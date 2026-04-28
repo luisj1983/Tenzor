@@ -252,7 +252,11 @@ TEST_P(NNMultiDTypeTest, Sigmoid_Range) {
 
     auto sigmoid = Sigmoid();
 
-    // Test output is in (0, 1)
+    // Sigmoid output is in [0, 1] — mathematically (0, 1) but in floating
+    // point it saturates at the bounds for large |x|. With randn * 5 some
+    // samples land beyond ~17, where 1/(1+exp(-x)) rounds to exactly 1.0
+    // in Float32 (and similarly for negative tails). Match Tanh_Range
+    // below which uses GE/LE for the same reason.
     auto input = Variable(randn({100}, dtype, device) * 5.0f, true);
     auto output = sigmoid.forward(input);
 
@@ -260,14 +264,14 @@ TEST_P(NNMultiDTypeTest, Sigmoid_Range) {
     if (dtype == DType::Float32) {
         auto output_data = output_cpu.data<float>();
         for (int64_t i = 0; i < 100; ++i) {
-            EXPECT_GT(output_data[i], 0.0f);
-            EXPECT_LT(output_data[i], 1.0f);
+            EXPECT_GE(output_data[i], 0.0f);
+            EXPECT_LE(output_data[i], 1.0f);
         }
     } else if (dtype == DType::Float64) {
         auto output_data = output_cpu.data<double>();
         for (int64_t i = 0; i < 100; ++i) {
-            EXPECT_GT(output_data[i], 0.0);
-            EXPECT_LT(output_data[i], 1.0);
+            EXPECT_GE(output_data[i], 0.0);
+            EXPECT_LE(output_data[i], 1.0);
         }
     }
 }

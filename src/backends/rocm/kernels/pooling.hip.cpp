@@ -503,10 +503,13 @@ auto maxpool2d_forward_hip(
 
 #ifdef USE_MIOPEN
     // Prefer MIOpen, fall back to HIP kernel if MIOpen JIT fails (see
-    // avgpool2d_forward_hip for the same pattern).
-    if (input.dtype() == DType::Float32 ||
-        input.dtype() == DType::Float16 ||
-        input.dtype() == DType::BFloat16) {
+    // avgpool2d_forward_hip for the same pattern). On parts where MIOpen JIT
+    // is known to hang the GPU (gfx1150/gfx1151), is_miopen_available() short-
+    // circuits before the MIOpen call so the catch fallback never runs.
+    if (rocm::is_miopen_available() &&
+        (input.dtype() == DType::Float32 ||
+         input.dtype() == DType::Float16 ||
+         input.dtype() == DType::BFloat16)) {
         try {
             return maxpool2d_forward_miopen(input, kernel_h, kernel_w,
                                             stride_h, stride_w, pad_h, pad_w,
@@ -812,10 +815,13 @@ auto avgpool2d_forward_hip(
     // Prefer MIOpen for supported dtypes, but fall back to the HIP kernel
     // if MIOpen's JIT compilation fails (e.g., hip headers missing from
     // the runtime compiler's search path — environment-dependent error 7
-    // we've observed on gfx1150).
-    if (input.dtype() == DType::Float32 ||
-        input.dtype() == DType::Float16 ||
-        input.dtype() == DType::BFloat16) {
+    // we've observed on gfx1150). is_miopen_available() short-circuits
+    // before the MIOpen call on parts where the JIT failure also hangs
+    // the GPU, so a catch fallback alone is not enough.
+    if (rocm::is_miopen_available() &&
+        (input.dtype() == DType::Float32 ||
+         input.dtype() == DType::Float16 ||
+         input.dtype() == DType::BFloat16)) {
         try {
             return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
                                             stride_h, stride_w, pad_h, pad_w,

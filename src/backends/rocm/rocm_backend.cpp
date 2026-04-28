@@ -7,16 +7,41 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <cstdint>
+#include <cstdio>
 #include <sstream>
+#include <string>
 
 namespace tenzor {
 
 // ROCmBackend Implementation
 
+// MIOpen runs HIPRTC at runtime to JIT-compile any kernels missing from its
+// prebuilt DB (which on most ROCm builds covers only CDNA — gfx908/90a/942/950).
+// HIPRTC's default include search path does not contain /opt/rocm/include, so
+// kernels that #include <hip/hip_runtime.h> fail to compile with a "file not
+// found" error and the failure can wedge the GPU. HIPRTC honours ROCM_PATH to
+// locate the HIP headers, so we ensure it is set before any MIOpen call. We
+// only set it if the user hasn't, and only if the candidate path actually
+// contains hip/hip_runtime.h — so a non-standard ROCm install is unaffected.
+static void ensure_rocm_path_for_hiprtc() {
+    if (std::getenv("ROCM_PATH") != nullptr) {
+        return;  // Respect user-provided path.
+    }
+    static constexpr const char* kCandidate = "/opt/rocm";
+    std::string header_path = std::string(kCandidate) + "/include/hip/hip_runtime.h";
+    if (FILE* f = std::fopen(header_path.c_str(), "r")) {
+        std::fclose(f);
+        ::setenv("ROCM_PATH", kCandidate, /*overwrite=*/0);
+    }
+}
+
 ROCmBackend::ROCmBackend() {
     // Check if caching allocator is enabled via environment variable
     const char* enable_caching = std::getenv("TENZOR_ENABLE_CACHING_ALLOCATOR");
     use_caching_allocator_ = (enable_caching != nullptr && std::string(enable_caching) == "1");
+
+    // Set ROCM_PATH for MIOpen's HIPRTC kernel JIT before any MIOpen call.
+    ensure_rocm_path_for_hiprtc();
 
     // Initialize HIP runtime by querying device count
     int count = 0;

@@ -57,8 +57,47 @@ float fast_cos(float x) {
     return fast_sin(x + PI_OVER_2);
 }
 
+// Tan uses Cephes-style range reduction to (-pi/4, pi/4] and a direct
+// polynomial for tan, rather than fast_sin(x)/fast_cos(x). The division form
+// magnifies cos's error near pi/2 by ~1/cos(x)^2, which gave Vulkan tan an
+// effective ~1e-5 error at |x|>=1.5 — enough to make the JVP finite-difference
+// test for tan flake (CPU's std::tan stays within ~1 ULP). Direct tan keeps
+// the relative error close to libm.
+//
+// Cephes reduction: j = floor(|x| * 4/pi); round j up to even; then
+// xr = |x| - j * pi/4 lies in (-pi/4, pi/4]. After polynomial:
+//   if (j & 2): tan(x) = -1 / tan_poly(xr)  (shift by pi/2)
+//   else:        tan(x) = tan_poly(xr)
+// Three-part pi/4 subtraction (Cody-Waite) preserves precision for large |x|;
+// using only two parts left ~2e-8 error in the reduced argument, which
+// magnifies ~200x through the 1/tan path near pi/2.
+const float FOUR_OVER_PI  = 1.27323954473516;
+const float PI_OVER_4_HI  = 0.78515625;             // exact in f32
+const float PI_OVER_4_MID = 2.4187564849853515e-4;
+const float PI_OVER_4_LO  = 3.77489497744594108e-8; // pi/4 = HI + MID + LO
+
+// Cephes tanf polynomial, accurate to ~1 ULP over (-pi/4, pi/4].
+float tan_poly(float x) {
+    float x2 = x * x;
+    float p = 9.38540185543e-3;
+    p = p * x2 + 3.11992232697e-3;
+    p = p * x2 + 2.44301354525e-2;
+    p = p * x2 + 5.34112807005e-2;
+    p = p * x2 + 1.33387994085e-1;
+    p = p * x2 + 3.33331568548e-1;
+    return x + x * x2 * p;
+}
+
 float fast_tan(float x) {
-    return fast_sin(x) / fast_cos(x);
+    float ax = abs(x);
+    float yf = floor(ax * FOUR_OVER_PI);
+    int j = int(yf);
+    if ((j & 1) != 0) { j += 1; yf += 1.0; }
+    float xr = ((ax - yf * PI_OVER_4_HI) - yf * PI_OVER_4_MID) - yf * PI_OVER_4_LO;
+
+    float t = tan_poly(xr);
+    if ((j & 2) != 0) t = -1.0 / t;
+    return (x < 0.0) ? -t : t;
 }
 
 void main() {

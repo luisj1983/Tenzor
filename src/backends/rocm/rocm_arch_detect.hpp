@@ -11,6 +11,7 @@
 #include <hip/hip_runtime.h>
 #include <string>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace tenzor {
@@ -85,6 +86,7 @@ inline auto parse_arch_from_name(const char* gcn_arch_name) -> AMDArch {
 struct CachedDeviceInfo {
     AMDArch arch = AMDArch::Unknown;
     int wavefront_size = 64;
+    std::string gcn_arch_name;  ///< e.g. "gfx1150" (colon suffix stripped)
     bool initialized = false;
 };
 
@@ -110,6 +112,14 @@ inline auto get_cached_info(int device_id) -> const CachedDeviceInfo& {
         }
         info.arch = parse_arch_from_name(props.gcnArchName);
         info.wavefront_size = props.warpSize;
+
+        // Strip ":sramecc+:xnack-" feature suffix; keep only the gfx name.
+        std::string name(props.gcnArchName);
+        auto colon_pos = name.find(':');
+        info.gcn_arch_name = (colon_pos != std::string::npos)
+            ? name.substr(0, colon_pos)
+            : name;
+
         info.initialized = true;
     }
     return info;
@@ -134,6 +144,43 @@ inline auto has_mfma(int device_id = 0) -> bool {
     return arch == AMDArch::CDNA  ||
            arch == AMDArch::CDNA2 ||
            arch == AMDArch::CDNA3;
+}
+
+/// Get the raw gcn arch name (e.g. "gfx1150", colon suffix stripped).
+inline auto get_gcn_arch_name(int device_id = 0) -> const std::string& {
+    return detail::get_cached_info(device_id).gcn_arch_name;
+}
+
+/// Check whether MIOpen is usable on this device.
+///
+/// Upstream MIOpen ships a prebuilt kernel database (the .ufdb / .ktn / .tn
+/// files under /opt/rocm/share/miopen/db/) for CDNA parts only — gfx908
+/// (MI100), gfx90a (MI200), gfx942 (MI300), gfx950. Every RDNA part falls
+/// back to HIPRTC JIT at first use.
+///
+/// HIPRTC needs ROCM_PATH (or the HIP headers in its default search path) to
+/// resolve <hip/hip_runtime.h>; without it, JIT fails with "file not found"
+/// and on some devices the failed compile wedges the GPU. The ROCm backend's
+/// constructor (rocm_backend.cpp::ensure_rocm_path_for_hiprtc) sets ROCM_PATH
+/// before any MIOpen call when /opt/rocm/include/hip/hip_runtime.h exists,
+/// which is the canonical install layout. With ROCM_PATH in place, JIT works
+/// and the GPU does not hang.
+///
+/// We therefore enable MIOpen on every architecture we recognise. The
+/// TENZOR_ROCM_DISABLE_MIOPEN=1 escape hatch forces the native HIP fallback
+/// for environments where MIOpen still misbehaves (custom ROCm install, no
+/// HIP headers on disk, etc.).
+inline auto is_miopen_available(int device_id = 0) -> bool {
+    if (const char* env = std::getenv("TENZOR_ROCM_DISABLE_MIOPEN");
+        env && env[0] == '1') {
+        return false;
+    }
+    if (const char* env = std::getenv("TENZOR_ROCM_FORCE_MIOPEN");
+        env && env[0] == '1') {
+        return true;
+    }
+    AMDArch arch = detect_arch(device_id);
+    return arch != AMDArch::Unknown;
 }
 
 } // namespace rocm

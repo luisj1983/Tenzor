@@ -38,6 +38,17 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         return Tensor(output_shape, a.dtype(), a.device());
     }
 
+    // FP8 has insufficient precision for direct math; upcast to Float32, compute,
+    // then downcast back. The native shaders have no FP8 paths.
+    if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+        b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2) {
+        DType orig = a.dtype();
+        Tensor a_f32 = (a.dtype() == DType::Float32) ? a : a.to(DType::Float32);
+        Tensor b_f32 = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
+        Tensor result = dispatchBinaryOp(op_name, a_f32, b_f32);
+        return (orig == DType::Float32) ? result : result.to(orig);
+    }
+
     int32_t device_id = a.device().index;
 
     // Map operation name to opcode
@@ -690,8 +701,10 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // Synchronize to ensure GPU has completed before using the result
-    synchronize(device_id);
+    // No synchronize() here — see comment in dispatchReduction. The
+    // returned tensor's data is consumed by either subsequent compute
+    // ops (which chain through CB barriers + cross-submission semaphore)
+    // or by host readback (which calls ensurePendingWorkComplete).
 
     return output;
 }
@@ -888,8 +901,7 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
-
-    synchronize(device_id);
+    // No synchronize() here — see comment in dispatchReduction.
 
     return output;
 }
@@ -968,8 +980,7 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
-
-    synchronize(device_id);
+    // No synchronize() here — see comment in dispatchReduction.
 
     return output;
 }
@@ -1302,7 +1313,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         insertComputeOnlyBarrier(cmd1);
 
         endSingleTimeCommands(cmd1, device_id);
-        synchronize(device_id);
+        // No synchronize() here — see comment in dispatchReduction.
 
         // For mean, divide by element count
         if (op_name == "mean") {
@@ -1430,8 +1441,16 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // Synchronize to ensure GPU has completed before reading results
-    synchronize(device_id);
+    // No synchronize() here: output is returned as a Tensor wrapping its
+    // pending GPU work. Subsequent compute ops chain through the active
+    // command buffer's barriers and the per-frame semaphore on submit;
+    // host readbacks (e.g. .to(Device::cpu())) issue their own
+    // ensurePendingWorkComplete. Calling synchronize() here resets the
+    // device's descriptor and command pools, which is fatal under
+    // multi-thread autograd accumulation: another thread that has just
+    // allocated a descriptor set (between allocateAndWriteDescriptorSet
+    // and beginSingleTimeCommands) will record vkCmdBindDescriptorSets
+    // against a now-invalid handle and read garbage from its dispatch.
 
     // Convert back to original dtype if we did an Int64->Float64 conversion
     if (orig_dtype != output.dtype()) {
@@ -1450,6 +1469,15 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     // overflow the F16 range (+-65504) for large reduction dimensions (K).
     // BFloat16 has the same exponent range as Float32 so no overflow risk.
     if (a.dtype() == DType::Float16) {
+        DType orig_dtype = a.dtype();
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto result_f32 = dispatchMatmul(a_f32, b_f32);
+        return result_f32.to(orig_dtype);
+    }
+
+    // FP8: no native FP8 matmul shader; widen to Float32 and downcast result
+    if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
         DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);

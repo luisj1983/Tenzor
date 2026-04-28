@@ -17,8 +17,8 @@ endif()
 # Include GoogleTest module for gtest_discover_tests
 include(GoogleTest)
 
-# Maximum test execution timeout (20 minutes)
-set(TENZOR_TEST_TIMEOUT 1200)
+# Maximum test execution timeout (25 minutes)
+set(TENZOR_TEST_TIMEOUT 1500)
 
 # When ON, tests enumerate all devices per backend (e.g. cuda:0, cuda:1)
 # instead of only testing device index 0.

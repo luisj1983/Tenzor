@@ -116,6 +116,12 @@ auto gather_hip(
     auto input_shape = input.shape();
     auto indices_shape = indices.shape();
 
+    // Normalize negative dim (PyTorch semantics: dim=-1 → last)
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::out_of_range("gather_hip: dim out of range");
+    }
+
     // Compute output shape
     std::vector<int64_t> output_shape;
     for (size_t i = 0; i < input_shape.size(); ++i) {
@@ -431,6 +437,12 @@ auto index_select_hip(
 ) -> Tensor {
 
     auto input_shape = input.shape();
+
+    // Normalize negative dim (PyTorch semantics: dim=-1 → last)
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::out_of_range("index_select_hip: dim out of range");
+    }
 
     // Compute output shape
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
@@ -1446,6 +1458,12 @@ auto gather_hip(
     auto input_shape = input.shape();
     auto indices_shape = indices.shape();
 
+    // Normalize negative dim (PyTorch semantics: dim=-1 → last)
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::out_of_range("gather_hip: dim out of range");
+    }
+
     std::vector<int64_t> output_shape;
     for (size_t i = 0; i < input_shape.size(); ++i) {
         if (static_cast<int64_t>(i) == dim) {
@@ -1670,6 +1688,12 @@ auto index_select_hip(
     hipStream_t stream
 ) -> Tensor {
     auto input_shape = input.shape();
+
+    // Normalize negative dim (PyTorch semantics: dim=-1 → last)
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::out_of_range("index_select_hip: dim out of range");
+    }
 
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
     output_shape[dim] = indices.numel();

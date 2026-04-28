@@ -76,7 +76,12 @@ protected:
 
 TEST_P(JVPExpandedMultiDTypeTest, Tan) {
     skipIfHalf();
-    auto p = small_randn({4});
+    // Scale 0.3 (vs default small_randn 0.5) keeps |p| safely away from
+    // pi/2 ~ 1.57. At scale 0.5 a randn 3-sigma sample lands at 1.5, where
+    // tan's third derivative explodes (~200) and FD truncation noise
+    // dominates the 1e-3 absolute tolerance — flaky on Vulkan/ROCm where
+    // tan kernel ULPs differ from CPU's correctly-rounded std::tan.
+    auto p = tenzor::mul(tenzor::randn({4}, dtype(), device()), 0.3f);
     auto t = tenzor::randn({4}, dtype(), device());
     auto result = jvp_tan(DualTensor(p, t));
     auto expected = numerical_jvp([](const Tensor& x) { return tenzor::tan(x); }, p, t);
