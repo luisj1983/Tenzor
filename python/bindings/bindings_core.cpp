@@ -3441,11 +3441,13 @@ Returns:
          py::arg("input"), py::arg("split_sizes"), py::arg("dim") = 0,
          py::call_guard<py::gil_scoped_release>());
 
-    m.def("view_as_real", &tenzor::view_as_real,
+    m.def("view_as_real",
+         static_cast<tenzor::Tensor(*)(const tenzor::Tensor&)>(&tenzor::view_as_real),
          "View a complex tensor as real with trailing dim 2",
          py::arg("input"),
          py::call_guard<py::gil_scoped_release>());
-    m.def("view_as_complex", &tenzor::view_as_complex,
+    m.def("view_as_complex",
+         static_cast<tenzor::Tensor(*)(const tenzor::Tensor&)>(&tenzor::view_as_complex),
          "View a real tensor with trailing dim 2 as complex",
          py::arg("input"),
          py::call_guard<py::gil_scoped_release>());
