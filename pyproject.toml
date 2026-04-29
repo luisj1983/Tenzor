@@ -8,17 +8,17 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "tenzor"
-version = "1.0.0"
-description = "High-performance tensor computation and neural network library with multi-backend support"
+version = "0.1.0"
+description = "Multi-backend tensor and deep learning library in modern C++23 with PyTorch-like Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "Tenzor Contributors"}
+    {name = "Lee Morton"}
 ]
-keywords = ["deep-learning", "neural-networks", "tensor", "gpu", "cuda", "machine-learning"]
+keywords = ["deep-learning", "neural-networks", "tensor", "gpu", "cuda", "rocm", "vulkan", "oneapi", "machine-learning"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -62,10 +62,9 @@ viz = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tenzor/tenzor"
-Documentation = "https://tenzor.readthedocs.io"
-Repository = "https://github.com/tenzor/tenzor"
-"Bug Tracker" = "https://github.com/tenzor/tenzor/issues"
+Homepage = "https://github.com/skreamz/Tenzor"
+Repository = "https://github.com/skreamz/Tenzor"
+"Bug Tracker" = "https://github.com/skreamz/Tenzor/issues"
 
 [tool.scikit-build]
 # CMake configuration

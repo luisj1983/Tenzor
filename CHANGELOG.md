@@ -5,207 +5,109 @@ All notable changes to Tenzor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2025-01-15
+## [0.1.0] - 2026-04-29
 
-### Initial Public Release
+First public alpha release. The library is feature-complete for the listed scope but has had no public CI exposure on GPU hardware yet, and CPU benchmarks against PyTorch are competitive in some shapes and slower in others. Treat this release as experimental.
 
-This is the first public release of Tenzor, a high-performance tensor computation and deep learning library.
+### Added
 
-### Core Features
+#### Tensor operations
+- Multi-dimensional tensors with strided storage and broadcasting.
+- Math: add, sub, mul, div, matmul, pow, sqrt, exp, log, plus the usual elementwise unary/binary set.
+- Reductions: sum, mean, max, min, argmax, argmin, prod (with keepdim and axis).
+- Shape ops: reshape, view, transpose, permute, squeeze, unsqueeze, expand, contiguous.
+- Indexing: slice, gather, scatter, masked_select, masked_fill, index_select, advanced (fancy) indexing.
+- Dtypes: Float32, Float64, Float16, BFloat16, Int8/16/32/64, UInt8/16/32/64, Bool, Complex64/128.
 
-#### Tensor Operations
-- Multi-dimensional tensor support with efficient memory management
-- Comprehensive math operations: add, sub, mul, div, matmul, pow, sqrt, exp, log
-- Reduction operations: sum, mean, max, min, argmax, argmin, prod
-- Shape operations: reshape, view, transpose, permute, squeeze, unsqueeze
-- Indexing: slice, gather, scatter, masked_select, masked_fill, index_select
-- Broadcasting support for all element-wise operations
-- Multiple data types: Float32, Float64, Float16, BFloat16, Int8/16/32/64, UInt8/16/32/64, Bool, Complex64/128
+#### Automatic differentiation
+- Reverse-mode autodiff with explicit computation graph.
+- In-place op support, gradient accumulation, gradient checkpointing.
+- Custom `autograd::Function` extension point.
+- Higher-order gradients for the activation set and core math ops.
 
-#### Automatic Differentiation
-- Full reverse-mode autodiff with computational graph tracking
-- Gradient accumulation and zeroing
-- Support for in-place operations
-- Custom autograd function support
-- Gradient checkpointing for memory-efficient training
-
-#### Neural Network Layers
-- **Linear layers**: Linear (fully connected)
-- **Convolutional layers**: Conv1d, Conv2d, Conv3d with grouped convolution support
-- **Normalization**: BatchNorm1d/2d, LayerNorm, GroupNorm, RMSNorm
-- **Pooling**: MaxPool1d/2d/3d, AvgPool1d/2d/3d, AdaptiveAvgPool, AdaptiveMaxPool
-- **Recurrent**: RNN, LSTM, GRU with bidirectional support
-- **Attention**: MultiheadAttention, ScaledDotProductAttention
-- **Activation functions**: ReLU, LeakyReLU, GELU, SiLU/Swish, Sigmoid, Tanh, Softmax, ELU, SELU
-- **Regularization**: Dropout, Dropout2d, AlphaDropout
-- **Embedding**: Embedding, EmbeddingBag
-- **Utilities**: Flatten, Unflatten, Sequential, ModuleList, ModuleDict
+#### Neural network layers
+- Linear, Conv1d/2d/3d (grouped + dilated).
+- BatchNorm1d/2d/3d, LayerNorm, GroupNorm, RMSNorm, InstanceNorm.
+- MaxPool1d/2d/3d, AvgPool1d/2d/3d, AdaptiveAvgPool, AdaptiveMaxPool.
+- RNN, LSTM, GRU (bidirectional).
+- MultiheadAttention, ScaledDotProductAttention.
+- Activations: ReLU, LeakyReLU, GELU, SiLU/Swish, Sigmoid, Tanh, Softmax, ELU, SELU, GatedLinearUnit.
+- Dropout, Dropout2d, AlphaDropout.
+- Embedding, EmbeddingBag.
+- Containers: Sequential, ModuleList, ModuleDict; Flatten / Unflatten utilities.
 
 #### Optimizers
-- SGD with momentum and Nesterov acceleration
-- Adam and AdamW with weight decay
-- AdamAtan2 (for HRM training stability)
-- RMSprop
-- Adagrad
+- SGD (with momentum and Nesterov).
+- Adam, AdamW, AdamAtan2.
+- RMSprop, Adagrad.
 
-#### Learning Rate Schedulers
-- StepLR, MultiStepLR
-- ExponentialLR
-- CosineAnnealingLR, CosineAnnealingWarmRestarts
-- OneCycleLR
-- ReduceLROnPlateau
-- Linear and polynomial warmup
+#### Learning rate schedulers
+- StepLR, MultiStepLR, ExponentialLR.
+- CosineAnnealingLR, CosineAnnealingWarmRestarts.
+- OneCycleLR, ReduceLROnPlateau.
+- Linear and polynomial warmup.
 
-#### Loss Functions
-- MSELoss
-- CrossEntropyLoss
-- NLLLoss
-- BCELoss, BCEWithLogitsLoss
-- L1Loss, SmoothL1Loss
-- HuberLoss
-- CTC Loss
-- Focal Loss
-- Label Smoothing Cross Entropy
+#### Loss functions
+- MSELoss, CrossEntropyLoss, NLLLoss, BCELoss, BCEWithLogitsLoss.
+- L1Loss, SmoothL1Loss, HuberLoss.
+- CTC Loss, Focal Loss, Label-smoothing CE.
 
-### Backend Support
+#### Backends
+- **CPU** with SSE4.2 / AVX2 / AVX-512 paths, OpenMP parallelism, MKL/oneDNN where available.
+- **CUDA 12.0+** via cuBLAS / cuDNN / cuSOLVER / cuSPARSE plus custom kernels.
+- **ROCm 5.0+** via hipBLAS / MIOpen / rocSOLVER / rocSPARSE.
+- **OneAPI 2023.0+** via oneMKL / oneDNN.
+- **Vulkan 1.2+** with SPIR-V compute shaders (cross-vendor).
+- All five backends register the same 317 operations (op-count parity verified by `bin/op_coverage_report`).
 
-#### CPU Backend
-- SIMD optimization (SSE4.2, AVX2, AVX-512)
-- OpenMP parallelization
-- Optimized BLAS operations
+#### Reference model implementations (`src/models/`)
+- Vision: ResNet, VGG, MobileNet (V2/V3), EfficientNet, ConvNeXt, ViT, Swin Transformer, YOLO, Faster R-CNN, Mask R-CNN, U-Net, DeepLabV3+, AlexNet, GoogLeNet.
+- Language: BERT, RoBERTa, ALBERT, ELECTRA, GPT-2, T5.
+- Specialized: Hierarchical Reasoning Model (HRM).
+- Note: model definitions only — no pretrained weights are distributed in this release.
 
-#### CUDA Backend (NVIDIA GPUs)
-- CUDA 12.0+ support
-- cuBLAS integration for matrix operations
-- cuDNN support for convolutions
-- Custom CUDA kernels for all operations
-- Multi-GPU support
-- Mixed precision training (FP16/BF16)
+#### Other
+- ONNX import and export (subset of operators; coverage tracked under `tests/`).
+- Mixed-precision training (FP16 / BF16) and INT8 quantization (PTQ + QAT).
+- JIT tracing and scripting with a kernel-fusion pass.
+- Dataset / DataLoader with multi-worker prefetch and basic image transforms.
+- Distributed training primitives (data-parallel and model-parallel scaffolding).
+- Python bindings via pybind11; NumPy interop; Python 3.9–3.13.
 
-#### ROCm Backend (AMD GPUs)
-- ROCm 5.0+ support
-- hipBLAS integration
-- MIOpen for optimized convolutions
-- Full operation parity with CUDA
+### Known limitations
 
-#### OneAPI Backend (Intel GPUs)
-- OneAPI 2023.0+ support
-- oneMKL integration
-- oneDNN for neural network operations
-- Support for Intel Arc, Data Center, and integrated GPUs
-
-#### Vulkan Backend
-- Cross-platform GPU compute via Vulkan 1.2+
-- SPIR-V compute shaders
-- Support for all major GPU vendors
-- Optimized kernels for Float16, Float32, Float64
-
-### Pre-built Models
-
-#### Vision Models
-- ResNet (18, 34, 50, 101, 152)
-- VGG (11, 13, 16, 19)
-- MobileNetV2, MobileNetV3
-- EfficientNet (B0-B7)
-- ConvNeXt
-- Vision Transformer (ViT)
-- Swin Transformer
-- YOLO (v5, v8)
-- Faster R-CNN, Mask R-CNN
-- U-Net, DeepLabV3+
-
-#### Language Models
-- BERT, RoBERTa
-- GPT-2
-- T5
-- ALBERT
-- ELECTRA
-
-#### Specialized
-- Hierarchical Reasoning Model (HRM) - brain-inspired recurrent architecture
-
-### Data Loading
-- Dataset and DataLoader abstractions
-- Multi-worker data loading
-- Prefetching and caching
-- Data transforms and augmentation
-- Image transforms: Resize, RandomCrop, RandomHorizontalFlip, Normalize, ColorJitter
-
-### Model Serialization
-- Save and load model checkpoints
-- State dict serialization
-- ONNX export and import
-- Model hub for pretrained weights
-
-### JIT Compilation
-- Function tracing
-- Script compilation
-- Kernel fusion optimization
-- Serialization of traced models
-
-### Quantization
-- Post-training quantization (INT8)
-- Quantization-aware training
-- Dynamic quantization
-- Mixed precision inference
-
-### Distributed Training
-- Data parallel training
-- Model parallel support
-- Gradient synchronization
-- Process group management
-
-### Utilities
-- TensorBoard integration for logging
-- Benchmark utilities
-- Memory profiling
-- Configuration management
-- Logging framework
-
-### Python Bindings
-- Complete pybind11 bindings
-- NumPy interoperability
-- Python 3.8 - 3.13 support
-- Pythonic API matching C++ interface
-
-### Documentation
-- Comprehensive API documentation (Doxygen)
-- Getting started guide
-- Architecture documentation
-- Example tutorials (Python and C++)
-- Installation guide
-
-### Testing
-- Extensive test suite with 500+ tests
-- Multi-dtype testing
-- Backend parity testing
-- Gradient checking utilities
-- Performance benchmarks
+- **No public CI proof for GPU backends.** GitHub Actions currently runs CPU smoke tests only.
+- **Vulkan STFT / ISTFT** dispatch to a CPU fallback in this release; the native compute path is built but a forward-pass shape-value bug is open. Tracked in [`audit/README.md`](audit/README.md) Phase 4.3.
+- **MPS backend** (Apple Metal) is partial and not at parity with the four primary GPU backends.
+- **CPU performance** is below PyTorch on the published benchmark suite (see [`reports/combined_benchmark.md`](reports/combined_benchmark.md)). One Conv2D shape measures 0.07× and is almost certainly a measurement artifact pending re-run.
+- **Single maintainer.** Reviews and contributions welcome.
 
 ---
 
 ## [Unreleased]
 
-### Planned Features
-- Distributed training improvements
-- More pre-built model architectures
-- Enhanced JIT optimization
-- Model compression techniques (pruning, knowledge distillation)
+### Planned
+
+- Public GPU CI on self-hosted runners.
+- Re-run benchmarks with proper warmup / median-of-N; publish GPU numbers.
+- Resolve the Vulkan STFT / ISTFT regression and re-enable the native pipeline.
+- Pretrained weight hub for the reference models.
+- Distributed training improvements (gradient bucketing, NCCL/RCCL collectives).
 
 ---
 
-## Version History Summary
+## Version history
 
-| Version | Date | Highlights |
-|---------|------|------------|
-| 1.0.0 | 2025-01-15 | Initial public release |
+| Version | Date       | Highlights                          |
+|---------|------------|-------------------------------------|
+| 0.1.0   | 2026-04-29 | First public alpha release.         |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute to Tenzor.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Tenzor is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

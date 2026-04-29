@@ -598,8 +598,8 @@ Now that you understand the basics, explore these resources:
 - [C++ API Documentation](api/html/index.html) - Full API reference
 
 ### Community
-- [GitHub Issues](https://github.com/leelee222/tenzor/issues) - Report bugs, request features
-- [Discussions](https://github.com/leelee222/tenzor/discussions) - Ask questions, share projects
+- [GitHub Issues](https://github.com/skreamz/Tenzor/issues) - Report bugs, request features
+- [Discussions](https://github.com/skreamz/Tenzor/discussions) - Ask questions, share projects
 - [Contributing](../CONTRIBUTING.md) - Contribute to Tenzor
 
 ---

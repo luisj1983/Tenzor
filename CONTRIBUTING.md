@@ -15,7 +15,7 @@ Thank you for your interest in contributing to Tenzor! This document provides gu
 
 ```bash
 # Clone the repository
-git clone https://github.com/leelee222/tenzor.git
+git clone https://github.com/skreamz/Tenzor.git
 cd tenzor
 
 # Create build directory
@@ -300,8 +300,8 @@ doxygen Doxyfile
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/leelee222/tenzor/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/leelee222/tenzor/discussions)
+- **Issues**: [GitHub Issues](https://github.com/skreamz/Tenzor/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/skreamz/Tenzor/discussions)
 
 ## Adding a new op: coverage checklist
 

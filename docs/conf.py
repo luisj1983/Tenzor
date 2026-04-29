@@ -1,9 +1,9 @@
 """Sphinx configuration for Tenzor documentation."""
 
 project = "Tenzor"
-copyright = "2024, Tenzor Contributors"
-author = "Tenzor Contributors"
-release = "1.0.0"
+copyright = "2026, Lee Morton"
+author = "Lee Morton"
+release = "0.1.0"
 
 extensions = [
     "sphinx.ext.autodoc",

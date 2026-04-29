@@ -67,7 +67,7 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     list(APPEND TENZOR_LANGUAGES HIP)
 endif()
 
-project(tenzor VERSION 1.0.0 LANGUAGES ${TENZOR_LANGUAGES})
+project(tenzor VERSION 0.1.0 LANGUAGES ${TENZOR_LANGUAGES})
 
 # Use ccache if available for faster rebuilds
 find_program(CCACHE_PROGRAM ccache)

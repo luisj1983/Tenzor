@@ -178,7 +178,7 @@ for _op_name in (
         globals()[_op_name] = overrides.implements(_op)
 del _op_name, _op
 
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 
 __all__ = [
     # Core

@@ -1,27 +1,50 @@
-# Tenzor: High-Performance Neural Network & Tensor Library
+# Tenzor
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/leelee222/tenzor/actions)
+A multi-backend tensor computation and deep learning library written in modern C++23, with full reverse-mode autograd and a PyTorch-like API exposed in both C++ and Python.
+
+> **Status: alpha (v0.1.0).** Single-developer research project. The API is reasonably stable but has had no public-CI exposure on GPU hardware yet, and benchmarks against PyTorch on CPU are competitive in some shapes and slower in others (see [reports/combined_benchmark.md](reports/combined_benchmark.md)). Treat it as experimental, not as a production replacement for PyTorch or TensorFlow.
+
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-blue)]()
-[![CUDA](https://img.shields.io/badge/CUDA-12.0%2B-green)]()
-[![Python](https://img.shields.io/badge/Python-3.8--3.13-blue)]()
+[![Python](https://img.shields.io/badge/Python-3.9--3.13-blue)]()
 
-A high-performance, production-grade tensor computation and deep learning library built with modern C++23. Designed for researchers and engineers who need PyTorch-like flexibility with C++ performance.
+## What's in the box
 
-## Features
+- **Multi-backend autograd** with op-count parity across CPU, CUDA, ROCm, OneAPI, and Vulkan (317 operations registered on each — see [`audit/README.md`](audit/README.md)).
+- **Multi-dtype dispatch**: Float32/64/16, BFloat16, Int8/16/32/64, UInt8/16/32/64, Bool, Complex64/128.
+- **NN module library**: Linear, Conv1d/2d/3d, BatchNorm/LayerNorm/GroupNorm/RMSNorm, MaxPool/AvgPool/Adaptive, RNN/LSTM/GRU (bidirectional), MultiheadAttention/ScaledDotProductAttention, dropout variants, embedding/embedding-bag, activations, sequential containers.
+- **Optimizers and schedulers**: SGD (+ Nesterov), Adam, AdamW, AdamAtan2, RMSprop, Adagrad. StepLR, MultiStepLR, ExponentialLR, CosineAnnealing(WarmRestarts), OneCycleLR, ReduceLROnPlateau, polynomial/linear warmup.
+- **Reference model implementations** in `src/models/`: ResNet, VGG, MobileNet (V2/V3), EfficientNet, ConvNeXt, ViT, Swin Transformer, YOLO, Faster R-CNN, Mask R-CNN, U-Net, DeepLabV3+, BERT, RoBERTa, ALBERT, ELECTRA, GPT-2, T5, AlexNet, GoogLeNet, plus an HRM (Hierarchical Reasoning Model) example. These are model definitions; pretrained weights are not currently distributed.
+- **Python bindings** via pybind11, with NumPy interop.
+- **ONNX import/export**.
+- **Mixed precision** (FP16/BF16) and **INT8 quantization** code paths (post-training and QAT).
+- **JIT** tracing/scripting and a kernel-fusion pass.
 
-- **Multi-Backend Support**: CPU (SIMD-optimized), CUDA, ROCm, OneAPI, Vulkan
-- **Automatic Differentiation**: Full reverse-mode autodiff with computational graph
-- **Thread-Safe**: Lockless algorithms and parallel execution
-- **Python Bindings**: First-class Python support via pybind11
-- **High Performance**: SIMD vectorization, kernel fusion, memory pooling
-- **Easy to Use**: Intuitive PyTorch-like API
-- **Pre-built Models**: ResNet, BERT, ViT, YOLO, and more
-- **ONNX Support**: Import and export models
+## Quick start
 
-## Quick Start
+### Python
 
-### C++ Example
+```python
+import tenzor as tz
+tz.initialize()  # required once per process before constructing tensors
+
+x = tz.randn([32, 784])
+model = tz.nn.Sequential(
+    tz.nn.Linear(784, 128),
+    tz.nn.ReLU(),
+    tz.nn.Linear(128, 10),
+)
+if tz.cuda_is_available():
+    x, model = x.cuda(), model.cuda()
+
+opt = tz.optim.Adam(model.parameters(), lr=1e-3)
+pred = model(x)
+loss = tz.nn.cross_entropy(pred, tz.zeros([32], dtype=tz.int64))
+loss.backward()
+opt.step()
+```
+
+### C++
 
 ```cpp
 #include <tenzor/tenzor.hpp>
@@ -29,20 +52,17 @@ A high-performance, production-grade tensor computation and deep learning librar
 int main() {
     using namespace tenzor;
 
-    // Create model
     auto model = nn::Sequential(
         std::make_shared<nn::Linear>(784, 128),
         std::make_shared<nn::ReLU>(),
         std::make_shared<nn::Linear>(128, 10)
-    ).cuda();
+    );
 
-    // Training
     auto optimizer = optim::Adam(model.parameters(), 1e-3);
 
     for (auto [x, y] : dataloader) {
         auto pred = model(Variable(x, true));
         auto loss = nn::cross_entropy(pred, y);
-
         optimizer.zero_grad();
         loss.backward();
         optimizer.step();
@@ -50,201 +70,119 @@ int main() {
 }
 ```
 
-### Python Example
-
-```python
-import tenzor as tz
-
-# Create tensors
-x = tz.randn([32, 784])
-y = tz.zeros([32, 10])
-
-# GPU acceleration
-x = x.cuda()
-
-# Build model
-model = tz.nn.Sequential(
-    tz.nn.Linear(784, 128),
-    tz.nn.ReLU(),
-    tz.nn.Linear(128, 10)
-).cuda()
-
-# Training
-optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
-
-pred = model(x)
-loss = tz.nn.cross_entropy(pred, y)
-loss.backward()
-optimizer.step()
-```
-
-## Building from Source
+## Building
 
 ### Prerequisites
 
 - CMake 3.25+
-- C++23 compatible compiler (GCC 12+, Clang 15+, MSVC 2022+)
-- CUDA 12.0+ (optional)
-- Python 3.8+ (optional, for bindings)
+- A C++23 compiler (GCC 12+, Clang 15+, MSVC 19.34+)
+- Optional: CUDA 12.0+, ROCm 5.0+, oneAPI 2023.0+, Vulkan SDK 1.2+
+- Optional: Python 3.9+ (for the bindings)
 
-### Build Instructions
+### From source
 
 ```bash
-# Clone repository
-git clone https://github.com/leelee222/tenzor.git
-cd tenzor
-
-# Create build directory
-mkdir build && cd build
-
-# Configure
-cmake .. \
+git clone https://github.com/skreamz/Tenzor.git
+cd Tenzor
+cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DTENZOR_BUILD_CUDA=ON \
     -DTENZOR_BUILD_PYTHON=ON \
     -DTENZOR_BUILD_TESTS=ON
-
-# Build
-cmake --build . -j$(nproc)
-
-# Install
-sudo cmake --install .
+cmake --build build -j
 ```
 
-### Build Options
+### Build options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `TENZOR_BUILD_CUDA` | Build CUDA backend | ON |
-| `TENZOR_BUILD_ROCM` | Build ROCm backend | OFF |
-| `TENZOR_BUILD_ONEAPI` | Build OneAPI backend | OFF |
-| `TENZOR_BUILD_PYTHON` | Build Python bindings | ON |
-| `TENZOR_BUILD_TESTS` | Build test suite | ON |
-| `TENZOR_BUILD_BENCHMARKS` | Build benchmarks | OFF |
+| Option | Default | Notes |
+|---|---|---|
+| `TENZOR_BUILD_CUDA`       | ON  | Requires CUDA Toolkit |
+| `TENZOR_BUILD_ROCM`       | ON  | Requires ROCm + HIP   |
+| `TENZOR_BUILD_ONEAPI`     | ON  | Requires Intel oneAPI |
+| `TENZOR_BUILD_VULKAN`     | ON  | Requires Vulkan SDK + glslc |
+| `TENZOR_BUILD_PYTHON`     | ON  | Requires Python dev headers |
+| `TENZOR_BUILD_TESTS`      | ON  | GoogleTest (fetched automatically) |
+| `TENZOR_BUILD_BENCHMARKS` | OFF | |
+
+See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
 ## Documentation
 
-- [Getting Started](docs/GETTING_STARTED.md) - Quick introduction and tutorials
-- [Installation Guide](INSTALL.md) - Detailed installation instructions
-- [Architecture](docs/ARCHITECTURE.md) - System design and internals
-- [API Reference](docs/api/html/index.html) - Complete API documentation (Doxygen)
-- [Examples](examples/) - Code examples and tutorials
-- [FAQ](docs/FAQ.md) - Frequently asked questions
-- [Changelog](CHANGELOG.md) - Version history and release notes
-- [Contributing](CONTRIBUTING.md) - Contribution guidelines
+- [Getting Started](docs/GETTING_STARTED.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Installation Guide](INSTALL.md)
+- [Testing Guide](TESTING.md)
+- [FAQ](docs/FAQ.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Pre-release hardening audit](audit/README.md) — what's covered, what's deferred
 
 ## Performance
 
-Tenzor is designed for maximum performance:
+Tenzor is intended as a research-grade alternative implementation, not a faster drop-in for PyTorch. The current published benchmarks ([reports/combined_benchmark.md](reports/combined_benchmark.md)) measure CPU-only Conv2D and MatMul against PyTorch and show:
 
-| Operation | Tenzor | PyTorch | TensorFlow |
-|-----------|--------|---------|------------|
-| MatMul (4096×4096) | 18ms | 22ms | 25ms |
-| Conv2d (ResNet50) | 0.9ms | 1.2ms | 1.3ms |
-| Backward Pass | 1.8× forward | 2.5× | 2.8× |
+- Average speedup: **0.67×** vs PyTorch on the sampled workloads.
+- Tenzor is faster on **2 / 20** measured cases.
+
+GPU benchmarks have not been published yet. If you need raw throughput today, use PyTorch. If you want a clean, hackable C++23 codebase to study or build on, Tenzor is for you.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│         Python Bindings (pybind11)                  │
-├─────────────────────────────────────────────────────┤
-│         High-Level Neural Network API               │
-├─────────────────────────────────────────────────────┤
-│            Autograd Engine                          │
-├─────────────────────────────────────────────────────┤
-│         Core Tensor Operations                      │
-├─────────────────────────────────────────────────────┤
-│        Backend Abstraction Layer                    │
-├─────────────────────────────────────────────────────┤
-│   [CPU] [CUDA] [ROCm] [OneAPI]                     │
-└─────────────────────────────────────────────────────┘
+Python bindings (pybind11)
+        │
+High-level NN API
+        │
+Autograd engine
+        │
+Core tensor ops (O(1) OpId dispatch)
+        │
+Backend abstraction
+        │
+[CPU] [CUDA] [ROCm] [OneAPI] [Vulkan]
 ```
 
-## Key Features
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and dispatch internals.
 
-### Tensor Operations
-- Creation: zeros, ones, randn, empty, arange
-- Math: add, sub, mul, div, matmul, pow
-- Reduction: sum, mean, max, min, argmax
-- Transformation: reshape, transpose, permute, view
-- Indexing: slice, gather, scatter, masked operations
+## Known limitations
 
-### Automatic Differentiation
-- Reverse-mode autodiff
-- Computational graph tracking
-- Gradient accumulation
-- Custom autograd functions
-
-### Neural Network Layers
-- Linear (fully connected)
-- Conv1d, Conv2d, Conv3d
-- BatchNorm, LayerNorm, GroupNorm
-- Dropout, Dropout2d
-- RNN, LSTM, GRU
-- Attention, MultiheadAttention
-
-### Optimizers
-- SGD (with momentum)
-- Adam, AdamW
-- RMSprop
-- Adagrad
-
-### Loss Functions
-- MSELoss
-- CrossEntropyLoss
-- BCELoss, BCEWithLogitsLoss
-- NLLLoss
+- **No public CI proof for GPU backends.** GitHub Actions runs CPU smoke tests only; CUDA/ROCm/OneAPI/Vulkan are tested locally on the maintainer's hardware.
+- **Vulkan STFT/ISTFT** currently dispatch to a CPU fallback; the native compute pipeline is in the build but a forward-pass shape-value bug is being investigated. See [`audit/README.md`](audit/README.md) Phase 4.3.
+- **MPS backend** (Apple Metal) is partial. Not yet at parity with the four primary GPU backends.
+- **CPU performance** is below PyTorch on the published benchmark suite. Conv2D in particular has a regression that needs investigation (one shape measures 0.07× — almost certainly a dispatch/warmup artifact).
+- **Pretrained weights** are not distributed. The model files in `src/models/` are architectures only.
+- **Single maintainer.** Contributions, issues, and reviews are welcome.
 
 ## Roadmap
 
-### Completed
-- [x] Core tensor infrastructure
-- [x] CPU backend with SIMD optimization
-- [x] Autograd engine with gradient checkpointing
-- [x] Neural network API (50+ layers)
-- [x] CUDA backend with cuBLAS/cuDNN
-- [x] Python bindings via pybind11
-- [x] ROCm backend for AMD GPUs
-- [x] OneAPI backend for Intel GPUs
-- [x] Vulkan compute backend
-- [x] ONNX import and export
-- [x] Pre-built models (ResNet, BERT, ViT, etc.)
-- [x] Mixed precision training (FP16/BF16)
-- [x] Model quantization (INT8)
-- [x] JIT compilation and tracing
-
-### In Progress
-- [ ] Distributed training improvements
-- [ ] Enhanced model compression (pruning, distillation)
-- [ ] Additional pre-built architectures
+- Public GPU CI on self-hosted runners.
+- Resolve the Vulkan STFT/ISTFT regression and re-enable the native pipeline.
+- Re-run benchmarks with proper warmup/median-of-N and publish GPU numbers.
+- Distributed training improvements.
+- Pretrained weight hub for the reference models.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+MIT — see [LICENSE](LICENSE).
 
 ## Citation
 
-If you use Tenzor in your research, please cite:
+If you use Tenzor in your research:
 
 ```bibtex
-@software{tenzor2025,
-  title={Tenzor: High-Performance Neural Network \& Tensor Library},
-  author={Lee},
-  year={2025},
-  url={https://github.com/leelee222/tenzor}
+@software{tenzor,
+  title  = {Tenzor: A multi-backend tensor and deep learning library in C++23},
+  author = {Morton, Lee},
+  year   = {2026},
+  url    = {https://github.com/skreamz/Tenzor}
 }
 ```
 
 ## Acknowledgments
 
-Inspired by PyTorch, TensorFlow, and other great deep learning frameworks.
+The API surface is heavily inspired by PyTorch. The internal design borrows ideas from PyTorch's ATen, oneDNN, and the cuDNN/cuBLAS reference patterns.
 
 ## Contact
 
-- **GitHub Issues**: [Report bugs and request features](https://github.com/leelee222/tenzor/issues)
-- **Discussions**: [Ask questions and share projects](https://github.com/leelee222/tenzor/discussions)
+- [GitHub Issues](https://github.com/skreamz/Tenzor/issues) — bug reports and feature requests.
+- [Discussions](https://github.com/skreamz/Tenzor/discussions) — questions and design.

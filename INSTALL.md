@@ -18,7 +18,7 @@ This guide covers all methods to install Tenzor on your system.
 ### From Source (Recommended)
 
 ```bash
-git clone https://github.com/leelee222/tenzor.git
+git clone https://github.com/skreamz/Tenzor.git
 cd tenzor
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -114,7 +114,7 @@ brew install cmake ninja python
 ### Step 2: Clone Repository
 
 ```bash
-git clone https://github.com/leelee222/tenzor.git
+git clone https://github.com/skreamz/Tenzor.git
 cd tenzor
 ```
 
@@ -474,8 +474,8 @@ cmake .. -DOpenMP_ROOT=$(brew --prefix)/opt/libomp
 
 ### Getting Help
 
-- **GitHub Issues**: [Report bugs and request features](https://github.com/leelee222/tenzor/issues)
-- **Discussions**: [Ask questions](https://github.com/leelee222/tenzor/discussions)
+- **GitHub Issues**: [Report bugs and request features](https://github.com/skreamz/Tenzor/issues)
+- **Discussions**: [Ask questions](https://github.com/skreamz/Tenzor/discussions)
 - **Documentation**: [Full API reference](docs/api/html/index.html)
 
 ### Debug Build

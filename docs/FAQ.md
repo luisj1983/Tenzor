@@ -62,7 +62,7 @@ Tenzor is released under the MIT License, allowing free use in both commercial a
 See the [Installation Guide](../INSTALL.md) for detailed instructions. Quick start:
 
 ```bash
-git clone https://github.com/leelee222/tenzor.git
+git clone https://github.com/skreamz/Tenzor.git
 cd tenzor && mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
@@ -483,8 +483,8 @@ ctest --output-on-failure
 
 ### Where can I get help?
 
-- **GitHub Issues**: [Report bugs](https://github.com/leelee222/tenzor/issues)
-- **Discussions**: [Ask questions](https://github.com/leelee222/tenzor/discussions)
+- **GitHub Issues**: [Report bugs](https://github.com/skreamz/Tenzor/issues)
+- **Discussions**: [Ask questions](https://github.com/skreamz/Tenzor/discussions)
 - **Documentation**: [API Reference](api/html/index.html)
 
 ---
@@ -492,6 +492,6 @@ ctest --output-on-failure
 ## Still have questions?
 
 If your question isn't answered here, please:
-1. Search [existing issues](https://github.com/leelee222/tenzor/issues)
+1. Search [existing issues](https://github.com/skreamz/Tenzor/issues)
 2. Check the [API documentation](api/html/index.html)
-3. Open a [new discussion](https://github.com/leelee222/tenzor/discussions/new)
+3. Open a [new discussion](https://github.com/skreamz/Tenzor/discussions/new)
