@@ -24,6 +24,33 @@ endmacro()
 
 ####################################################################################
 
+set(TENZOR_VERSION "1.0.0")
+
+# Backend availability flags (set at configure time)
+set(Tenzor_CUDA_FOUND ON)
+set(Tenzor_ROCM_FOUND ON)
+set(Tenzor_ONEAPI_FOUND ON)
+set(Tenzor_VULKAN_FOUND ON)
+
+# Find required dependencies
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(OpenMP)
+
+# Model Hub dependencies (CURL + OpenSSL are linked PUBLIC when enabled)
+if(ON)
+    find_dependency(CURL)
+    find_dependency(OpenSSL)
+endif()
+
+# Component checking: allow find_package(Tenzor COMPONENTS CUDA Vulkan ...)
+foreach(_comp ${Tenzor_FIND_COMPONENTS})
+    if(NOT Tenzor_${_comp}_FOUND)
+        set(Tenzor_FOUND FALSE)
+        set(Tenzor_NOT_FOUND_MESSAGE "Required component '${_comp}' not available")
+    endif()
+endforeach()
+
 include("${CMAKE_CURRENT_LIST_DIR}/TenzorTargets.cmake")
 
 check_required_components(Tenzor)

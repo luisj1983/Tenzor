@@ -81,6 +81,168 @@ Status changes since the 2026-04-18 audit:
   `TransformerIntegrationMultiDTypeTest.ForwardBackward`. They assert non-zero input grads
   across all five backends; CPU Float32/Float64 and GPU Float32 are all green.
 
+## Update — 2026-04-29 (extensions — close the remaining plan gaps)
+
+After the initial PR1+PR2+PR3 landing, a follow-up pass closed the
+remaining open items from the plan:
+
+**PR 2.4 — CI guard**: `tools/check_layer_tests.py` flags any
+`tests/nn/layers/test_*.cpp` file that calls `.backward()` without a
+sufficient non-zero gradient assertion (`EXPECT_GRAD_FLOWS`,
+`numerical_gradient`, an explicit `max(abs(grad))>0` check, or a
+per-element `EXPECT_NEAR` pattern). Wired into ctest as
+`LayerTestGradFlowGuard` (label `lint;layer_tests`). Files can opt out
+with a `// grad-check-exempt: <reason>` comment when a non-zero check is
+genuinely inappropriate.
+
+**PR 3.4 (extended)**: `Sort`, `TopK`, `GridSample`, `AffineGrid`
+gradchecks added. Required adding Variable-level wrappers for
+`grid_sample` and `affine_grid` (in `include/tenzor/autograd/ops.hpp` +
+`src/autograd/ops.cpp`) since only the Backward classes existed; now
+exposed as public API alongside the gradchecks.
+
+**PR 3.1 (extended)**: `SparseTriSolve` Variable wrapper added (sparse L
+matrix is constant, dense `b` is the differentiated input). Gradcheck
+passes on CPU. SpGEMM is intentionally not exposed as a Variable op —
+its dense-via-sparse use case is mathematically equivalent to `matmul`
+which is already covered.
+
+**PR 3.5 (extended)**: `view_as_real` and `view_as_complex` Variable
+wrappers added — these were the missing piece for complex-output
+gradcheck. With them, dedicated `FFTGradcheck` and `IFFTGradcheck` tests
+now pass via `f(x) = sum(view_as_real(fft(x)))` (and the symmetric form
+for IFFT through `view_as_complex` of a real `[..., 2]` input). The
+RFFT/IRFFT round-trip variants are kept for negative-dim and norm-scale
+coverage.
+
+**PR 2.1 (extended) — chat_ai re-evaluation**: 11_chat_ai remains Tier B
+intentionally; full re-evaluation rationale in `tests/examples/SKIP_NOTES.md`.
+Summary: chat_ai already has a synthetic-pair fallback in `load_pairs`,
+so disk-IO isn't the blocker; the autograd surface (GRU, Bahdanau
+attention via matmul+softmax, log_softmax cross-entropy) is already
+covered by other wired examples (07_rnn_sequence, 16_self_attention).
+
+After all extensions: **116/116 tests pass on CPU**
+(94 gradcheck tests + 21 example regressions + 1 lint guard).
+RFFT/IRFFT, FFT, IFFT, sparse_triangular_solve, grid_sample, affine_grid,
+sort, topk are now all covered by gradcheck.
+
+## Update — 2026-04-29 (audit fix PR2/PR3 — example regressions, neg-dim gradcheck, op coverage)
+
+PR 2 + PR 3 of the audit fix landed:
+
+**PR 2.3 — parameterized negative-dim gradcheck** (`tests/autograd/test_gradcheck_negative_dim.cpp`):
+- 18 tests covering every dim-taking op with both positive and negative
+  dim values: index_select, gather, narrow, sum, prod, max(dim), min(dim),
+  logsumexp, cumsum, cumprod, var, std, softmax, log_softmax, flip, roll,
+  cat. 17 pass on CPU.
+- Mean(dim) is skipped — pre-existing crash in MeanBackward when dim is
+  passed as `int64_t` (libstdc++ span out-of-bounds assertion). Tracked
+  separately as a real bug.
+
+**PR 3.1 — sparse op gradchecks** (3 ops):
+- `SpMMGradcheck`, `SpMVGradcheck`, `SparseAddGradcheck` cover the dense-
+  side gradient. `SpGEMMBackward` and `SparseTriSolveBackward` are
+  declared but have no Variable-level autograd entry point in the public
+  API — left as a follow-up if the user wants them exposed.
+
+**PR 3.2 — linalg gradchecks** (5 ops):
+- `VecdotGradcheck`, `VectorNormGradcheck`, `MatrixNormGradcheck`
+  (Frobenius — operator 2-norm goes through SVD with delicate backward
+  near degenerate singular values), `EigvalshGradcheck`, `SolveGradcheck`.
+
+**PR 3.3 — special-math gradchecks** (6 ops):
+- `ErfGradcheck`, `ErfcGradcheck`, `ErfInvGradcheck` (input clamped to
+  |x|<0.3 to keep curvature bounded), `I0eGradcheck`, `I1eGradcheck`,
+  `MultigammalnGradcheck`.
+
+**PR 3.4 — indexing/shape leftovers** (3 ops):
+- `ScatterGradcheck` (plain scatter, distinct from ScatterAdd which was
+  already covered), `TrilGradcheck`, `TriuGradcheck`.
+- `SortBackward`, `TopKBackward`, `GridSampleBackward`, `AffineGridBackward`
+  remain uncovered — Sort/TopK gradients flow only through values
+  (deferred until needed); GridSample/AffineGrid require parameterized
+  setup (deferred).
+
+**PR 3.5 — FFT gradchecks** (RFFT/IRFFT round-trip variants):
+- `RFFTIRFFT_RoundTrip_DefaultDim`, `_NegativeDim`, `_OrthoNorm`. Pure
+  FFT/IFFT explicit gradchecks remain skipped pending a complex-output
+  gradcheck infrastructure (the existing `tenzor::sum` doesn't reduce
+  complex tensors). The round-trip variants exercise both RFFTBackward
+  and IRFFTBackward, including the negative-dim and norm-scaling code
+  paths.
+
+After PR1+PR2+PR3:
+- 87/87 gradcheck tests pass on CPU (`GradCheckMissingTest +
+  GradCheckNegativeDimTest` filtered to cpu only).
+- `tests/examples/test_hrm_example.cpp` (PR1) plus the bulk
+  `tests/examples/test_all_autograd_examples.cpp` (PR2.1) provide
+  end-to-end regression coverage; loss-decrease assertions catch
+  zero-gradient bugs at training time.
+- Layer tests across `tests/nn/layers/` now use `EXPECT_GRAD_FLOWS`
+  consistently for backward-running tests, replacing the prior
+  `has_value()` and `EXPECT_NO_THROW(backward())` patterns that masked
+  silently-zeroed gradients.
+
+## Update — 2026-04-28 (audit fix PR1 — functional wiring + grad-flow macro)
+
+PR 1 of the testing-audit fix landed (see `/home/lee/.claude/plans/create-and-implement-a-wild-pearl.md`). Net changes:
+
+- **Live Python-reachable autograd-break bugs fixed** in `src/nn/functional.cpp`:
+  - `functional::group_norm`, `functional::instance_norm`, `functional::embedding`
+    now properly wire their `*Backward` Function via new factories
+    (`internal::make_group_norm_backward`, `make_instance_norm_backward` in
+    `normalization.hpp`; `make_embedding_backward` in `embedding.hpp`).
+  - `functional::nll_loss` rewritten to use Variable-level ops (gather / neg /
+    mean / sum) — no custom Function needed; grad flows automatically.
+  - `functional::dropout`, `functional::normalize`, and `functional::pad`
+    (reflect/replicate/circular path) refactored to Variable-level ops —
+    same raw-tensor-op-breaks-grad-fn pattern, fixed identically.
+  - `functional::interpolate` made explicitly `requires_grad=false` — no
+    `InterpolateBackward` exists yet; previous code was lying about
+    differentiability. Tracked as a follow-up.
+  - `Parametrization::forward_impl` documented as non-grad-flowing (the
+    base `forward(Tensor)→Tensor` signature can't preserve grad_fn; design
+    fix is out of PR1 scope).
+
+- **New gradchecks** in `test_gradcheck_missing.cpp`:
+  - `FunctionalGroupNormGradcheck`, `FunctionalInstanceNormGradcheck`,
+    `FunctionalEmbeddingGradcheck`, `FunctionalNllLossGradcheck` —
+    CPU-only at Float32 (the GroupNorm/InstanceNorm CPU backward kernels
+    internally downcast to Float32; documented in the tests).
+
+- **Layer-level grad-flow assertion macro** added at
+  `tests/grad_flow_helpers.hpp`: `EXPECT_GRAD_FLOWS(var)` asserts the
+  Variable's grad has at least one non-zero element after backward. Catches
+  the "severed grad_fn returns zero gradients" failure class that the
+  prior `has_value()` / `EXPECT_NO_THROW(backward())` patterns miss.
+
+- **High-risk layer tests retrofitted** with EXPECT_GRAD_FLOWS or new
+  grad-flow tests across these files: `test_gated_activations.cpp`,
+  `test_glu_multidtype.cpp`, `test_lazy_backward.cpp`,
+  `test_lazy_backward_multidtype.cpp`, `test_sparse_linear.cpp`,
+  `test_sparse_linear_multidtype.cpp`, `test_dropout.cpp`,
+  `test_dropout_multidtype.cpp`, `test_multihead_attention_multidtype.cpp`,
+  `test_window_attention.cpp`, `test_window_attention_multidtype.cpp`.
+
+- **HRM example wired as ctest regression** in
+  `tests/examples/test_hrm_example.cpp`. The training body of
+  `examples/cpp/showcase/22_hierarchical_reasoning/autograd.cpp` was
+  extracted into `autograd_runner.{cpp,hpp}` so the test drives the same
+  code path as the showcase exe. The test asserts that loss decreases by
+  at least 0.10 absolute over 200 epochs — would have caught the
+  IndexSelect/Narrow negative-dim bug that originally surfaced here.
+
+- **Pre-existing oneapi backend crashes** in SparseLinear, LazyBackward,
+  and a few other layers were exposed by the new tests (not introduced
+  by them — `SparseLinear::ForwardShape` crashes on oneapi too, and that
+  test predates PR1). These remain on the open-issue list and are
+  excluded from PR1 verification via `-E "oneapi"`.
+
+PR2 (full ~45-file layer-test sweep, all 22 examples wired as ctest,
+negative-dim parameterized gradcheck) and PR3 (sparse/FFT/linalg/special-
+math gradcheck holes) follow per the plan.
+
 ## Update — 2026-04-20 (E1 expansion, 60+ ops covered)
 
 Additional gradcheck coverage landed in `tests/autograd/test_gradcheck_missing.cpp`

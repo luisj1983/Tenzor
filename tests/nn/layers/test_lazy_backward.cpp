@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/layers/lazy_conv.hpp>
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -29,8 +30,10 @@ TEST_F(LazyBackwardTest, LazyLinear_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    // Input should have gradient
-    ASSERT_TRUE(input.grad().has_value());
+    // Input should have gradient with at least one non-zero element
+    // (.has_value() alone passes for an all-zero grad — a severed grad_fn
+    // would still allocate a zero-filled grad tensor and slip through).
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 2);
     ASSERT_EQ(input.grad().value().shape()[1], 16);
 
@@ -48,7 +51,7 @@ TEST_F(LazyBackwardTest, LazyConv1d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 1);
 }
 
@@ -61,7 +64,7 @@ TEST_F(LazyBackwardTest, LazyConv2d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[1], 8);
 }
 
@@ -74,6 +77,6 @@ TEST_F(LazyBackwardTest, LazyConv3d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[1], 4);
 }

@@ -1928,6 +1928,22 @@ auto GroupNorm::reset_parameters() -> void {
     // Weight initialized to 1, bias to 0 (already done in constructor)
 }
 
+// Factory exposed via normalization.hpp for use by F::group_norm in
+// functional.cpp. The functional path otherwise wraps the dispatch result
+// in a Variable with no grad_fn, silently zeroing input/weight/bias
+// gradients on backward — same pattern as the F::layer_norm fix.
+namespace internal {
+auto make_group_norm_backward(bool affine, double eps,
+                              int64_t num_groups, int64_t num_channels,
+                              int64_t group_size,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<GroupNormBackward>(affine, eps, num_groups,
+                                                num_channels, group_size,
+                                                std::move(tensors_to_save));
+}
+}  // namespace internal
+
 // ============================================================================
 // InstanceNorm2d Implementation
 // ============================================================================
@@ -2301,6 +2317,19 @@ auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
 auto InstanceNorm2d::reset_parameters() -> void {
     // Weight initialized to 1, bias to 0 (already done in constructor)
 }
+
+// Factory exposed via normalization.hpp for use by F::instance_norm in
+// functional.cpp. Wires up InstanceNormBackwardFn so the functional path
+// preserves gradients for input/weight/bias.
+namespace internal {
+auto make_instance_norm_backward(bool affine, double eps,
+                                 int64_t num_features,
+                                 std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<InstanceNormBackwardFn>(affine, eps, num_features,
+                                                     std::move(tensors_to_save));
+}
+}  // namespace internal
 
 // ============================================================================
 // InstanceNorm1d Implementation

@@ -7,6 +7,8 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/mobilenet.hpp>
 
+#include "../../grad_flow_helpers.hpp"
+
 using namespace tenzor;
 using namespace tenzor::nn;
 
@@ -44,5 +46,5 @@ TEST_F(FusedMBConvTest, Backward) {
     auto output = block.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }

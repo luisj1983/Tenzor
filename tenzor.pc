@@ -1,0 +1,11 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: tenzor
+Description: High-performance tensor computation library with automatic differentiation
+Version: 1.0.0
+Requires:
+Libs: -L${libdir} -ltenzor_core
+Cflags: -I${includedir}

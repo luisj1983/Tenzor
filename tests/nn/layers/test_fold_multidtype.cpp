@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/vision.hpp>
 
@@ -45,7 +46,7 @@ TEST_P(FoldMultiDTypeTest, Backward) {
     auto output = fold.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(FoldMultiDTypeTest, DTypePreserved) {

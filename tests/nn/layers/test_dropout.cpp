@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 #include <numeric>
 #include <algorithm>
@@ -294,9 +295,8 @@ TEST(DropoutTest, BackwardPassGradientShape) {
 
     // Backward pass
     auto grad_output = ones({10, 20});
-    EXPECT_NO_THROW({
-        output.backward(grad_output);
-    });
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST(DropoutTest, BackwardPassGradientValues) {

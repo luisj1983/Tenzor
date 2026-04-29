@@ -1229,5 +1229,18 @@ auto EmbeddingBag::weight() const -> const Variable& {
     return embedding_->weight();
 }
 
+// Factory exposed via embedding.hpp for use by F::embedding in functional.cpp.
+namespace internal {
+auto make_embedding_backward(::tenzor::Tensor indices, int64_t num_embeddings,
+                             int64_t embedding_dim, int64_t padding_idx,
+                             bool scale_grad_by_freq, bool sparse)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<EmbeddingBackward>(std::move(indices),
+                                                num_embeddings, embedding_dim,
+                                                padding_idx, scale_grad_by_freq,
+                                                sparse);
+}
+}  // namespace internal
+
 } // namespace nn
 } // namespace tenzor

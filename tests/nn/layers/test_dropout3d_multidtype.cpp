@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 
 using namespace tenzor;
@@ -62,14 +63,17 @@ TEST_P(Dropout3dMultiDTypeTest, ChannelwiseDropout) {
 }
 
 TEST_P(Dropout3dMultiDTypeTest, Backward) {
+    // Dropout3d zeros entire channels — use enough channels per sample so the
+    // probability that every channel in every sample is dropped is negligible
+    // (keeps EXPECT_GRAD_FLOWS deterministic).
     Dropout3d dp(0.3);
     convert_model(dp);
     dp.train();
-    auto input = createInput({2, 3, 4, 4, 4}, true);
+    auto input = createInput({2, 16, 4, 4, 4}, true);
     auto output = dp.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(Dropout3dMultiDTypeTest, DTypePreserved) {

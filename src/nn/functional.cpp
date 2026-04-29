@@ -8,6 +8,7 @@
 
 #include "tenzor/nn/functional.hpp"
 #include "tenzor/nn/layers/normalization.hpp"  // for internal::make_layer_norm_backward
+#include "tenzor/nn/layers/embedding.hpp"      // for internal::make_embedding_backward
 #include "tenzor/nn/layers/pooling.hpp"        // J7: delegate pool functional to Module
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -668,13 +669,22 @@ auto dropout(const Variable& input, double p, bool training) -> Variable {
         return input;
     }
     if (p == 1.0) {
+        // p=1 zeros every element. Multiply by a non-grad zero Variable so
+        // the autograd graph still records a Mul (whose backward returns
+        // zero w.r.t. input) — keeps types/usage uniform with the p<1 path.
         auto s = input.tensor().shape();
         std::vector<int64_t> sv(s.begin(), s.end());
-        return Variable(zeros(sv, input.dtype(), input.tensor().device()),
-                        input.requires_grad());
+        Variable zero_var(zeros(sv, input.dtype(), input.tensor().device()),
+                          /*requires_grad=*/false);
+        return input * zero_var;
     }
 
-    // Generate Bernoulli mask via rand > p, then apply inverted dropout
+    // Generate the Bernoulli mask as a raw Tensor (no autograd needed for
+    // the mask itself), then wrap as a non-grad Variable and use the
+    // Variable-level operator* so backward flows through input. The
+    // earlier implementation called tenzor::mul on raw tensors and wrapped
+    // the result in a Variable with no grad_fn — silently zeroing
+    // input.grad() (raw-tensor-op breaks autograd graph pattern).
     auto shape_span = input.tensor().shape();
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
     auto rand_t = tenzor::rand(shape_vec, input.dtype(), input.tensor().device());
@@ -683,14 +693,12 @@ auto dropout(const Variable& input, double p, bool training) -> Variable {
     auto mask_bool = tenzor::gt(rand_t, threshold);
     auto ones_t = tenzor::ones(shape_vec, input.dtype(), input.tensor().device());
     auto zeros_t = tenzor::zeros(shape_vec, input.dtype(), input.tensor().device());
-    auto mask = tenzor::where(mask_bool, ones_t, zeros_t);
+    auto mask_tensor = tenzor::where(mask_bool, ones_t, zeros_t);
+    Variable mask_var(mask_tensor, /*requires_grad=*/false);
 
     // Inverted dropout: scale by 1/(1-p)
     float scale = static_cast<float>(1.0 / (1.0 - p));
-    auto scale_t = tenzor::full(shape_vec, scale, input.dtype(), input.tensor().device());
-    auto output = tenzor::mul(tenzor::mul(input.tensor(), mask), scale_t);
-
-    return Variable(output, input.requires_grad());
+    return (input * mask_var) * scale;
 }
 
 // ============================================================================
@@ -701,9 +709,26 @@ auto group_norm(const Variable& input, int64_t num_groups,
                 const std::optional<Variable>& weight,
                 const std::optional<Variable>& bias,
                 double eps) -> Variable {
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    if (weight.has_value()) inputs_vec.push_back(weight->tensor());
-    if (bias.has_value()) inputs_vec.push_back(bias->tensor());
+    // The dispatch path expects a [C]-shaped weight and bias tensor in all
+    // cases. Synthesize ones/zeros when the caller didn't supply them so the
+    // dispatch shape contract stays consistent with nn::GroupNorm and the
+    // backward grad_fn can save the (synthetic) weight tensor uniformly.
+    auto in_shape = input.tensor().shape();
+    if (in_shape.size() < 2) {
+        throw std::runtime_error("F::group_norm: input must have at least 2 dims");
+    }
+    int64_t num_channels = in_shape[1];
+    auto compute_dtype = input.tensor().dtype();
+    auto compute_device = input.tensor().device();
+
+    Tensor weight_tensor = weight.has_value()
+        ? weight->tensor()
+        : ones({num_channels}, compute_dtype, compute_device);
+    Tensor bias_tensor = bias.has_value()
+        ? bias->tensor()
+        : zeros({num_channels}, compute_dtype, compute_device);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
 
     NewOpAttributes attrs;
     // Use NumGroups (matches GroupNorm layer convention in normalization.cpp).
@@ -712,8 +737,49 @@ auto group_norm(const Variable& input, int64_t num_groups,
     attrs.set(AttrKey::NumGroups, num_groups);
     attrs.set(AttrKey::Eps, eps);
 
-    auto result = dispatch(OpId::GroupNorm, inputs_vec, attrs);
-    return Variable(result[0], input.requires_grad());
+    auto results = dispatch(OpId::GroupNorm, inputs_vec, attrs);
+    Tensor output_t = results[0];
+    Tensor saved_mean = results.size() > 1 ? results[1] : Tensor();
+    Tensor saved_rstd = results.size() > 2 ? results[2] : Tensor();
+
+    bool affine = weight.has_value() || bias.has_value();
+    bool needs_grad =
+        input.requires_grad() ||
+        (weight.has_value() && weight->requires_grad()) ||
+        (bias.has_value() && bias->requires_grad());
+
+    if (!needs_grad) {
+        return Variable(output_t, false);
+    }
+
+    Variable output(output_t, true);
+
+    int64_t group_size = num_channels / num_groups;
+    std::vector<Tensor> tensors_to_save = {
+        input.tensor(), saved_mean, saved_rstd, weight_tensor
+    };
+
+    auto grad_fn = internal::make_group_norm_backward(
+        affine, eps, num_groups, num_channels, group_size,
+        std::move(tensors_to_save));
+    output.set_grad_fn(grad_fn);
+
+    std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+    if (weight.has_value()) {
+        if (auto fn = weight->grad_fn()) next_funcs.push_back(fn);
+    }
+    if (bias.has_value()) {
+        if (auto fn = bias->grad_fn()) next_funcs.push_back(fn);
+    }
+    grad_fn->set_next_functions(std::move(next_funcs));
+
+    std::vector<Variable> input_vars{input};
+    if (weight.has_value()) input_vars.push_back(*weight);
+    if (bias.has_value()) input_vars.push_back(*bias);
+    grad_fn->set_input_variables(std::move(input_vars));
+
+    return output;
 }
 
 // ============================================================================
@@ -728,15 +794,70 @@ auto instance_norm(const Variable& input,
                    [[maybe_unused]] bool training,
                    [[maybe_unused]] double momentum,
                    double eps) -> Variable {
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    if (weight.has_value()) inputs_vec.push_back(weight->tensor());
-    if (bias.has_value()) inputs_vec.push_back(bias->tensor());
+    auto in_shape = input.tensor().shape();
+    if (in_shape.size() < 2) {
+        throw std::runtime_error("F::instance_norm: input must have at least 2 dims");
+    }
+    int64_t num_features = in_shape[1];
+    auto compute_dtype = input.tensor().dtype();
+    auto compute_device = input.tensor().device();
+
+    // Synthesize a unit weight / zero bias if caller didn't supply them so
+    // the dispatch contract matches nn::InstanceNorm and the backward
+    // grad_fn can save the weight tensor uniformly.
+    Tensor weight_tensor = weight.has_value()
+        ? weight->tensor()
+        : ones({num_features}, compute_dtype, compute_device);
+    Tensor bias_tensor = bias.has_value()
+        ? bias->tensor()
+        : zeros({num_features}, compute_dtype, compute_device);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::Eps, eps);
 
-    auto result = dispatch(OpId::InstanceNorm, inputs_vec, attrs);
-    return Variable(result[0], input.requires_grad());
+    auto results = dispatch(OpId::InstanceNorm, inputs_vec, attrs);
+    Tensor output_t = results[0];
+    Tensor saved_mean = results.size() > 1 ? results[1] : Tensor();
+    Tensor saved_rstd = results.size() > 2 ? results[2] : Tensor();
+
+    bool affine = weight.has_value() || bias.has_value();
+    bool needs_grad =
+        input.requires_grad() ||
+        (weight.has_value() && weight->requires_grad()) ||
+        (bias.has_value() && bias->requires_grad());
+
+    if (!needs_grad) {
+        return Variable(output_t, false);
+    }
+
+    Variable output(output_t, true);
+
+    std::vector<Tensor> tensors_to_save = {
+        input.tensor(), saved_mean, saved_rstd, weight_tensor
+    };
+
+    auto grad_fn = internal::make_instance_norm_backward(
+        affine, eps, num_features, std::move(tensors_to_save));
+    output.set_grad_fn(grad_fn);
+
+    std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+    if (weight.has_value()) {
+        if (auto fn = weight->grad_fn()) next_funcs.push_back(fn);
+    }
+    if (bias.has_value()) {
+        if (auto fn = bias->grad_fn()) next_funcs.push_back(fn);
+    }
+    grad_fn->set_next_functions(std::move(next_funcs));
+
+    std::vector<Variable> input_vars{input};
+    if (weight.has_value()) input_vars.push_back(*weight);
+    if (bias.has_value()) input_vars.push_back(*bias);
+    grad_fn->set_input_variables(std::move(input_vars));
+
+    return output;
 }
 
 // ============================================================================
@@ -746,7 +867,32 @@ auto instance_norm(const Variable& input,
 auto embedding(const Tensor& input, const Variable& weight) -> Variable {
     std::vector<Tensor> inputs_vec = {weight.tensor(), input};
     auto result = dispatch(OpId::Embedding, inputs_vec, {});
-    return Variable(result[0], weight.requires_grad());
+    Tensor output_t = result[0];
+
+    if (!weight.requires_grad()) {
+        return Variable(output_t, false);
+    }
+
+    auto weight_shape = weight.tensor().shape();
+    int64_t num_embeddings = weight_shape.size() >= 1 ? weight_shape[0] : 0;
+    int64_t embedding_dim = weight_shape.size() >= 2 ? weight_shape[1] : 0;
+
+    // Defaults match PyTorch F.embedding when extra kwargs aren't provided.
+    auto grad_fn = internal::make_embedding_backward(
+        input, num_embeddings, embedding_dim,
+        /*padding_idx=*/-1,
+        /*scale_grad_by_freq=*/false,
+        /*sparse=*/false);
+
+    Variable output(output_t, true);
+    output.set_grad_fn(grad_fn);
+
+    std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+    if (auto fn = weight.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({weight});
+
+    return output;
 }
 
 // ============================================================================
@@ -766,7 +912,13 @@ auto interpolate(const Variable& input,
     attrs.set(AttrKey::AlignCorners, align_corners);
 
     auto result = dispatch(OpId::Interpolate, inputs_vec, attrs);
-    return Variable(result[0], input.requires_grad());
+    // No InterpolateBackward exists in this codebase yet — propagating
+    // input.requires_grad() onto the output Variable here would be a lie
+    // (no grad_fn is attached, so backward through the result returns
+    // zero gradients). Force requires_grad=false so callers see the
+    // "interpolate output is detached" semantics explicitly. A real
+    // backward (bilinear/nearest/etc.) is tracked as a follow-up.
+    return Variable(result[0], false);
 }
 
 // ============================================================================
@@ -776,18 +928,29 @@ auto interpolate(const Variable& input,
 auto nll_loss(const Variable& input, const Tensor& target,
               Reduction reduction) -> Variable {
     // NLL loss: -sum(input[i, target[i]]) / N
-    auto input_t = input.tensor();
-    auto shape = input_t.shape();
+    //
+    // Use Variable-level ops throughout so backward propagates through the
+    // gather/neg/reduce chain. The previous implementation called the
+    // raw-Tensor overloads of gather/mean/sum/reshape and wrapped the
+    // result in a Variable with no grad_fn — silently zeroing input.grad()
+    // on backward (raw-tensor-op breaks autograd graph pattern). The
+    // bound Python helper functional_nll_loss exposes this directly.
+    auto shape = input.tensor().shape();
     int64_t N = shape[0];
 
-    // Gather the log-probabilities at target indices
-    auto gathered = tenzor::gather(input_t, 1,
-        tenzor::reshape(target, {N, 1}));
-    auto loss = tenzor::neg(tenzor::reshape(gathered, {N}));
+    // Reshape target to [N, 1] for column gather. target is index data
+    // (Int64) — keep as a plain Tensor; Variable gather takes (Variable,
+    // dim, Tensor index).
+    Tensor target_2d = tenzor::reshape(target, {N, 1});
 
-    if (reduction == Reduction::Mean) return Variable(tenzor::mean(loss), input.requires_grad());
-    if (reduction == Reduction::Sum) return Variable(tenzor::sum(loss), input.requires_grad());
-    return Variable(loss, input.requires_grad());
+    // Variable gather → Variable reshape → Variable neg.
+    Variable gathered = tenzor::gather(input, /*dim=*/1, target_2d);
+    Variable loss_per_sample =
+        tenzor::neg(tenzor::reshape(gathered, std::vector<int64_t>{N}));
+
+    if (reduction == Reduction::Mean) return tenzor::mean(loss_per_sample);
+    if (reduction == Reduction::Sum) return tenzor::sum(loss_per_sample);
+    return loss_per_sample;
 }
 
 // ============================================================================
@@ -978,12 +1141,21 @@ auto scaled_dot_product_attention(
 
 auto normalize(const Variable& input, double p, int64_t dim,
                double eps) -> Variable {
-    // Compute L_p norm along dim, keepdim for broadcasting
-    auto norm_t = tenzor::norm(input.tensor(), static_cast<float>(p), dim, /*keepdim=*/true);
-    // Clamp to avoid division by zero
-    auto clamped = tenzor::clamp_min(norm_t, static_cast<float>(eps));
-    auto result = input.tensor() / clamped;
-    return Variable(result, input.requires_grad());
+    // Compute L_p norm along dim using Variable-level ops so backward
+    // flows through. The previous implementation called tenzor::norm on
+    // a raw Tensor and wrapped the division result in a Variable with no
+    // grad_fn — silently zeroing input.grad() on backward.
+    //
+    // ||x||_p = ( sum(|x|^p, dim, keepdim=true) )^(1/p)
+    // Add eps before division (instead of clamp_min) since clamp_min
+    // doesn't have a Variable overload yet; this matches PyTorch's
+    // alternate "softer" normalize formula and is identical to clamp_min
+    // for nonzero norms (the only relevant case at runtime).
+    Variable abs_x = tenzor::abs(input);
+    Variable powered = tenzor::pow(abs_x, static_cast<float>(p));
+    Variable summed = tenzor::sum(powered, dim, /*keepdim=*/true);
+    Variable norm_v = tenzor::pow(summed, static_cast<float>(1.0 / p));
+    return input / (norm_v + static_cast<float>(eps));
 }
 
 // ============================================================================
@@ -1107,8 +1279,12 @@ auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
         return result;
     }
 
-    // reflect / replicate / circular: use index_select per padded dimension
-    Tensor result = inp;
+    // reflect / replicate / circular: use Variable-level index_select per
+    // padded dimension so backward flows back to input. The previous
+    // implementation called the raw-Tensor index_select and wrapped the
+    // result in a Variable with no grad_fn — silently zeroing input.grad()
+    // (raw-tensor-op breaks autograd graph pattern).
+    Variable result = input;
     for (int64_t i = 0; i < n_pad_dims; ++i) {
         auto dim_idx = ndim - 1 - i;
         auto pad_before = pad_sizes[2 * i];
@@ -1116,13 +1292,13 @@ auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
 
         if (pad_before == 0 && pad_after == 0) continue;
 
-        auto current_dim_size = result.shape()[dim_idx];
+        auto current_dim_size = result.tensor().shape()[dim_idx];
         auto idx = build_pad_indices(current_dim_size, pad_before, pad_after,
-                                     mode, result.device());
+                                     mode, result.tensor().device());
         result = tenzor::index_select(result, dim_idx, idx);
     }
 
-    return Variable(result, input.requires_grad());
+    return result;
 }
 
 // ============================================================================

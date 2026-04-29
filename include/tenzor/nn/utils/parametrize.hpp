@@ -71,6 +71,23 @@ public:
         return Y;
     }
 
+    /**
+     * @brief Default forward_impl: applies forward(Tensor) and returns a
+     * non-grad Variable.
+     *
+     * NOTE: Parametrizations are currently treated as non-trainable
+     * transforms — gradients do NOT flow back from the parametrized output
+     * into the unconstrained source parameter. This matches the existing
+     * register_parametrization() implementation in parametrize.cpp, which
+     * memcpys the parametrized value into the parameter buffer via a
+     * forward pre-hook (so the autograd graph for the transform itself is
+     * never built).
+     *
+     * If you need a Parametrization whose constrained output participates
+     * in autograd (so gradients reach the unconstrained parameter), do NOT
+     * rely on this base — register a forward pre-hook that produces a
+     * Variable via Variable-level ops, mirroring weight_norm / spectral_norm.
+     */
     auto forward_impl(const Variable& input) -> Variable override {
         return Variable(forward(input.tensor()), false);
     }

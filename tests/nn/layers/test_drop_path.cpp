@@ -7,6 +7,8 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/drop_path.hpp>
 
+#include "../../grad_flow_helpers.hpp"
+
 using namespace tenzor;
 using namespace tenzor::nn;
 
@@ -51,11 +53,13 @@ TEST_F(DropPathTest, TrainingModeOutputShape) {
 }
 
 TEST_F(DropPathTest, Backward) {
+    // Use a larger batch so the probability of every sample being dropped is
+    // negligible — keeps EXPECT_GRAD_FLOWS deterministic with drop_rate=0.3.
     DropPath dp(0.3);
     dp.train();
-    auto input = Variable(randn({4, 8}, DType::Float32, Device::cpu()), true);
+    auto input = Variable(randn({16, 8}, DType::Float32, Device::cpu()), true);
     auto output = dp.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }

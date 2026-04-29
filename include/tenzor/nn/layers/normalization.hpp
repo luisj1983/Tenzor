@@ -444,14 +444,26 @@ private:
     double k_;       ///< Additive constant
 };
 
-// Factory for the LayerNormBackward grad_fn (defined in normalization.cpp).
-// Used by F::layer_norm in functional.cpp to wire up backward properly —
-// the functional path otherwise returns a Variable without a grad_fn and
-// silently drops gradients.
+// Factories for the *Backward grad_fns (defined in normalization.cpp).
+// Used by F::layer_norm / F::group_norm / F::instance_norm in functional.cpp
+// to wire up backward properly — the functional path otherwise returns a
+// Variable without a grad_fn and silently drops gradients (raw-tensor-op
+// breaks autograd graph pattern).
 namespace internal {
 auto make_layer_norm_backward(bool elementwise_affine, double eps,
                               int64_t normalized_size,
                               std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+
+auto make_group_norm_backward(bool affine, double eps,
+                              int64_t num_groups, int64_t num_channels,
+                              int64_t group_size,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+
+auto make_instance_norm_backward(bool affine, double eps,
+                                 int64_t num_features,
+                                 std::vector<::tenzor::Tensor> tensors_to_save)
     -> std::shared_ptr<::tenzor::Function>;
 }  // namespace internal
 

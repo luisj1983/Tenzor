@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/vision.hpp>
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -35,6 +36,6 @@ TEST_F(WindowAttentionTest, Backward) {
     auto output = wa.forward(input, Tensor{});
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 2);
 }

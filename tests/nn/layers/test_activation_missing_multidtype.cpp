@@ -14,6 +14,7 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -61,11 +62,13 @@ TEST_P(ActivationMissingMultiDTypeTest, Hardsigmoid_ForwardValues) {
 
 TEST_P(ActivationMissingMultiDTypeTest, Hardsigmoid_Backward) {
     Hardsigmoid act;
+    // Use small-magnitude inputs (default randn ~ N(0,1)) to keep most
+    // elements inside the active band [-3, 3] where the slope is non-zero.
     auto input = Variable(createRandn({4, 8}), true);
     auto output = act.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape().size(), 2u);
     EXPECT_EQ(input.grad().value().shape()[0], 4);
     EXPECT_EQ(input.grad().value().shape()[1], 8);
@@ -104,9 +107,12 @@ TEST_P(ActivationMissingMultiDTypeTest, Softmin_Backward) {
     Softmin act(/*dim=*/-1);
     auto input = Variable(createRandn({4, 8}), true);
     auto output = act.forward(input);
-    auto loss = tenzor::sum(output);
+    // sum(softmax(...)) along the softmax axis is identically 1, so
+    // d sum/dx is zero — use sum(output*output) to produce a non-trivial
+    // gradient that EXPECT_GRAD_FLOWS can verify.
+    auto loss = tenzor::sum(output * output);
     loss.backward();
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape().size(), 2u);
 }
 
@@ -150,7 +156,7 @@ TEST_P(ActivationMissingMultiDTypeTest, Tanhshrink_Backward) {
     auto output = act.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape().size(), 2u);
 }
 

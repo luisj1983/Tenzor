@@ -12,6 +12,7 @@
 #include <tenzor/nn/layers/attention.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -96,11 +97,9 @@ TEST_P(MultiheadAttentionMultiDTypeTest, GradientFlowsToQuery) {
     Variable q = createInput({batch, seq, embed}, true);
     auto [out, _] = mha.forward(q, q, q);
     auto grad = tenzor::ones({batch, seq, embed}, dtype_, device_);
-    EXPECT_NO_THROW({ out.backward(grad); });
+    out.backward(grad);
 
-    ASSERT_TRUE(q.grad().has_value())
-        << "MultiheadAttention backward did not populate query grad on "
-        << device().to_string();
+    EXPECT_GRAD_FLOWS(q);
     expectShape(*q.grad(), {batch, seq, embed});
 }
 

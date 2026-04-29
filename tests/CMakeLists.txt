@@ -496,6 +496,29 @@ add_executable(benchmark_backends benchmarks/benchmark_backends.cpp)
 target_link_libraries(benchmark_backends PRIVATE tenzor_core)
 
 # ==============================================================================
+# Layer-test grad-flow guard (lint test, no compilation)
+#
+# Fails CI if any tests/nn/layers/test_*.cpp file calls .backward() without
+# at least one of: EXPECT_GRAD_FLOWS macro, numerical_gradient finite-
+# difference helper, an explicit max-abs > 0 check, or a per-element
+# EXPECT_NEAR pattern. Catches regressions in the silently-zeroed-gradient
+# bug class at PR-time rather than after the bug ships.
+# ==============================================================================
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(
+        NAME LayerTestGradFlowGuard
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_SOURCE_DIR}/tools/check_layer_tests.py"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(LayerTestGradFlowGuard PROPERTIES
+        LABELS "lint;layer_tests"
+        TIMEOUT 30
+    )
+endif()
+
+# ==============================================================================
 # Python Tests (registered as CTest tests)
 # ==============================================================================
 if(TENZOR_BUILD_PYTHON)

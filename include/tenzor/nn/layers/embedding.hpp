@@ -284,5 +284,16 @@ private:
     auto aggregate_embeddings(const Variable& embeddings, const Variable& offsets) -> Variable;
 };
 
+// Factory exposed via embedding.hpp for use by F::embedding in functional.cpp.
+// Wires up EmbeddingBackward so the functional path preserves gradients
+// for the weight Variable. Otherwise the dispatch result is wrapped in a
+// Variable with no grad_fn (raw-tensor-op breaks autograd graph pattern).
+namespace internal {
+auto make_embedding_backward(::tenzor::Tensor indices, int64_t num_embeddings,
+                             int64_t embedding_dim, int64_t padding_idx,
+                             bool scale_grad_by_freq, bool sparse)
+    -> std::shared_ptr<::tenzor::Function>;
+}  // namespace internal
+
 } // namespace nn
 } // namespace tenzor

@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/layers/lazy_conv.hpp>
@@ -41,7 +42,7 @@ TEST_P(LazyBackwardMultiDTypeTest, LazyLinear_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().shape()[0], 2);
     EXPECT_EQ(input.grad().value().shape()[1], 16);
 
@@ -60,7 +61,7 @@ TEST_P(LazyBackwardMultiDTypeTest, LazyConv1d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().shape()[0], 1);
 }
 
@@ -75,7 +76,7 @@ TEST_P(LazyBackwardMultiDTypeTest, LazyConv2d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().shape()[1], 8);
 }
 
@@ -90,7 +91,7 @@ TEST_P(LazyBackwardMultiDTypeTest, LazyConv3d_Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().shape()[1], 4);
 }
 
@@ -103,6 +104,7 @@ TEST_P(LazyBackwardMultiDTypeTest, LazyLinear_MaterializedParametersHaveGrad) {
     auto loss = sum(output);
     loss.backward();
 
+    EXPECT_GRAD_FLOWS(input);
     auto params = layer.parameters();
     EXPECT_FALSE(params.empty());
 }

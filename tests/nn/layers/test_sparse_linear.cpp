@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/sparse_linear.hpp>
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -38,7 +39,10 @@ TEST_F(SparseLinearTest, Backward) {
     auto output = sl.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    // EXPECT_GRAD_FLOWS asserts non-zero grad — pre-fix, a severed grad_fn
+    // chain would still produce a zero-filled grad tensor that passes the
+    // shape and has_value() checks but not this magnitude check.
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 2);
     ASSERT_EQ(input.grad().value().shape()[1], 8);
 }

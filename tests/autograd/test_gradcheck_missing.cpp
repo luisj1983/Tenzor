@@ -13,6 +13,9 @@
 #include <tenzor/autograd/gradcheck.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/nn/functional.hpp>
+#include <tenzor/nn/loss/losses.hpp>  // for Reduction enum used by F::nll_loss
+#include <tenzor/sparse/sparse_tensor.hpp>
 #include "../backend_test_fixture.hpp"
 #include "../multi_backend_dtype_fixture.hpp"  // SKIP_WITH_REASON
 
@@ -614,6 +617,566 @@ TEST_P(GradCheckMissingTest, Cholesky) {
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
         << "cholesky gradcheck failed on " << device.to_string();
+}
+
+// ============================================================================
+// Functional wrappers in src/nn/functional.cpp — these previously wrapped
+// dispatch results in a Variable with no grad_fn ("raw-tensor-op breaks
+// autograd graph" pattern). Each test verifies backward propagates through
+// the wired *Backward Function. CPU-only because GPU norm-backward kernels
+// have separate tracked issues (J5 etc.); the wiring fix itself is
+// backend-agnostic — these tests target the wiring.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "F::group_norm gradcheck CPU-only (GPU norm backward "
+                        "tracked separately under J5)";
+    }
+    // GroupNormBackward CPU path internally downcasts to Float32 (see
+    // src/nn/layers/normalization.cpp:1420-1424 and the kernel branching
+    // in cpu/kernels/nn_kernels.cpp:2232+). Even with a Float64 Variable,
+    // the analytical gradient has Float32 precision, so we run the input/
+    // numerical comparison in Float32 and use looser tolerance. The point
+    // of this test is to verify the *wiring* (that grad_fn is attached and
+    // backward runs); kernel-precision is tracked separately.
+    auto x_t = randn({2, 4, 4, 4}, DType::Float32, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    Variable w(tenzor::ones({4}, DType::Float32, Device::cpu()), true);
+    Variable b(tenzor::zeros({4}, DType::Float32, Device::cpu()), true);
+    auto f_input = [&](const Variable& v) -> Variable {
+        auto y = tenzor::nn::functional::group_norm(v, /*num_groups=*/2,
+                                                     w, b, /*eps=*/1e-5);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f_input, x, 1e-3, 1e-2, 1e-2))
+        << "F::group_norm input gradcheck failed (grad_fn wiring regression?)";
+
+    auto f_weight = [&](const Variable& w_in) -> Variable {
+        auto y = tenzor::nn::functional::group_norm(x, /*num_groups=*/2,
+                                                     w_in, b, /*eps=*/1e-5);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f_weight, w, 1e-3, 1e-2, 1e-2))
+        << "F::group_norm weight gradcheck failed";
+    auto f_bias = [&](const Variable& b_in) -> Variable {
+        auto y = tenzor::nn::functional::group_norm(x, /*num_groups=*/2,
+                                                     w, b_in, /*eps=*/1e-5);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f_bias, b, 1e-3, 1e-2, 1e-2))
+        << "F::group_norm bias gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, FunctionalInstanceNormGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "F::instance_norm gradcheck CPU-only (GPU norm "
+                        "backward tracked separately under J5)";
+    }
+    // Same Float32-only kernel-internal precision constraint as
+    // FunctionalGroupNormGradcheck above — see comment there.
+    auto x_t = randn({2, 4, 4, 4}, DType::Float32, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    Variable w(tenzor::ones({4}, DType::Float32, Device::cpu()), true);
+    Variable b(tenzor::zeros({4}, DType::Float32, Device::cpu()), true);
+    auto f_input = [&](const Variable& v) -> Variable {
+        auto y = tenzor::nn::functional::instance_norm(
+            v, /*running_mean=*/std::nullopt, /*running_var=*/std::nullopt,
+            w, b, /*training=*/true, /*momentum=*/0.0, /*eps=*/1e-5);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f_input, x, 1e-3, 1e-2, 1e-2))
+        << "F::instance_norm input gradcheck failed";
+
+    auto f_weight = [&](const Variable& w_in) -> Variable {
+        auto y = tenzor::nn::functional::instance_norm(
+            x, std::nullopt, std::nullopt, w_in, b, true, 0.0, 1e-5);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f_weight, w, 1e-3, 1e-2, 1e-2))
+        << "F::instance_norm weight gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, FunctionalEmbeddingGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "F::embedding gradcheck CPU-only";
+    }
+    // Weight matrix [V=8, D=4], indices [3, 2].
+    auto w_t = randn({8, 4}, DType::Float64, Device::cpu());
+    Variable w(w_t, /*requires_grad=*/true);
+    // Indices are integer data — keep as a plain Tensor, gradcheck only
+    // perturbs the Variable (weight here).
+    std::vector<int64_t> idx_data = {0, 3, 5, 1, 7, 2};
+    Tensor idx({3, 2}, DType::Int64, Device::cpu());
+    std::memcpy(idx.data<int64_t>(), idx_data.data(),
+                idx_data.size() * sizeof(int64_t));
+
+    auto f = [&](const Variable& w_in) -> Variable {
+        auto y = tenzor::nn::functional::embedding(idx, w_in);
+        return tenzor::sum(y);
+    };
+    EXPECT_TRUE(gradcheck(f, w, 1e-5, 1e-3, 1e-3))
+        << "F::embedding weight gradcheck failed (grad_fn wiring regression?)";
+}
+
+TEST_P(GradCheckMissingTest, FunctionalNllLossGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "F::nll_loss gradcheck CPU-only";
+    }
+    // log-prob input [N=4, C=3], target [4]. nll_loss now uses Variable-
+    // level gather/neg/mean so backward flows through automatically.
+    auto x_t = randn({4, 3}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    std::vector<int64_t> target_data = {1, 0, 2, 1};
+    Tensor target({4}, DType::Int64, Device::cpu());
+    std::memcpy(target.data<int64_t>(), target_data.data(),
+                target_data.size() * sizeof(int64_t));
+
+    using R = tenzor::nn::Reduction;
+    for (auto red : {R::Mean, R::Sum, R::None}) {
+        auto f = [&](const Variable& v) -> Variable {
+            auto y = tenzor::nn::functional::nll_loss(v, target, red);
+            // For Reduction::None y is shape [N]; reduce to scalar so
+            // gradcheck has a scalar function.
+            return red == R::None ? tenzor::sum(y) : y;
+        };
+        EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+            << "F::nll_loss reduction=" << static_cast<int>(red)
+            << " gradcheck failed";
+    }
+}
+
+// ============================================================================
+// Sparse autograd ops — gradcheck w.r.t. the dense Variable side. The
+// SparseTensor side is fixed (gradcheck only perturbs Variable inputs).
+// SpGEMMBackward and SparseTriSolveBackward are declared but currently
+// have no Variable-level autograd entry point; covered by op-direct tests
+// elsewhere.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, SpMMGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Sparse gradchecks CPU-only — cuSPARSE/rocSPARSE "
+                        "backward dispatch tracked separately";
+    }
+    // Build a fixed 4x3 sparse matrix (CSR) and a 3x5 dense Variable.
+    auto sparse_dense = randn({4, 3}, DType::Float64, Device::cpu());
+    auto sparse_t = ::tenzor::SparseTensor::from_dense(sparse_dense,
+                                  ::tenzor::SparseLayout::CSR);
+    auto dense_t = randn({3, 5}, DType::Float64, Device::cpu());
+    Variable dense(dense_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::spmm(sparse_t, v);
+    };
+    EXPECT_TRUE(gradcheck(f, dense, 1e-5, 1e-4, 1e-4))
+        << "spmm gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, SpMVGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+    }
+    auto sparse_dense = randn({5, 4}, DType::Float64, Device::cpu());
+    auto sparse_t = ::tenzor::SparseTensor::from_dense(sparse_dense,
+                                  ::tenzor::SparseLayout::CSR);
+    auto vec_t = randn({4}, DType::Float64, Device::cpu());
+    Variable vec(vec_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::spmv(sparse_t, v);
+    };
+    EXPECT_TRUE(gradcheck(f, vec, 1e-5, 1e-4, 1e-4))
+        << "spmv gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, SparseTriSolveGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+    }
+    // L is a fixed sparse lower-triangular matrix; b is the dense
+    // Variable. SparseTriSolveBackward only differentiates through b.
+    int64_t n = 4;
+    auto eye_t = ::tenzor::eye(n, std::nullopt, DType::Float64, Device::cpu());
+    // Build a well-conditioned lower-triangular: I + small lower noise.
+    auto noise = ::tenzor::mul(::tenzor::tril(
+        randn({n, n}, DType::Float64, Device::cpu()), -1), 0.1);
+    auto L_dense = ::tenzor::add(eye_t, noise);
+    auto L = ::tenzor::SparseTensor::from_dense(L_dense,
+                                                ::tenzor::SparseLayout::CSR);
+    auto b_t = randn({n, 3}, DType::Float64, Device::cpu());
+    Variable b(b_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::sparse_triangular_solve(L, v, /*upper=*/false);
+    };
+    EXPECT_TRUE(gradcheck(f, b, 1e-5, 1e-4, 1e-4))
+        << "sparse_triangular_solve gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, SparseAddGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+    }
+    auto sparse_dense = randn({4, 3}, DType::Float64, Device::cpu());
+    auto sparse_t = ::tenzor::SparseTensor::from_dense(sparse_dense,
+                                  ::tenzor::SparseLayout::COO);
+    auto dense_t = randn({4, 3}, DType::Float64, Device::cpu());
+    Variable dense(dense_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::sparse_add(sparse_t, v);
+    };
+    EXPECT_TRUE(gradcheck(f, dense, 1e-5, 1e-4, 1e-4))
+        << "sparse_add gradcheck failed";
+}
+
+// ============================================================================
+// Linalg gradchecks — vecdot, vector_norm, matrix_norm, eigvalsh, solve.
+// LDL factor/solve are J9-tracked (Cholesky-family precision issues).
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, VecdotGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "linalg gradchecks CPU-only";
+    }
+    auto a_t = randn({5}, DType::Float64, Device::cpu());
+    auto b_t = randn({5}, DType::Float64, Device::cpu());
+    Variable a(a_t, /*requires_grad=*/true);
+    Variable b(b_t, /*requires_grad=*/false);  // probe one side at a time
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::vecdot(v, b);
+    };
+    EXPECT_TRUE(gradcheck(f, a, 1e-5, 1e-4, 1e-4))
+        << "vecdot gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, VectorNormGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "linalg gradchecks CPU-only";
+    }
+    auto a_t = randn({4, 6}, DType::Float64, Device::cpu());
+    Variable a(a_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::vector_norm(v, 2.0);
+    };
+    EXPECT_TRUE(gradcheck(f, a, 1e-5, 1e-4, 1e-4))
+        << "vector_norm gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, MatrixNormGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "linalg gradchecks CPU-only";
+    }
+    // matrix_norm with ord=2 (operator 2-norm) goes through SVD and the
+    // backward is delicate near degenerate singular values. Frobenius norm
+    // (sum of squares, sqrt) is smooth and a much better fit for
+    // gradcheck. linalg_norm(.,"fro") is the dedicated path.
+    auto a_t = randn({4, 5}, DType::Float64, Device::cpu());
+    Variable a(a_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::linalg_norm(v, /*ord=*/"fro");
+    };
+    EXPECT_TRUE(gradcheck(f, a, 1e-5, 1e-4, 1e-4))
+        << "matrix_norm (Frobenius) gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, EigvalshGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "eigvalsh gradcheck CPU-only";
+    }
+    auto spd = make_spd(4);
+    Variable x(spd, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::eigvalsh(v);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "eigvalsh gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, SolveGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "solve gradcheck CPU-only";
+    }
+    auto A_t = make_spd(4);
+    auto B_t = randn({4, 3}, DType::Float64, Device::cpu()).to(device);
+    Variable A(A_t, /*requires_grad=*/true);
+    Variable B(B_t, /*requires_grad=*/false);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::solve(v, B);
+    };
+    EXPECT_TRUE(gradcheck(f, A, 1e-5, 1e-3, 1e-3))
+        << "solve gradcheck failed";
+}
+
+// ============================================================================
+// Special math gradchecks — erf family, Bessel I0e/I1e, multigammaln.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, ErfGradcheck) {
+    auto x_t = randn({6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return ::tenzor::erf(v); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "erf gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, ErfcGradcheck) {
+    auto x_t = randn({6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return ::tenzor::erfc(v); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "erfc gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, ErfInvGradcheck) {
+    // Domain (-1, 1). erfinv'(x) = sqrt(pi)/2 * exp(erfinv(x)^2) — grows
+    // very fast as |x| -> 1, so finite differences become unreliable.
+    // Use a tight range around 0 (|x| < ~0.3) to keep the curvature
+    // bounded. randn is unbounded; clamp by tanh which keeps |x| <= 1
+    // smoothly, then scale to |x| < 0.3.
+    auto x_t = ::tenzor::mul(
+        ::tenzor::tanh(randn({6}, DType::Float64, Device::cpu())), 0.3);
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return ::tenzor::erfinv(v); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "erfinv gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, I0eGradcheck) {
+    auto x_t = randn({6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return ::tenzor::i0e(v); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "i0e gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, I1eGradcheck) {
+    auto x_t = randn({6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return ::tenzor::i1e(v); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "i1e gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, MultigammalnGradcheck) {
+    // Multigammaln(x, p) requires x > (p-1)/2. For p=2, x > 0.5.
+    auto x_t = ::tenzor::add(::tenzor::abs(randn({6}, DType::Float64, Device::cpu())), 1.0);
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::multigammaln(v, /*p=*/2);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "multigammaln gradcheck failed on " << device.to_string();
+}
+
+// ============================================================================
+// Indexing/shape leftover gradchecks — Scatter (plain), Sort, TopK, Tril,
+// Triu. GridSample/AffineGrid in vision.cpp; covered separately.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, ScatterGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "scatter gradcheck CPU-only";
+    }
+    // scatter writes input values into target at indexed positions; backward
+    // routes grad back to the values input via gather along the scatter dim.
+    auto v_t = randn({3, 4}, DType::Float64, Device::cpu());
+    Variable v_var(v_t, /*requires_grad=*/true);
+    std::vector<int64_t> idx_data = {0, 2, 1, 3, 2, 0, 3, 1, 1, 0, 2, 3};
+    Tensor idx({3, 4}, DType::Int64, Device::cpu());
+    std::memcpy(idx.data<int64_t>(), idx_data.data(),
+                idx_data.size() * sizeof(int64_t));
+    auto target_t = ::tenzor::zeros({3, 4}, DType::Float64, Device::cpu());
+    Variable target(target_t, /*requires_grad=*/false);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::scatter(target, /*dim=*/1, idx, v);
+    };
+    EXPECT_TRUE(gradcheck(f, v_var, 1e-5, 1e-4, 1e-4))
+        << "scatter gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, TrilGradcheck) {
+    auto x_t = randn({4, 4}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::tril(v, /*diagonal=*/0);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "tril gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, TriuGradcheck) {
+    auto x_t = randn({4, 4}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::triu(v, /*diagonal=*/0);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "triu gradcheck failed on " << device.to_string();
+}
+
+// ============================================================================
+// Sort / TopK — both return pair<Variable values, Tensor indices>; gradient
+// flows only through values. Backward must scatter via the inverse
+// permutation (sort) or by indices (topk) — wrong dim normalisation here
+// would map gradients to the wrong rows.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, SortGradcheck) {
+    auto x_t = randn({4, 6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [vals, idx] = ::tenzor::sort(v, /*dim=*/-1, /*descending=*/false);
+        return ::tenzor::sum(vals);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "sort gradcheck failed on " << device.to_string();
+}
+
+TEST_P(GradCheckMissingTest, GridSampleGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "grid_sample gradcheck CPU-only "
+                        "(GridSampleBackward CPU impl exact; GPU paths "
+                        "tracked separately)";
+    }
+    // Tiny [N=1, C=2, H=3, W=3] feature map sampled with a [N=1, H=2, W=2,
+    // 2] grid in (-1, 1). align_corners=true to keep boundary derivatives
+    // simple.
+    auto in_t = randn({1, 2, 3, 3}, DType::Float64, Device::cpu());
+    auto grid_t = ::tenzor::mul(randn({1, 2, 2, 2}, DType::Float64, Device::cpu()), 0.5);
+    Variable input(in_t, /*requires_grad=*/true);
+    Variable grid(grid_t, /*requires_grad=*/false);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::grid_sample(v, grid, "bilinear", "zeros", true);
+    };
+    EXPECT_TRUE(gradcheck(f, input, 1e-4, 1e-3, 1e-3))
+        << "grid_sample gradcheck failed (input)";
+}
+
+TEST_P(GradCheckMissingTest, AffineGridGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "affine_grid gradcheck CPU-only";
+    }
+    // affine_grid(theta) is an exactly-linear function of theta — the
+    // affine transform x' = theta * [grid_x; grid_y; 1] applied at every
+    // pre-computed (grid_x, grid_y) pixel. Loose tolerance because the
+    // AffineGridBackward CPU impl reduces over the spatial grid in
+    // Float32 internally (the `gi_f32` accumulator pattern in
+    // function_vision.cpp).
+    auto theta_t = randn({1, 2, 3}, DType::Float64, Device::cpu());
+    Variable theta(theta_t, /*requires_grad=*/true);
+    auto f = [&](const Variable& v) -> Variable {
+        return ::tenzor::affine_grid(v, /*size=*/{1, 1, 3, 3},
+                                     /*align_corners=*/true);
+    };
+    EXPECT_TRUE(gradcheck(f, theta, 1e-3, 1e-2, 1e-2))
+        << "affine_grid gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, TopKGradcheck) {
+    auto x_t = randn({4, 6}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [vals, idx] = ::tenzor::topk(v, /*k=*/3, /*dim=*/-1,
+                                          /*largest=*/true, /*sorted=*/true);
+        return ::tenzor::sum(vals);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "topk gradcheck failed on " << device.to_string();
+}
+
+// ============================================================================
+// FFT family — pure FFT/IFFT produce complex outputs which gradcheck can't
+// reduce directly. We compose with view_as_real (Variable overload added
+// in src/autograd/ops.cpp) to get a real-valued scalar function:
+//
+//     f(x) = sum(view_as_real(fft(x)))
+//
+// which is a smooth real → real function whose gradient depends on the
+// FFTBackward / IFFTBackward implementations.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, FFTGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "FFT gradchecks CPU-only";
+    }
+    auto x_t = randn({8}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::view_as_real(::tenzor::fft_autograd::fft(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2))
+        << "fft gradcheck failed (real-input → complex-output → "
+           "view_as_real → sum)";
+}
+
+TEST_P(GradCheckMissingTest, IFFTGradcheck) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "FFT gradchecks CPU-only";
+    }
+    // ifft expects complex input. Build it from a real Variable via
+    // view_as_complex on a [..., 2] real tensor — the gradient flows back
+    // through view_as_complex into the original real Variable.
+    auto x_t = randn({8, 2}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    auto f = [](const Variable& v) -> Variable {
+        auto z = ::tenzor::view_as_complex(v);
+        return ::tenzor::view_as_real(::tenzor::fft_autograd::ifft(z));
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2))
+        << "ifft gradcheck failed";
+}
+
+// ============================================================================
+// FFT family — RFFT/IRFFT round-trip variants. Original audit doc kept
+// these as a workaround pre-PR3.5; we keep them for negative-dim and
+// custom-norm coverage even though the dedicated FFT/IFFT tests above
+// now exist.
+// ============================================================================
+
+TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_DefaultDim) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "FFT gradchecks CPU-only";
+    }
+    auto x_t = randn({8}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::fft_autograd::irfft(::tenzor::fft_autograd::rfft(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2))
+        << "rfft→irfft round-trip gradcheck failed (default dim/norm)";
+}
+
+TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_NegativeDim) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "FFT gradchecks CPU-only";
+    }
+    // Negative-dim regression: matches the HRM-bug class (dim=-1 used as a
+    // shape index in backward). The rfft/irfft pair must normalise dim
+    // identically on both legs of the round-trip for this to pass.
+    auto x_t = randn({4, 8}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::fft_autograd::irfft(
+            ::tenzor::fft_autograd::rfft(v, /*n=*/std::nullopt, /*dim=*/-1),
+            /*n=*/std::nullopt, /*dim=*/-1);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2))
+        << "rfft→irfft (dim=-1) gradcheck failed";
+}
+
+TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_OrthoNorm) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "FFT gradchecks CPU-only";
+    }
+    // The norm scaling factor multiplies through forward and backward —
+    // a missing scale in the backward would produce a constant-ratio
+    // gradient mismatch that gradcheck catches.
+    auto x_t = randn({8}, DType::Float64, Device::cpu());
+    Variable x(x_t, /*requires_grad=*/true);
+    auto f = [](const Variable& v) -> Variable {
+        auto y = ::tenzor::fft_autograd::rfft(v, std::nullopt, -1, "ortho");
+        return ::tenzor::fft_autograd::irfft(y, std::nullopt, -1, "ortho");
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2))
+        << "rfft→irfft (norm=ortho) gradcheck failed";
 }
 
 INSTANTIATE_BACKEND_TESTS(GradCheckMissingTest);

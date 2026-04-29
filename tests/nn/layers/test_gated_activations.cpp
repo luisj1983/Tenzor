@@ -5,8 +5,10 @@
 
 #include <gtest/gtest.h>
 #include "../../backend_test_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/autograd/variable.hpp>
+#include <tenzor/ops/reduction.hpp>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -74,6 +76,41 @@ TEST_P(GatedActivationsTest, AllGateTypes_ProduceDifferentOutput) {
         EXPECT_EQ(out_sig.shape()[i], out_silu.shape()[i]);
         EXPECT_EQ(out_sig.shape()[i], out_gelu.shape()[i]);
         EXPECT_EQ(out_sig.shape()[i], out_relu.shape()[i]);
+    }
+}
+
+// Locks in that backward propagates through every gate type. Pre-fix, the
+// raw-tensor multiply inside GatedLinearUnit's gating step severed grad_fn
+// and tests like the shape ones above would NOT detect it (output exists,
+// shape is correct, but backward returns zero gradients).
+TEST_P(GatedActivationsTest, GeGLU_GradFlowsThroughBackward) {
+    GeGLU geglu(32, 64);
+    Variable input(randn({2, 4, 32}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto output = geglu.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
+}
+
+TEST_P(GatedActivationsTest, ReGLU_GradFlowsThroughBackward) {
+    ReGLU reglu(32, 64);
+    Variable input(randn({2, 4, 32}, DType::Float32, Device::cpu()), true);
+    auto output = reglu.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
+}
+
+TEST_P(GatedActivationsTest, GatedLinearUnit_AllGateTypes_GradFlow) {
+    for (auto gate : {GateType::Sigmoid, GateType::SiLU,
+                      GateType::GELU, GateType::ReLU}) {
+        SCOPED_TRACE("gate type = " + std::to_string(static_cast<int>(gate)));
+        GatedLinearUnit glu(32, 64, gate, /*bias=*/false);
+        Variable input(randn({1, 4, 32}, DType::Float32, Device::cpu()), true);
+        auto output = glu.forward(input);
+        auto loss = tenzor::sum(output);
+        loss.backward();
+        EXPECT_GRAD_FLOWS(input);
     }
 }
 

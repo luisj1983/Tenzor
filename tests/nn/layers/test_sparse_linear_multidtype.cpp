@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/sparse_linear.hpp>
 
@@ -57,7 +58,7 @@ TEST_P(SparseLinearMultiDTypeTest, Backward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 2);
     ASSERT_EQ(input.grad().value().shape()[1], 8);
 }

@@ -115,6 +115,13 @@ add_executable(test_gradcheck_missing test_gradcheck_missing.cpp)
 target_link_libraries(test_gradcheck_missing PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_missing LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Negative-dim gradcheck — every dim-taking op exercised with both
+# positive and negative dim values. Guards the bug class that hit the
+# HRM autograd example (commit 6cffd0a7).
+add_executable(test_gradcheck_negative_dim test_gradcheck_negative_dim.cpp)
+target_link_libraries(test_gradcheck_negative_dim PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_negative_dim LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Phase 7: linalg / Conv / Mode gradcheck additions
 add_executable(test_gradcheck_phase7 test_gradcheck_phase7.cpp)
 target_link_libraries(test_gradcheck_phase7 PRIVATE tenzor_core GTest::gtest_main)

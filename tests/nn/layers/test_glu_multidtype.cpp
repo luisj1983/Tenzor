@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/activations/activations.hpp>
 
@@ -51,8 +52,8 @@ TEST_P(GLUMultiDTypeTest, Backward) {
     auto output = glu.forward(input);
     auto loss = sum(output);
     loss.backward();
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad();
-    ASSERT_TRUE(grad.has_value());
     ASSERT_EQ(grad.value().shape()[0], 4);
     ASSERT_EQ(grad.value().shape()[1], 8);
 }

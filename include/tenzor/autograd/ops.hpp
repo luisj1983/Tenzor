@@ -918,6 +918,21 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable;
  */
 auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable;
 
+/**
+ * @brief Sparse triangular solve with gradient tracking.
+ *
+ * Solves L @ x = b for x where L is a sparse triangular matrix (constant)
+ * and b is a dense Variable. Gradient flows through to b only — the
+ * sparse matrix L is not differentiated (sparsity is structural).
+ *
+ * @param L Sparse triangular matrix (constant)
+ * @param b Right-hand side dense Variable
+ * @param upper If true, treat L as upper triangular (default lower)
+ */
+auto sparse_triangular_solve(const SparseTensor& L,
+                              const Variable& b,
+                              bool upper = false) -> Variable;
+
 // ============================================================================
 // New Op Autograd Wrappers (Phase 7)
 // ============================================================================
@@ -991,6 +1006,47 @@ auto vecdot(const Variable& a, const Variable& b, int64_t dim = -1) -> Variable;
 auto as_strided(const Variable& input, std::span<const int64_t> size,
                 std::span<const int64_t> stride,
                 std::optional<int64_t> storage_offset = std::nullopt) -> Variable;
+
+// ============================================================================
+// Vision Operations (Variable-level wrappers for grid_sample / affine_grid)
+// ============================================================================
+
+/**
+ * @brief View a complex tensor as a real tensor with trailing dim 2
+ *        (real, imag). Variable wrapper around tenzor::view_as_real.
+ *
+ * Backward dispatches via ViewAsRealBackward (linear; backward = view_as_complex).
+ * Useful for reducing complex-valued outputs (e.g., FFT) to real for gradcheck.
+ */
+auto view_as_real(const Variable& input) -> Variable;
+
+/**
+ * @brief View a real tensor with trailing dim 2 as a complex tensor.
+ *        Variable wrapper around tenzor::view_as_complex.
+ */
+auto view_as_complex(const Variable& input) -> Variable;
+
+/**
+ * @brief Sample input at non-integer grid locations with gradient tracking.
+ *
+ * Variable wrapper around tenzor::grid_sample. Backward via GridSampleBackward
+ * computes gradients w.r.t. both `input` and `grid`.
+ */
+auto grid_sample(const Variable& input,
+                 const Variable& grid,
+                 const std::string& mode = "bilinear",
+                 const std::string& padding_mode = "zeros",
+                 bool align_corners = false) -> Variable;
+
+/**
+ * @brief Generate a 2D affine grid with gradient tracking.
+ *
+ * Variable wrapper around tenzor::affine_grid. Backward via AffineGridBackward
+ * computes the gradient w.r.t. theta.
+ */
+auto affine_grid(const Variable& theta,
+                 const std::vector<int64_t>& size,
+                 bool align_corners = false) -> Variable;
 
 } // namespace tenzor
 

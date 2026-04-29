@@ -14,6 +14,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/detection/rpn.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -135,7 +136,7 @@ TEST_P(RPNHeadMultiDTypeTest, BackwardGradientFlow) {
     auto loss = tenzor::sum(objectness);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {1, 256, 8, 8});
 }
 

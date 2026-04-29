@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/drop_path.hpp>
 
@@ -57,14 +58,17 @@ TEST_P(DropPathMultiDTypeTest, TrainingModeOutputShape) {
 }
 
 TEST_P(DropPathMultiDTypeTest, Backward) {
+    // Use a larger batch so that the probability of every sample being dropped
+    // is negligible — keeps EXPECT_GRAD_FLOWS deterministic with a non-zero
+    // drop rate.
     DropPath dp(0.3);
     convert_model(dp);
     dp.train();
-    auto input = createInput({4, 8}, true);
+    auto input = createInput({16, 8}, true);
     auto output = dp.forward(input);
     auto loss = sum(output);
     loss.backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(DropPathMultiDTypeTest, DTypePreserved) {

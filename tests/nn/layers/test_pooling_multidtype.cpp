@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -82,11 +83,9 @@ TEST_P(PoolingMultiDTypeTest, MaxPool2dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({
-        output.backward(grad_output);
-    });
+    output.backward(grad_output);
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -145,11 +144,9 @@ TEST_P(PoolingMultiDTypeTest, AvgPool2dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({
-        output.backward(grad_output);
-    });
+    output.backward(grad_output);
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -187,11 +184,9 @@ TEST_P(PoolingMultiDTypeTest, AdaptiveAvgPool2dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({
-        output.backward(grad_output);
-    });
+    output.backward(grad_output);
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -255,7 +250,7 @@ TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dGradientFlow) {
     auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {1, 2, 8, 8});
 }
 

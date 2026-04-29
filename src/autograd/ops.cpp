@@ -8,6 +8,7 @@
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/fft.hpp"
+#include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/custom_op.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -1719,6 +1720,30 @@ auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable {
     return output;
 }
 
+auto sparse_triangular_solve(const SparseTensor& L,
+                              const Variable& b,
+                              bool upper) -> Variable {
+    auto result_tensor = sparse::sparse_triangular_solve(L, b.tensor(), upper);
+    if (!b.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
+
+    // SparseTriSolveBackward needs L^T as a sparse matrix to compute
+    // grad_b = L^{-T} @ grad_x. Pre-compute the transpose once.
+    auto Lt = L.transpose();
+
+    auto grad_fn = std::make_shared<SparseTriSolveBackward>();
+    grad_fn->set_sparse_l_transposed(std::move(Lt));
+    grad_fn->set_upper(upper);
+    grad_fn->save_for_backward({result_tensor});
+    grad_fn->set_next_functions({b.grad_fn()});
+    grad_fn->set_input_variables({b});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 // ============================================================================
 // Cumulative, Sorting, and Triangular Operations
 // ============================================================================
@@ -2356,6 +2381,99 @@ auto as_strided(const Variable& input, std::span<const int64_t> size,
     grad_fn->set_input_variables({input});
 
     Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// View-as-real / view-as-complex Variable wrappers.
+// Useful for reducing complex outputs to real (e.g., wrapping FFT for
+// gradcheck). The *Backward classes are defined in function_shape.cpp.
+// ============================================================================
+
+auto view_as_real(const Variable& input) -> Variable {
+    auto out_t = ::tenzor::view_as_real(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(out_t, false);
+    }
+    auto grad_fn = std::make_shared<ViewAsRealBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(out_t, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto view_as_complex(const Variable& input) -> Variable {
+    auto out_t = ::tenzor::view_as_complex(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(out_t, false);
+    }
+    auto grad_fn = std::make_shared<ViewAsComplexBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(out_t, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// Vision Operations — Variable-level wrappers for grid_sample / affine_grid.
+// The *Backward classes already exist (see include/tenzor/autograd/function.hpp
+// and src/autograd/function_vision.cpp); the wrappers here expose them through
+// the public Variable API for use by gradcheck and end-user code.
+// ============================================================================
+
+auto grid_sample(const Variable& input,
+                 const Variable& grid,
+                 const std::string& mode,
+                 const std::string& padding_mode,
+                 bool align_corners) -> Variable {
+    auto out_t = ::tenzor::ops::grid_sample(input.tensor(), grid.tensor(),
+                                            mode, padding_mode, align_corners);
+    bool needs_grad = (input.requires_grad() || grid.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(out_t, false);
+    }
+    auto grad_fn = std::make_shared<GridSampleBackward>();
+    grad_fn->mode_ = mode;
+    grad_fn->padding_mode_ = padding_mode;
+    grad_fn->align_corners_ = align_corners;
+    grad_fn->save_for_backward({input.tensor(), grid.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = grid.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+
+    std::vector<Variable> input_vars{input};
+    if (grid.requires_grad()) input_vars.push_back(grid);
+    grad_fn->set_input_variables(std::move(input_vars));
+
+    Variable output(out_t, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto affine_grid(const Variable& theta,
+                 const std::vector<int64_t>& size,
+                 bool align_corners) -> Variable {
+    auto out_t = ::tenzor::ops::affine_grid(theta.tensor(), size, align_corners);
+    if (!theta.requires_grad() || !is_grad_enabled()) {
+        return Variable(out_t, false);
+    }
+    auto grad_fn = std::make_shared<AffineGridBackward>();
+    grad_fn->size_ = size;
+    grad_fn->align_corners_ = align_corners;
+    grad_fn->save_for_backward({theta.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = theta.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({theta});
+
+    Variable output(out_t, true);
     output.set_grad_fn(grad_fn);
     return output;
 }

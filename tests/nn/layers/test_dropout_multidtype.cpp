@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 #include <numeric>
 #include <algorithm>
@@ -172,11 +173,9 @@ TEST_P(DropoutMultiDTypeTest, BackwardPassGradientShape) {
     EXPECT_TRUE(output.grad_fn() != nullptr);
 
     auto grad_output = createOnes({10, 20});
-    EXPECT_NO_THROW({
-        output.backward(grad_output);
-    });
+    output.backward(grad_output);
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
