@@ -66,10 +66,10 @@
  * - **Parallel**: Thread pool, parallel loops, atomic operations
  * - **Utilities**: Configuration, Logging, Error handling
  *
- * @see https://github.com/yourusername/tenzor for full documentation
+ * @see https://github.com/skreamz/Tenzor for full documentation
  *
- * @version 1.0.0
- * @author Tenzor Development Team
+ * @version 0.1.0
+ * @author Lee Morton
  */
 
 #pragma once

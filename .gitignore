@@ -61,3 +61,4 @@ docs/api/xml/
 # Sanitizer / fuzz output
 fuzz-*.log
 crash-*
+.bench-mkl-shim/

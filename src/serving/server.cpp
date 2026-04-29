@@ -336,7 +336,7 @@ auto InferenceServer::serve_loop() -> void {
 
     // Health check
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(R"({"status":"ok","version":"1.0.0"})", "application/json");
+        res.set_content(R"({"status":"ok","version":"0.1.0"})", "application/json");
     });
 
     // Prometheus metrics

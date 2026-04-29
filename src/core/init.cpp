@@ -97,7 +97,7 @@ auto initialize() -> void {
     }
 #endif
 
-    std::cout << "Initializing Tenzor library v1.0.0" << std::endl;
+    std::cout << "Initializing Tenzor library v0.1.0" << std::endl;
 
     // Load CPU backend dynamically
     auto& loader = backend_registry();

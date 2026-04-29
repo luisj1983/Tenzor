@@ -55,6 +55,7 @@ def benchmark_tenzor_layernorm(
             ln = tz.nn.LayerNorm([hidden])
 
             if device == "cuda":
+                ln.cuda()
                 x = tz.randn([batch, seq_len, hidden]).cuda()
             else:
                 x = tz.randn([batch, seq_len, hidden])
@@ -178,6 +179,7 @@ def benchmark_tenzor_batchnorm(
                 bn.eval()
 
             if device == "cuda":
+                bn.cuda()
                 x = tz.randn([batch, channels, h, w]).cuda()
             else:
                 x = tz.randn([batch, channels, h, w])
@@ -296,6 +298,7 @@ def benchmark_tenzor_rmsnorm(
             rms = tz.nn.RMSNorm(hidden)
 
             if device == "cuda":
+                rms.cuda()
                 x = tz.randn([batch, seq_len, hidden]).cuda()
             else:
                 x = tz.randn([batch, seq_len, hidden])

@@ -202,6 +202,7 @@ def benchmark_tenzor_linear_precision(
                 linear = tz.nn.Linear(in_feat, out_feat, dtype=dtype)
 
                 if device == "cuda":
+                    linear.cuda()
                     x = tz.randn([batch, in_feat], dtype=dtype).cuda()
                 else:
                     x = tz.randn([batch, in_feat], dtype=dtype)

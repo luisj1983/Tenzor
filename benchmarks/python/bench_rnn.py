@@ -94,6 +94,7 @@ def benchmark_tenzor_lstm(
             lstm.eval()  # Enable fused kernel optimization for inference
 
             if device == "cuda":
+                lstm.cuda()
                 x = tz.randn([batch, seq_len, input_size]).cuda()
             else:
                 x = tz.randn([batch, seq_len, input_size])
@@ -234,6 +235,7 @@ def benchmark_tenzor_gru(
             gru.eval()  # Enable fused kernel optimization for inference
 
             if device == "cuda":
+                gru.cuda()
                 x = tz.randn([batch, seq_len, input_size]).cuda()
             else:
                 x = tz.randn([batch, seq_len, input_size])
@@ -366,6 +368,7 @@ def benchmark_tenzor_lstm_backward(
             )
 
             if device == "cuda":
+                lstm.cuda()
                 x = tz.randn([batch, seq_len, input_size]).cuda()
             else:
                 x = tz.randn([batch, seq_len, input_size])

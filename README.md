@@ -119,12 +119,29 @@ See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
 ## Performance
 
-Tenzor is intended as a research-grade alternative implementation, not a faster drop-in for PyTorch. The current published benchmarks ([reports/combined_benchmark.md](reports/combined_benchmark.md)) measure CPU-only Conv2D and MatMul against PyTorch and show:
+Measured against PyTorch 2.11 on a single RTX 5070 Laptop (Blackwell, sm_120, CUDA 13.2). Full per-shape numbers and methodology in [`reports/combined_benchmark.md`](reports/combined_benchmark.md).
 
-- Average speedup: **0.67×** vs PyTorch on the sampled workloads.
-- Tenzor is faster on **2 / 20** measured cases.
+**CUDA, 91 paired benchmarks:** Tenzor wins 22 (24%); average speedup 1.15× vs PyTorch.
 
-GPU benchmarks have not been published yet. If you need raw throughput today, use PyTorch. If you want a clean, hackable C++23 codebase to study or build on, Tenzor is for you.
+| Category | Tenzor vs PyTorch | Wins |
+|---|---|---|
+| RMSNorm           | **4.04×** | 4 / 4 |
+| BatchNorm         | 2.18× | 2 / 14 |
+| LayerNorm         | 1.52× | 3 / 4 |
+| MatMul            | 1.35× | 2 / 2 |
+| Linear            | 1.31× | 4 / 6 |
+| Batched MatMul    | 1.24× | 1 / 2 |
+| MLP (combined)    | 0.89× | 3 / 8 |
+| Training (mixed)  | 0.87× | 3 / 12 |
+| Conv2D            | 0.83× | 0 / 18 |
+| Activation        | 0.43× | 0 / 12 |
+| Transformer (e2e) | 0.41× | 0 / 2 |
+| Attention         | **0.13×** | 0 / 4 |
+| LSTM training     | **0.02×** | 0 / 3 |
+
+**Honest read:** Tenzor is competitive on the unfused-compute primitives (MatMul, Linear, normalization layers) and notably wins on RMSNorm. It has real regressions on the fused / highly-optimized paths PyTorch covers via cuDNN+SDPA: attention (~7× slower), Conv2D (~17% slower), and a current correctness bug in CUDA LSTM/GRU forward that throws `cuBLAS INVALID_VALUE` — all of which are documented in [`reports/combined_benchmark.md`](reports/combined_benchmark.md) as known issues for v0.1.0.
+
+If you need raw production throughput today, use PyTorch. If you want a clean, hackable C++23 codebase that's competitive on bread-and-butter linear algebra and that you can extend — Tenzor is for you.
 
 ## Architecture
 

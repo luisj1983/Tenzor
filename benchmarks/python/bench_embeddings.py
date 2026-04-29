@@ -53,6 +53,7 @@ def benchmark_tenzor_embedding(
 
             # Create random token indices
             if device == "cuda":
+                embedding.cuda()
                 indices = tz.randint(0, vocab_size, [batch, seq_len]).cuda()
             else:
                 indices = tz.randint(0, vocab_size, [batch, seq_len])
@@ -165,6 +166,7 @@ def benchmark_tenzor_embedding_backward(
             embedding = tz.nn.Embedding(vocab_size, embed_dim)
 
             if device == "cuda":
+                embedding.cuda()
                 indices = tz.randint(0, vocab_size, [batch, seq_len]).cuda()
             else:
                 indices = tz.randint(0, vocab_size, [batch, seq_len])

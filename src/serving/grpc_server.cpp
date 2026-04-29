@@ -162,7 +162,7 @@ public:
                              const HealthCheckRequest* /*request*/,
                              HealthCheckResponse* response) override {
         response->set_healthy(true);
-        response->set_version("1.0.0");
+        response->set_version("0.1.0");
         return grpc::Status::OK;
     }
 
