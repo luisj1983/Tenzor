@@ -35,6 +35,14 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+# CMake-generated config files (templates live in cmake/)
+/TenzorConfig.cmake
+/TenzorConfigVersion.cmake
+/tenzor.pc
+# CMake-generated artifacts from accidental in-source builds at repo root
+/_deps/
+/generated/
+/compile_commands.json
 
 # Testing
 Testing/
