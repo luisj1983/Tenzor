@@ -121,25 +121,27 @@ See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
 Measured against PyTorch 2.11 on a single RTX 5070 Laptop (Blackwell, sm_120, CUDA 13.2). Full per-shape numbers and methodology in [`reports/combined_benchmark.md`](reports/combined_benchmark.md).
 
-**CUDA, 91 paired benchmarks:** Tenzor wins 22 (24%); average speedup 1.15× vs PyTorch.
+**CUDA, 99 paired benchmarks (post-v0.1.0 fixes):** Tenzor wins 21 (21%); average speedup 1.01× vs PyTorch.
 
 | Category | Tenzor vs PyTorch | Wins |
 |---|---|---|
-| RMSNorm           | **4.04×** | 4 / 4 |
-| BatchNorm         | 2.18× | 2 / 14 |
-| LayerNorm         | 1.52× | 3 / 4 |
-| MatMul            | 1.35× | 2 / 2 |
-| Linear            | 1.31× | 4 / 6 |
-| Batched MatMul    | 1.24× | 1 / 2 |
-| MLP (combined)    | 0.89× | 3 / 8 |
-| Training (mixed)  | 0.87× | 3 / 12 |
-| Conv2D            | 0.83× | 0 / 18 |
-| Activation        | 0.43× | 0 / 12 |
-| Transformer (e2e) | 0.41× | 0 / 2 |
-| Attention         | **0.13×** | 0 / 4 |
+| RMSNorm           | **3.82×** | 4 / 4 |
+| BatchNorm         | 1.88× | 2 / 14 |
+| LayerNorm         | 1.54× | 3 / 4 |
+| MatMul            | 1.51× | 2 / 2 |
+| Linear            | 1.30× | 4 / 6 |
+| Batched MatMul    | 1.17× | 1 / 2 |
+| Training (mixed)  | 0.92× | 4 / 12 |
+| Conv2D            | 0.81× | 0 / 18 |
+| MLP (combined)    | 0.69× | 0 / 8 |
+| GRU forward       | 0.57× | 0 / 2 |
+| Activation        | 0.41× | 0 / 12 |
+| Transformer (e2e) | 0.33× | 0 / 2 |
+| LSTM forward      | 0.21× | 0 / 6 |
+| Attention         | 0.10× | 0 / 4 |
 | LSTM training     | **0.02×** | 0 / 3 |
 
-**Honest read:** Tenzor is competitive on the unfused-compute primitives (MatMul, Linear, normalization layers) and notably wins on RMSNorm. It has real regressions on the fused / highly-optimized paths PyTorch covers via cuDNN+SDPA: attention (~7× slower), Conv2D (~17% slower), and a current correctness bug in CUDA LSTM/GRU forward that throws `cuBLAS INVALID_VALUE` — all of which are documented in [`reports/combined_benchmark.md`](reports/combined_benchmark.md) as known issues for v0.1.0.
+**Honest read:** Tenzor is competitive on the unfused-compute primitives (MatMul, Linear, normalization layers) and notably wins on RMSNorm. It has real regressions on the fused / highly-optimized paths PyTorch covers via cuDNN+SDPA: LSTM/GRU forward (~5× slower than cuDNN's fused RNN), attention (~10× slower on Blackwell — FP32 cuDNN SDPA is in the codebase but gated off pending an upstream Blackwell stability fix), and Conv2D (~20% slower). LSTM training on CUDA is ~50× slower because it falls through to a per-timestep autograd path — cuDNN RNN integration is the v0.2 milestone. All documented in [`reports/combined_benchmark.md`](reports/combined_benchmark.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 If you need raw production throughput today, use PyTorch. If you want a clean, hackable C++23 codebase that's competitive on bread-and-butter linear algebra and that you can extend — Tenzor is for you.
 
