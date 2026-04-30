@@ -138,20 +138,24 @@ void cublas_gemm_ex(
         beta = &beta_f;
     }
 
-    // cuBLAS uses column-major, we use row-major
-    // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
-    // Which is: C (col-major) = B (col-major) @ A (col-major)
+    // cuBLAS uses column-major, we use row-major. We pass B first then A so
+    // cuBLAS computes (B_col)(A_col) = (B_user_row)^T (A_user_row)^T = (A·B)^T,
+    // and the col-major output (N×M) is bit-identical to the row-major (M×N)
+    // we want. Because the col-major view of row-major data is already the
+    // logical transpose, we use OP_N for both (no further transpose). Passing
+    // transpose_a=true asks cuBLAS to transpose A — i.e. OP_T on the second
+    // operand (cuBLAS-B = A_user); same for transpose_b on cuBLAS-A.
 
-    // Leading dimensions
-    int64_t lda = transpose_a ? M : K;
-    int64_t ldb = transpose_b ? K : N;
-    int64_t ldc = N;
+    // Leading dimensions: col-major leading dim = trailing row-major dim.
+    int64_t lda = transpose_a ? M : K;  // leading dim of A_user col-major view
+    int64_t ldb = transpose_b ? K : N;  // leading dim of B_user col-major view
+    int64_t ldc = N;                    // leading dim of C col-major (output is N×M)
 
     // Use cublasGemmEx for Tensor Core acceleration
     TENZOR_CUBLAS_CHECK(cublasGemmEx(
         handle,
-        transpose_b ? CUBLAS_OP_N : CUBLAS_OP_T,  // Swap and adjust for row-major
-        transpose_a ? CUBLAS_OP_N : CUBLAS_OP_T,
+        transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N,  // op for cuBLAS-A (= our B_user)
+        transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N,  // op for cuBLAS-B (= our A_user)
         N,              // Rows of B^T (cols of B)
         M,              // Cols of A^T (rows of A)
         K,              // Cols of B^T = Rows of A^T
