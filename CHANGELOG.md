@@ -86,6 +86,17 @@ First public alpha release. The library is feature-complete for the listed scope
 
 ## [Unreleased]
 
+### Fixed
+
+- **CUDA LSTM / GRU forward** no longer throws `cuBLAS INVALID_VALUE`. Root cause was inverted `OP_T` / `OP_N` flags in `cublas_gemm_ex` for the no-transpose default case. Only `lstm_forward_cuda` / `gru_forward_cuda` / `bilstm_forward_cuda` used the broken wrapper; Linear / matmul went through a different known-good path.
+- **CUDA cuDNN SDPA path** now supports FP32 (and BF16) end-to-end on Ampere / Hopper, not just FP16. The `create_sdpa_graph` builder is dtype-parameterized; the dispatch path picks `HALF` / `BFLOAT16` / `FLOAT` from `Q.dtype()`. Added a per-process capability cache so combos cuDNN reports as unsupported on a given device only pay the build/check cost once.
+
+### Known issues
+
+- **CUDA LSTM / GRU training is ~50× slower than PyTorch.** The autograd path bypasses the fused kernel (no backward kernel exists yet) and steps through the cell per timestep, building thousands of Variable nodes. Tracked for v0.2 — cuDNN RNN integration. Until then, use eval-mode forward, or train on CPU. A one-shot `WARNING` is printed the first time the slow path runs on CUDA so users notice the perf cliff.
+- **CUDA GRU forward (post-cuBLAS-fix) hits a separate kernel-launch bug** at `rnn_sequence.cu:287` (the `gru_cell_fused_kernel` launch site) traceable to the swap-pattern reusing `h0`'s storage. The corresponding regression test is `DISABLED_GRU_BenchShape`. LSTM forward is unaffected.
+- **FP32 cuDNN SDPA on Blackwell (sm ≥ 100)** is gated off — cuDNN frontend reports `check_support` OK but `execute()` triggers an illegal memory access (verified on RTX 5070 / sm_120). Blackwell falls through to the manual BMM path for FP32 attention, preserving the v0.1.0 behavior. FP16 / BF16 are unaffected.
+
 ### Planned
 
 - Public GPU CI on self-hosted runners.
@@ -93,6 +104,7 @@ First public alpha release. The library is feature-complete for the listed scope
 - Resolve the Vulkan STFT / ISTFT regression and re-enable the native pipeline.
 - Pretrained weight hub for the reference models.
 - Distributed training improvements (gradient bucketing, NCCL/RCCL collectives).
+- cuDNN RNN forward+backward integration (closes the LSTM/GRU training perf gap).
 
 ---
 

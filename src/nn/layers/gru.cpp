@@ -11,6 +11,8 @@
 #include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <sstream>
+#include <iostream>
+#include <mutex>
 
 namespace tenzor::nn {
 
@@ -362,7 +364,20 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // =========================================================================
     // STANDARD PATH: Autograd-correct per-timestep forward.
     // Mirror LSTM standard path — see lstm.cpp for rationale.
+    //
+    // Same v0.1 known-perf limitation as LSTM: this autograd path is
+    // materially slower than PyTorch's cuDNN RNN training kernel on CUDA.
+    // cuDNN RNN integration is on the v0.2 roadmap.
     // =========================================================================
+    if (input.device().type == Device::Type::CUDA) {
+        static std::once_flag warned;
+        std::call_once(warned, []() {
+            std::cerr << "[Tenzor] WARNING: CUDA GRU training uses the "
+                      << "per-timestep autograd path and is significantly slower "
+                      << "than PyTorch's cuDNN RNN. See known issues in CHANGELOG. "
+                      << "Use eval-mode forward, train on CPU, or wait for v0.2.\n";
+        });
+    }
     auto split_states_per_layer = [&](const Variable& stacked_states,
                                       std::vector<Variable>& out) {
         for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
