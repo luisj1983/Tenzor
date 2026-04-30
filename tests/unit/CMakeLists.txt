@@ -42,6 +42,10 @@ target_link_libraries(test_lstm_multidtype PRIVATE tenzor_core GTest::gtest_main
 add_executable(test_lstm_cuda_forward_regression test_lstm_cuda_forward_regression.cpp)
 target_link_libraries(test_lstm_cuda_forward_regression PRIVATE tenzor_core GTest::gtest_main)
 
+# CUDA cuDNN SDPA FP32 path regression test (v0.1.0 attention perf gap)
+add_executable(test_attention_sdpa_fp32 test_attention_sdpa_fp32.cpp)
+target_link_libraries(test_attention_sdpa_fp32 PRIVATE tenzor_core GTest::gtest_main)
+
 # Float16 regression tests (consolidated from 19 minimal_float16_* debug tests)
 add_executable(test_float16_regression test_float16_regression.cpp)
 target_link_libraries(test_float16_regression PRIVATE tenzor_core GTest::gtest_main)
@@ -591,6 +595,7 @@ tenzor_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PR
 tenzor_discover_tests(test_lstm DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_lstm_cuda_forward_regression DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_attention_sdpa_fp32 DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_float16_regression DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gru DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gru_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

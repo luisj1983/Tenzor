@@ -255,18 +255,25 @@ auto MultiheadAttention::scaled_dot_product_attention(
     }
 
     // CUDA Fast path: cuDNN SDPA with Flash Attention and Tensor Cores
-    // Uses cuDNN Graph API for fused attention via dispatch - up to 2x faster than separate BMM ops
-    // Requirements: cuDNN 9.0+, Ampere+ GPU, head_dim in {32, 64, 128, 256}, FP16 input
-    // Note: Only enabled for FP16 inputs - FP32→FP16 conversion overhead makes BMM faster for FP32
-    // Note: Only enabled in inference mode - cuDNN SDPA doesn't build autograd graph
-    // need_weights must be false (cuDNN SDPA path doesn't compute attention weights)
-    bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
+    // Uses cuDNN Graph API for fused attention via dispatch.
+    // Requirements: cuDNN 9.0+, Ampere+ GPU, head_dim in {32, 64, 128, 256},
+    // FP16 / BF16 / FP32 input. cuDNN SDPA accumulates in FP32 regardless of
+    // I/O dtype, so the FP32 path runs the same fused kernel as FP16/BF16
+    // (just with more bandwidth). If cuDNN can't handle the configuration on
+    // the current device (e.g. a brand new GPU arch with limited SDPA tuning)
+    // the kernel internally falls back to the custom flash kernel via the
+    // capability cache in cudnn_sdpa.cpp — see SDPACapCache.
+    // Note: Only enabled in inference mode — cuDNN SDPA doesn't build the
+    // autograd graph. need_weights must be false (no attention weights out).
+    bool dtype_supported = query.dtype() == DType::Float16 ||
+                           query.dtype() == DType::BFloat16 ||
+                           query.dtype() == DType::Float32;
     // ROCm's fused_attention_hip kernel doesn't accept a causal flag (#46) — if
     // is_causal is requested, fall through to the manual BMM path which builds
     // an explicit triu mask. CUDA cuDNN SDPA handles causal natively.
     bool device_supports_causal = (query.device().type != Device::Type::ROCm) || !is_causal_;
     bool can_use_cudnn_sdpa = !need_weights &&
-        is_fp16 &&
+        dtype_supported &&
         is_op_supported(OpId::FusedAttention, query.device().type) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
         device_supports_causal &&
