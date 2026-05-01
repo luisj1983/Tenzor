@@ -7,6 +7,10 @@
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "cuda_common.cuh"
 #include "../cublas_handle_pool.hpp"
@@ -446,10 +450,12 @@ __global__ void fused_softmax_cross_entropy_kernel(
     // Shared memory for reduction
     __shared__ T shared_data[BLOCK_SIZE];
 
-    // Find max (for numerical stability)
+    // Find max (for numerical stability). Use overloaded fmax/exp/log so the
+    // template instantiation for T=double doesn't silently downcast through
+    // the float-only fmaxf/expf/logf intrinsics.
     T max_val = -INFINITY;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        max_val = fmaxf(max_val, row[i]);
+        max_val = fmax(max_val, row[i]);
     }
 
     // Block-wide max reduction
@@ -458,7 +464,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            shared_data[threadIdx.x] = fmaxf(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
+            shared_data[threadIdx.x] = fmax(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
         }
         __syncthreads();
     }
@@ -469,7 +475,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
     // Compute sum(exp(x - max))
     T sum_exp = 0;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        sum_exp += expf(row[i] - global_max);
+        sum_exp += exp(row[i] - global_max);
     }
 
     shared_data[threadIdx.x] = sum_exp;
@@ -484,7 +490,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
 
     // Compute loss
     if (threadIdx.x == 0) {
-        T log_sum_exp = logf(shared_data[0]) + global_max;
+        T log_sum_exp = log(shared_data[0]) + global_max;
         losses[b] = log_sum_exp - row[target];
     }
 }
@@ -494,6 +500,52 @@ auto fused_softmax_cross_entropy_cuda(
     const Tensor& targets,
     const std::string& reduction
 ) -> Tensor {
+    // Per docs/internals/attention-contract.md (FusedSoftmaxCrossEntropy):
+    // CPU supports F32/F64; CUDA gains F64 here via widen-narrow at host level
+    // for the F16/BF16 paths and direct F64 dispatch via template instantiation.
+    // Audit L3 — was previously F32-only, silently downcast caller F64 inputs.
+    if (logits.dtype() == DType::Float64) {
+        // F64 dispatch: instantiate the kernel template with double. The
+        // reduction below uses tenzor::dispatch(OpId::Sum) instead of
+        // cuda_sum_device since the latter is float-only (CUB Sum<float>).
+        int64_t batch_size = logits.shape()[0];
+        int64_t num_classes = logits.shape()[1];
+        Tensor losses = create_cuda_zeros({batch_size}, DType::Float64, logits.device());
+        constexpr int BLOCK_SIZE = 256;
+        int blocks = batch_size;
+        fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            logits.data<double>(),
+            targets.data<int64_t>(),
+            losses.data<double>(),
+            batch_size,
+            num_classes
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        if (reduction == "none") return losses;
+        // Reduction via dispatch — works for any dtype the Sum kernel supports.
+        // Avoid tenzor::mul/add (math.hpp) here because including math.hpp into
+        // this CUDA TU collides with kernel-local `eps`/`sqrt` symbols in the
+        // optimizer-fused code below — use OpId-based dispatch instead.
+        NewOpAttributes sum_attrs;
+        std::vector<Tensor> sum_inputs = {losses};
+        Tensor total = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+        if (reduction == "mean") {
+            Tensor scale_t = tenzor::full({1}, 1.0 / static_cast<double>(batch_size),
+                                           DType::Float64, losses.device());
+            std::vector<Tensor> mul_inputs = {total, scale_t};
+            return tenzor::dispatch(OpId::Mul, mul_inputs)[0];
+        }
+        return total;  // "sum"
+    }
+    if (logits.dtype() == DType::Float16 || logits.dtype() == DType::BFloat16) {
+        // Widen to F32 for compute, narrow output back. Mirrors the rest of the
+        // F16/BF16 paths in this file.
+        DType orig = logits.dtype();
+        Tensor logits_f32 = logits.to(DType::Float32);
+        Tensor loss_f32 = fused_softmax_cross_entropy_cuda(logits_f32, targets, reduction);
+        return loss_f32.to(orig);
+    }
+
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
@@ -512,7 +564,7 @@ auto fused_softmax_cross_entropy_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_softmax_cross_entropy_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_softmax_cross_entropy_cuda: Unsupported dtype");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1754,6 +1806,46 @@ auto fused_elementwise_chain_cuda(
 }
 
 // ==============================================================================
+// Philox4x32-10 Counter-Based PRNG (CUDA device port of CPU Philox4x32 in
+// src/backends/cpu/kernels/flash_attention.cpp). Same algorithm and constants
+// so dropout results within a single backend's forward/backward pair match
+// bit-exactly. Cross-backend reproducibility is not part of the contract.
+// ==============================================================================
+
+__device__ __forceinline__ void philox_round(uint32_t ctr[4], const uint32_t key[2]) {
+    constexpr uint64_t M0 = 0xD2511F53ULL;
+    constexpr uint64_t M1 = 0xCD9E8D57ULL;
+    uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+    uint32_t lo0 = static_cast<uint32_t>(prod0);
+    uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+    uint32_t lo1 = static_cast<uint32_t>(prod1);
+    uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+    uint32_t new1 = lo1;
+    uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+    uint32_t new3 = lo0;
+    ctr[0] = new0; ctr[1] = new1; ctr[2] = new2; ctr[3] = new3;
+}
+
+__device__ __forceinline__ float philox_uniform(uint32_t batch_head, uint32_t query_idx,
+                                                 uint32_t kv_pos, uint32_t rng_seed) {
+    // 10-round Philox4x32 with counter (batch_head, query_idx, kv_pos, 0) and
+    // key (rng_seed, rng_seed^0x1BD11BDA). Returns a uniform float in [0, 1).
+    uint32_t ctr[4] = {batch_head, query_idx, kv_pos, 0};
+    uint32_t k[2] = {rng_seed, rng_seed ^ 0x1BD11BDAU};
+    constexpr uint32_t W0 = 0x9E3779B9U;
+    constexpr uint32_t W1 = 0xBB67AE85U;
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        philox_round(ctr, k);
+        if (r < 9) { k[0] += W0; k[1] += W1; }
+    }
+    // Convert to [0, 1) via the 24-bit mantissa trick (same as CPU).
+    return (static_cast<float>(ctr[0] >> 8)) * (1.0f / 16777216.0f);
+}
+
+// ==============================================================================
 // Flash Attention CUDA Kernel - Optimized with Warp-Level Parallelism
 // ==============================================================================
 
@@ -1804,11 +1896,10 @@ __global__ void flash_attention_v2_kernel(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const bool causal                // M4 fix: applies upper-triangular mask
-                                     // before softmax. Audit C1 / C4: was a
-                                     // (void)causal stub that silently produced
-                                     // non-causal output even when the registry
-                                     // forwarded the flag.
+    const bool causal,               // applies upper-triangular mask before softmax
+    const float dropout_p,           // dropout probability (0 disables); applied
+                                     // post-softmax with inverted scaling 1/(1-p).
+    const uint32_t rng_seed          // Philox seed for dropout reproducibility
 ) {
     // Configuration
     constexpr int Bc = 32;  // Keys per tile - small for register pressure
@@ -1924,9 +2015,29 @@ __global__ void flash_attention_v2_kernel(
         // Step 2: Compute exp(score - max) and sum
         float local_sum = 0.0f;
 
+        // Apply Philox dropout post-softmax with inverted scaling 1/(1-p)
+        // when dropout_p > 0 and rng_seed != 0. Counter is (batch_head,
+        // query_idx, kv_pos, 0); each thread independently draws its own
+        // uniform sample so the mask is bit-reproducible from (seed,
+        // batch_head, query_idx, kv_pos) for the backward replay.
+        const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
+        const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
+
         for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
             float exp_score = expf(scores_shared[j] - block_max);
-            scores_shared[j] = exp_score;  // Store exp for P @ V
+            if (apply_dropout) {
+                int kv_pos = k_start + j;
+                float u = philox_uniform(static_cast<uint32_t>(batch_head),
+                                          static_cast<uint32_t>(query_idx),
+                                          static_cast<uint32_t>(kv_pos),
+                                          rng_seed);
+                if (u < dropout_p) {
+                    exp_score = 0.0f;
+                } else {
+                    exp_score *= dropout_scale;
+                }
+            }
+            scores_shared[j] = exp_score;  // Store exp (post-dropout) for P @ V
             local_sum += exp_score;
         }
         __syncthreads();
@@ -2289,9 +2400,9 @@ auto fused_attention_cuda(
     const Tensor& K,     // (batch_heads, seq_len_k, head_dim)
     const Tensor& V,     // (batch_heads, seq_len_k, head_dim)
     float scale,
-    bool causal          // Honored — flash_attention_v2_kernel applies the
-                         // mask inline before softmax (audit C1 / C4 fix
-                         // landed in M4 follow-up).
+    bool causal,         // Honored — flash kernel applies mask inline
+    float dropout_p,     // Dropout probability; 0 disables
+    uint32_t rng_seed    // Philox seed; 0 disables dropout regardless of dropout_p
 ) -> std::pair<Tensor, Tensor> {
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len_q = Q.shape()[1];
@@ -2303,7 +2414,7 @@ auto fused_attention_cuda(
         auto Q_f32 = Q.to(DType::Float32);
         auto K_f32 = K.to(DType::Float32);
         auto V_f32 = V.to(DType::Float32);
-        auto [output_f32, lse_f32] = fused_attention_cuda(Q_f32, K_f32, V_f32, scale, causal);
+        auto [output_f32, lse_f32] = fused_attention_cuda(Q_f32, K_f32, V_f32, scale, causal, dropout_p, rng_seed);
         return {output_f32.to(Q.dtype()), lse_f32};
     }
 
@@ -2336,31 +2447,31 @@ auto fused_attention_cuda(
         size_t smem_size = compute_smem_size(64);
         flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
         flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
         flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
         flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
         flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         // Non-standard head_dim: pad Q/K/V up to a supported specialized HEAD_DIM
@@ -2403,23 +2514,23 @@ auto fused_attention_cuda(
         if (padded_hd == 32) {
             flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(32)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 64) {
             flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(64)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 80) {
             flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(80)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 96) {
             flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(96)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else {
             flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(128)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         }
         TENZOR_CUDA_POST_LAUNCH_CHECK();
 

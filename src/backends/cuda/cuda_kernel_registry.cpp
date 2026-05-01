@@ -406,13 +406,15 @@ namespace cuda {
 
     // Fused Attention operation (returns {output, logsumexp}).
     // Defaults live in include/tenzor/backend/fused_ops.hpp per
-    // docs/internals/attention-contract.md (`causal` defaults to false).
+    // docs/internals/attention-contract.md.
     auto fused_attention_cuda(
         const Tensor& Q,
         const Tensor& K,
         const Tensor& V,
         float scale,
-        bool causal
+        bool causal,
+        float dropout_p,
+        uint32_t rng_seed
     ) -> std::pair<Tensor, Tensor>;
 
     // Fused Flash Attention backward (tiled, memory-efficient).
@@ -1676,19 +1678,55 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // For 4D inputs falling through (cuDNN unavailable / not requested),
         // reshape to 3D before dispatch — fused_attention_cuda assumes 3D and
         // would otherwise read num_heads as seq_len_q (audit H7).
+        // GQA: when H_kv < H_q, broadcast K/V along head dim before the 3D
+        // collapse so the kernel sees [B*H_q, S_k, D] for both. The kernel
+        // itself doesn't have GQA index math (it would need q_heads_per_kv_head
+        // as a kernel param); host-level expand+contiguous is contract-correct
+        // at the cost of memory (per attention-contract.md GQA section).
         const Tensor& Qi = inputs[0];
         const Tensor& Ki = inputs[1];
         const Tensor& Vi = inputs[2];
         if (Qi.shape().size() == 4) {
             int64_t b = Qi.shape()[0], h = Qi.shape()[1], sq = Qi.shape()[2], d = Qi.shape()[3];
+            int64_t h_kv = Ki.shape()[1];
             int64_t sk = Ki.shape()[2];
+            int64_t d_v = Vi.shape()[3];
+
+            Tensor Kc = Ki.is_contiguous() ? Ki : Ki.contiguous();
+            Tensor Vc = Vi.is_contiguous() ? Vi : Vi.contiguous();
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FusedAttention CUDA: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t reps = h / h_kv;
+                // Broadcast via unsqueeze + expand + reshape.
+                std::vector<Tensor> ku = {Kc};
+                NewOpAttributes us_attrs;
+                us_attrs.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, ku, us_attrs)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vc}, us_attrs)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, d_v};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek_attrs; ek_attrs.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev_attrs; ev_attrs.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek_attrs)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev_attrs)[0];
+                Kc = Ke.contiguous().reshape({b, h, sk, d});
+                Vc = Ve.contiguous().reshape({b, h, sk, d_v});
+            }
+
             Tensor Q3 = (Qi.is_contiguous() ? Qi : Qi.contiguous()).reshape({b * h, sq, d});
-            Tensor K3 = (Ki.is_contiguous() ? Ki : Ki.contiguous()).reshape({b * h, sk, d});
-            Tensor V3 = (Vi.is_contiguous() ? Vi : Vi.contiguous()).reshape({b * h, sk, d});
-            auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal_attr);
-            return std::vector<Tensor>{out3.reshape({b, h, sq, d})};
+            Tensor K3 = Kc.reshape({b * h, sk, d});
+            Tensor V3 = Vc.reshape({b * h, sk, d_v});
+            auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal_attr, 0.0f, 0u);
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v})};
         }
-        auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal_attr);
+        auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal_attr, 0.0f, 0u);
         return std::vector<Tensor>{output};
     });
 
@@ -1697,26 +1735,43 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // Per docs/internals/attention-contract.md, returns 4 tensors:
-        // [output, lse_f32, philox_seed_int64, philox_offset_int64]. seed/offset
-        // are empty when DropoutP == 0. Causal flag is now plumbed through to
-        // fused_attention_cuda — was previously dropped on the floor (audit C1).
-        // Dropout reproducibility (Philox seed save) arrives with the kernel
-        // refit later in M4; for now, when dropout_p > 0 and is_training, we
-        // throw a clear error so the caller knows to use the BMM fallback path.
+        // [output, lse_f32, philox_seed_int64, philox_offset_int64].
+        // Causal mask applied inline in flash_attention_v2_kernel (audit C1).
+        // Philox dropout applied inline (audit M4 follow-up). seed/offset
+        // returned only when dropout fires so backward can replay.
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
-        if (dropout_p > 0.0f && is_training) {
-            throw std::runtime_error(
-                "FlashAttention CUDA: dropout > 0 not yet supported on this backend. "
-                "Routes through BMM fallback in nn::functional::scaled_dot_product_attention "
-                "until M4 wires Philox into flash_attention_v2_kernel.");
+        bool apply_dropout = dropout_p > 0.0f && is_training;
+
+        uint32_t rng_seed = 0u;
+        if (apply_dropout) {
+            int64_t seed_in = attrs.get_int(AttrKey::Seed, 0);
+            // Derive seed from the Q data pointer hash if caller didn't supply one.
+            // Lower 32 bits — Philox treats the seed as a 32-bit key.
+            uint64_t seed64 = (seed_in != 0)
+                ? static_cast<uint64_t>(seed_in)
+                : (reinterpret_cast<uintptr_t>(inputs[0].data_ptr()) * 2654435761ULL);
+            rng_seed = static_cast<uint32_t>(seed64);
+            if (rng_seed == 0) rng_seed = 1u;  // 0 disables in-kernel; force non-zero.
         }
-        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale, causal);
-        // Empty seed/offset placeholders so consumers using the 4-tuple contract
-        // can safely index them (.is_valid() returns false on empty Tensor).
-        return std::vector<Tensor>{output, lse, Tensor{}, Tensor{}};
+
+        auto [output, lse] = cuda::fused_attention_cuda(
+            inputs[0], inputs[1], inputs[2], scale, causal,
+            apply_dropout ? dropout_p : 0.0f, rng_seed);
+
+        Tensor seed_t, offset_t;
+        if (apply_dropout) {
+            seed_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
+            offset_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
+            // Tiny D2H/H2D — write seed/offset scalars from host.
+            int64_t seed_host = static_cast<int64_t>(rng_seed);
+            int64_t offset_host = 0;
+            cudaMemcpy(seed_t.data_ptr(), &seed_host, sizeof(int64_t), cudaMemcpyHostToDevice);
+            cudaMemcpy(offset_t.data_ptr(), &offset_host, sizeof(int64_t), cudaMemcpyHostToDevice);
+        }
+        return std::vector<Tensor>{output, lse, seed_t, offset_t};
     });
 
     // =========================================================================
@@ -1828,10 +1883,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 Tensor Q3 = (Qi.is_contiguous() ? Qi : Qi.contiguous()).reshape({b * h, sq, d});
                 Tensor K3 = (Ki.is_contiguous() ? Ki : Ki.contiguous()).reshape({b * h, sk, d});
                 Tensor V3 = (Vi.is_contiguous() ? Vi : Vi.contiguous()).reshape({b * h, sk, d});
-                auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal);
+                auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal, 0.0f, 0u);
                 return std::vector<Tensor>{out3.reshape({b, h, sq, d}), lse3};
             }
-            auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal);
+            auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal, 0.0f, 0u);
             return std::vector<Tensor>{output, lse};
         }
 

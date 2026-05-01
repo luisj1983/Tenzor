@@ -301,7 +301,7 @@ Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& 
         K3 = K.reshape({b * h, sk, d});
         V3 = V.reshape({b * h, sk, d});
     }
-    auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale, causal);
+    auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale, causal, 0.0f, 0u);
     if (is_4d) {
         output = output.reshape({q_shape[0], q_shape[1], q_shape[2], q_shape[3]});
     }

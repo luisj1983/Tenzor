@@ -124,7 +124,9 @@ auto fused_attention_cuda(
     const Tensor& K,
     const Tensor& V,
     float scale,
-    bool causal = false
+    bool causal = false,
+    float dropout_p = 0.0f,
+    uint32_t rng_seed = 0u
 ) -> std::pair<Tensor, Tensor>;
 
 /**
