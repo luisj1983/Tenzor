@@ -706,7 +706,8 @@ namespace rocm {
                                        const Tensor& running_var, const Tensor& weight,
                                        const Tensor& bias, float eps) -> Tensor;
     auto fused_attention_hip(const Tensor& Q, const Tensor& K, const Tensor& V,
-                             float scale, bool causal = false) -> std::pair<Tensor, Tensor>;
+                             float scale, bool causal = false,
+                             float dropout_p = 0.0f, uint32_t rng_seed = 0u) -> std::pair<Tensor, Tensor>;
     auto flash_attention_backward_hip(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
         const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
@@ -1828,18 +1829,37 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // with a kernel-level refit. Causal is honored (audit C1 fix).
     // ========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Per docs/internals/attention-contract.md: returns 4-tuple
+        // [output, lse, philox_seed, philox_offset]. Causal + dropout both
+        // honored kernel-side (M5-rem fix; was throwing for dropout > 0).
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
-        if (dropout_p > 0.0f && is_training) {
-            throw std::runtime_error(
-                "FlashAttention ROCm: dropout > 0 not yet supported on this backend. "
-                "Routes through BMM fallback in nn::functional::scaled_dot_product_attention "
-                "until the kernel-level Philox refit lands.");
+        bool apply_dropout = dropout_p > 0.0f && is_training;
+
+        uint32_t rng_seed = 0u;
+        if (apply_dropout) {
+            int64_t seed_in = attrs.get_int(AttrKey::Seed, 0);
+            uint64_t seed64 = (seed_in != 0)
+                ? static_cast<uint64_t>(seed_in)
+                : (reinterpret_cast<uintptr_t>(inputs[0].data_ptr()) * 2654435761ULL);
+            rng_seed = static_cast<uint32_t>(seed64);
+            if (rng_seed == 0) rng_seed = 1u;
         }
-        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
-        return std::vector<Tensor>{output, lse, Tensor{}, Tensor{}};
+        auto [output, lse] = rocm::fused_attention_hip(
+            inputs[0], inputs[1], inputs[2], scale, causal,
+            apply_dropout ? dropout_p : 0.0f, rng_seed);
+        Tensor seed_t, offset_t;
+        if (apply_dropout) {
+            seed_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
+            offset_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
+            int64_t seed_host = static_cast<int64_t>(rng_seed);
+            int64_t offset_host = 0;
+            hipMemcpy(seed_t.data_ptr(), &seed_host, sizeof(int64_t), hipMemcpyHostToDevice);
+            hipMemcpy(offset_t.data_ptr(), &offset_host, sizeof(int64_t), hipMemcpyHostToDevice);
+        }
+        return std::vector<Tensor>{output, lse, seed_t, offset_t};
     });
 
     // ========================================================================

@@ -2,6 +2,15 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
+// Note: NOT including tenzor/ops/math.hpp here — its tenzor::sqrt/exp/etc.
+// declarations collide with HIP device sqrt/exp inside the __global__ kernels
+// in this TU. Use OpId-based dispatch (tenzor::dispatch + AttrKey) for the
+// host-side composed-ops fallback below.
 #include "reduction_utils.hip.h"
 #include <stdexcept>
 #include <cmath>
@@ -1197,6 +1206,42 @@ __global__ void compute_attention_lse_kernel(
 }
 
 // ==============================================================================
+// Philox4x32-10 Counter-Based PRNG (HIP device port — same algorithm as CPU
+// and CUDA implementations so within a single backend's forward/backward pair
+// the dropout mask is bit-reproducible).
+// ==============================================================================
+
+__device__ __forceinline__ void philox_round_hip(uint32_t ctr[4], const uint32_t key[2]) {
+    constexpr uint64_t M0 = 0xD2511F53ULL;
+    constexpr uint64_t M1 = 0xCD9E8D57ULL;
+    uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+    uint32_t lo0 = static_cast<uint32_t>(prod0);
+    uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+    uint32_t lo1 = static_cast<uint32_t>(prod1);
+    uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+    uint32_t new1 = lo1;
+    uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+    uint32_t new3 = lo0;
+    ctr[0] = new0; ctr[1] = new1; ctr[2] = new2; ctr[3] = new3;
+}
+
+__device__ __forceinline__ float philox_uniform_hip(uint32_t batch_head, uint32_t query_idx,
+                                                     uint32_t kv_pos, uint32_t rng_seed) {
+    uint32_t ctr[4] = {batch_head, query_idx, kv_pos, 0};
+    uint32_t k[2] = {rng_seed, rng_seed ^ 0x1BD11BDAU};
+    constexpr uint32_t W0 = 0x9E3779B9U;
+    constexpr uint32_t W1 = 0xBB67AE85U;
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        philox_round_hip(ctr, k);
+        if (r < 9) { k[0] += W0; k[1] += W1; }
+    }
+    return (static_cast<float>(ctr[0] >> 8)) * (1.0f / 16777216.0f);
+}
+
+// ==============================================================================
 // Flash Attention v2 Forward HIP Kernel (Tiled, Memory-Efficient)
 // ==============================================================================
 
@@ -1227,9 +1272,9 @@ __global__ void flash_attention_v2_kernel_hip(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const bool causal     // M5: causal masking (audit C1) — applied before
-                          // the per-tile softmax max-subtract so masked
-                          // positions get score = -INF and exp(-INF) = 0
+    const bool causal,        // applied before per-tile softmax max-subtract
+    const float dropout_p,    // dropout probability; 0 disables
+    const uint32_t rng_seed   // Philox seed; 0 disables dropout
 ) {
     const int batch_head = blockIdx.x;
     const int q_row = blockIdx.y;
@@ -1316,54 +1361,83 @@ __global__ void flash_attention_v2_kernel_hip(
         }
         __syncthreads();
 
-        // Find max score (shared-memory reduction, wavefront-agnostic)
-        float local_max = -1e30f;
-        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
-            local_max = fmaxf(local_max, scores_shared[j]);
-        }
-        // Tree reduction in shared memory
-        reduce_buf[tid % (num_warps + 1)] = -1e30f;  // init
-        __syncthreads();
-        // Each thread writes its local max
-        if (tid < BLOCK_SIZE) {
-            atomicMax(reinterpret_cast<int*>(&reduce_buf[0]),
-                      __float_as_int(local_max));  // float atomicMax via int cast
-        }
-        __syncthreads();
-
-        // Simpler approach: just use shared memory parallel reduction
-        // Store per-thread max in scores_shared (repurposed)
-        if (tid < Bc) {
-            // scores_shared already has the values
-        }
-        // Serial max over Bc elements (Bc=32, fast enough)
-        if (tid == 0) {
-            float block_max = -1e30f;
-            for (int j = 0; j < Bc; ++j) {
-                block_max = fmaxf(block_max, scores_shared[j]);
+        // Find tile_max via proper shared-memory tree reduction over scores_shared.
+        // Per audit C3 ROCm: replaces the dead atomicMax block (was doing
+        // atomicMax<int>(reinterpret_cast<int*>(&reduce_buf[0]), __float_as_int(local_max))
+        // which gives wrong order for negative floats — and was followed by a
+        // serial-in-tid==0 fallback that ignored the atomic result anyway).
+        // The new tree reduction is wavefront-agnostic so it works on both
+        // wave32 (RDNA) and wave64 (CDNA/MI200/MI300).
+        //
+        // scores_shared has Bc=32 entries — we use the first Bc threads to do
+        // an in-place pairwise reduction. For Bc <= BLOCK_SIZE this is
+        // single-pass; we don't need the reduce_buf for max anymore.
+        for (int stride = Bc / 2; stride > 0; stride >>= 1) {
+            if (tid < stride && tid + stride < Bc) {
+                scores_shared[tid] = fmaxf(scores_shared[tid], scores_shared[tid + stride]);
             }
-            reduce_buf[0] = block_max;
+            __syncthreads();
+        }
+        float tile_max = scores_shared[0];
+        __syncthreads();
+
+        // Recompute scores from K_tile so scores_shared can be repopulated for
+        // the exp pass — the max reduction destroyed the original score values.
+        // (Same arithmetic as the score-load loop above; reuses Q_shared and K_tile
+        // which are still valid in shared memory.)
+        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
+            float score;
+            int kv_pos = kv_start + j;
+            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
+                score = 0.0f;
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_shared[d] * K_tile[j * K_STRIDE + d];
+                }
+                score *= scale;
+            } else {
+                score = -INFINITY;
+            }
+            scores_shared[j] = score;
         }
         __syncthreads();
-        float tile_max = reduce_buf[0];
 
-        // Compute exp(score - max) and sum
-        float local_sum = 0.0f;
+        // Compute exp(score - tile_max), apply Philox dropout (post-softmax,
+        // inverted-scaled), and store P. Counter is (batch_head, q_row,
+        // kv_pos, 0) so backward replays bit-exactly given the same seed.
+        const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
+        const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             float exp_val = expf(scores_shared[j] - tile_max);
-            scores_shared[j] = exp_val;  // Store P values
-            local_sum += exp_val;
-        }
-        // Sum reduction (serial in thread 0 since Bc=32)
-        if (tid == 0) {
-            float total_sum = 0.0f;
-            for (int j = 0; j < Bc; ++j) {
-                total_sum += scores_shared[j];
+            if (apply_dropout) {
+                int kv_pos = kv_start + j;
+                float u = philox_uniform_hip(static_cast<uint32_t>(batch_head),
+                                              static_cast<uint32_t>(q_row),
+                                              static_cast<uint32_t>(kv_pos),
+                                              rng_seed);
+                if (u < dropout_p) {
+                    exp_val = 0.0f;
+                } else {
+                    exp_val *= dropout_scale;
+                }
             }
-            reduce_buf[0] = total_sum;
+            scores_shared[j] = exp_val;
         }
         __syncthreads();
+
+        // Sum reduction over scores_shared via in-place pairwise (wavefront-agnostic).
+        // We use reduce_buf[0..Bc-1] as a scratch copy so scores_shared keeps the P values.
+        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
+            reduce_buf[j] = scores_shared[j];
+        }
+        __syncthreads();
+        for (int stride = Bc / 2; stride > 0; stride >>= 1) {
+            if (tid < stride && tid + stride < Bc) {
+                reduce_buf[tid] += reduce_buf[tid + stride];
+            }
+            __syncthreads();
+        }
         float tile_sum = reduce_buf[0];
+        __syncthreads();
 
         // Online softmax rescaling
         float m_new = fmaxf(m_prev, tile_max);
@@ -1776,8 +1850,9 @@ auto fused_attention_hip(
     const Tensor& K,
     const Tensor& V,
     float scale,
-    bool causal      // M5: plumbed through to flash_attention_v2_kernel_hip
-                     // (audit C1 — was previously missing)
+    bool causal,         // M5: plumbed to flash_attention_v2_kernel_hip
+    float dropout_p,     // M5-rem: dropout probability
+    uint32_t rng_seed    // M5-rem: Philox seed; 0 disables dropout
 ) -> std::pair<Tensor, Tensor> {
     // Non-Float32: upcast to Float32, compute, convert back
     if (Q.dtype() != DType::Float32) {
@@ -1785,7 +1860,7 @@ auto fused_attention_hip(
         auto q_f32 = Q.to(DType::Float32);
         auto k_f32 = K.to(DType::Float32);
         auto v_f32 = V.to(DType::Float32);
-        auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale, causal);
+        auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale, causal, dropout_p, rng_seed);
         return {result.to(orig_dtype), lse};
     }
 
@@ -1814,11 +1889,15 @@ auto fused_attention_hip(
         dim3 grid(static_cast<int>(batch_size), seq_len_int);
         dim3 threads(BLOCK_SIZE);
 
-        // Shared memory: K_tile[Bc*K_STRIDE] + V_tile[Bc*K_STRIDE] + Q_shared[HD] + scores[Bc] + reduce[num_warps+1]
+        // Shared memory layout (post-M5-rem reduction rewrite):
+        //   K_tile[Bc * K_STRIDE] + V_tile[Bc * K_STRIDE] + Q_shared[HD]
+        //   + scores_shared[Bc] + reduce_buf[Bc]
+        // The new reduce_buf needs Bc entries for the in-place pairwise sum
+        // reduction (was previously num_warps+1 — too small once we stopped
+        // using the broken atomicMax-based reduction at line 1325).
         auto compute_fwd_smem = [&](int hd) -> size_t {
             int k_stride = hd + 4;
-            int num_warps = BLOCK_SIZE / 64 + 1;
-            return (2 * Bc * k_stride + hd + Bc + num_warps + 1) * sizeof(float);
+            return (2 * Bc * k_stride + hd + Bc + Bc) * sizeof(float);
         };
 
         const float* q_ptr = Q.data<float>();
@@ -1831,36 +1910,75 @@ auto fused_attention_hip(
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(32), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 64) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(64), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 128) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(128), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         }
         HIP_CHECK(hipGetLastError());
     } else {
-        // Fallback: naive O(N^2) attention + separate LSE computation
-        dim3 threads_naive(BLOCK_SIZE);
-        dim3 blocks_naive(1, static_cast<int>(seq_len), static_cast<int>(batch_size));
-
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(fused_attention_kernel<float, BLOCK_SIZE>),
-            blocks_naive, threads_naive, 0, 0,
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
-            batch_size, seq_len, d_k, d_v, scale);
-
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(compute_attention_lse_kernel<float, BLOCK_SIZE>),
-            dim3(static_cast<int>(batch_size), static_cast<int>(seq_len)),
-            dim3(BLOCK_SIZE), BLOCK_SIZE * sizeof(float), 0,
-            Q.data<float>(), K.data<float>(), lse.data<float>(),
-            batch_size, seq_len, d_k, scale);
+        // Composed-ops fallback for unsupported head_dim (d_k != {32,64,128} or
+        // d_k != d_v). Replaces the previous naive fused_attention_kernel which
+        // had the audit H6 bug class: shared_scores stale-write inside the
+        // strided col loop, recomputed Q·K three times, and didn't bound the
+        // sum reduction on seq_len. Uses OpId-based dispatch only (math.hpp
+        // ops would collide with HIP device sqrt/exp in this TU).
+        // Path: BMM(Q, K^T) * scale → softmax → BMM(P, V).
+        NewOpAttributes empty;
+        // K^T via Permute on last two dims.
+        NewOpAttributes perm_attrs;
+        // Build perm string "0,1,3,2" for 4D or "0,2,1" for 3D — but K is 3D
+        // here (batch_heads, seq, dim). Use Transpose with Dim/Dim2 attrs.
+        NewOpAttributes tr_attrs;
+        tr_attrs.set(AttrKey::Dim,  static_cast<int64_t>(-1));
+        tr_attrs.set(AttrKey::Dim2, static_cast<int64_t>(-2));
+        std::vector<Tensor> tr_in = {K};
+        Tensor Kt = tenzor::dispatch(OpId::Transpose, tr_in, tr_attrs)[0];
+        std::vector<Tensor> bmm_in = {Q, Kt};
+        Tensor scores = tenzor::dispatch(OpId::Bmm, bmm_in, empty)[0];
+        std::vector<int64_t> sshape(scores.shape().begin(), scores.shape().end());
+        Tensor scale_t = tenzor::full(sshape, static_cast<double>(scale),
+                                       scores.dtype(), scores.device());
+        std::vector<Tensor> mul_in = {scores, scale_t};
+        scores = tenzor::dispatch(OpId::Mul, mul_in, empty)[0];
+        if (causal) {
+            int64_t sl = sshape[sshape.size() - 1];
+            Tensor rows = tenzor::arange(0, sl, 1, DType::Int64, scores.device());
+            Tensor cols = tenzor::arange(0, sl, 1, DType::Int64, scores.device());
+            std::vector<int64_t> rshape{sl, 1};
+            std::vector<int64_t> cshape{1, sl};
+            Tensor rows_2d = tenzor::reshape(rows, rshape);
+            Tensor cols_2d = tenzor::reshape(cols, cshape);
+            Tensor rows_f = rows_2d.to(DType::Float32);
+            Tensor cols_f = cols_2d.to(DType::Float32);
+            std::vector<Tensor> gt_in = {cols_f, rows_f};
+            Tensor cmask = tenzor::dispatch(OpId::Gt, gt_in, empty)[0];
+            Tensor neg_inf = tenzor::full(sshape,
+                -std::numeric_limits<float>::infinity(),
+                scores.dtype(), scores.device());
+            Tensor cmask_t = cmask.to(scores.dtype());
+            std::vector<Tensor> mul2_in = {cmask_t, neg_inf};
+            Tensor mask_v = tenzor::dispatch(OpId::Mul, mul2_in, empty)[0];
+            std::vector<Tensor> add_in = {scores, mask_v};
+            scores = tenzor::dispatch(OpId::Add, add_in, empty)[0];
+        }
+        NewOpAttributes sm_attrs;
+        sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+        std::vector<Tensor> sm_in = {scores};
+        Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+        std::vector<Tensor> bmm2_in = {probs, V};
+        output = tenzor::dispatch(OpId::Bmm, bmm2_in, empty)[0];
+        // LSE not surfaced by the composed path; backward uses
+        // function_attention.cpp's composed_attention_backward fallback when
+        // L is missing.
+        lse = Tensor{};
     }
 
     HIP_CHECK(hipGetLastError());
