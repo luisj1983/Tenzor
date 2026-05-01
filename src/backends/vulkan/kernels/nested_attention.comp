@@ -17,9 +17,12 @@ layout(binding = 5)          buffer OutBuf    { float out_data[]; };   // [total
 
 layout(push_constant) uniform PushConstants {
     uint B;          // batch size
-    uint head_dim;   // dimension of each head
+    uint head_dim;   // dimension of K (and Q)
     float scale;     // typically 1/sqrt(head_dim)
     uint causal;     // 0 = not causal, 1 = causal mask
+    uint head_v;     // dimension of V output (audit C18 Vulkan fix; was
+                     // assumed equal to head_dim — silently wrong if V's
+                     // last dim differs)
 } params;
 
 void main() {
@@ -45,10 +48,10 @@ void main() {
         float max_score = -3.402823466e+38;  // -FLT_MAX
         float sum_exp = 0.0;
 
-        // Zero the output accumulator for this query row (in-place in out_data)
-        uint out_base = uint(q_start + qi) * params.head_dim;
-        for (uint hd = 0; hd < params.head_dim; ++hd) {
-            out_data[out_base + hd] = 0.0;
+        // Zero the output accumulator for this query row (V dim, not K dim).
+        uint out_base = uint(q_start + qi) * params.head_v;
+        for (uint hv = 0; hv < params.head_v; ++hv) {
+            out_data[out_base + hv] = 0.0;
         }
 
         for (int ki = 0; ki < Lkv; ++ki) {
@@ -56,38 +59,38 @@ void main() {
             if (params.causal != 0 && ki > qi) break;
 
             uint k_row_base = uint(kv_start + ki) * params.head_dim;
-            uint v_row_base = uint(kv_start + ki) * params.head_dim;
+            uint v_row_base = uint(kv_start + ki) * params.head_v;
 
-            // Compute dot(Q[qi], K[ki]) * scale
+            // Compute dot(Q[qi], K[ki]) * scale (over head_dim, not head_v)
             float score = 0.0;
             for (uint hd = 0; hd < params.head_dim; ++hd) {
                 score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
             }
             score *= params.scale;
 
-            // Online softmax update
+            // Online softmax update — accumulator is over head_v entries.
             if (score > max_score) {
                 float correction = exp(max_score - score);
                 sum_exp = sum_exp * correction + 1.0;
-                for (uint hd = 0; hd < params.head_dim; ++hd) {
-                    out_data[out_base + hd] = out_data[out_base + hd] * correction
-                                            + v_data[v_row_base + hd];
+                for (uint hv = 0; hv < params.head_v; ++hv) {
+                    out_data[out_base + hv] = out_data[out_base + hv] * correction
+                                            + v_data[v_row_base + hv];
                 }
                 max_score = score;
             } else {
                 float w = exp(score - max_score);
                 sum_exp += w;
-                for (uint hd = 0; hd < params.head_dim; ++hd) {
-                    out_data[out_base + hd] += w * v_data[v_row_base + hd];
+                for (uint hv = 0; hv < params.head_v; ++hv) {
+                    out_data[out_base + hv] += w * v_data[v_row_base + hv];
                 }
             }
         }
 
-        // Normalize by softmax denominator
+        // Normalize by softmax denominator (over V dim, not K dim)
         if (sum_exp > 0.0) {
             float inv_sum = 1.0 / sum_exp;
-            for (uint hd = 0; hd < params.head_dim; ++hd) {
-                out_data[out_base + hd] *= inv_sum;
+            for (uint hv = 0; hv < params.head_v; ++hv) {
+                out_data[out_base + hv] *= inv_sum;
             }
         }
     }

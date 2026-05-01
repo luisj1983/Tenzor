@@ -721,6 +721,10 @@ auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
 auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
                                               const Tensor& q_offsets, const Tensor& kv_offsets,
                                               float scale, bool causal) -> Tensor {
+    // Per docs/internals/attention-contract.md NestedAttention: backends widen
+    // FP16/BF16/F64 to F32 for compute; the output dtype must match the input
+    // dtype (audit C19 Vulkan — was always returning F32 regardless of input).
+    DType input_dtype = Q.dtype();
     Tensor Q_f32 = (Q.dtype() == DType::Float32) ? Q.contiguous()
                                                    : dispatchCast(Q.contiguous(), DType::Float32);
     Tensor K_f32 = (K.dtype() == DType::Float32) ? K.contiguous()
@@ -737,13 +741,21 @@ auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, co
                             : dispatchCast(kv_offsets.contiguous(), DType::Int32);
 
     int64_t head_dim = Q_f32.shape().back();
+    int64_t head_v = V_f32.shape().back();   // audit C18 fix — V's last dim
+                                              // can differ from K's; previously
+                                              // assumed equal and silently
+                                              // produced wrong-sized output.
     int64_t total_q = Q_f32.shape()[0];
     int64_t total_kv = K_f32.shape()[0];
     uint32_t B = static_cast<uint32_t>(q_off_i32.numel() - 1);
 
-    std::vector<int64_t> out_shape(Q_f32.shape().begin(), Q_f32.shape().end());
+    // Output shape is [total_q, head_v] not [total_q, head_dim].
+    std::vector<int64_t> out_shape{total_q, head_v};
     Tensor output(out_shape, DType::Float32, Q.device());
-    if (total_q == 0 || B == 0) return output;
+    if (total_q == 0 || B == 0) {
+        if (input_dtype != DType::Float32) return dispatchCast(output, input_dtype);
+        return output;
+    }
 
     int32_t device_id = Q.device().index;
     auto* pipeline = getPipeline("nested_attention", device_id);
@@ -753,9 +765,10 @@ auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, co
         uint32_t head_dim;
         float scale;
         uint32_t causal;
+        uint32_t head_v;     // audit C18 — V's last dim, separate from head_dim
     };
     NestedAttentionPC pc{B, static_cast<uint32_t>(head_dim), scale,
-                          causal ? 1u : 0u};
+                          causal ? 1u : 0u, static_cast<uint32_t>(head_v)};
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, Q_f32.data_ptr()},
@@ -768,10 +781,10 @@ auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, co
     std::vector<size_t> sizes = {
         static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
         static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_v) * sizeof(float),
         static_cast<size_t>(q_off_i32.numel()) * sizeof(int32_t),
         static_cast<size_t>(kv_off_i32.numel()) * sizeof(int32_t),
-        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_v) * sizeof(float),
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -786,6 +799,10 @@ auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, co
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
+    // Restore input dtype on output per attention-contract.md (audit C19).
+    if (input_dtype != DType::Float32) {
+        return dispatchCast(output, input_dtype);
+    }
     return output;
 }
 
