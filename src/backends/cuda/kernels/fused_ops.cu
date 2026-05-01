@@ -857,6 +857,20 @@ auto fused_layer_norm_cuda(
     const Tensor& bias,
     float eps
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Per docs/internals/attention-contract.md: mean/inv_std must be Float32
+    // for FP16/BF16 inputs (rstd dynamic range exceeds FP16 max=65504 when
+    // var ~ 1e-11). Mirrors fused_rms_norm_cuda's widen-narrow at line 1241
+    // (audit H1 for CUDA LayerNorm).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto in_f32 = input.to(DType::Float32);
+        auto wt_f32 = weight.to(DType::Float32);
+        auto bs_f32 = bias.to(DType::Float32);
+        auto [out_f32, mean_f32, inv_std_f32] = fused_layer_norm_cuda(
+            in_f32, normalized_shape, wt_f32, bs_f32, eps);
+        return std::make_tuple(out_f32.to(orig), mean_f32, inv_std_f32);
+    }
+
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
         norm_size *= dim;

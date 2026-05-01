@@ -85,18 +85,19 @@ struct SDPACacheKey {
     int64_t head_dim;
     DType dtype;
     float scale;
+    bool causal;       // M4: causal flag is part of the graph build, must key the cache.
 
     bool operator==(const SDPACacheKey& other) const {
         return batch == other.batch && num_heads == other.num_heads &&
                seq_len_q == other.seq_len_q && seq_len_k == other.seq_len_k &&
                head_dim == other.head_dim && dtype == other.dtype &&
-               scale == other.scale;
+               scale == other.scale && causal == other.causal;
     }
 };
 
 struct SDPACacheKeyHash {
     size_t operator()(const SDPACacheKey& k) const {
-        // Simple hash combining all dimensions, dtype, and scale
+        // Simple hash combining all dimensions, dtype, scale, and causal flag.
         size_t h = std::hash<int64_t>{}(k.batch);
         h ^= std::hash<int64_t>{}(k.num_heads) << 1;
         h ^= std::hash<int64_t>{}(k.seq_len_q) << 2;
@@ -104,6 +105,7 @@ struct SDPACacheKeyHash {
         h ^= std::hash<int64_t>{}(k.head_dim) << 4;
         h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.dtype)) << 5;
         h ^= std::hash<float>{}(k.scale) << 6;
+        h ^= std::hash<bool>{}(k.causal) << 7;
         return h;
     }
 };
@@ -286,7 +288,9 @@ inline fe::DataType_t to_cudnn_dtype(DType dt) {
 
 // Fallback path for dtypes / shapes / archs cuDNN can't handle on this device.
 // Reshapes 4D BHSD inputs to 3D (B*H, S, D) for the custom flash kernel.
-Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& V, float scale) {
+// Honors causal so the fallback produces contract-equivalent output to the
+// cuDNN graph path (audit C4 — cuDNN call had no causal, fallback didn't either).
+Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& V, float scale, bool causal) {
     auto q_shape = Q.shape();
     bool is_4d = (q_shape.size() == 4);
     Tensor Q3 = Q, K3 = K, V3 = V;
@@ -297,7 +301,7 @@ Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& 
         K3 = K.reshape({b * h, sk, d});
         V3 = V.reshape({b * h, sk, d});
     }
-    auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale);
+    auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale, causal);
     if (is_4d) {
         output = output.reshape({q_shape[0], q_shape[1], q_shape[2], q_shape[3]});
     }
@@ -313,7 +317,8 @@ auto create_sdpa_graph(
     int64_t seq_len_k,
     int64_t head_dim,
     float attn_scale,
-    fe::DataType_t io_dtype
+    fe::DataType_t io_dtype,
+    bool causal
 ) -> std::pair<std::shared_ptr<fe::graph::Graph>, int64_t> {
 
     auto graph = std::make_shared<fe::graph::Graph>();
@@ -369,11 +374,16 @@ auto create_sdpa_graph(
         .set_stride(v_stride)
         .set_data_type(io_dtype));
 
-    // Configure SDPA attributes
+    // Configure SDPA attributes. Per docs/internals/attention-contract.md, the
+    // causal flag must apply *before* softmax (cuDNN does this internally via
+    // its mask-fusion path). Previously this was hardcoded false, so any
+    // caller asking for causal MHA on CUDA in eval mode silently got
+    // non-causal output (audit C4/M5).
     auto sdpa_options = fe::graph::SDPA_attributes()
         .set_name("flash_attention")
         .set_generate_stats(false)
-        .set_attn_scale(attn_scale);
+        .set_attn_scale(attn_scale)
+        .set_causal_mask(causal);
 
     // Create SDPA operation
     auto [O, Stats] = graph->sdpa(Q, K, V, sdpa_options);
@@ -433,13 +443,19 @@ auto create_sdpa_graph(
  * @return Output tensor with same shape as Q
  */
 auto cudnn_sdpa_forward(
-    const Tensor& Q,
-    const Tensor& K,
-    const Tensor& V,
+    const Tensor& Q_in,
+    const Tensor& K_in,
+    const Tensor& V_in,
     float scale,
-    bool causal     // M4: not yet honored — needs sdpa_options.set_causal_mask(causal)
+    bool causal
 ) -> Tensor {
-    (void)causal;
+    // Per docs/internals/attention-contract.md, the host helper must enforce
+    // contiguity at entry — cuDNN's stride descriptors are computed assuming
+    // contiguous BHSD layout in compute_strides() below; a permuted view of
+    // [B,S,H,D] would silently read garbage (audit C3/H6).
+    const Tensor& Q = Q_in.is_contiguous() ? Q_in : Q_in.contiguous();
+    const Tensor& K = K_in.is_contiguous() ? K_in : K_in.contiguous();
+    const Tensor& V = V_in.is_contiguous() ? V_in : V_in.contiguous();
     // Determine I/O dtype for cuDNN. Anything outside the FP16 / BF16 / FP32
     // set goes straight to the custom flash kernel — cuDNN frontend does not
     // expose other types for SDPA.
@@ -462,7 +478,7 @@ auto cudnn_sdpa_forward(
             io_dtype = fe::DataType_t::FLOAT;
             break;
         default:
-            return fused_attention_fallback(Q, K, V, scale);
+            return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
     // Determine dimensions
@@ -494,14 +510,17 @@ auto cudnn_sdpa_forward(
     // graph build entirely and fall back to the custom kernel.
     SDPACapKey cap_key{Q.dtype(), head_dim, current_sm_arch()};
     if (SDPACapCache::instance().is_known_unsupported(cap_key)) {
-        return fused_attention_fallback(Q, K, V, scale);
+        return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
     cudnnHandle_t handle = SDPACuDNNHandle::get();
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
 
-    // Check graph cache for this exact shape + dtype + scale.
-    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale};
+    // Check graph cache for this exact shape + dtype + scale + causal.
+    // Causal flag changes the cuDNN graph (mask op fused into softmax), so it
+    // must key the cache to avoid silently reusing a non-causal graph for a
+    // causal call — the audit's C4/M5 manifestation in the cache layer.
+    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale, causal};
     SDPACacheEntry cache_entry;
 
     if (!SDPAGraphCache::instance().get(cache_key, cache_entry)) {
@@ -510,13 +529,15 @@ auto cudnn_sdpa_forward(
         // falls back instead of poisoning every future call.
         try {
             auto [graph, workspace_size] = create_sdpa_graph(
-                handle, batch, num_heads, seq_len_q, seq_len_k, head_dim, scale, io_dtype);
+                handle, batch, num_heads, seq_len_q, seq_len_k, head_dim, scale, io_dtype, causal);
             cache_entry.graph = graph;
             cache_entry.workspace_size = workspace_size;
             SDPAGraphCache::instance().set(cache_key, cache_entry);
         } catch (const std::exception&) {
             SDPACapCache::instance().mark_unsupported(cap_key);
-            return fused_attention_fallback(Q, K, V, scale);
+            // Composed fallback below uses fused_attention_cuda which now also
+            // honors causal; passing it through preserves contract.
+            return fused_attention_fallback(Q, K, V, scale, causal);
         }
     }
 
@@ -536,7 +557,7 @@ auto cudnn_sdpa_forward(
         // Execution-time failures aren't necessarily permanent (could be
         // workspace sizing etc.) but we still want to fall back gracefully
         // rather than throwing into the dispatch site.
-        return fused_attention_fallback(Q, K, V, scale);
+        return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
     return o_output;

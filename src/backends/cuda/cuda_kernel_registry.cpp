@@ -1656,21 +1656,39 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [Q, K, V]
         //   - 4D: (batch, num_heads, seq_len, head_dim) for cuDNN SDPA
         //   - 3D: (batch_heads, seq_len, head_dim) for custom kernel
-        // attrs: scale, use_cudnn_sdpa (optional)
+        // attrs: scale, use_cudnn_sdpa, causal (per docs/internals/attention-contract.md)
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        bool causal_attr = attrs.get_bool(AttrKey::Causal, false);
 
 #ifdef TENZOR_HAS_CUDNN_FRONTEND
-        // Check if cuDNN SDPA is requested and input is 4D
+        // Check if cuDNN SDPA is requested and input is 4D. Causal flag is now
+        // plumbed through (audit C4/M5 fix): the cuDNN graph is rebuilt with
+        // set_causal_mask(causal); the cache key includes causal so a non-causal
+        // build never silently serves a causal call.
         bool use_cudnn_sdpa = attrs.get_bool(AttrKey::UseCudnnSdpa, false);
         if (use_cudnn_sdpa && inputs[0].shape().size() == 4) {
-            // 4D input: use cuDNN SDPA directly
-            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale);
+            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale, causal_attr);
             return std::vector<Tensor>{output};
         }
 #endif
 
-        // 3D input or cuDNN not available: use custom flash attention kernel
-        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
+        // 3D input or cuDNN not available: use custom flash attention kernel.
+        // For 4D inputs falling through (cuDNN unavailable / not requested),
+        // reshape to 3D before dispatch — fused_attention_cuda assumes 3D and
+        // would otherwise read num_heads as seq_len_q (audit H7).
+        const Tensor& Qi = inputs[0];
+        const Tensor& Ki = inputs[1];
+        const Tensor& Vi = inputs[2];
+        if (Qi.shape().size() == 4) {
+            int64_t b = Qi.shape()[0], h = Qi.shape()[1], sq = Qi.shape()[2], d = Qi.shape()[3];
+            int64_t sk = Ki.shape()[2];
+            Tensor Q3 = (Qi.is_contiguous() ? Qi : Qi.contiguous()).reshape({b * h, sq, d});
+            Tensor K3 = (Ki.is_contiguous() ? Ki : Ki.contiguous()).reshape({b * h, sk, d});
+            Tensor V3 = (Vi.is_contiguous() ? Vi : Vi.contiguous()).reshape({b * h, sk, d});
+            auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal_attr);
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d})};
+        }
+        auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal_attr);
         return std::vector<Tensor>{output};
     });
 
@@ -1678,12 +1696,27 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Flash Attention (memory-efficient tiled attention)
     // =========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Uses same implementation as FusedAttention — both are memory-efficient
-        // Returns {O, L} where L is the row-wise logsumexp (for backward pass)
+        // Per docs/internals/attention-contract.md, returns 4 tensors:
+        // [output, lse_f32, philox_seed_int64, philox_offset_int64]. seed/offset
+        // are empty when DropoutP == 0. Causal flag is now plumbed through to
+        // fused_attention_cuda — was previously dropped on the floor (audit C1).
+        // Dropout reproducibility (Philox seed save) arrives with the kernel
+        // refit later in M4; for now, when dropout_p > 0 and is_training, we
+        // throw a clear error so the caller knows to use the BMM fallback path.
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
-        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
-        return std::vector<Tensor>{output, lse};
+        float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+        bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
+        if (dropout_p > 0.0f && is_training) {
+            throw std::runtime_error(
+                "FlashAttention CUDA: dropout > 0 not yet supported on this backend. "
+                "Routes through BMM fallback in nn::functional::scaled_dot_product_attention "
+                "until M4 wires Philox into flash_attention_v2_kernel.");
+        }
+        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale, causal);
+        // Empty seed/offset placeholders so consumers using the 4-tuple contract
+        // can safely index them (.is_valid() returns false on empty Tensor).
+        return std::vector<Tensor>{output, lse, Tensor{}, Tensor{}};
     });
 
     // =========================================================================
@@ -1722,13 +1755,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             scores = tenzor::mul(scores, scale_t);
 
             if (causal) {
+                // Per attention-contract.md sentinel rule: use -INFINITY,
+                // never -1e9. The latter saturates to -65504 in FP16, leaving
+                // exp(-65504 + something) > 0 after softmax — leaks gradient
+                // mass through masked positions (audit Systemic #3, Vulkan C15).
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 rows = tenzor::reshape(rows, {seq_len, 1});
                 cols = tenzor::reshape(cols, {1, seq_len});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
-                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
+                Tensor neg_inf = tenzor::full(scores_shape,
+                                              -std::numeric_limits<float>::infinity(),
                                               scores.dtype(), scores.device());
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
@@ -1763,6 +1801,68 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
             return {dQ, dK, dV};
         });
+
+    // =========================================================================
+    // FlexAttention (built-in score_mod registry; full programmable backward
+    // arrives in M8 with native CUDA block-sparse implementation)
+    // =========================================================================
+    // Per docs/internals/attention-contract.md, ScoreModId encodes a built-in:
+    //   0 = identity (== FusedAttention)
+    //   1 = causal  (== FusedAttention with causal=true)
+    // Other IDs throw on this backend until the M8 native path lands. The same
+    // composed FlashAttentionBackward kernel handles backward for both modes
+    // (mathematically identical).
+    table.register_kernel(OpId::FlexAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttention CUDA: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work). Identity (0) and causal (1) supported.");
+        }
+        bool causal = (score_mod_id == 1);
+        // Use the same custom flash kernel via fused_attention_cuda; reshape
+        // 4D→3D since the kernel assumes 3D BHSD-collapsed inputs.
+        const Tensor& Qi = inputs[0];
+        const Tensor& Ki = inputs[1];
+        const Tensor& Vi = inputs[2];
+        if (Qi.shape().size() == 4) {
+            int64_t b = Qi.shape()[0], h = Qi.shape()[1], sq = Qi.shape()[2], d = Qi.shape()[3];
+            int64_t sk = Ki.shape()[2];
+            Tensor Q3 = (Qi.is_contiguous() ? Qi : Qi.contiguous()).reshape({b * h, sq, d});
+            Tensor K3 = (Ki.is_contiguous() ? Ki : Ki.contiguous()).reshape({b * h, sk, d});
+            Tensor V3 = (Vi.is_contiguous() ? Vi : Vi.contiguous()).reshape({b * h, sk, d});
+            auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal);
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d}), lse3};
+        }
+        auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal);
+        return std::vector<Tensor>{output, lse};
+    });
+
+    table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttentionBackward CUDA: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work).");
+        }
+        bool causal = (score_mod_id == 1);
+        const Tensor& dO = inputs[0], &Q = inputs[1], &K = inputs[2], &V = inputs[3], &O = inputs[4];
+        int64_t head_dim = Q.shape().back();
+        bool has_lse = inputs.size() >= 6;
+        if (has_lse && (head_dim == 32 || head_dim == 64 || head_dim == 128) && Q.dtype() == DType::Float32) {
+            return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, inputs[5],
+                                                       scale, causal, 0.0f, Tensor{}, Tensor{});
+        }
+        // Composed-ops fallback for unsupported head_dim or dtype: defer to
+        // FlashAttentionBackward dispatch which already implements it.
+        OpAttributes bwd_attrs;
+        bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+        bwd_attrs.set(AttrKey::Causal, causal);
+        std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+        return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+    });
 
     // =========================================================================
     // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
