@@ -404,15 +404,19 @@ namespace cuda {
         float eps
     ) -> std::tuple<Tensor, Tensor>;
 
-    // Fused Attention operation (returns {output, logsumexp})
+    // Fused Attention operation (returns {output, logsumexp}).
+    // Defaults live in include/tenzor/backend/fused_ops.hpp per
+    // docs/internals/attention-contract.md (`causal` defaults to false).
     auto fused_attention_cuda(
         const Tensor& Q,
         const Tensor& K,
         const Tensor& V,
-        float scale
+        float scale,
+        bool causal
     ) -> std::pair<Tensor, Tensor>;
 
-    // Fused Flash Attention backward (tiled, memory-efficient)
+    // Fused Flash Attention backward (tiled, memory-efficient).
+    // Defaults live in include/tenzor/backend/fused_ops.hpp.
     auto flash_attention_backward_cuda(
         const Tensor& dO,
         const Tensor& Q,
@@ -421,7 +425,10 @@ namespace cuda {
         const Tensor& O,
         const Tensor& L,
         float scale,
-        bool causal
+        bool causal,
+        float dropout_p,
+        const Tensor& philox_seed,
+        const Tensor& philox_offset
     ) -> std::vector<Tensor>;
 
     // Fused optimizer operations

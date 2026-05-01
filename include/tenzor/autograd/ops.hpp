@@ -1048,6 +1048,63 @@ auto affine_grid(const Variable& theta,
                  const std::vector<int64_t>& size,
                  bool align_corners = false) -> Variable;
 
+// ============================================================================
+// Attention apply helpers
+// ============================================================================
+//
+// Wrap dispatch<OpId::Flash/Fused/Flex Attention>() in autograd Functions so
+// the resulting Variable has a grad_fn — enabling training. Direct dispatch
+// returns Variables with severed grad chains (audit C1).
+// Per docs/internals/attention-contract.md.
+//
+// Conditional attach: if no input requires grad AND grad mode is disabled,
+// dispatch is called raw and a no-grad Variable is returned (no Function alloc).
+
+/**
+ * @brief FlashAttention with autograd. Q/K/V are 4D [B, H, S, D].
+ *
+ * GPU backends that internally collapse to 3D [B*H, S, D] (CUDA/ROCm/OneAPI/
+ * Vulkan) handle that reshape inside the apply helper.
+ *
+ * @param Q Query Variable [B, H, S_q, D]
+ * @param K Key Variable [B, H_kv, S_k, D] (H_kv may differ from H for GQA — backend dependent)
+ * @param V Value Variable [B, H_kv, S_k, D_v]
+ * @param scale Multiplicative scale (typically 1/sqrt(D))
+ * @param causal Apply causal (lower-triangular) mask
+ * @param dropout_p Dropout probability (training-time only)
+ * @param is_training Whether to apply dropout
+ * @return Variable [B, H, S_q, D_v] with grad_fn = FlashAttentionBackward
+ */
+auto flash_attention(const Variable& Q,
+                     const Variable& K,
+                     const Variable& V,
+                     float scale,
+                     bool causal = false,
+                     float dropout_p = 0.0f,
+                     bool is_training = false) -> Variable;
+
+/**
+ * @brief FusedAttention with autograd (cuDNN-SDPA-friendly variant; no dropout).
+ *        Same shape contract as flash_attention.
+ */
+auto fused_attention(const Variable& Q,
+                     const Variable& K,
+                     const Variable& V,
+                     float scale,
+                     bool causal = false,
+                     bool use_cudnn_sdpa = false) -> Variable;
+
+/**
+ * @brief FlexAttention with autograd. score_mod_id selects a built-in score
+ *        modification op (0 = none); see attention-contract.md for the registry.
+ */
+auto flex_attention(const Variable& Q,
+                    const Variable& K,
+                    const Variable& V,
+                    float scale,
+                    int64_t score_mod_id = 0,
+                    const Tensor& block_mask = Tensor{}) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

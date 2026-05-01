@@ -119,13 +119,14 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
     add_bias_kv_ = add_bias_kv;
 
     if (add_bias_kv) {
-        // Initialize bias_k and bias_v as learnable parameters [1, 1, embed_dim]
-        auto bk = tenzor::zeros({1, 1, embed_dim_}, DType::Float32);
-        auto bv = tenzor::zeros({1, 1, embed_dim_}, DType::Float32);
-        bias_k_ = Variable(bk, true);
-        bias_v_ = Variable(bv, true);
-        register_parameter("bias_k", bias_k_);
-        register_parameter("bias_v", bias_v_);
+        // Initialize bias_k and bias_v as learnable parameters [1, 1, embed_dim].
+        // Stored at construction-time dtype (Float32); Module::to(DType) will
+        // cast in-place via the registered_parameters map, which the local
+        // shared_ptr members alias.
+        register_parameter("bias_k", Variable(tenzor::zeros({1, 1, embed_dim_}, DType::Float32), true));
+        register_parameter("bias_v", Variable(tenzor::zeros({1, 1, embed_dim_}, DType::Float32), true));
+        bias_k_ = get_parameter("bias_k");
+        bias_v_ = get_parameter("bias_v");
     }
 
     head_dim_ = embed_dim_ / num_heads_;
@@ -197,6 +198,17 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Query: (batch, num_heads, seq_len_q, head_dim)
     // Key: (batch, num_heads, seq_len_k, head_dim)
     // Value: (batch, num_heads, seq_len_k, head_dim)
+
+    // Per docs/internals/attention-contract.md: passing both is_causal and an
+    // explicit attn_mask is ambiguous (PyTorch errors here). Reject early so
+    // the manual BMM path's additive double-masking can't silently produce
+    // half-correct results that disagree with the fused/cuDNN paths.
+    if (is_causal_ && attn_mask.is_valid() && attn_mask.shape().size() > 0) {
+        throw std::invalid_argument(
+            "MultiheadAttention: is_causal=true and attn_mask are mutually exclusive. "
+            "Pass exactly one. (Use is_causal for triangular masking; use attn_mask "
+            "for arbitrary additive masks.)");
+    }
 
     auto q_shape = query.shape();
     int64_t batch_size = q_shape[0];
@@ -272,12 +284,20 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // is_causal is requested, fall through to the manual BMM path which builds
     // an explicit triu mask. CUDA cuDNN SDPA handles causal natively.
     bool device_supports_causal = (query.device().type != Device::Type::ROCm) || !is_causal_;
+    // Only take the cuDNN SDPA fast path when no gradient is needed downstream.
+    // This dispatch returns a Variable without a grad_fn, so any caller that
+    // backwards through it would get zero gradients (audit C1, H1). The manual
+    // BMM path below is autograd-correct. Eval mode without grad-enabled
+    // (the common inference case) still gets the fast cuDNN call.
+    bool any_input_needs_grad = query.requires_grad() || key.requires_grad() || value.requires_grad();
+    bool grad_path_safe = !is_grad_enabled() && !any_input_needs_grad;
     bool can_use_cudnn_sdpa = !need_weights &&
         dtype_supported &&
         is_op_supported(OpId::FusedAttention, query.device().type) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
         device_supports_causal &&
-        !is_training();  // Only use cuDNN SDPA in inference mode
+        !is_training() &&     // dropout/training BMM-only
+        grad_path_safe;       // gradient correctness
 
     if (can_use_cudnn_sdpa) {
         try {
@@ -300,9 +320,15 @@ auto MultiheadAttention::scaled_dot_product_attention(
                 v_contig = tenzor::reshape(v_contig, {batch_size * num_heads, seq_len_k, head_dim});
             }
 
-            // Use dispatch to call cuDNN SDPA - pass 4D tensors directly
+            // Use dispatch to call cuDNN SDPA - pass 4D tensors directly.
+            // Per docs/internals/attention-contract.md, Causal must be set so the
+            // backend (cuDNN graph or custom kernel) applies the mask before
+            // softmax. Previously this path silently dropped is_causal_ on
+            // CUDA, producing a non-causal output for any caller that asked
+            // for causal MHA in eval mode.
             OpAttributes attrs;
             attrs.set(AttrKey::Scale, static_cast<double>(scale_f));
+            attrs.set(AttrKey::Causal, is_causal_);
             attrs.set(AttrKey::UseCudnnSdpa, true);
             std::vector<Tensor> fused_inputs = {q_contig, k_contig, v_contig};
             Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
@@ -344,7 +370,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
                                    (dev_cpu || !is_causal_ || vulkan_causal_supported) &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
-    if (can_use_flash_attention && !is_training()) {
+    // Same grad correctness gate as cuDNN SDPA above: this fast path also
+    // returns Variable(output, false) without grad_fn — only safe when no
+    // gradient is needed downstream. Re-uses grad_path_safe computed above.
+    if (can_use_flash_attention && !is_training() && grad_path_safe) {
         try {
             float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
@@ -550,14 +579,19 @@ auto MultiheadAttention::forward(const Variable& query,
     auto input_device = q_ptr->tensor().device();
 
     if (weight_device != input_device) {
-        // Move projection layers to input device to preserve autograd chain
+        // Move projection layers to input device to preserve autograd chain.
+        // The bias_k_/bias_v_ shared_ptrs alias the registered_parameters map
+        // entries, so calling Module::to(input_device) on this module updates
+        // their tensors in-place (per src/nn/module.cpp:90-115). We don't
+        // rebuild local Variables here — that would detach the shared_ptr
+        // and leave the registered_parameters map pointing at a stale tensor
+        // (the dangling-leaf bug from feedback_raw_tensor_op_bug).
         q_proj_->to(input_device);
         k_proj_->to(input_device);
         v_proj_->to(input_device);
         out_proj_->to(input_device);
         if (add_bias_kv_) {
-            bias_k_ = Variable(bias_k_.tensor().to(input_device), bias_k_.requires_grad());
-            bias_v_ = Variable(bias_v_.tensor().to(input_device), bias_v_.requires_grad());
+            this->to(input_device);  // updates parameters_["bias_k"], aliased by bias_k_
         }
     }
 
@@ -572,9 +606,11 @@ auto MultiheadAttention::forward(const Variable& query,
 
     // add_bias_kv: concatenate bias_k/bias_v to key/value sequences
     if (add_bias_kv_) {
-        // bias_k_ is [1, 1, embed_dim], expand to [batch_size, 1, embed_dim]
-        auto bk = tenzor::expand(bias_k_, {batch_size, 1, embed_dim_});
-        auto bv = tenzor::expand(bias_v_, {batch_size, 1, embed_dim_});
+        // bias_k_ is [1, 1, embed_dim], expand to [batch_size, 1, embed_dim].
+        // Dereference shared_ptr to get the live Variable (kept current by
+        // Module::to(); see member declaration in attention.hpp).
+        auto bk = tenzor::expand(*bias_k_, {batch_size, 1, embed_dim_});
+        auto bv = tenzor::expand(*bias_v_, {batch_size, 1, embed_dim_});
         K = tenzor::cat({K, bk}, 1);  // [batch, seq_k+1, embed]
         V = tenzor::cat({V, bv}, 1);  // [batch, seq_k+1, embed]
         seq_len_k += 1;
@@ -603,8 +639,11 @@ auto MultiheadAttention::forward(const Variable& query,
 
     // Add key padding mask if provided
     if (key_padding_mask.is_valid() && key_padding_mask.shape().size() > 0) {
-        // key_padding_mask: (batch, seq_len_k)
-        // Need to broadcast to (batch, 1, 1, seq_len_k) then to (batch, num_heads, seq_len_q, seq_len_k)
+        // key_padding_mask: (batch, seq_len_k). Reshape to a broadcastable
+        // (batch, 1, 1, seq_len_k) and rely on downstream `add` to broadcast
+        // along (num_heads, seq_q). Previously this code did an explicit
+        // expand to [batch, num_heads, seq_q, seq_k] producing a stride-0
+        // view that some backends mishandle (memory: feedback_stride_bugs).
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
         Tensor padding_mask = reshape(key_padding_mask, mask_shape);
 
@@ -615,18 +654,16 @@ auto MultiheadAttention::forward(const Variable& query,
         Tensor zero_tensor = zeros(pm_shape, padding_mask.dtype(), padding_mask.device());
         Tensor threshold = full(pm_shape, 0.5f, padding_mask.dtype(), padding_mask.device());
 
-        // where(mask > 0.5, -inf, 0.0) — runs on GPU if tensors are on GPU
+        // where(mask > 0.5, -inf, 0.0) — runs on GPU if tensors are on GPU.
+        // Result keeps the [batch, 1, 1, seq_k] shape; broadcasting deferred
+        // to the additive combine below (downstream `add` handles it).
         Tensor mask_gt = Tensor(gt(padding_mask, threshold));
-        neg_inf_tensor = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
-
-        // Broadcast to full attention shape
-        std::vector<int64_t> full_mask_shape = {batch_size, num_heads_, seq_len_q, seq_len_k};
-        Tensor broadcasted_mask = expand(neg_inf_tensor, full_mask_shape);
+        Tensor broadcastable_mask = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
 
         if (combined_mask.shape().size() > 0) {
-            combined_mask = Tensor(add(combined_mask, broadcasted_mask));
+            combined_mask = Tensor(add(combined_mask, broadcastable_mask));
         } else {
-            combined_mask = broadcasted_mask;
+            combined_mask = broadcastable_mask;
         }
     }
 

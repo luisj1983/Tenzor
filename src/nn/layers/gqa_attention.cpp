@@ -104,16 +104,20 @@ auto GroupedQueryAttention::repeat_kv(const Variable& x) const -> Variable {
 
     // Unsqueeze to (batch, num_kv_heads, 1, seq_len, head_dim)
     // Then expand to (batch, num_kv_heads, num_heads_per_group, seq_len, head_dim)
-    // Then reshape to (batch, num_heads, seq_len, head_dim)
-    Tensor unsqueezed = tenzor::unsqueeze(x.tensor(), 2);
+    // Then reshape to (batch, num_heads, seq_len, head_dim).
+    //
+    // Use autograd:: ops (not raw tenzor::) so the grad_fn chain is preserved
+    // back through to k_proj_/v_proj_. The previous implementation called
+    // raw Tensor ops on x.tensor() and rewrapped as Variable(reshaped, x.requires_grad())
+    // — discarding the grad_fn. That zeroed K/V projection gradients for every
+    // GQA model where num_heads_per_group_ > 1 (memory: feedback_raw_tensor_op_bug).
+    Variable unsqueezed = autograd::unsqueeze(x, 2);
     std::vector<int64_t> expand_shape = {batch_size, n_kv_heads, num_heads_per_group_, seq_len, h_dim};
-    Tensor expanded = tenzor::expand(unsqueezed, expand_shape);
-    // Make contiguous after expand (expand creates a view with stride=0)
-    Tensor expanded_contig = expanded.is_contiguous() ? expanded : expanded.contiguous();
+    Variable expanded = autograd::expand(unsqueezed, expand_shape);
+    // reshape requires contiguous. autograd::reshape handles the contiguity
+    // pass-through correctly while keeping the chain intact.
     std::vector<int64_t> final_shape = {batch_size, num_heads_, seq_len, h_dim};
-    Tensor reshaped = tenzor::reshape(expanded_contig, final_shape);
-
-    return Variable(reshaped, x.requires_grad());
+    return autograd::reshape(expanded, final_shape);
 }
 
 auto GroupedQueryAttention::scaled_dot_product_attention(
@@ -158,13 +162,26 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
     Variable scale_var(scale_tensor, false);
     scores = scores * scale_var;
 
-    // Apply causal mask if requested
+    // Apply causal mask if requested.
+    //
+    // For self-attention (seq_q == seq_k) the standard upper-triangular mask
+    // applies with diagonal=1. For cross-attention with KV cache (seq_k > seq_q),
+    // the conventional contract is "token at q-position i can attend to all KV
+    // positions <= i + (seq_k - seq_q)" — i.e. all cached tokens, plus the
+    // first i+1 new tokens. Equivalent: triu with diagonal = 1 + (seq_k - seq_q),
+    // so the mask line aligns at the bottom-right.
+    //
+    // The previous implementation built a (seq_q, seq_q) square mask and
+    // sliced columns to (seq_q, seq_q); the resulting mask had wrong column
+    // semantics (indexed an offset chunk of itself rather than the actual
+    // KV positions).
     if (is_causal_) {
-        Tensor causal = create_causal_mask(seq_len_q, query.device(), query.dtype());
-        // Slice if seq_len_k != seq_len_q (cross-attention case)
-        if (seq_len_k != seq_len_q) {
-            causal = tenzor::slice(causal, 1, seq_len_k - seq_len_q, seq_len_k);
-        }
+        int64_t diag_offset = 1 + (seq_len_k - seq_len_q);
+        Tensor causal_ones = ones({seq_len_q, seq_len_k}, query.dtype(), query.device());
+        Tensor causal_triu = triu(causal_ones, diag_offset);
+        Tensor neg_inf = full({1}, -std::numeric_limits<float>::infinity(),
+                              query.dtype(), query.device());
+        Tensor causal = causal_triu * neg_inf;
         Variable mask_var(causal, false);
         scores = scores + mask_var;
     }

@@ -2251,8 +2251,10 @@ auto fused_attention_cuda(
     const Tensor& Q,     // (batch_heads, seq_len_q, head_dim)
     const Tensor& K,     // (batch_heads, seq_len_k, head_dim)
     const Tensor& V,     // (batch_heads, seq_len_k, head_dim)
-    float scale
+    float scale,
+    bool causal          // M4: not yet honored; flash kernel ignores this until causal masking is wired into flash_attention_v2_kernel
 ) -> std::pair<Tensor, Tensor> {
+    (void)causal;
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len_q = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
@@ -2263,7 +2265,7 @@ auto fused_attention_cuda(
         auto Q_f32 = Q.to(DType::Float32);
         auto K_f32 = K.to(DType::Float32);
         auto V_f32 = V.to(DType::Float32);
-        auto [output_f32, lse_f32] = fused_attention_cuda(Q_f32, K_f32, V_f32, scale);
+        auto [output_f32, lse_f32] = fused_attention_cuda(Q_f32, K_f32, V_f32, scale, causal);
         return {output_f32.to(Q.dtype()), lse_f32};
     }
 
@@ -2897,8 +2899,14 @@ auto flash_attention_backward_cuda(
     const Tensor& O,     // [batch_heads, seq_len, head_dim]
     const Tensor& L,     // [batch_heads, seq_len] logsumexp
     float scale,
-    bool causal
+    bool causal,
+    float dropout_p,             // M4: dropout reproduction not yet wired
+    const Tensor& philox_seed,
+    const Tensor& philox_offset
 ) -> std::vector<Tensor> {
+    (void)dropout_p;
+    (void)philox_seed;
+    (void)philox_offset;
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];

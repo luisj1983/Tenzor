@@ -40,9 +40,6 @@ namespace fe = cudnn_frontend;
 namespace tenzor {
 namespace cuda {
 
-// Forward declaration: FP32 flash attention kernel (defined in fused_ops.cu)
-auto fused_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V, float scale) -> std::pair<Tensor, Tensor>;
-
 namespace {
 
 // ============================================================================
@@ -439,8 +436,10 @@ auto cudnn_sdpa_forward(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
-    float scale
+    float scale,
+    bool causal     // M4: not yet honored — needs sdpa_options.set_causal_mask(causal)
 ) -> Tensor {
+    (void)causal;
     // Determine I/O dtype for cuDNN. Anything outside the FP16 / BF16 / FP32
     // set goes straight to the custom flash kernel — cuDNN frontend does not
     // expose other types for SDPA.

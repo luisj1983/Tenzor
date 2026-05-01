@@ -109,17 +109,22 @@ auto fused_rms_norm_backward_cuda(
  * Computes scaled dot-product attention in a single fused kernel:
  * output = softmax(Q @ K.T / sqrt(head_dim)) @ V
  *
+ * Implements the FusedAttention contract from docs/internals/attention-contract.md.
+ *
  * @param Q Query tensor (batch_heads, seq_len_q, head_dim)
  * @param K Key tensor (batch_heads, seq_len_k, head_dim)
  * @param V Value tensor (batch_heads, seq_len_k, head_dim)
- * @param scale Scaling factor (typically 1/sqrt(head_dim))
- * @return {output, logsumexp} — output (batch_heads, seq_len_q, head_dim), logsumexp (batch_heads, seq_len_q)
+ * @param scale Scaling factor (multiplicative; typically 1/sqrt(head_dim))
+ * @param causal If true, apply causal (lower-triangular) mask before softmax
+ * @return {output, logsumexp} — output (batch_heads, seq_len_q, head_dim);
+ *         logsumexp (batch_heads, seq_len_q) is always Float32
  */
 auto fused_attention_cuda(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
-    float scale
+    float scale,
+    bool causal = false
 ) -> std::pair<Tensor, Tensor>;
 
 /**
@@ -128,14 +133,20 @@ auto fused_attention_cuda(
  * Recomputes attention in tiles using saved logsumexp, avoiding O(N^2) memory.
  * Falls back to composed-ops for unsupported head dimensions.
  *
+ * Implements the FlashAttentionBackward contract from
+ * docs/internals/attention-contract.md.
+ *
  * @param dO Gradient of output (batch_heads, seq_len, head_dim)
  * @param Q Query tensor (batch_heads, seq_len, head_dim)
  * @param K Key tensor (batch_heads, seq_len, head_dim)
  * @param V Value tensor (batch_heads, seq_len, head_dim)
  * @param O Forward output (batch_heads, seq_len, head_dim)
- * @param L Row-wise logsumexp from forward (batch_heads, seq_len)
- * @param scale Scaling factor (typically 1/sqrt(head_dim))
+ * @param L Row-wise logsumexp from forward (batch_heads, seq_len) — always Float32
+ * @param scale Scaling factor (multiplicative; typically 1/sqrt(head_dim))
  * @param causal Whether to apply causal masking
+ * @param dropout_p Dropout probability used in forward (0 disables dropout)
+ * @param philox_seed Int64 scalar Tensor — Philox seed used in forward (empty if dropout_p == 0)
+ * @param philox_offset Int64 scalar Tensor — Philox offset used in forward (empty if dropout_p == 0)
  * @return {dQ, dK, dV}
  */
 auto flash_attention_backward_cuda(
@@ -146,7 +157,10 @@ auto flash_attention_backward_cuda(
     const Tensor& O,
     const Tensor& L,
     float scale,
-    bool causal
+    bool causal,
+    float dropout_p = 0.0f,
+    const Tensor& philox_seed = Tensor{},
+    const Tensor& philox_offset = Tensor{}
 ) -> std::vector<Tensor>;
 
 /**
@@ -155,17 +169,24 @@ auto flash_attention_backward_cuda(
  * Uses cuDNN Graph API for optimized fused attention with Tensor Core support.
  * Provides up to 2x speedup over separate BMM operations.
  *
- * @param Q Query tensor [batch, num_heads, seq_len_q, head_dim]
- * @param K Key tensor [batch, num_heads, seq_len_k, head_dim]
- * @param V Value tensor [batch, num_heads, seq_len_k, head_dim]
- * @param scale Scaling factor (typically 1/sqrt(head_dim))
+ * Implements the FusedAttention contract from docs/internals/attention-contract.md.
+ * Note: returns Tensor for transitional compatibility; M4 will move this to
+ * std::pair<Tensor, Tensor> once cuDNN graph is configured with set_generate_stats(true)
+ * and callers (cuda_kernel_registry.cpp:1660) are updated together.
+ *
+ * @param Q Query tensor [batch, num_heads, seq_len_q, head_dim] (forced contiguous)
+ * @param K Key tensor [batch, num_heads, seq_len_k, head_dim] (forced contiguous)
+ * @param V Value tensor [batch, num_heads, seq_len_k, head_dim] (forced contiguous)
+ * @param scale Scaling factor (multiplicative; typically 1/sqrt(head_dim))
+ * @param causal If true, apply causal mask via cuDNN's set_causal_mask_bottom_right(true)
  * @return Output tensor with same shape as Q
  */
 auto cudnn_sdpa_forward(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
-    float scale
+    float scale,
+    bool causal = false
 ) -> Tensor;
 
 /**

@@ -190,6 +190,9 @@ void init_builtin_batching_rules() {
     // ====================================================================
     register_batching_rule("MultiheadAttentionBackward", shape_passthrough);
     register_batching_rule("FusedAttentionBackward", shape_passthrough);
+    register_batching_rule("FlashAttentionBackward", shape_passthrough);
+    register_batching_rule("FlexAttentionBackward", shape_passthrough);
+    register_batching_rule("NestedAttentionBackward", shape_passthrough);
 
     // ====================================================================
     // TopK/Sort: operate on a specific dim, batch-independent

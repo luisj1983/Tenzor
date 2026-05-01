@@ -208,9 +208,14 @@ private:
     bool add_zero_attn_;     ///< Whether to add zero attention
     bool is_causal_;         ///< Whether to apply causal masking in fused kernels
 
-    // Optional bias_k and bias_v parameters (when add_bias_kv=true)
-    Variable bias_k_;  ///< Bias for key [1, 1, embed_dim]
-    Variable bias_v_;  ///< Bias for value [1, 1, embed_dim]
+    // Optional bias_k and bias_v parameters (when add_bias_kv=true).
+    // Stored as shared_ptr aliasing the registered_parameters map entry so that
+    // Module::to(Device) / to(DType) updates the underlying tensor in-place and
+    // is visible here automatically. Storing as Variable would create a detached
+    // local copy; rebuilding it manually breaks the autograd chain (memory:
+    // feedback_raw_tensor_op_bug).
+    std::shared_ptr<Variable> bias_k_;  ///< Bias for key [1, 1, embed_dim]
+    std::shared_ptr<Variable> bias_v_;  ///< Bias for value [1, 1, embed_dim]
 
     // Projection layers
     std::shared_ptr<Linear> q_proj_;    ///< Query projection

@@ -323,6 +323,9 @@ enum class AttrKey : uint16_t {
     // DCT parameters
     DCTType,               // DCT type (1, 2, 3, or 4)
 
+    // FlexAttention parameters (per docs/internals/attention-contract.md)
+    ScoreModId,            // OpId-encoded score modification op (0 = none/identity)
+
     // Sentinel
     _Count
 };

@@ -2646,4 +2646,84 @@ public:
     auto name() const -> std::string override { return "ViewAsComplexBackward"; }
 };
 
+// ============================================================================
+// Attention autograd Functions
+// ============================================================================
+//
+// Per docs/internals/attention-contract.md:
+//   - FlashAttention forward returns (output, lse, seed, offset). Backward
+//     consumes (dO, Q, K, V, O, L, seed, offset) and the same scalar context
+//     (scale, causal, dropout_p) the forward used. The Function persists L,
+//     seed, offset across the forward/backward boundary so the user-facing
+//     output is just the differentiable Variable.
+//   - FusedAttention is the same shape but no dropout; it shares the same
+//     backward kernel so a separate backward class is unnecessary.
+//   - FlexAttention carries a serializable score_mod OpId and an optional
+//     block_mask; its backward dispatches FlexAttentionBackward.
+//
+// Backends that don't yet honor the 4-tuple contract (M3-M7 work) trigger the
+// composed-ops fallback in backward via the saved-tensor count check.
+
+/**
+ * @brief FlashAttention gradient function.
+ *
+ * Forward: (output, lse, seed, offset) = flash_attention(Q, K, V; scale, causal, dropout_p, is_training)
+ * Backward: (dQ, dK, dV) via OpId::FlashAttentionBackward dispatch using saved (Q, K, V, O, L, seed, offset).
+ */
+class FlashAttentionBackward : public Function {
+public:
+    FlashAttentionBackward(float scale, bool causal, float dropout_p, bool is_training)
+        : scale_(scale), causal_(causal), dropout_p_(dropout_p), is_training_(is_training) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "FlashAttentionBackward"; }
+private:
+    float scale_;
+    bool causal_;
+    float dropout_p_;
+    bool is_training_;
+};
+
+/**
+ * @brief FusedAttention gradient function.
+ *
+ * Forward: (output, lse) = fused_attention(Q, K, V; scale, causal, use_cudnn_sdpa)
+ * Backward: shares the FlashAttentionBackward kernel since the math is identical
+ *           (no dropout in fused). Saves Q, K, V, O, L for backward.
+ */
+class FusedAttentionBackward : public Function {
+public:
+    FusedAttentionBackward(float scale, bool causal, bool use_cudnn_sdpa)
+        : scale_(scale), causal_(causal), use_cudnn_sdpa_(use_cudnn_sdpa) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "FusedAttentionBackward"; }
+private:
+    float scale_;
+    bool causal_;
+    bool use_cudnn_sdpa_;
+};
+
+/**
+ * @brief FlexAttention gradient function.
+ *
+ * Forward: (output, lse) = flex_attention(Q, K, V; score_mod_id, block_mask?)
+ * Backward: (dQ, dK, dV) via OpId::FlexAttentionBackward dispatch using saved (Q, K, V, O, L).
+ */
+class FlexAttentionBackward : public Function {
+public:
+    FlexAttentionBackward(float scale, int64_t score_mod_id, bool has_block_mask)
+        : scale_(scale), score_mod_id_(score_mod_id), has_block_mask_(has_block_mask) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "FlexAttentionBackward"; }
+private:
+    float scale_;
+    int64_t score_mod_id_;
+    bool has_block_mask_;
+};
+
 } // namespace tenzor

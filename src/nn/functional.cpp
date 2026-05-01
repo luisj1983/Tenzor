@@ -1034,46 +1034,46 @@ auto scaled_dot_product_attention(
 
     if (is_4d && no_mask && supported_dtype && causal_path_ok && dropout_path_ok) {
         try {
-            Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
-            Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
-            Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
-
             // Backend FlashAttention kernels disagree on input rank: CPU's
             // flash_attention_forward expects 4D [B, H, L, E], but CUDA's
             // fused_attention_cuda and ROCm's fused_attention_hip expect 3D
             // [B*H, L, E] (collapsed batch+heads). Normalize to 3D for GPU
-            // dispatch and reshape the output back. Without this the GPU
-            // kernels produce output of shape [B, H, L] (E silently dropped).
-            auto q_shape = q_contig.shape();
+            // dispatch and reshape the output back. Use the Variable-overload
+            // reshape from autograd::ops so the grad chain is preserved
+            // through the FlashAttentionBackward Function below.
+            auto q_shape = query.shape();
             int64_t B = q_shape[0], H = q_shape[1], L = q_shape[2], E = q_shape[3];
-            auto dev = q_contig.device().type;
+            auto dev = query.tensor().device().type;
             bool needs_3d_collapse = (dev != Device::Type::CPU);
+
+            Variable q_var = query;
+            Variable k_var = key;
+            Variable v_var = value;
             if (needs_3d_collapse) {
-                q_contig = tenzor::reshape(q_contig, {B * H, L, E});
-                int64_t Lk = k_contig.shape()[2];
-                int64_t Ek = k_contig.shape()[3];
-                k_contig = tenzor::reshape(k_contig, {B * H, Lk, Ek});
-                int64_t Lv = v_contig.shape()[2];
-                int64_t Ev = v_contig.shape()[3];
-                v_contig = tenzor::reshape(v_contig, {B * H, Lv, Ev});
+                int64_t Lk = k_var.shape()[2];
+                int64_t Ek = k_var.shape()[3];
+                int64_t Lv = v_var.shape()[2];
+                int64_t Ev = v_var.shape()[3];
+                q_var = ::tenzor::reshape(q_var, std::vector<int64_t>{B * H, L, E});
+                k_var = ::tenzor::reshape(k_var, std::vector<int64_t>{B * H, Lk, Ek});
+                v_var = ::tenzor::reshape(v_var, std::vector<int64_t>{B * H, Lv, Ev});
             }
 
-            OpAttributes attrs;
-            attrs.set(AttrKey::Scale, static_cast<double>(scale));
-            attrs.set(AttrKey::Causal, opts.is_causal);
-            attrs.set(AttrKey::DropoutP, opts.dropout_p);
-            // Use dropout_p > 0 as training proxy: FlashAttention applies
-            // dropout internally when IsTraining is true. Callers should set
-            // dropout_p = 0 during inference (matches PyTorch convention).
-            attrs.set(AttrKey::IsTraining, opts.dropout_p > 0.0);
-            std::vector<Tensor> flash_inputs = {q_contig, k_contig, v_contig};
-            Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
+            // Route through the autograd FlashAttentionBackward Function so
+            // the resulting Variable carries a grad_fn. The previous direct
+            // dispatch wrapped output as Variable(t, requires_grad=true) with
+            // no grad_fn — silently zeroing Q/K/V gradients (audit C1).
+            Variable out_var = ::tenzor::flash_attention(
+                q_var, k_var, v_var,
+                static_cast<float>(scale),
+                /*causal=*/opts.is_causal,
+                /*dropout_p=*/static_cast<float>(opts.dropout_p),
+                /*is_training=*/opts.dropout_p > 0.0);
 
             if (needs_3d_collapse) {
-                output = tenzor::reshape(output, {B, H, L, E});
+                out_var = ::tenzor::reshape(out_var, std::vector<int64_t>{B, H, L, E});
             }
-
-            return Variable(output, query.requires_grad() || key.requires_grad() || value.requires_grad());
+            return out_var;
         } catch (const std::exception&) {
             // Fall through to manual path if FlashAttention kernel unavailable
         }

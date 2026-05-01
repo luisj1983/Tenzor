@@ -181,6 +181,7 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::MaxNorm: return "max_norm";
         case AttrKey::Strides: return "strides";
         case AttrKey::StorageOffset: return "storage_offset";
+        case AttrKey::ScoreModId: return "score_mod_id";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";
