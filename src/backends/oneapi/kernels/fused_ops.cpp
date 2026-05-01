@@ -244,11 +244,16 @@ auto fused_layer_norm_kernel(
 
     int64_t batch_size = input.numel() / norm_size;
 
-    // Create output tensors
+    // Per docs/internals/attention-contract.md: mean / inv_std must be Float32
+    // for FP16/BF16 inputs (rstd dynamic range exceeds FP16 max=65504 when
+    // var ~ 1e-11). Audit M11 OneAPI — was storing stats as input.dtype().
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
-    Tensor mean({batch_size}, input.dtype(), input.device());
-    Tensor inv_std({batch_size}, input.dtype(), input.device());
+    DType stats_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+                            ? DType::Float32
+                            : input.dtype();
+    Tensor mean({batch_size}, stats_dtype, input.device());
+    Tensor inv_std({batch_size}, stats_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -399,13 +404,14 @@ auto fused_layer_norm_kernel(
         });
     }
     else if (input.dtype() == DType::Float16) {
-        // Float16: use float32 accumulation for numerical stability
+        // Float16: use float32 accumulation for numerical stability.
+        // mean/inv_std tensors are Float32 (audit M11 — was Float16, overflow risk).
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
         const sycl::half* bias_ptr = get_data_ptr<const sycl::half>(bias);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        sycl::half* mean_ptr = get_data_ptr<sycl::half>(mean);
-        sycl::half* inv_std_ptr = get_data_ptr<sycl::half>(inv_std);
+        float* mean_ptr = get_data_ptr<float>(mean);
+        float* inv_std_ptr = get_data_ptr<float>(inv_std);
 
         int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
         int64_t wg_pow2 = 1;
@@ -459,8 +465,9 @@ auto fused_layer_norm_kernel(
                 float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
 
                 if (lid == 0) {
-                    mean_ptr[b] = sycl::half(batch_mean);
-                    inv_std_ptr[b] = sycl::half(batch_inv_std);
+                    // Stats stored as Float32 per attention-contract.md
+                    mean_ptr[b] = batch_mean;
+                    inv_std_ptr[b] = batch_inv_std;
                 }
                 item.barrier(sycl::access::fence_space::local_space);
 
@@ -475,13 +482,14 @@ auto fused_layer_norm_kernel(
         });
     }
     else if (input.dtype() == DType::BFloat16) {
-        // BFloat16: use float32 accumulation for numerical stability
+        // BFloat16: use float32 accumulation. mean/inv_std are Float32 per
+        // attention-contract.md (audit M11 — was BF16 with overflow risk).
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const uint16_t* weight_ptr = get_data_ptr<const uint16_t>(weight);
         const uint16_t* bias_ptr = get_data_ptr<const uint16_t>(bias);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        uint16_t* mean_ptr = get_data_ptr<uint16_t>(mean);
-        uint16_t* inv_std_ptr = get_data_ptr<uint16_t>(inv_std);
+        float* mean_ptr = get_data_ptr<float>(mean);
+        float* inv_std_ptr = get_data_ptr<float>(inv_std);
 
         int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
         int64_t wg_pow2 = 1;
@@ -535,8 +543,9 @@ auto fused_layer_norm_kernel(
                 float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
 
                 if (lid == 0) {
-                    mean_ptr[b] = f32_to_bf16(batch_mean);
-                    inv_std_ptr[b] = f32_to_bf16(batch_inv_std);
+                    // Stats stored as Float32 per attention-contract.md
+                    mean_ptr[b] = batch_mean;
+                    inv_std_ptr[b] = batch_inv_std;
                 }
                 item.barrier(sycl::access::fence_space::local_space);
 
@@ -1217,6 +1226,17 @@ auto fused_softmax_cross_entropy_kernel(
             int64_t b = static_cast<int64_t>(idx[0]);
             const T* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
+
+            // Per docs/internals/attention-contract.md: backends must bounds-
+            // check targets to prevent OOB device-memory access (audit C10
+            // OneAPI). Out-of-range targets get NaN loss matching the CPU
+            // contract; without this, row[target] reads adjacent rows or
+            // beyond-buffer memory and silently corrupts neighboring data.
+            if (target < 0 || target >= nc) {
+                // SYCL device-side NaN via the standard math intrinsic.
+                losses_ptr[b] = static_cast<T>(sycl::nan(0u));
+                return;
+            }
 
             // Find max for numerical stability
             AccT max_val = static_cast<AccT>(row[0]);
@@ -2206,6 +2226,30 @@ auto flash_attention_impl(
     const DataT* v_ptr = get_data_ptr<const DataT>(V);
     DataT* o_ptr = get_data_ptr<DataT>(output);
 
+    // Audit C4 OneAPI fix: actually honor the `mask` parameter. Previously it
+    // was passed in but never captured by the kernel lambda, so callers'
+    // attn_mask was silently ignored. We support a mask shape of
+    // [batch_heads, seq_len_q, seq_len_k] (or any prefix that broadcasts);
+    // for now require exactly that 3D shape and bounds-check at the host.
+    const float* mask_ptr = nullptr;
+    int64_t mask_b_stride = 0, mask_q_stride = 0;
+    if (mask != nullptr && mask->is_valid() && mask->numel() > 0) {
+        if (mask->dtype() != DType::Float32) {
+            throw std::invalid_argument(
+                "FlashAttention OneAPI: mask must be Float32 (cast at host).");
+        }
+        if (mask->ndim() != 3
+            || mask->shape()[0] != batch_heads
+            || mask->shape()[1] != seq_len_q
+            || mask->shape()[2] != seq_len_k) {
+            throw std::invalid_argument(
+                "FlashAttention OneAPI: mask must be shape [batch_heads, seq_q, seq_k].");
+        }
+        mask_ptr = get_data_ptr<const float>(*mask);
+        mask_b_stride = seq_len_q * seq_len_k;
+        mask_q_stride = seq_len_k;
+    }
+
     // 2D grid: (batch_heads, seq_len_q) — one work-group per query row
     queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<ComputeT, 1> local_mem(local_mem_size / sizeof(ComputeT), cgh);
@@ -2216,6 +2260,9 @@ auto flash_attention_impl(
         const int ks = K_STRIDE;
         const bool causal = is_causal;
         const ComputeT sc = scale;
+        const float* m_ptr = mask_ptr;
+        const int64_t m_bstr = mask_b_stride;
+        const int64_t m_qstr = mask_q_stride;
 
         cgh.parallel_for<KernelName>(
             sycl::nd_range<2>(
@@ -2293,17 +2340,32 @@ auto flash_attention_impl(
                             score += q_val * sc * K_tile[j * ks + d];
                         }
                         // Apply causal mask
-                        if (causal && (k_start + j) > query_idx) {
+                        int kv_pos = k_start + j;
+                        if (causal && kv_pos > query_idx) {
                             score = -std::numeric_limits<ComputeT>::infinity();
+                        }
+                        // Apply additive attn_mask (audit C4 OneAPI fix —
+                        // was silently dropped). Mask is Float32; broadcast
+                        // by promoting through ComputeT.
+                        if (m_ptr != nullptr) {
+                            int64_t off = static_cast<int64_t>(batch_head) * m_bstr
+                                        + static_cast<int64_t>(query_idx) * m_qstr
+                                        + static_cast<int64_t>(kv_pos);
+                            score += static_cast<ComputeT>(m_ptr[off]);
                         }
                         scores[j] = score;
                         local_max = sycl::fmax(local_max, score);
                     }
 
-                    // Reduce max across work-group
+                    // Reduce max across work-group. reduce_over_group is a
+                    // collective with implicit barrier, so it pairs the
+                    // scores[j] writes above with the reads below (audit
+                    // High #7 OneAPI flagged a missing barrier here — adding
+                    // an explicit one before the read for clarity).
                     ComputeT block_max = sycl::reduce_over_group(
                         item.get_group(), local_max,
                         sycl::maximum<ComputeT>());
+                    sycl::group_barrier(item.get_group());
 
                     // Step 2: Compute exp(score - max) and sum
                     ComputeT local_sum = ComputeT(0);
