@@ -9,7 +9,6 @@
 #   kernels/activations_backward_simd.hpp - SIMD backward passes for activations
 #   kernels/gemm_packing_simd.hpp      - SIMD-accelerated GEMM packing
 #   kernels/fused_linear_optimized.hpp - Optimized fused linear layer operations
-#   kernels/fused_attention.hpp        - Fused attention operations for transformers
 #   kernels/gemm_optimized.hpp         - High-performance GEMM micro-kernels
 #   kernels/simd_fast_math.hpp         - Fast transcendental approximations
 

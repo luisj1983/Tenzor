@@ -18,7 +18,11 @@
 #include <limits>
 
 // Include fused attention kernel for CPU optimization
-#include "../../backends/cpu/kernels/fused_attention.hpp"
+// Note: cpu::attention::scaled_dot_product_attention (formerly in
+// src/backends/cpu/kernels/fused_attention.hpp) was deleted as part of the
+// attention contract consolidation — see docs/internals/attention-contract.md
+// and audit S1. All CPU attention dispatch now flows through OpId::FusedAttention
+// or OpId::FlashAttention via the autograd helpers in include/tenzor/autograd/ops.hpp.
 
 // Include dispatch for fused attention
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -222,48 +226,35 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Use fused CPU kernel for inference when conditions allow:
     // - CPU device, Float32, no mask (or is_causal handles masking), no dropout (or eval mode)
     // - need_weights must be false (fused path doesn't compute attention weights)
-    bool can_use_fused = !need_weights &&
-                         query.device().type == Device::Type::CPU &&
-                         query.dtype() == DType::Float32 &&
-                         (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0) &&  // No explicit mask needed
-                         (dropout_p <= 0.0 || !is_training());  // No dropout needed
+    //
+    // Previously this path called cpu::attention::scaled_dot_product_attention
+    // directly from src/backends/cpu/kernels/fused_attention.hpp — bypassing
+    // dispatch. That created two parallel CPU attention implementations
+    // (audit S1) with different mask sentinels (-1e9 in the header version vs
+    // -INFINITY in the dispatch version). Routing through the dispatch
+    // (OpId::FusedAttention) ensures one source of truth and lets the autograd
+    // Function attach a grad_fn when needed.
+    bool can_use_fused_cpu = !need_weights &&
+                             query.device().type == Device::Type::CPU &&
+                             query.dtype() == DType::Float32 &&
+                             (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0) &&
+                             (dropout_p <= 0.0 || !is_training());
 
-    if (can_use_fused && !is_training()) {
-        // Fast path: Use fused SDPA kernel
-        int64_t batch_heads = batch_size * num_heads;
-
-        // Make tensors contiguous if needed (permute/transpose creates non-contiguous views)
-        Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
-        Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
-        Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
-
-        // Get raw data pointers
-        const float* Q = q_contig.template data<float>();
-        const float* K = k_contig.template data<float>();
-        const float* V = v_contig.template data<float>();
-
-        // Allocate output tensor
-        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, head_dim};
-        Tensor output_tensor = empty(out_shape, DType::Float32, query.device());
-        float* output = output_tensor.data<float>();
-
-        // Call fused kernel
-        cpu::attention::scaled_dot_product_attention(
-            Q, K, V, output,
-            batch_heads,
-            seq_len_q, seq_len_k,
-            head_dim, head_dim,  // d_k = d_v = head_dim
-            is_causal_
-        );
-
-        // Return result (no attention weights computed in fused path for efficiency)
-        Variable attended(output_tensor, false);
-
-        // Return zero-shaped weights to indicate fused path (no weights computed)
-        Tensor empty_weights({0}, DType::Float32, output_tensor.device());
-        Variable attn_weights(empty_weights, false);
-
-        return {attended, attn_weights};
+    if (can_use_fused_cpu && !is_training()) {
+        try {
+            float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+            // Route through the autograd FusedAttention Function so the
+            // resulting Variable carries a grad_fn when any input needs grad
+            // (eval-with-grad). For pure inference the apply helper skips
+            // the Function allocation and returns a no-grad Variable.
+            Variable attended = ::tenzor::fused_attention(
+                query, key, value, scale_f, /*causal=*/is_causal_,
+                /*use_cudnn_sdpa=*/false);
+            Tensor empty_weights({0}, attended.tensor().dtype(), attended.tensor().device());
+            return {attended, Variable(empty_weights, false)};
+        } catch (const std::exception&) {
+            // Fall through to the manual path below if dispatch fails.
+        }
     }
 
     // CUDA Fast path: cuDNN SDPA with Flash Attention and Tensor Cores

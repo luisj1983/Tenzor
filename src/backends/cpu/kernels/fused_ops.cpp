@@ -1975,6 +1975,28 @@ auto fused_conv2d_bn_relu_kernel(
     int64_t stride, int64_t padding,
     float bn_momentum, float bn_eps, bool training) -> Tensor {
 
+    // Widen-narrow for non-Float32 inputs (audit M3 / feedback_float16_widen_narrow).
+    // The underlying SIMD GEMM + conv code is float-typed; we cast to Float32 at
+    // the boundary and back to the input dtype on return so all four dtypes
+    // (Float32 / Float64 / Float16 / BFloat16) get parity coverage.
+    DType orig_dtype = input.dtype();
+    if (orig_dtype != DType::Float32) {
+        Tensor input_f32 = input.dtype() == DType::Float32 ? input : input.to(DType::Float32);
+        Tensor weight_f32 = weight.dtype() == DType::Float32 ? weight : weight.to(DType::Float32);
+        Tensor conv_bias_f32 = (conv_bias.numel() == 0 || conv_bias.dtype() == DType::Float32)
+                                   ? conv_bias
+                                   : conv_bias.to(DType::Float32);
+        Tensor bn_gamma_f32 = bn_gamma.dtype() == DType::Float32 ? bn_gamma : bn_gamma.to(DType::Float32);
+        Tensor bn_beta_f32  = bn_beta.dtype()  == DType::Float32 ? bn_beta  : bn_beta.to(DType::Float32);
+        Tensor bn_rm_f32    = bn_running_mean.dtype() == DType::Float32 ? bn_running_mean : bn_running_mean.to(DType::Float32);
+        Tensor bn_rv_f32    = bn_running_var.dtype()  == DType::Float32 ? bn_running_var  : bn_running_var.to(DType::Float32);
+        Tensor out_f32 = fused_conv2d_bn_relu_kernel(
+            input_f32, weight_f32, conv_bias_f32,
+            bn_gamma_f32, bn_beta_f32, bn_rm_f32, bn_rv_f32,
+            stride, padding, bn_momentum, bn_eps, training);
+        return out_f32.to(orig_dtype);
+    }
+
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
     int64_t batch = in_shape[0];
