@@ -324,7 +324,8 @@ enum class AttrKey : uint16_t {
     DCTType,               // DCT type (1, 2, 3, or 4)
 
     // FlexAttention parameters (per docs/internals/attention-contract.md)
-    ScoreModId,            // OpId-encoded score modification op (0 = none/identity)
+    ScoreModId,            // Built-in score_mod selector (0=identity, 1=causal, 2=sliding_window)
+    WindowSize,            // Sliding window size for ScoreModId == 2 (full window, not half)
 
     // Sentinel
     _Count

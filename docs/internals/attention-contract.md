@@ -94,9 +94,25 @@ Block-sparse attention with score modification.
 | | |
 |---|---|
 | Inputs | `Q, K, V`, optional `block_mask` |
-| Attrs | `Scale`, `ScoreModId: int` (an `OpId` value identifying the score modification op — must be serializable; **not** a `std::function`) |
+| Attrs | `Scale`, `ScoreModId: int` (selects a built-in score_mod), `WindowSize: int` (used when `ScoreModId == 2`) |
 | Outputs | `(output, logsumexp)` |
-| Constraint | `score_mod` is encoded as an `OpId`. Backends that don't implement the requested `ScoreModId` raise `std::invalid_argument`. The CPU reference implements the standard library: `causal`, `alibi`, `sliding_window`, `relative_position_bias`, `rectangular`. |
+
+### ScoreModId registry
+
+Backends implement these built-ins natively; arbitrary programmable score_mod
+functors are deferred to the host-side reference at
+`src/nn/layers/flex_attention.cpp` (which takes `std::function` and runs on CPU).
+
+| ID | Name | Behavior | Backends |
+|----|------|----------|----------|
+| 0 | identity | no modification (== FusedAttention) | CPU, CUDA, ROCm, OneAPI, Vulkan |
+| 1 | causal | upper-triangular mask above diagonal | CPU, CUDA, ROCm, OneAPI, Vulkan |
+| 2 | sliding_window | mask positions where `\|i-j\| > WindowSize/2` | CPU, CUDA, ROCm, OneAPI, Vulkan (composed) |
+| ≥3 | reserved | future built-ins (alibi, relative_position_bias, rectangular) | not yet wired |
+
+Backends that don't implement the requested `ScoreModId` raise
+`std::invalid_argument` with a clear message pointing to the host-side reference
+at `src/nn/layers/flex_attention.cpp` for arbitrary score_mod functors.
 
 ## FusedLayerNorm (`OpId::FusedLayerNorm`, `OpId::FusedLayerNormBackward`)
 

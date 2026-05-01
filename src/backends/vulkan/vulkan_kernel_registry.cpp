@@ -2475,17 +2475,53 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
-            if (score_mod_id != 0 && score_mod_id != 1) {
-                throw std::runtime_error(
-                    "FlexAttention Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
-                    " not yet implemented (M8 work).");
+
+            if (score_mod_id == 0 || score_mod_id == 1) {
+                bool causal = (score_mod_id == 1);
+                Tensor output = get_vulkan_backend()->dispatchFlashAttention(
+                    inputs[0], inputs[1], inputs[2], scale, causal);
+                return {output, Tensor{}};
             }
-            bool causal = (score_mod_id == 1);
-            Tensor output = get_vulkan_backend()->dispatchFlashAttention(
-                inputs[0], inputs[1], inputs[2], scale, causal);
-            // LSE not yet emitted by Vulkan flash shader — empty placeholder
-            // matches the FlashAttention contract.
-            return {output, Tensor{}};
+
+            if (score_mod_id == 2) {
+                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+                if (window_size <= 0) {
+                    throw std::invalid_argument(
+                        "FlexAttention Vulkan: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                }
+                const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
+                int64_t S_q = Q.shape()[Q.shape().size() - 2];
+                int64_t S_k = K.shape()[K.shape().size() - 2];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::bmm(Q, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                               scores.dtype(), scores.device());
+                scores = scores * scale_t;
+                int64_t half = window_size / 2;
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
+                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                                              abs_diff.dtype(), abs_diff.device());
+                Tensor outside = tenzor::gt(abs_diff, half_t);
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device());
+                scores = scores + (outside.to(scores.dtype()) * neg_inf);
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                Tensor output = tenzor::bmm(probs, V);
+                return {output, Tensor{}};
+            }
+
+            throw std::runtime_error(
+                "FlexAttention Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (only 0=identity, 1=causal, 2=sliding_window).");
         });
 
     table.register_kernel(OpId::FlexAttentionBackward,
