@@ -1436,13 +1436,26 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
     // Create output shape
     std::vector<int64_t> out_shape;
+    int64_t batch_count = 1;
     for (size_t i = 0; i < a_shape.size() - 2; ++i) {
         out_shape.push_back(a_shape[i]);
+        batch_count *= a_shape[i];
     }
     out_shape.push_back(m);
     out_shape.push_back(n);
 
     Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+
+    // Audit-surfaced bug fix (M9 OneAPI 4D parity): the >=2D path below only
+    // allocated/copied a single m*k submatrix and called gemm once, so for
+    // any rank > 2 input the leading batch dimensions were silently ignored
+    // — output beyond the first 2D submatrix was uninitialized garbage.
+    // Loop over the leading batch dims so each 2D slice gets its own gemm.
+    // (oneMKL gemm_batch would be faster but loop is correct and unblocks
+    // the parity sweep; perf optimization tracked separately.)
+    const int64_t a_batch_stride = m * k;
+    const int64_t b_batch_stride = k * n;
+    const int64_t c_batch_stride = m * n;
 
 #ifdef TENZOR_HAS_ONEMKL
     // oneMKL GEMM has issues with sycl::malloc_shared memory on some devices/configurations
@@ -1460,34 +1473,31 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         std::unique_ptr<float, decltype(deleter)> d_c(
             static_cast<float*>(sycl::malloc_device(m * n * sizeof(float), queue)), deleter);
 
-        queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(float));
-        queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(float));
-        // In-order queue: GEMM will wait for memcpy to complete
-
         const float alpha = 1.0f;
         const float beta = 0.0f;
 
-        try {
-            // Row-major C(m,n) = A(m,k) * B(k,n)
-            // In column-major: C^T(n,m) = B^T(n,k) * A^T(k,m)
-            ::oneapi::mkl::blas::column_major::gemm(
-                queue,
-                ::oneapi::mkl::transpose::nontrans,
-                ::oneapi::mkl::transpose::nontrans,
-                n, m, k,
-                alpha,
-                d_b.get(), n,
-                d_a.get(), k,
-                beta,
-                d_c.get(), n
-            );
-        } catch (const ::oneapi::mkl::exception& e) {
-            throw std::runtime_error(std::string("oneMKL GEMM (F32) failed: ") + e.what());
-        } catch (const sycl::exception& e) {
-            throw std::runtime_error(std::string("SYCL error in GEMM (F32): ") + e.what());
+        for (int64_t bi = 0; bi < batch_count; ++bi) {
+            queue.memcpy(d_a.get(), a_ptr + bi * a_batch_stride, m * k * sizeof(float));
+            queue.memcpy(d_b.get(), b_ptr + bi * b_batch_stride, k * n * sizeof(float));
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    n, m, k,
+                    alpha,
+                    d_b.get(), n,
+                    d_a.get(), k,
+                    beta,
+                    d_c.get(), n
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F32) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F32): ") + e.what());
+            }
+            queue.memcpy(out_ptr + bi * c_batch_stride, d_c.get(), m * n * sizeof(float));
         }
-
-        queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(float));
         queue.wait_and_throw();
     }
     else if (a_cont.dtype() == DType::Float64) {
@@ -1503,32 +1513,31 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         std::unique_ptr<double, decltype(deleter)> d_c(
             static_cast<double*>(sycl::malloc_device(m * n * sizeof(double), queue)), deleter);
 
-        queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(double));
-        queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(double));
-        // In-order queue: GEMM will wait for memcpy to complete
-
+        // Per-batch loop (audit-surfaced bug fix — same as F32 path above).
         const double alpha = 1.0;
         const double beta = 0.0;
-
-        try {
-            ::oneapi::mkl::blas::column_major::gemm(
-                queue,
-                ::oneapi::mkl::transpose::nontrans,
-                ::oneapi::mkl::transpose::nontrans,
-                n, m, k,
-                alpha,
-                d_b.get(), n,
-                d_a.get(), k,
-                beta,
-                d_c.get(), n
-            );
-        } catch (const ::oneapi::mkl::exception& e) {
-            throw std::runtime_error(std::string("oneMKL GEMM (F64) failed: ") + e.what());
-        } catch (const sycl::exception& e) {
-            throw std::runtime_error(std::string("SYCL error in GEMM (F64): ") + e.what());
+        for (int64_t bi = 0; bi < batch_count; ++bi) {
+            queue.memcpy(d_a.get(), a_ptr + bi * a_batch_stride, m * k * sizeof(double));
+            queue.memcpy(d_b.get(), b_ptr + bi * b_batch_stride, k * n * sizeof(double));
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    n, m, k,
+                    alpha,
+                    d_b.get(), n,
+                    d_a.get(), k,
+                    beta,
+                    d_c.get(), n
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F64) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F64): ") + e.what());
+            }
+            queue.memcpy(out_ptr + bi * c_batch_stride, d_c.get(), m * n * sizeof(double));
         }
-
-        queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(double));
         queue.wait_and_throw();
     }
     else if (a_cont.dtype() == DType::Float16) {

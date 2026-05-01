@@ -1816,9 +1816,51 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Fused Attention — Causal flag now plumbed through (audit C1 ROCm fix).
     // ========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Mirrors CUDA M4-rem: 4D input with H_kv != H_q gets broadcast K/V
+        // along the head dim before the 3D collapse. fused_attention_hip
+        // assumes 3D [batch_heads, seq, dim] and would reshape-fail or
+        // silently wrong otherwise. Per attention-contract.md GQA section.
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
-        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
+        const Tensor& Qi = inputs[0];
+        const Tensor& Ki = inputs[1];
+        const Tensor& Vi = inputs[2];
+        if (Qi.shape().size() == 4) {
+            int64_t b = Qi.shape()[0], h = Qi.shape()[1], sq = Qi.shape()[2], d = Qi.shape()[3];
+            int64_t h_kv = Ki.shape()[1];
+            int64_t sk = Ki.shape()[2];
+            int64_t d_v = Vi.shape()[3];
+            Tensor Kc = Ki.is_contiguous() ? Ki : Ki.contiguous();
+            Tensor Vc = Vi.is_contiguous() ? Vi : Vi.contiguous();
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FusedAttention ROCm: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t reps = h / h_kv;
+                NewOpAttributes us; us.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Kc}, us)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vc}, us)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, d_v};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek; ek.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev; ev.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev)[0];
+                Kc = Ke.contiguous().reshape({b, h, sk, d});
+                Vc = Ve.contiguous().reshape({b, h, sk, d_v});
+            }
+            Tensor Q3 = (Qi.is_contiguous() ? Qi : Qi.contiguous()).reshape({b * h, sq, d});
+            Tensor K3 = Kc.reshape({b * h, sk, d});
+            Tensor V3 = Vc.reshape({b * h, sk, d_v});
+            auto [out3, lse3] = rocm::fused_attention_hip(Q3, K3, V3, scale, causal, 0.0f, 0u);
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v}), lse3};
+        }
+        auto [output, lse] = rocm::fused_attention_hip(Qi, Ki, Vi, scale, causal, 0.0f, 0u);
         return std::vector<Tensor>{output, lse};
     });
 

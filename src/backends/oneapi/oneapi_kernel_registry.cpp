@@ -2921,13 +2921,48 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             auto& queue = get_q(inputs);
 
+            // GQA host-broadcast: when 4D Q [B, H, S_q, D] meets K [B, H_kv, S_k, D]
+            // with H_kv < H_q, broadcast K/V along the head dim before the
+            // matmul. Per attention-contract.md GQA section. Mirrors the CUDA
+            // and ROCm M-rem patches; without this, oneapi::matmul_kernel
+            // would fail with "incompatible matrix dimensions" or silently
+            // mis-shape the result for GQA inputs.
+            Tensor Q_in = inputs[0];
+            Tensor K_in = inputs[1];
+            Tensor V_in = inputs[2];
+            if (Q_in.shape().size() == 4 && K_in.shape().size() == 4 && Q_in.shape()[1] != K_in.shape()[1]) {
+                int64_t b = Q_in.shape()[0], h = Q_in.shape()[1];
+                int64_t h_kv = K_in.shape()[1], sk = K_in.shape()[2], d = K_in.shape()[3];
+                int64_t d_v = V_in.shape()[3];
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FusedAttention OneAPI: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t reps = h / h_kv;
+                NewOpAttributes us; us.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{K_in}, us)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{V_in}, us)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, d_v};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek; ek.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev; ev.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev)[0];
+                K_in = Ke.contiguous().reshape({b, h, sk, d});
+                V_in = Ve.contiguous().reshape({b, h, sk, d_v});
+            }
+
             // Step 1: QK^T via batched matmul — transpose K by permuting last two dims
-            auto k_shape = inputs[1].shape();
+            auto k_shape = K_in.shape();
             int64_t ndim = static_cast<int64_t>(k_shape.size());
-            Tensor kt = oneapi::transpose_kernel(inputs[1], ndim - 2, ndim - 1, queue);
+            Tensor kt = oneapi::transpose_kernel(K_in, ndim - 2, ndim - 1, queue);
 
             // Step 2: scores = Q @ K^T
-            Tensor scores = oneapi::matmul_kernel(inputs[0], kt, queue);
+            Tensor scores = oneapi::matmul_kernel(Q_in, kt, queue);
 
             // Step 3: Multiply by scale. Per docs/internals/attention-contract.md
             // scale is the multiplicative factor (typically 1/sqrt(d_k)) — every
@@ -2939,7 +2974,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             scores = oneapi::mul_kernel(scores, scale_tensor, queue);
 
             // Step 3b: Apply causal mask if requested (audit C2 OneAPI: was
-            // also dropped). Use -INFINITY sentinel per the contract.
+            // dropped). Use `where(mask, -INFINITY, 0)` instead of
+            // `mul(mask, -INFINITY)` because IEEE 0 * -INF = NaN, which
+            // would corrupt unmasked positions and cascade through softmax
+            // (M9 parity sweep caught this — was producing NaN outputs).
             bool causal = attrs.get_bool(AttrKey::Causal, false);
             if (causal) {
                 auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
@@ -2950,18 +2988,33 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 rows = oneapi::reshape_kernel(rows, {seq_q, 1}, queue);
                 cols = oneapi::reshape_kernel(cols, {1, seq_k}, queue);
                 Tensor causal_mask = oneapi::gt_kernel(cols.to(DType::Float32), rows.to(DType::Float32), queue);
+                // Explicitly broadcast causal_mask from [seq_q, seq_k] to
+                // scores_shape before where, so OneAPI's where kernel receives
+                // all same-shape tensors. Manual broadcast via dispatch Expand.
+                std::string s_shape;
+                for (size_t i = 0; i < scores_shape.size(); ++i) {
+                    if (i) s_shape += ",";
+                    s_shape += std::to_string(scores_shape[i]);
+                }
+                NewOpAttributes exp_attrs; exp_attrs.set(AttrKey::Shape, s_shape);
+                std::vector<Tensor> exp_in = {causal_mask};
+                Tensor mask_4d = tenzor::dispatch(OpId::Expand, exp_in, exp_attrs)[0];
                 Tensor neg_inf = oneapi::full_kernel(scores_shape,
                     -std::numeric_limits<float>::infinity(),
                     scores.dtype(), scores.device(), queue);
-                scores = oneapi::add_kernel(scores,
-                    oneapi::mul_kernel(causal_mask.to(scores.dtype()), neg_inf, queue), queue);
+                Tensor zero = oneapi::full_kernel(scores_shape,
+                    0.0f, scores.dtype(), scores.device(), queue);
+                std::vector<Tensor> w_in = {mask_4d.contiguous(), neg_inf, zero};
+                NewOpAttributes w_attrs;
+                Tensor mask_addend = tenzor::dispatch(OpId::Where, w_in, w_attrs)[0];
+                scores = oneapi::add_kernel(scores, mask_addend, queue);
             }
 
             // Step 4: Softmax over last dimension
             Tensor attn_weights = oneapi::softmax_kernel(scores, -1, queue);
 
-            // Step 5: attn_weights @ V
-            Tensor output = oneapi::matmul_kernel(attn_weights, inputs[2], queue);
+            // Step 5: attn_weights @ V (use V_in — possibly broadcast for GQA)
+            Tensor output = oneapi::matmul_kernel(attn_weights, V_in, queue);
             // Per contract, FusedAttention returns (output, lse). LSE is the
             // log-row-sum-of-exp from the softmax above; until a fused-LSE
             // kernel lands, we compute it composed-ops style: max(scores) +
