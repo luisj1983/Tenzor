@@ -31,10 +31,15 @@
 //
 // Limitations (all documented in dispatchFlashAttention's fast-path
 // gating):
-//   - Float32 only (no FP16 variant yet).
+//   - Float32 only (no FP16 variant yet — M8 work).
 //   - head_dim and head_v up to MAX_HEAD_DIM = 128.
-//   - No causal mask (caller falls through to the composed path).
+//   - LSE saving (audit C1 Vulkan) and Philox dropout — M8 work.
 //   - Workgroup size fixed at Br = 16 threads.
+//
+// Causal masking IS supported (audit C2 Vulkan fix): when push_constant.causal
+// is non-zero, score is set to -INFINITY for kv positions > q position before
+// softmax. The contract sentinel (-INFINITY, never -1e9 / -1e30) is used so
+// the mask cleanly produces exp(-INFINITY) = 0 in the softmax below.
 //
 // Dispatch: (num_q_tiles, batch_heads, 1) workgroups where
 //   num_q_tiles = ceil(S_q / Br).
@@ -56,6 +61,8 @@ layout(push_constant) uniform PushConstants {
     int head_dim;   // D  (<= MAX_HEAD_DIM)
     int head_v;     // Dv (<= MAX_HEAD_DIM)
     float scale;    // usually 1 / sqrt(D)
+    int causal;     // M7: 0 = no mask, non-zero = causal lower-triangular
+                    //     mask applied before softmax with -INFINITY sentinel
 };
 
 // Shared memory for one K block and one V block — re-used across Q rows
@@ -80,10 +87,13 @@ void main() {
         }
     }
 
-    // Per-thread output accumulator and running softmax stats.
+    // Per-thread output accumulator and running softmax stats. Uses
+    // -1.0/0.0 = -INFINITY for the row_max sentinel (audit C2/C3 Vulkan)
+    // — the contract requires -INFINITY (not -1e30) so masked rows produce
+    // P = 0 cleanly without leaving residual gradient mass in FP16 paths.
     float o_vec[MAX_HEAD_DIM];
     for (int d = 0; d < MAX_HEAD_DIM; ++d) o_vec[d] = 0.0;
-    float row_max = -1e30;
+    float row_max = -1.0 / 0.0;  // -INFINITY
     float row_sum = 0.0;
 
     int num_k_blocks = (seq_k + Bc - 1) / Bc;
@@ -114,20 +124,21 @@ void main() {
         }
         barrier();
 
-        // Compute S_ij = Q_i · K_j · scale for j in this K block. Also
-        // mark out-of-range positions so they don't contribute to the
-        // softmax.
+        // Compute S_ij = Q_i · K_j · scale for j in this K block. Out-of-range
+        // and causally-masked positions get -INFINITY (contract sentinel,
+        // audit Systemic #3 — never -1e9 / -1e30, those saturate FP16).
         float S[Bc];
         for (int j = 0; j < Bc; ++j) {
             int k_row = k_start + j;
-            if (k_row < seq_k) {
+            bool causally_masked = (causal != 0) && (k_row > q_row);
+            if (k_row < seq_k && !causally_masked) {
                 float s = 0.0;
                 for (int d = 0; d < head_dim; ++d) {
                     s += q_vec[d] * Ks[j][d];
                 }
                 S[j] = s * scale;
             } else {
-                S[j] = -1e30;
+                S[j] = -1.0 / 0.0;  // -INFINITY
             }
         }
 
@@ -136,14 +147,25 @@ void main() {
         for (int j = 1; j < Bc; ++j) tile_max = max(tile_max, S[j]);
 
         float new_max = max(row_max, tile_max);
-        float correction = (row_max == -1e30) ? 0.0 : exp(row_max - new_max);
+        // Early-out when the entire history (incl. this tile) is masked —
+        // exp(-INF - (-INF)) is NaN; treat correction as 0 (audit C3 Vulkan).
+        // isinf(-INFINITY) returns true; new_max == -INFINITY iff both row_max
+        // and tile_max are -INFINITY, which means no valid keys yet.
+        bool prev_was_inf = isinf(row_max) && row_max < 0.0;
+        bool all_masked = isinf(new_max) && new_max < 0.0;
+        float correction = prev_was_inf ? 0.0 : exp(row_max - new_max);
 
-        // P_ij and tile sum.
+        // P_ij and tile sum. When all_masked, leave row_sum at 0 — the
+        // post-loop normalisation skips writing in that case.
         float P[Bc];
         float tile_sum = 0.0;
-        for (int j = 0; j < Bc; ++j) {
-            P[j] = exp(S[j] - new_max);
-            tile_sum += P[j];
+        if (!all_masked) {
+            for (int j = 0; j < Bc; ++j) {
+                P[j] = exp(S[j] - new_max);
+                tile_sum += P[j];
+            }
+        } else {
+            for (int j = 0; j < Bc; ++j) P[j] = 0.0;
         }
 
         // Running sum update.

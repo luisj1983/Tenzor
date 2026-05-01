@@ -41,10 +41,17 @@ void main() {
     float64_t sq = rho_d * square_avg[gid] + (1.0LF - rho_d) * g * g;
     square_avg[gid] = sq;
 
-    // Compute update delta
-    // GLSL sqrt only works on float — cast down for sqrt
-    float64_t std_delta = float64_t(sqrt(float(acc_delta[gid] + eps_d)));
-    float64_t std_grad = float64_t(sqrt(float(sq + eps_d)));
+    // Per attention-contract.md F64 sqrt rule: refine a float guess in F64
+    // (audit C10 Vulkan). Helper computes sqrt(x) ≈ x * (1/sqrt(float(x)))
+    // refined via one Newton-Raphson iteration in F64.
+    float64_t ad_in = acc_delta[gid] + eps_d;
+    float64_t inv_sd = float64_t(1.0) / float64_t(sqrt(float(ad_in)));
+    inv_sd = inv_sd * (float64_t(1.5) - float64_t(0.5) * ad_in * inv_sd * inv_sd);
+    float64_t std_delta = ad_in * inv_sd;
+    float64_t sg_in = sq + eps_d;
+    float64_t inv_sg = float64_t(1.0) / float64_t(sqrt(float(sg_in)));
+    inv_sg = inv_sg * (float64_t(1.5) - float64_t(0.5) * sg_in * inv_sg * inv_sg);
+    float64_t std_grad = sg_in * inv_sg;
     float64_t delta = std_delta / std_grad * g;
 
     // Accumulate squared update

@@ -998,10 +998,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Per docs/internals/attention-contract.md, RMSNorm reads
+        // AttrKey::NormalizedShape (multi-dim trailing-axes spec). Previously
+        // this used .back() which silently truncated multi-dim normalisation
+        // to the last dim (audit C20 Vulkan — singular-vs-plural drift in the
+        // same registry, since LayerNorm at line 1225 reads the attr correctly).
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        int64_t normalized_shape = inputs[0].shape().back();
+        auto normalized_shape_list = attrs.get_int_list(AttrKey::NormalizedShape);
+        int64_t normalized_size = 1;
+        if (!normalized_shape_list.empty()) {
+            for (auto d : normalized_shape_list) normalized_size *= d;
+        } else {
+            normalized_size = inputs[0].shape().back();
+        }
         auto [output, rrms] = get_vulkan_backend()->dispatchRMSNorm(
-            inputs[0], inputs[1], normalized_shape, eps);
+            inputs[0], inputs[1], normalized_size, eps);
         return std::vector<Tensor>{output, rrms};
     });
 
@@ -1223,24 +1234,55 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Per docs/internals/attention-contract.md: FusedLayerNorm forward must
+        // return (output, mean, rstd). Vulkan's dispatchLayerNorm currently
+        // returns just output and discards mean/inv_std internally — the
+        // SEGV pattern from feedback_forward_returns_stats (audit C12 Vulkan).
+        // Until dispatchLayerNorm exposes mean/inv_std, recompute them at the
+        // host level so the contract is honored. Per the contract, mean and
+        // rstd are Float32 even for FP16/BF16 inputs.
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         int64_t normalized_size = 1;
         for (auto s : normalized_shape) normalized_size *= s;
         if (normalized_size <= 0) normalized_size = inputs[0].shape().back();
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
 
-        // BFloat16: upcast all inputs to Float32 for numerical stability, then convert back
+        Tensor output;
         if (inputs[0].dtype() == DType::BFloat16) {
             Tensor input_f32 = inputs[0].to(DType::Float32);
             Tensor gamma_f32 = inputs[1].to(DType::Float32);
             Tensor beta_f32 = inputs[2].to(DType::Float32);
-            auto result = get_vulkan_backend()->dispatchLayerNorm(
-                input_f32, normalized_size, &gamma_f32, &beta_f32, eps);
-            return std::vector<Tensor>{result.to(DType::BFloat16)};
+            output = get_vulkan_backend()->dispatchLayerNorm(
+                input_f32, normalized_size, &gamma_f32, &beta_f32, eps).to(DType::BFloat16);
+        } else {
+            output = get_vulkan_backend()->dispatchLayerNorm(
+                inputs[0], normalized_size, &inputs[1], &inputs[2], eps);
         }
 
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchLayerNorm(
-            inputs[0], normalized_size, &inputs[1], &inputs[2], eps)};
+        // Compute mean / rstd at host level for the saved-stats slots.
+        const Tensor& X = inputs[0];
+        int64_t batch_size = X.numel() / normalized_size;
+        Tensor X_f32 = (X.dtype() == DType::Float32) ? X : X.to(DType::Float32);
+        Tensor X_2d = tenzor::reshape(X_f32, std::vector<int64_t>{batch_size, normalized_size});
+        NewOpAttributes mean_attrs;
+        mean_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+        mean_attrs.set(AttrKey::Keepdim, false);
+        std::vector<Tensor> mean_in = {X_2d};
+        Tensor mean = tenzor::dispatch(OpId::Mean, mean_in, mean_attrs)[0];
+        Tensor mean_unsq = tenzor::reshape(mean, std::vector<int64_t>{batch_size, 1});
+        Tensor diff = tenzor::sub(X_2d, mean_unsq);
+        Tensor diff_sq = tenzor::mul(diff, diff);
+        std::vector<Tensor> var_in = {diff_sq};
+        Tensor var = tenzor::dispatch(OpId::Mean, var_in, mean_attrs)[0];
+        Tensor eps_t = tenzor::full(
+            std::vector<int64_t>(var.shape().begin(), var.shape().end()),
+            static_cast<double>(eps), var.dtype(), var.device());
+        Tensor var_eps = tenzor::add(var, eps_t);
+        Tensor rstd = tenzor::div(
+            tenzor::full(std::vector<int64_t>(var_eps.shape().begin(), var_eps.shape().end()),
+                         1.0, var_eps.dtype(), var_eps.device()),
+            tenzor::sqrt(var_eps));
+        return std::vector<Tensor>{output, mean, rstd};
     });
 
     // ========================================================================
@@ -2320,10 +2362,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Expected speedup: 2-4x for long sequences (memory-bandwidth-bound).
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Per docs/internals/attention-contract.md: returns 4-tuple
+            // [output, lse, philox_seed, philox_offset]. The Vulkan compute
+            // shader currently only emits output (audit C1 Vulkan); LSE +
+            // Philox arrive with the shader-level refit (M8). Until then,
+            // emit empty placeholders so consumers using .is_valid() detect
+            // the contract gap and fall back to composed backward.
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
-            return {get_vulkan_backend()->dispatchFlashAttention(
-                inputs[0], inputs[1], inputs[2], scale, causal)};
+            float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+            bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
+            if (dropout_p > 0.0f && is_training) {
+                throw std::runtime_error(
+                    "FlashAttention Vulkan: dropout > 0 not yet supported. Routes "
+                    "through BMM fallback in nn::functional::scaled_dot_product_attention.");
+            }
+            Tensor output = get_vulkan_backend()->dispatchFlashAttention(
+                inputs[0], inputs[1], inputs[2], scale, causal);
+            return {output, Tensor{}, Tensor{}, Tensor{}};
         });
     // FlashAttentionBackward — composed from Vulkan matmul + softmax backward
     table.register_kernel(OpId::FlashAttentionBackward,
@@ -2349,26 +2405,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                            scores.dtype(), scores.device());
             scores = tenzor::mul(scores, scale_t);
 
-            // Apply causal mask if needed
+            // Apply causal mask if needed. Per docs/internals/attention-contract.md
+            // sentinel rule: -INFINITY, never -1e9 (audit C15 Vulkan — -1e9
+            // saturates to -65504 in FP16, leaks gradient mass through softmax).
             if (causal) {
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
-                Tensor mask = tenzor::ones({seq_len, seq_len}, DType::Float32, scores.device());
-                // Upper triangle = -inf
-                for (int64_t i = 0; i < seq_len; ++i) {
-                    for (int64_t j = i + 1; j < seq_len; ++j) {
-                        // This is expensive per-element; use triu approach
-                    }
-                }
-                // Simplified: use existing arange + comparison
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 rows = vk->dispatchReshape(rows, {seq_len, 1});
                 cols = vk->dispatchReshape(cols, {1, seq_len});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
-                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
-                                              scores.dtype(), scores.device());
-                Tensor zero = tenzor::zeros(scores_shape, scores.dtype(), scores.device());
-                // Broadcast causal_mask to scores shape
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device());
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
 
@@ -2414,6 +2463,46 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             Tensor dK = vk->dispatchBmm(dScores_t, Q);
 
             return {dQ, dK, dV};
+        });
+
+    // =========================================================================
+    // FlexAttention (built-in score_mod registry; native programmable in M8)
+    // =========================================================================
+    // Per docs/internals/attention-contract.md, ScoreModId 0=identity, 1=causal.
+    // Both reduce to FusedAttention; other IDs throw until M8 lands the native
+    // block-sparse path (audit C21 Vulkan — was entirely unregistered).
+    table.register_kernel(OpId::FlexAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+            if (score_mod_id != 0 && score_mod_id != 1) {
+                throw std::runtime_error(
+                    "FlexAttention Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
+                    " not yet implemented (M8 work).");
+            }
+            bool causal = (score_mod_id == 1);
+            Tensor output = get_vulkan_backend()->dispatchFlashAttention(
+                inputs[0], inputs[1], inputs[2], scale, causal);
+            // LSE not yet emitted by Vulkan flash shader — empty placeholder
+            // matches the FlashAttention contract.
+            return {output, Tensor{}};
+        });
+
+    table.register_kernel(OpId::FlexAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+            if (score_mod_id != 0 && score_mod_id != 1) {
+                throw std::runtime_error(
+                    "FlexAttentionBackward Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
+                    " not yet implemented (M8 work).");
+            }
+            bool causal = (score_mod_id == 1);
+            OpAttributes bwd_attrs;
+            bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+            bwd_attrs.set(AttrKey::Causal, causal);
+            std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+            return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         });
 
     // =========================================================================

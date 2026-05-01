@@ -45,13 +45,20 @@ void main() {
 
     // GLSL sqrt only works on float — cast down for sqrt
     float64_t denom;
+    // Per attention-contract.md F64 sqrt rule: refine in F64 (audit C10 Vulkan).
     if (params.centered != 0) {
         // Centered RMSprop: subtract squared mean gradient
         float64_t ga = alpha_d * grad_avg[gid] + (1.0LF - alpha_d) * g;
         grad_avg[gid] = ga;
-        denom = float64_t(sqrt(float(sq - ga * ga + eps_d)));
+        float64_t s = sq - ga * ga + eps_d;
+        float64_t inv = float64_t(1.0) / float64_t(sqrt(float(s)));
+        inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
+        denom = s * inv;
     } else {
-        denom = float64_t(sqrt(float(sq + eps_d)));
+        float64_t s = sq + eps_d;
+        float64_t inv = float64_t(1.0) / float64_t(sqrt(float(s)));
+        inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
+        denom = s * inv;
     }
 
     if (params.has_momentum != 0) {

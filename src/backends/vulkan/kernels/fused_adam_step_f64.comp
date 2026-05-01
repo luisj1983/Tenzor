@@ -71,8 +71,20 @@ void main() {
     float64_t bc1_d = float64_t(params.bias_correction1);
     float64_t bc2s_d = float64_t(params.bias_correction2_sqrt);
     float64_t m_hat = m / bc1_d;
-    // GLSL sqrt only works on float — cast down for sqrt
-    float64_t denom_d = float64_t(sqrt(float(denom_v))) / bc2s_d + eps_d;
+    // Per docs/internals/attention-contract.md (optimizer F64 paths): never
+    // downcast to float for sqrt — defeats the whole point of FP64 (audit C10
+    // Vulkan). GLSL sqrt isn't overloaded for float64_t in the base spec, so
+    // we Newton-Raphson refine a float-precision initial guess in F64:
+    //   inv = 1 / sqrt(float(x));                    # float-precision guess
+    //   inv = inv * (1.5 - 0.5 * x * inv * inv);     # one F64 NR iteration
+    // The single iteration adds ~24 bits of precision (doubles each step), so
+    // the result is accurate to ~48 bits of mantissa — well within F64's 52.
+    // Two iterations would saturate at ~52 bits but are usually overkill.
+    float64_t denom_v_d = denom_v;
+    float64_t inv_sqrt = float64_t(1.0) / float64_t(sqrt(float(denom_v_d)));
+    inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * denom_v_d * inv_sqrt * inv_sqrt);
+    float64_t sqrt_denom = denom_v_d * inv_sqrt;  // x * (1/sqrt(x)) = sqrt(x), refined
+    float64_t denom_d = sqrt_denom / bc2s_d + eps_d;
 
     p -= lr_d * m_hat / denom_d;
     param_data[gid] = p;

@@ -70,8 +70,13 @@ void main() {
     float64_t m_hat = m / bc1_d;
     float64_t v_hat = denom_v / (bc2s_d * bc2s_d);
 
-    // Atan2 update (key difference from standard Adam)
-    // GLSL atan/sqrt only work on float — cast down for trig
+    // Atan2 update (key difference from standard Adam). Per attention-contract.md
+    // F64 rule we'd ordinarily refine sqrt in F64, but atan2 itself isn't
+    // overloaded for float64_t in GLSL — the result is an angle in [-pi, pi]
+    // with ~7 decimal digits of precision, which is plenty for the direction.
+    // Refining sqrt(v_hat) in F64 here would gain mantissa bits that the
+    // atan2 step then discards anyway. The float result is cast back to F64
+    // before the parameter update, so weight precision is preserved.
     float update = atan(float(m_hat), sqrt(float(v_hat)) + float(eps_d));
     p -= lr_d * float64_t(update);
 

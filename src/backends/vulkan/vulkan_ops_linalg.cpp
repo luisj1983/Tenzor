@@ -2373,14 +2373,23 @@ auto VulkanBackend::dispatchFlashAttention(
     int64_t batch_heads, seq_len_q, seq_len_k, d_k;
 
     if (has_head_dim) {
+        // Per docs/internals/attention-contract.md (stride/contiguity rule):
+        // .contiguous() MUST precede .reshape(). The previous code called
+        // Q.reshape(...) on a possibly-permuted view (typical MHA pattern of
+        // permute(0,2,1,3) on [B,S,H,D]), which silently throws or returns
+        // a logically-wrong view (audit C4 Vulkan).
+        Tensor Q_c = Q.is_contiguous() ? Q : dispatchContiguous(Q);
+        Tensor K_c = K.is_contiguous() ? K : dispatchContiguous(K);
+        Tensor V_c = V.is_contiguous() ? V : dispatchContiguous(V);
+
         batch_heads = q_shape[0] * q_shape[1];
         seq_len_q = q_shape[2];
         d_k = q_shape[3];
         seq_len_k = K.shape()[2];
 
-        q_flat = Q.reshape({batch_heads, seq_len_q, d_k});
-        k_flat = K.reshape({batch_heads, seq_len_k, d_k});
-        v_flat = V.reshape({batch_heads, seq_len_k, V.shape()[3]});
+        q_flat = Q_c.reshape({batch_heads, seq_len_q, d_k});
+        k_flat = K_c.reshape({batch_heads, seq_len_k, d_k});
+        v_flat = V_c.reshape({batch_heads, seq_len_k, V.shape()[3]});
     } else {
         batch_heads = q_shape[0];
         seq_len_q = q_shape[1];
@@ -2388,22 +2397,20 @@ auto VulkanBackend::dispatchFlashAttention(
         seq_len_k = K.shape()[1];
     }
 
-    // Phase 5.4: fast path — use the tiled FlashAttention-2 shader
-    // (flash_attention.comp) when the configuration fits its current
-    // constraints:
-    //   - Float32 only
+    // Phase 5.4 fast path — tiled FlashAttention-2 shader. Per
+    // docs/internals/attention-contract.md the shader now supports causal
+    // masking inline (audit C2 Vulkan fix), so the !causal gate is removed.
+    // Constraints remaining:
+    //   - Float32 only (FP16/BF16/F64 variants land with M8)
     //   - head_dim / head_v <= 128
-    //   - no causal mask (the shader doesn't implement masking)
-    //   - contiguous Q, K, V
+    //   - contiguous Q, K, V (forced via dispatchContiguous below)
     //
-    // The tiled path avoids materializing the full seq_q × seq_k
-    // attention matrix — it streams K/V blocks through shared memory
-    // with an online softmax. Falls through to the composed path
-    // below on any edge case or dtype mismatch.
+    // The tiled path avoids materializing the full seq_q × seq_k attention
+    // matrix — it streams K/V blocks through shared memory with an online
+    // softmax. Falls through to the composed path on any dtype/shape mismatch.
     int64_t head_v = v_flat.shape()[2];
     const int64_t kMaxHeadDimTiled = 128;
-    if (!causal
-        && Q.dtype() == DType::Float32
+    if (Q.dtype() == DType::Float32
         && K.dtype() == DType::Float32
         && V.dtype() == DType::Float32
         && d_k <= kMaxHeadDimTiled
@@ -2426,12 +2433,14 @@ auto VulkanBackend::dispatchFlashAttention(
             int32_t head_dim;
             int32_t head_v;
             float scale;
+            int32_t causal;     // M7: passed to shader (audit C2 Vulkan)
         } pc;
         pc.seq_q    = static_cast<int32_t>(seq_len_q);
         pc.seq_k    = static_cast<int32_t>(seq_len_k);
         pc.head_dim = static_cast<int32_t>(d_k);
         pc.head_v   = static_cast<int32_t>(head_v);
         pc.scale    = scale;
+        pc.causal   = causal ? 1 : 0;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, q_contig.data_ptr()},

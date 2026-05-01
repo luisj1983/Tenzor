@@ -34,8 +34,13 @@ void main() {
     // Accumulate squared gradient
     sum_sq[gid] += g * g;
 
-    // Update parameter
-    // GLSL sqrt only works on float — cast down for sqrt
-    float64_t denom = float64_t(sqrt(float(sum_sq[gid]))) + eps_d;
+    // Per docs/internals/attention-contract.md (optimizer F64 paths): never
+    // downcast for sqrt. Newton-Raphson refines a float-precision initial
+    // guess in F64 — single iteration adds ~24 mantissa bits.
+    float64_t s = sum_sq[gid];
+    float64_t inv_sqrt = float64_t(1.0) / float64_t(sqrt(float(s)));
+    inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * s * inv_sqrt * inv_sqrt);
+    float64_t sqrt_s = s * inv_sqrt;
+    float64_t denom = sqrt_s + eps_d;
     param_data[gid] -= lr_d * g / denom;
 }

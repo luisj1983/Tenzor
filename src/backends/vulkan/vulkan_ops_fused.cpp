@@ -79,7 +79,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     pc.padding = 0;
 
     // F16 shader processes pairs (1 thread per word), F32 processes 1 element per thread
-    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
     uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -181,7 +181,7 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     pc.padding0 = 0;
     pc.padding1 = 0;
 
-    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
     uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -280,7 +280,7 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
     pc.padding0 = 0;
     pc.padding1 = 0;
 
-    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
     uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
