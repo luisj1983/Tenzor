@@ -1803,7 +1803,12 @@ __global__ void flash_attention_v2_kernel(
     float* __restrict__ L,           // [batch_heads, seq_len_q] logsumexp (may be nullptr)
     const int seq_len_q,
     const int seq_len_k,
-    const float scale
+    const float scale,
+    const bool causal                // M4 fix: applies upper-triangular mask
+                                     // before softmax. Audit C1 / C4: was a
+                                     // (void)causal stub that silently produced
+                                     // non-causal output even when the registry
+                                     // forwarded the flag.
 ) {
     // Configuration
     constexpr int Bc = 32;  // Keys per tile - small for register pressure
@@ -1861,15 +1866,23 @@ __global__ void flash_attention_v2_kernel(
         }
         __syncthreads();
 
-        // Step 1: Compute all Q·K scores and find max
-        // Each thread computes one or more scores
+        // Step 1: Compute all Q·K scores and find max. Causal masking applied
+        // here so masked positions get score = -INFINITY before the per-tile
+        // softmax max-subtract — produces clean exp(-INF) = 0 in step 2 below.
+        // Per docs/internals/attention-contract.md sentinel rule.
         float local_max = -INFINITY;
 
         for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
-            float score = 0.0f;
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                score += Q_shared[d] * K_tile[j * K_STRIDE + d];
+            int kv_pos = k_start + j;
+            float score;
+            if (causal && kv_pos > query_idx) {
+                score = -INFINITY;
+            } else {
+                score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_shared[d] * K_tile[j * K_STRIDE + d];
+                }
             }
             scores_shared[j] = score;
             local_max = fmaxf(local_max, score);
@@ -1897,6 +1910,16 @@ __global__ void flash_attention_v2_kernel(
         }
         __syncthreads();
         float block_max = reduce_buf[0];
+
+        // All-tile-masked early-out: when every score in this tile is -INF
+        // (causal mask kills the whole tile, e.g. q=4 with kv_block at [32,64)),
+        // exp(scores - block_max) = exp(-INF - (-INF)) = NaN. Skip the tile —
+        // the online-softmax math correctly leaves running state alone in this
+        // case (l_prev unchanged, o_local unchanged, m_prev unchanged).
+        if (block_max == -INFINITY) {
+            __syncthreads();  // pair the next iteration's K/V tile load
+            continue;
+        }
 
         // Step 2: Compute exp(score - max) and sum
         float local_sum = 0.0f;
@@ -2266,9 +2289,10 @@ auto fused_attention_cuda(
     const Tensor& K,     // (batch_heads, seq_len_k, head_dim)
     const Tensor& V,     // (batch_heads, seq_len_k, head_dim)
     float scale,
-    bool causal          // M4: not yet honored; flash kernel ignores this until causal masking is wired into flash_attention_v2_kernel
+    bool causal          // Honored — flash_attention_v2_kernel applies the
+                         // mask inline before softmax (audit C1 / C4 fix
+                         // landed in M4 follow-up).
 ) -> std::pair<Tensor, Tensor> {
-    (void)causal;
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len_q = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
@@ -2312,31 +2336,31 @@ auto fused_attention_cuda(
         size_t smem_size = compute_smem_size(64);
         flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
         flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
         flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
         flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
         flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         // Non-standard head_dim: pad Q/K/V up to a supported specialized HEAD_DIM
@@ -2379,23 +2403,23 @@ auto fused_attention_cuda(
         if (padded_hd == 32) {
             flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(32)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         } else if (padded_hd == 64) {
             flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(64)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         } else if (padded_hd == 80) {
             flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(80)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         } else if (padded_hd == 96) {
             flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(96)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         } else {
             flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(128)>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
-                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal);
         }
         TENZOR_CUDA_POST_LAUNCH_CHECK();
 

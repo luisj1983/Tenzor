@@ -52,6 +52,23 @@ below is the load-bearing fix — backends that drift will fail
 If `DropoutP > 0`, the backward must seed Philox at `(seed, offset)` and reproduce the
 exact same dropout mask the forward used.
 
+**Backend dropout-support matrix (current):**
+
+| Backend | Causal | Dropout (forward) | Dropout (backward replay) |
+|---------|--------|-------------------|---------------------------|
+| CPU     | ✅     | ✅ (Philox4x32)   | ✅ (replays via saved seed) |
+| CUDA    | ✅ (kernel-inline) | ❌ throws clearly when `dropout_p > 0 && is_training` | n/a |
+| ROCm    | ✅ (kernel-inline) | ❌ throws clearly | n/a |
+| OneAPI  | ✅ (composed)      | ❌ throws clearly | n/a |
+| Vulkan  | ✅ (shader-inline) | ❌ throws clearly | n/a |
+
+For GPU backends, `nn::functional::scaled_dot_product_attention` falls into the
+manual BMM path when `dropout_p > 0` (since the gating in `attention.cpp` and
+`functional.cpp` checks `device_supports_dropout`). The manual BMM path applies
+dropout as a separate Variable-level op, which is autograd-correct but doesn't
+benefit from kernel fusion. Native fused-dropout on GPU backends is a follow-up
+(M4-7 extension).
+
 ### Sentinels
 
 - Causal mask sentinel: `-std::numeric_limits<float>::infinity()` (or
