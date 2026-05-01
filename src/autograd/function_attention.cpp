@@ -40,15 +40,60 @@ namespace tenzor {
 
 namespace {
 
-// Composed-ops fallback for FlashAttention backward when L (and seed/offset)
-// are not available. This is mathematically equivalent but uses O(N^2) memory.
+// Host-portable Philox4x32-10 (matches CPU flash_attention.cpp constants /
+// algorithm). Used by the composed backward to replay the forward dropout
+// mask using the saved seed. Counter convention matches the CUDA/ROCm flash
+// kernels: (batch_head, query_idx, kv_pos, 0) so backward + forward
+// produce identical masks within those backends. CPU forward uses a
+// different convention (b, h, qi, ki), so for CPU-saved seeds the composed
+// backward isn't bit-exact — but the CPU backward kernel handles its own
+// replay (per src/backends/cpu/kernels/flash_attention.cpp), so this code
+// path only runs for GPU-saved seeds where the conventions match.
+namespace {
+inline void host_philox_round(uint32_t ctr[4], const uint32_t key[2]) {
+    constexpr uint64_t M0 = 0xD2511F53ULL;
+    constexpr uint64_t M1 = 0xCD9E8D57ULL;
+    uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+    uint32_t lo0 = static_cast<uint32_t>(prod0);
+    uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+    uint32_t lo1 = static_cast<uint32_t>(prod1);
+    uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+    uint32_t new1 = lo1;
+    uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+    uint32_t new3 = lo0;
+    ctr[0] = new0; ctr[1] = new1; ctr[2] = new2; ctr[3] = new3;
+}
+inline float host_philox_uniform(uint32_t batch_head, uint32_t query_idx,
+                                  uint32_t kv_pos, uint32_t rng_seed) {
+    uint32_t ctr[4] = {batch_head, query_idx, kv_pos, 0};
+    uint32_t k[2] = {rng_seed, rng_seed ^ 0x1BD11BDAU};
+    constexpr uint32_t W0 = 0x9E3779B9U;
+    constexpr uint32_t W1 = 0xBB67AE85U;
+    for (int r = 0; r < 10; ++r) {
+        host_philox_round(ctr, k);
+        if (r < 9) { k[0] += W0; k[1] += W1; }
+    }
+    return (static_cast<float>(ctr[0] >> 8)) * (1.0f / 16777216.0f);
+}
+}  // anonymous namespace
+
+// Composed-ops fallback for FlashAttention backward when the fused dispatch
+// path is unavailable. Mathematically equivalent to the fused kernel; uses
+// O(N^2) memory because P = softmax(scores) is materialized.
+//
+// Dropout replay: when dropout_p > 0 and philox_seed != 0, applies the
+// inverted-scaled Philox mask to P before computing dV/dQ/dK so the gradient
+// matches what the forward actually computed (audit contract requirement).
 //
 // Math:
 //   S = Q @ K^T * scale  + (causal mask if applicable)
 //   P = softmax(S, dim=-1)
-//   dV = P^T @ dO
+//   if dropout: P_drop[i,j] = (philox(b,h,i,j) < p) ? 0 : P[i,j] / (1 - p)
+//   dV = P_drop^T @ dO
 //   dP = dO @ V^T
-//   dS = P * (dP - sum(dP * P, dim=-1, keepdim))
+//   dS = P_drop * (dP - sum(dP * P_drop, dim=-1, keepdim))
 //   dQ = dS @ K * scale
 //   dK = dS^T @ Q * scale
 auto composed_attention_backward(const Tensor& dO,
@@ -56,7 +101,9 @@ auto composed_attention_backward(const Tensor& dO,
                                  const Tensor& K,
                                  const Tensor& V,
                                  float scale,
-                                 bool causal) -> std::vector<Tensor> {
+                                 bool causal,
+                                 float dropout_p = 0.0f,
+                                 uint32_t rng_seed = 0u) -> std::vector<Tensor> {
     // Q, K, V, dO all have shape [B, H, S, D] or [B*H, S, D]. We work on
     // 3D for bmm convenience by collapsing leading dims if 4D. shape() returns
     // a span; convert to vector for the reshape API.
@@ -105,6 +152,38 @@ auto composed_attention_backward(const Tensor& dO,
     Tensor S_exp = tenzor::exp(S_centered);
     Tensor S_exp_sum = tenzor::sum(S_exp, /*dim=*/std::optional<int64_t>{-1}, /*keepdim=*/true);
     Tensor P = S_exp / S_exp_sum;
+
+    // Replay forward Philox dropout on P (audit M4-rem follow-up):
+    // For dropout_p > 0 and rng_seed != 0, build the same dropout mask the
+    // forward applied. P is shape [batch_heads, S_q, S_k]. Mask is built
+    // on host then moved to P's device. dropout_scale = 1/(1-p) (inverted
+    // dropout).
+    if (dropout_p > 0.0f && rng_seed != 0u) {
+        auto P_shape = P.shape();
+        int64_t bh = P_shape[0];
+        int64_t S_q_ax = P_shape[1];
+        int64_t S_k_ax = P_shape[2];
+        const float scale_drop = 1.0f / (1.0f - dropout_p);
+        // Build per-element mask on CPU (Float32, multiplicative): kept = scale_drop,
+        // dropped = 0. The forward produces the same value distribution per the
+        // (batch_head, query_idx, kv_pos, 0) Philox counter convention.
+        Tensor mask_cpu = tenzor::zeros({bh, S_q_ax, S_k_ax}, DType::Float32, Device::cpu());
+        float* mptr = mask_cpu.data<float>();
+        for (int64_t bh_i = 0; bh_i < bh; ++bh_i) {
+            for (int64_t qi = 0; qi < S_q_ax; ++qi) {
+                for (int64_t ki = 0; ki < S_k_ax; ++ki) {
+                    float u = host_philox_uniform(static_cast<uint32_t>(bh_i),
+                                                   static_cast<uint32_t>(qi),
+                                                   static_cast<uint32_t>(ki),
+                                                   rng_seed);
+                    mptr[bh_i * S_q_ax * S_k_ax + qi * S_k_ax + ki]
+                        = (u < dropout_p) ? 0.0f : scale_drop;
+                }
+            }
+        }
+        Tensor mask_dev = mask_cpu.to(P.device()).to(P.dtype());
+        P = P * mask_dev;
+    }
 
     // dV = P^T @ dO
     Tensor Pt = tenzor::transpose(P, -1, -2);
@@ -157,9 +236,24 @@ auto try_fused_or_compose_backward(const Tensor& dO,
                                    float dropout_p,
                                    const Tensor& philox_seed,
                                    const Tensor& philox_offset) -> std::vector<Tensor> {
+    // Read seed (if any) for the composed-fallback dropout replay.
+    uint32_t seed_for_replay = 0u;
+    if (philox_seed.is_valid() && philox_seed.numel() > 0) {
+        // Move to CPU to read scalar; tiny single-int copy.
+        Tensor seed_cpu = philox_seed.cpu();
+        if (seed_cpu.dtype() == DType::Int64) {
+            seed_for_replay = static_cast<uint32_t>(seed_cpu.data<int64_t>()[0]);
+        } else if (seed_cpu.dtype() == DType::Int32) {
+            seed_for_replay = static_cast<uint32_t>(seed_cpu.data<int32_t>()[0]);
+        }
+    }
+
     if (!L.is_valid() || L.shape().size() == 0) {
         // No saved logsumexp — backward must recompute from scratch.
-        return composed_attention_backward(dO, Q, K, V, scale, causal);
+        // If dropout was applied in forward, replay the mask using the
+        // saved seed so dV/dQ/dK match the masked attention pattern.
+        return composed_attention_backward(dO, Q, K, V, scale, causal,
+                                            dropout_p, seed_for_replay);
     }
     try {
         std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O, L};
@@ -174,7 +268,8 @@ auto try_fused_or_compose_backward(const Tensor& dO,
         return dispatch<OpId::FlashAttentionBackward>(bwd_inputs, bwd_attrs);
     } catch (const std::exception&) {
         // Fall through — backend doesn't support this combo.
-        return composed_attention_backward(dO, Q, K, V, scale, causal);
+        return composed_attention_backward(dO, Q, K, V, scale, causal,
+                                            dropout_p, seed_for_replay);
     }
 }
 
