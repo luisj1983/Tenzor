@@ -1310,16 +1310,35 @@ static void attention_online_f32(
     int64_t seq_k,
     int64_t head_dim,
     float scale,
-    bool causal
+    bool causal,
+    int64_t H_q = 1,                  // Q heads per batch (equals batch_heads/B)
+    int64_t q_heads_per_kv_head = 1   // 1 = MHA, > 1 = GQA, == H_q = MQA
 ) {
+    // Per docs/internals/attention-contract.md GQA section: when H_kv < H_q,
+    // K/V have fewer heads and the kernel broadcasts them along the head dim
+    // via index math (kv_h = h_q / q_heads_per_kv_head). H_q == 1 (default)
+    // matches the legacy MHA path where K and V are indexed identically to Q.
     const int64_t q_stride = seq_q * head_dim;
     const int64_t k_stride = seq_k * head_dim;
+    const int64_t H_kv = H_q / q_heads_per_kv_head;
+    const bool is_gqa = (q_heads_per_kv_head > 1);
 
     #pragma omp parallel for schedule(dynamic) if(batch_heads > 1)
     for (int64_t bh = 0; bh < batch_heads; ++bh) {
+        // Compute the matching KV head index. For MHA (q_heads_per_kv_head==1)
+        // this is simply bh; for GQA we map H_q query heads onto H_kv KV heads.
+        int64_t bh_kv;
+        if (is_gqa) {
+            int64_t b = bh / H_q;
+            int64_t h_q = bh % H_q;
+            int64_t h_kv = h_q / q_heads_per_kv_head;
+            bh_kv = b * H_kv + h_kv;
+        } else {
+            bh_kv = bh;
+        }
         const float* q = q_data + bh * q_stride;
-        const float* k = k_data + bh * k_stride;
-        const float* v = v_data + bh * k_stride;  // V stride == K stride
+        const float* k = k_data + bh_kv * k_stride;
+        const float* v = v_data + bh_kv * k_stride;  // V stride == K stride
         float* o = out_data + bh * q_stride;
 
         // Per-thread tile score buffer, kept small for L1 residency.
@@ -1383,20 +1402,38 @@ static void attention_online_f32(
 
 auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                             float scale, bool causal) -> Tensor {
-    // Q, K, V: (batch_heads, seq_len, head_dim) for 3D
-    //          (batch, num_heads, seq_len, head_dim) for 4D
+    // Q, K, V: (batch_heads, seq_len, head_dim) for 3D (no GQA — H_q == H_kv)
+    //          (batch, num_heads, seq_len, head_dim) for 4D (GQA when K/V have
+    //          fewer heads than Q; per attention-contract.md kv_h = h_q*H_kv/H_q).
     const auto& q_shape = Q.shape();
     const int64_t ndim = Q.ndim();
 
     int64_t batch_heads, seq_len_q, head_dim, seq_len_k;
+    int64_t H_q = 1;
+    int64_t q_heads_per_kv_head = 1;
 
     if (ndim == 3) {
         batch_heads = q_shape[0];
         seq_len_q = q_shape[1];
         head_dim = q_shape[2];
         seq_len_k = K.shape()[1];
+        if (K.shape()[0] != batch_heads) {
+            throw std::runtime_error(
+                "fused_attention: 3D layout requires Q.shape[0] == K.shape[0]; "
+                "GQA must be expressed as 4D (B, H, S, D) so the kernel can "
+                "reason about the H_q vs H_kv ratio.");
+        }
     } else if (ndim == 4) {
-        batch_heads = q_shape[0] * q_shape[1];
+        H_q = q_shape[1];
+        int64_t H_kv = K.shape()[1];
+        if (H_kv == 0 || H_q % H_kv != 0) {
+            throw std::runtime_error(
+                "fused_attention: H_q (" + std::to_string(H_q) + ") must be a "
+                "positive multiple of H_kv (" + std::to_string(H_kv) +
+                ") for GQA; got non-divisible heads.");
+        }
+        q_heads_per_kv_head = H_q / H_kv;
+        batch_heads = q_shape[0] * H_q;
         seq_len_q = q_shape[2];
         head_dim = q_shape[3];
         seq_len_k = K.shape()[2];
@@ -1412,7 +1449,7 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             Q.data<float>(), K.data<float>(), V.data<float>(),
             output.data<float>(),
             batch_heads, seq_len_q, seq_len_k, head_dim,
-            scale, causal
+            scale, causal, H_q, q_heads_per_kv_head
         );
     } else if (Q.dtype() == DType::Float64) {
         // Float64: compute in Float32 for online-softmax numerical range,
@@ -1435,7 +1472,7 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             q32.data<float>(), k32.data<float>(), v32.data<float>(),
             out32.data<float>(),
             batch_heads, seq_len_q, seq_len_k, head_dim,
-            scale, causal
+            scale, causal, H_q, q_heads_per_kv_head
         );
         output = out32.to(DType::Float64);
     } else if (Q.dtype() == DType::Float16) {
@@ -1450,7 +1487,7 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             q32.data<float>(), k32.data<float>(), v32.data<float>(),
             out32.data<float>(),
             batch_heads, seq_len_q, seq_len_k, head_dim,
-            scale, causal
+            scale, causal, H_q, q_heads_per_kv_head
         );
         output = out32.to(DType::Float16);
     } else if (Q.dtype() == DType::BFloat16) {
@@ -1465,7 +1502,7 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             q32.data<float>(), k32.data<float>(), v32.data<float>(),
             out32.data<float>(),
             batch_heads, seq_len_q, seq_len_k, head_dim,
-            scale, causal
+            scale, causal, H_q, q_heads_per_kv_head
         );
         output = out32.to(DType::BFloat16);
     } else {

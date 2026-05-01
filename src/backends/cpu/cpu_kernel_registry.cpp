@@ -535,15 +535,23 @@ namespace cpu {
     auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 float scale, bool causal) -> Tensor;
 
-    // Flash Attention (with optional fused dropout for training)
+    // Flash Attention forward (with optional fused dropout for training).
+    // Per docs/internals/attention-contract.md, returns 4 tensors:
+    // [output, lse_f32, philox_seed_int64, philox_offset_int64]. seed/offset
+    // are empty Tensors when dropout_p == 0.
     auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   float scale, bool causal,
-                                  float dropout_p = 0.0f, bool is_training = false) -> Tensor;
+                                  float dropout_p = 0.0f, bool is_training = false,
+                                  uint64_t seed_in = 0) -> std::vector<Tensor>;
 
-    // Flash Attention Backward
+    // Flash Attention Backward. Consumes saved Philox (seed, offset) so the
+    // forward's dropout mask is reproduced bit-exactly. Returns {dQ, dK, dV}.
     auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K,
                                    const Tensor& V, const Tensor& O,
-                                   float scale, bool causal) -> std::vector<Tensor>;
+                                   float scale, bool causal,
+                                   float dropout_p = 0.0f,
+                                   uint64_t philox_seed = 0,
+                                   uint64_t philox_offset = 0) -> std::vector<Tensor>;
 
     // Fused Conv2d + Activation variants
     auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -2712,23 +2720,87 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // Flash Attention (O(N) memory, tiled online softmax)
     // =========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Per docs/internals/attention-contract.md, returns 4 tensors:
+        // [output, lse_f32, philox_seed_int64, philox_offset_int64].
+        // seed/offset are empty Tensors when dropout_p == 0.
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
-        // FlashAttention dispatchers (functional::sdpa, attention layer) set
-        // IsTraining; older callers may set Training. Accept either.
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
-        return std::vector<Tensor>{cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2], scale, causal, dropout_p, is_training)};
+        uint64_t seed_in = static_cast<uint64_t>(attrs.get_int(AttrKey::Seed, 0));
+        return cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2],
+                                            scale, causal, dropout_p, is_training, seed_in);
     });
 
     // =========================================================================
     // Flash Attention Backward
     // =========================================================================
     table.register_kernel(OpId::FlashAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Per contract, inputs are [dO, Q, K, V, O, L?, philox_seed?, philox_offset?].
+        // L is currently unused by this CPU backward (it recomputes softmax
+        // from scratch — correctness-equivalent, just more memory). seed and
+        // offset, when present, replay the forward's dropout mask exactly.
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
-        // inputs: [dO, Q, K, V, O]
-        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], scale, causal);
+        float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+        uint64_t philox_seed = 0, philox_offset = 0;
+        if (inputs.size() > 6 && inputs[6].is_valid() && inputs[6].numel() > 0) {
+            philox_seed = static_cast<uint64_t>(inputs[6].data<int64_t>()[0]);
+        }
+        if (inputs.size() > 7 && inputs[7].is_valid() && inputs[7].numel() > 0) {
+            philox_offset = static_cast<uint64_t>(inputs[7].data<int64_t>()[0]);
+        }
+        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                                             scale, causal, dropout_p, philox_seed, philox_offset);
+    });
+
+    // =========================================================================
+    // FlexAttention (built-in score_mod registry — full programmatic score_mod
+    // arrives in M8 across all GPU backends; CPU here covers the common modes)
+    // =========================================================================
+    // Per docs/internals/attention-contract.md, ScoreModId encodes a built-in
+    // score modification op:
+    //   0 = identity (no modification — equivalent to FusedAttention)
+    //   1 = causal  (adds upper-triangular -inf mask before softmax)
+    // Other IDs throw on this backend until M8 lands the native programmable
+    // score_mod path (see src/nn/layers/flex_attention.cpp for the existing
+    // host-side reference impl that supports arbitrary score_mod functors).
+    auto flex_attention_dispatch = [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        bool causal = (score_mod_id == 1);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
+                " is not yet implemented on this backend (only 0=identity and "
+                "1=causal supported pre-M8). Use the host-side reference at "
+                "src/nn/layers/flex_attention.cpp for arbitrary score_mod functors.");
+        }
+        // For score_mod_id 0/1, the math is identical to FusedAttention, so
+        // reuse that kernel and emit (output, lse) per the contract.
+        // We compute lse here from the FlashAttention path so callers get the
+        // saved-stat for backward.
+        return cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2],
+                                            scale, causal, /*dropout_p=*/0.0f,
+                                            /*is_training=*/false, /*seed_in=*/0);
+    };
+    table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
+
+    // FlexAttentionBackward shares the FlashAttention backward kernel for the
+    // identity/causal score_mods (they're algebraically the same op). Native
+    // score_mod backward arrives in M8.
+    table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttentionBackward CPU: ScoreModId=" + std::to_string(score_mod_id) +
+                " is not yet implemented on this backend (M8).");
+        }
+        bool causal = (score_mod_id == 1);
+        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                                             scale, causal, /*dropout_p=*/0.0f,
+                                             /*philox_seed=*/0, /*philox_offset=*/0);
     });
 
     // =========================================================================

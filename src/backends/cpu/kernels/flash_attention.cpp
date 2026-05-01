@@ -235,7 +235,12 @@ inline void fma_vector(float* out, float weight, const float* src, int64_t len) 
 
 auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                               float scale, bool causal,
-                              float dropout_p, bool is_training) -> Tensor {
+                              float dropout_p, bool is_training,
+                              uint64_t seed_in) -> std::vector<Tensor> {
+    // Per docs/internals/attention-contract.md, FlashAttention forward returns
+    // (output, logsumexp, philox_seed, philox_offset). LSE is always Float32;
+    // seed/offset are Int64 scalar tensors and are empty when dropout_p == 0.
+    //
     // Q, K, V: [batch, num_heads, seq_len, head_dim]
     auto shape = Q.shape();
     int64_t batch = shape[0];
@@ -244,13 +249,18 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t head_dim = shape[3];
 
     // Multi-dtype support: Float32 computed directly, Float64/Float16/BFloat16
-    // upcast to Float32, compute, then downcast output.
+    // upcast to Float32, compute, then downcast output. LSE stays Float32 in
+    // every case per the contract (the dynamic range of max+log(sum) exceeds
+    // FP16/BF16 even when the input dtype is small).
     if (Q.dtype() == DType::Float64 || Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
         auto orig_dtype = Q.dtype();
-        auto O_f32 = flash_attention_forward(
+        auto outs_f32 = flash_attention_forward(
             Q.to(DType::Float32), K.to(DType::Float32), V.to(DType::Float32),
-            scale, causal, dropout_p, is_training);
-        return O_f32.to(orig_dtype);
+            scale, causal, dropout_p, is_training, seed_in);
+        // outs_f32: [O_f32, L_f32, seed?, offset?]
+        outs_f32[0] = outs_f32[0].to(orig_dtype);
+        // L stays Float32. seed/offset are int64 — leave them as-is.
+        return outs_f32;
     } else if (Q.dtype() != DType::Float32) {
         throw std::runtime_error("Flash attention: unsupported dtype " +
                                  std::string(dtype_name(Q.dtype())));
@@ -260,24 +270,28 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     constexpr int64_t BLOCK_Q = 64;
     constexpr int64_t BLOCK_KV = 64;
 
-    // Output tensor (Float32 path only reaches here)
+    // Output tensor (Float32 path only reaches here) and LSE buffer
     auto O = zeros({batch, num_heads, seq_len, head_dim}, DType::Float32, Q.device());
+    auto L = zeros({batch, num_heads, seq_len}, DType::Float32, Q.device());
 
     const float* q_data = Q.data<float>();
     const float* k_data = K.data<float>();
     const float* v_data = V.data<float>();
     float* o_data = O.data<float>();
+    float* lse_data = L.data<float>();
 
     // Dropout configuration
     const bool apply_dropout = is_training && dropout_p > 0.0f;
     const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
 
-    // Seed for Philox RNG. Use a fixed seed derived from the tensor data pointer
-    // for reproducibility within a single forward pass. For true randomness across
-    // calls, the caller should vary the seed (e.g., via an attribute).
-    // We mix in the data pointer to get a different stream per call.
-    const uint32_t rng_seed = static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(q_data) * 2654435761U);
+    // Seed for Philox RNG. If the caller passed seed_in == 0 (the default),
+    // derive a per-call seed from the data pointer for backward reproducibility
+    // within a single forward; the saved seed below is then echoed back so the
+    // backward can replay the exact same mask.
+    const uint64_t actual_seed = seed_in != 0
+        ? seed_in
+        : (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(q_data)) * 2654435761ULL);
+    const uint32_t rng_seed = static_cast<uint32_t>(actual_seed);
 
     // Parallelize over batch and heads
     #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
@@ -372,17 +386,40 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
             }
 
             // Final normalization by softmax denominator (SIMD-vectorized)
+            // and LSE write per-row. LSE = row_max + log(row_sum), with
+            // -INFINITY for fully-masked rows (row_sum == 0). The contract
+            // requires LSE to be a sentinel that produces zero P in backward
+            // (`P = exp(S - L)` with `L=-INFINITY` evaluates to 0).
+            float* lse_bh = lse_data + (b * num_heads + h) * seq_len;
             for (int64_t qi = 0; qi < seq_len; ++qi) {
                 if (row_sum[qi] > 0.0f) {
                     float inv_sum = 1.0f / row_sum[qi];
                     float* o_row = o_bh + qi * head_dim;
                     scale_vector(o_row, inv_sum, head_dim);
+                    lse_bh[qi] = row_max[qi] + std::logf(row_sum[qi]);
+                } else {
+                    lse_bh[qi] = -std::numeric_limits<float>::infinity();
                 }
             }
         }
     }
 
-    return O;
+    // Allocate seed/offset return tensors only when dropout actually fired —
+    // empty Tensors when dropout_p == 0 keeps the contract's "seed/offset are
+    // empty if dropout disabled" rule machine-checkable downstream.
+    Tensor seed_t;
+    Tensor offset_t;
+    if (apply_dropout) {
+        seed_t = zeros({1}, DType::Int64, Q.device());
+        offset_t = zeros({1}, DType::Int64, Q.device());
+        seed_t.data<int64_t>()[0] = static_cast<int64_t>(actual_seed);
+        // Offset is currently 0: the per-element Philox counter uses the
+        // (b,h,qi,ki) tuple directly as the position, so no global offset
+        // is needed. Backward reconstructs the same counter from the same
+        // tuple and gets the same mask.
+        offset_t.data<int64_t>()[0] = 0;
+    }
+    return {O, L, seed_t, offset_t};
 }
 
 // ============================================================================
@@ -412,7 +449,15 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
 
 auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K,
                                const Tensor& V, const Tensor& O,
-                               float scale, bool causal) -> std::vector<Tensor> {
+                               float scale, bool causal,
+                               float dropout_p,
+                               uint64_t philox_seed,
+                               uint64_t /*philox_offset*/) -> std::vector<Tensor> {
+    // Per docs/internals/attention-contract.md: backward consumes scale, causal,
+    // dropout_p plus the saved Philox (seed, offset) so the dropout mask the
+    // forward used can be reproduced exactly. philox_offset is currently
+    // unused — the forward derives the per-element counter from (b,h,qi,ki)
+    // alone. If a future change adds a global offset, it'll be used here.
     auto q_shape = Q.shape();
     int64_t batch = q_shape[0];
     int64_t num_heads = q_shape[1];
@@ -427,12 +472,17 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
         auto orig_dtype = Q.dtype();
         auto result = flash_attention_backward(
             dO.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
-            V.to(DType::Float32), O.to(DType::Float32), scale, causal);
+            V.to(DType::Float32), O.to(DType::Float32),
+            scale, causal, dropout_p, philox_seed, 0);
         return {result[0].to(orig_dtype), result[1].to(orig_dtype), result[2].to(orig_dtype)};
     } else if (Q.dtype() != DType::Float32) {
         throw std::runtime_error("Flash attention backward: unsupported dtype " +
                                  std::string(dtype_name(Q.dtype())));
     }
+
+    const bool apply_dropout = dropout_p > 0.0f && philox_seed != 0;
+    const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    const uint32_t rng_seed = static_cast<uint32_t>(philox_seed);
 
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
     std::vector<int64_t> k_shape_vec(k_shape.begin(), k_shape.end());
@@ -512,6 +562,36 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                 float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
                 for (int64_t j = 0; j < M; ++j) {
                     P[i * M + j] *= inv_sum;
+                }
+            }
+
+            // Step 3b: Replay forward dropout mask using saved (seed, offset).
+            // The forward applies dropout *after* softmax with inverted scaling
+            // (`weight = 0` if dropped else `weight *= 1/(1-p)`); we apply the
+            // identical transform to P here so dV = P^T @ dO and dQ/dK derived
+            // from this P match the masked attention pattern the forward used.
+            // The Philox counter (b,h,qi,ki) and (rng_seed, rng_seed^0x1BD11BDA)
+            // key match the forward's, guaranteeing bit-identical mask replay.
+            if (apply_dropout) {
+                for (int64_t i = 0; i < N; ++i) {
+                    for (int64_t j = 0; j < M; ++j) {
+                        Philox4x32 philox;
+                        philox.counter[0] = static_cast<uint32_t>(b);
+                        philox.counter[1] = static_cast<uint32_t>(h);
+                        philox.counter[2] = static_cast<uint32_t>(i);
+                        philox.counter[3] = static_cast<uint32_t>(j);
+                        philox.key[0] = rng_seed;
+                        philox.key[1] = rng_seed ^ 0x1BD11BDAU;
+                        uint32_t rng_out[4];
+                        philox.generate(rng_out);
+                        float rand_val = Philox4x32::uint32_to_uniform(rng_out[0]);
+                        float& p_ref = P[i * M + j];
+                        if (rand_val < dropout_p) {
+                            p_ref = 0.0f;
+                        } else {
+                            p_ref *= dropout_scale;
+                        }
+                    }
                 }
             }
 
