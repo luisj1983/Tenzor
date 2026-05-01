@@ -361,8 +361,14 @@ auto flash_attention(const Variable& Q,
 
     auto grad_fn = std::make_shared<FlashAttentionBackward>(scale, causal, dropout_p, is_training);
     // Saved layout matches FlashAttentionBackward::backward expectation:
-    // [Q, K, V, O, L, seed, offset]. Empty placeholders preserve indexing.
-    grad_fn->save_for_backward({Q.tensor(), K.tensor(), V.tensor(), O_t, L_t, seed_t, offset_t});
+    // [Q, K, V, O, L?, seed?, offset?]. The autograd graph machinery balks at
+    // uninitialized Tensor in save_for_backward, so only push what's actually
+    // valid. Backward checks saved.size() to know which auxiliaries arrived.
+    std::vector<Tensor> saved = {Q.tensor(), K.tensor(), V.tensor(), O_t};
+    if (L_t.is_valid())      saved.push_back(L_t);
+    if (seed_t.is_valid())   saved.push_back(seed_t);
+    if (offset_t.is_valid()) saved.push_back(offset_t);
+    grad_fn->save_for_backward(saved);
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 
@@ -390,7 +396,9 @@ auto fused_attention(const Variable& Q,
     const Tensor& L_t = outs[1];
 
     auto grad_fn = std::make_shared<FusedAttentionBackward>(scale, causal, use_cudnn_sdpa);
-    grad_fn->save_for_backward({Q.tensor(), K.tensor(), V.tensor(), O_t, L_t});
+    std::vector<Tensor> saved = {Q.tensor(), K.tensor(), V.tensor(), O_t};
+    if (L_t.is_valid()) saved.push_back(L_t);
+    grad_fn->save_for_backward(saved);
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 
@@ -419,8 +427,10 @@ auto flex_attention(const Variable& Q,
 
     bool has_block_mask = block_mask.is_valid() && block_mask.shape().size() > 0;
     auto grad_fn = std::make_shared<FlexAttentionBackward>(scale, score_mod_id, has_block_mask);
-    grad_fn->save_for_backward({Q.tensor(), K.tensor(), V.tensor(), O_t, L_t,
-                                 has_block_mask ? block_mask : Tensor{}});
+    std::vector<Tensor> saved = {Q.tensor(), K.tensor(), V.tensor(), O_t};
+    if (L_t.is_valid()) saved.push_back(L_t);
+    if (has_block_mask) saved.push_back(block_mask);
+    grad_fn->save_for_backward(saved);
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 

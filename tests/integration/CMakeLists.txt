@@ -37,6 +37,32 @@ target_link_libraries(test_cross_backend PRIVATE
 
 gtest_discover_tests(test_cross_backend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
 
+# Attention contract dispatch-table audit (M9 — enforces every backend
+# registers all required attention OpIds; see docs/internals/attention-contract.md).
+add_executable(test_attention_contract
+    test_attention_contract.cpp
+)
+
+target_link_libraries(test_attention_contract PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_attention_contract DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
+# Attention autograd grad-flow tests (M9 — catches the audit's C1-C6 dead
+# training path / severed grad_fn class of bugs).
+add_executable(test_attention_autograd
+    test_attention_autograd.cpp
+)
+
+target_link_libraries(test_attention_autograd PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
 # Data pipeline integration tests
 add_executable(test_data_pipeline
     test_data_pipeline.cpp
