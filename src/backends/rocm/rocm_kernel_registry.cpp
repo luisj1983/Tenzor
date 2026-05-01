@@ -706,7 +706,7 @@ namespace rocm {
                                        const Tensor& running_var, const Tensor& weight,
                                        const Tensor& bias, float eps) -> Tensor;
     auto fused_attention_hip(const Tensor& Q, const Tensor& K, const Tensor& V,
-                             float scale) -> std::pair<Tensor, Tensor>;
+                             float scale, bool causal = false) -> std::pair<Tensor, Tensor>;
     auto flash_attention_backward_hip(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
         const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
@@ -1750,11 +1750,50 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: input, weight, bias
+        // Per docs/internals/attention-contract.md: returns (output, mean, rstd).
+        // The HIP kernel computes mean/inv_std internally for normalization
+        // but historically discarded them — the dispatcher then returned a
+        // single tensor and any consumer expecting saved stats SEGVed in the
+        // nn layer (audit C5; matches feedback_forward_returns_stats).
+        // Until fused_layer_norm_hip is refactored to expose mean/inv_std as
+        // outputs, recompute them here at the host level so the contract is
+        // honored. The recomputation is O(N) — meaningful overhead but
+        // correctness wins until the kernel-level refit lands.
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return std::vector<Tensor>{rocm::fused_layer_norm_hip(inputs[0], normalized_shape,
-                                                              inputs[1], inputs[2], eps)};
+        Tensor output = rocm::fused_layer_norm_hip(
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps);
+        // Compute mean and rstd from the original input for the saved-stats slots.
+        // Per the contract these stay Float32 even for FP16/BF16 inputs.
+        const Tensor& X = inputs[0];
+        int64_t norm_size = 1;
+        for (auto d : normalized_shape) norm_size *= d;
+        int64_t batch_size = X.numel() / norm_size;
+        // Reshape to [batch_size, norm_size] view for reduction.
+        Tensor X_f32 = (X.dtype() == DType::Float32) ? X : X.to(DType::Float32);
+        Tensor X_2d = tenzor::reshape(X_f32, std::vector<int64_t>{batch_size, norm_size});
+        // mean = X_2d.mean(dim=1)
+        NewOpAttributes mean_attrs;
+        mean_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+        mean_attrs.set(AttrKey::Keepdim, false);
+        std::vector<Tensor> mr_inputs = {X_2d};
+        Tensor mean = tenzor::dispatch(OpId::Mean, mr_inputs, mean_attrs)[0];
+        // var = ((X_2d - mean).pow(2)).mean(dim=1)
+        Tensor mean_unsq = tenzor::reshape(mean, std::vector<int64_t>{batch_size, 1});
+        Tensor diff = tenzor::sub(X_2d, mean_unsq);
+        Tensor diff_sq = tenzor::mul(diff, diff);
+        std::vector<Tensor> vinp = {diff_sq};
+        Tensor var = tenzor::dispatch(OpId::Mean, vinp, mean_attrs)[0];
+        // rstd = 1/sqrt(var + eps)
+        Tensor eps_t = tenzor::full(
+            std::vector<int64_t>(var.shape().begin(), var.shape().end()),
+            static_cast<double>(eps), var.dtype(), var.device());
+        Tensor var_eps = tenzor::add(var, eps_t);
+        Tensor rstd = tenzor::div(
+            tenzor::full(std::vector<int64_t>(var_eps.shape().begin(), var_eps.shape().end()),
+                         1.0, var_eps.dtype(), var_eps.device()),
+            tenzor::sqrt(var_eps));
+        return std::vector<Tensor>{output, mean, rstd};
     });
 
     // ========================================================================
@@ -1773,21 +1812,34 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // Fused Attention
+    // Fused Attention — Causal flag now plumbed through (audit C1 ROCm fix).
     // ========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
-        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale);
-        return std::vector<Tensor>{output};
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
+        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
+        return std::vector<Tensor>{output, lse};
     });
 
     // ========================================================================
-    // Flash Attention (memory-efficient tiled attention)
+    // Flash Attention (memory-efficient tiled attention) — returns 4-tuple
+    // [output, lse, philox_seed, philox_offset] per attention-contract.md.
+    // Dropout > 0 with is_training currently throws; full Philox replay arrives
+    // with a kernel-level refit. Causal is honored (audit C1 fix).
     // ========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
-        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale);
-        return std::vector<Tensor>{output, lse};
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
+        float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+        bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
+        if (dropout_p > 0.0f && is_training) {
+            throw std::runtime_error(
+                "FlashAttention ROCm: dropout > 0 not yet supported on this backend. "
+                "Routes through BMM fallback in nn::functional::scaled_dot_product_attention "
+                "until the kernel-level Philox refit lands.");
+        }
+        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
+        return std::vector<Tensor>{output, lse, Tensor{}, Tensor{}};
     });
 
     // ========================================================================
@@ -1826,13 +1878,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             scores = tenzor::mul(scores, scale_t);
 
             if (causal) {
+                // Per attention-contract.md sentinel rule: -INFINITY, not -1e9
+                // (FP16 saturates the latter to -65504, leaks gradient mass
+                // through softmax — Systemic #3).
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 rows = tenzor::reshape(rows, {seq_len, 1});
                 cols = tenzor::reshape(cols, {1, seq_len});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
-                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
+                Tensor neg_inf = tenzor::full(scores_shape,
+                                              -std::numeric_limits<float>::infinity(),
                                               scores.dtype(), scores.device());
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
@@ -1867,6 +1923,40 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
             return {dQ, dK, dV};
         });
+
+    // ========================================================================
+    // FlexAttention (built-in score_mod registry; M8 lands the native path)
+    // ========================================================================
+    // Per docs/internals/attention-contract.md, ScoreModId 0=identity,
+    // 1=causal — both reduce to FusedAttention. Other IDs throw until M8.
+    table.register_kernel(OpId::FlexAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttention ROCm: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work).");
+        }
+        bool causal = (score_mod_id == 1);
+        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
+        return std::vector<Tensor>{output, lse};
+    });
+
+    table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttentionBackward ROCm: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work).");
+        }
+        bool causal = (score_mod_id == 1);
+        OpAttributes bwd_attrs;
+        bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+        bwd_attrs.set(AttrKey::Causal, causal);
+        std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+        return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+    });
 
     // ========================================================================
     // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)

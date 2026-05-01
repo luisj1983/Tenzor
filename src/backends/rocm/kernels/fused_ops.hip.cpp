@@ -1185,7 +1185,14 @@ __global__ void compute_attention_lse_kernel(
     }
 
     if (threadIdx.x == 0) {
-        lse_out[batch * seq_len + row] = max_val + logf(fmaxf(shared_reduce[0], 1e-10f));
+        // Per docs/internals/attention-contract.md: LSE for fully-masked rows
+        // must be -INFINITY so backward's exp(S - L) correctly evaluates to 0.
+        // Previously this clamped sum to 1e-10, producing LSE = max_val - 23
+        // which seeded spurious P values for fully-masked queries (audit H1 ROCm).
+        float row_sum = shared_reduce[0];
+        lse_out[batch * seq_len + row] = (row_sum > 0.0f)
+            ? (max_val + logf(row_sum))
+            : -INFINITY;
     }
 }
 
@@ -1219,7 +1226,10 @@ __global__ void flash_attention_v2_kernel_hip(
     float* __restrict__ L,
     const int seq_len_q,
     const int seq_len_k,
-    const float scale
+    const float scale,
+    const bool causal     // M5: causal masking (audit C1) — applied before
+                          // the per-tile softmax max-subtract so masked
+                          // positions get score = -INF and exp(-INF) = 0
 ) {
     const int batch_head = blockIdx.x;
     const int q_row = blockIdx.y;
@@ -1286,17 +1296,21 @@ __global__ void flash_attention_v2_kernel_hip(
         }
         __syncthreads();
 
-        // Compute attention scores: S[j] = Q @ K[j]^T * scale for j in [0, Bc)
-        // Each thread computes one or more scores
+        // Compute attention scores: S[j] = Q @ K[j]^T * scale for j in [0, Bc).
+        // Causal masking applied here so masked positions get a -INF score
+        // that cleanly produces exp(-INF) = 0 in the softmax below — matches
+        // the contract sentinel rule (audit C1 ROCm fix).
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
-            float score = 0.0f;
-            if (j < kv_end_actual) {
+            float score;
+            int kv_pos = kv_start + j;
+            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
+                score = 0.0f;
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     score += Q_shared[d] * K_tile[j * K_STRIDE + d];
                 }
                 score *= scale;
             } else {
-                score = -1e30f;  // Masked out (beyond seq_len_k)
+                score = -INFINITY;  // Beyond seq_len_k OR causally masked
             }
             scores_shared[j] = score;
         }
@@ -1761,7 +1775,9 @@ auto fused_attention_hip(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
-    float scale
+    float scale,
+    bool causal      // M5: plumbed through to flash_attention_v2_kernel_hip
+                     // (audit C1 — was previously missing)
 ) -> std::pair<Tensor, Tensor> {
     // Non-Float32: upcast to Float32, compute, convert back
     if (Q.dtype() != DType::Float32) {
@@ -1769,7 +1785,7 @@ auto fused_attention_hip(
         auto q_f32 = Q.to(DType::Float32);
         auto k_f32 = K.to(DType::Float32);
         auto v_f32 = V.to(DType::Float32);
-        auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale);
+        auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale, causal);
         return {result.to(orig_dtype), lse};
     }
 
@@ -1815,17 +1831,17 @@ auto fused_attention_hip(
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(32), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
         } else if (d_k == 64) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(64), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
         } else if (d_k == 128) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(128), 0,
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal);
         }
         HIP_CHECK(hipGetLastError());
     } else {
