@@ -63,6 +63,20 @@ target_link_libraries(test_attention_autograd PRIVATE
 
 gtest_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
 
+# Cross-backend FlashAttention/FusedAttention parity sweep (M9 — verifies
+# every enabled backend matches the CPU reference within F32 tolerance
+# across {causal, GQA, contiguous/permuted} axes per the contract).
+add_executable(test_attention_parity
+    test_attention_parity.cpp
+)
+
+target_link_libraries(test_attention_parity PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_attention_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
 # Data pipeline integration tests
 add_executable(test_data_pipeline
     test_data_pipeline.cpp
