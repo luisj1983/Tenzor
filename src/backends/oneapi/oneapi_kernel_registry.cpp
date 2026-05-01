@@ -2628,18 +2628,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Per docs/internals/attention-contract.md the canonical backward
+            // input order is [grad_output, input, weight, mean, rstd]. The
+            // OneAPI kernel signature expects (go, in, mean, inv_std, weight)
+            // — remap here. Previously the dispatcher passed inputs in raw
+            // order, leaving OneAPI in a divergent contract from CPU/CUDA/
+            // ROCm/Vulkan (audit M14 OneAPI).
             auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+            const Tensor& grad_output = inputs[0];
+            const Tensor& input       = inputs[1];
+            const Tensor& weight      = inputs[2];
+            const Tensor& mean        = inputs[3];
+            const Tensor& inv_std     = inputs[4];
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
-                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_q(inputs));
+                grad_output, input, mean, inv_std, weight, normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};
         });
 
-    // Note: OpId::FusedLayerNormBackward also maps to fused_layer_norm_backward
+    // Per the contract, FusedLayerNormBackward shares the same canonical
+    // input order as LayerNormBackward: [grad_output, input, weight, mean, rstd].
     table.register_kernel(OpId::FusedLayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+            const Tensor& grad_output = inputs[0];
+            const Tensor& input       = inputs[1];
+            const Tensor& weight      = inputs[2];
+            const Tensor& mean        = inputs[3];
+            const Tensor& inv_std     = inputs[4];
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
-                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_q(inputs));
+                grad_output, input, mean, inv_std, weight, normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};
         });
 
@@ -2912,16 +2929,47 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             // Step 2: scores = Q @ K^T
             Tensor scores = oneapi::matmul_kernel(inputs[0], kt, queue);
 
-            // Step 3: Scale by 1/scale (scale attr is typically sqrt(d_k))
+            // Step 3: Multiply by scale. Per docs/internals/attention-contract.md
+            // scale is the multiplicative factor (typically 1/sqrt(d_k)) — every
+            // other backend (CPU/CUDA/ROCm/Vulkan) and every caller in this
+            // codebase passes 1/sqrt(d_k) and expects multiplicative semantics.
+            // OneAPI used div previously (audit C1 OneAPI — the single highest
+            // impact OneAPI bug; every Intel-GPU MHA call was off by d_k).
             Tensor scale_tensor = oneapi::full_kernel({1}, scale, scores.dtype(), scores.device(), queue);
-            scores = oneapi::div_kernel(scores, scale_tensor, queue);
+            scores = oneapi::mul_kernel(scores, scale_tensor, queue);
+
+            // Step 3b: Apply causal mask if requested (audit C2 OneAPI: was
+            // also dropped). Use -INFINITY sentinel per the contract.
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            if (causal) {
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+                int64_t seq_q = scores_shape[scores_shape.size() - 2];
+                int64_t seq_k = scores_shape[scores_shape.size() - 1];
+                Tensor rows = oneapi::arange_kernel(0, seq_q, 1, DType::Int64, scores.device(), queue);
+                Tensor cols = oneapi::arange_kernel(0, seq_k, 1, DType::Int64, scores.device(), queue);
+                rows = oneapi::reshape_kernel(rows, {seq_q, 1}, queue);
+                cols = oneapi::reshape_kernel(cols, {1, seq_k}, queue);
+                Tensor causal_mask = oneapi::gt_kernel(cols.to(DType::Float32), rows.to(DType::Float32), queue);
+                Tensor neg_inf = oneapi::full_kernel(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device(), queue);
+                scores = oneapi::add_kernel(scores,
+                    oneapi::mul_kernel(causal_mask.to(scores.dtype()), neg_inf, queue), queue);
+            }
 
             // Step 4: Softmax over last dimension
             Tensor attn_weights = oneapi::softmax_kernel(scores, -1, queue);
 
             // Step 5: attn_weights @ V
             Tensor output = oneapi::matmul_kernel(attn_weights, inputs[2], queue);
-            return {output};
+            // Per contract, FusedAttention returns (output, lse). LSE is the
+            // log-row-sum-of-exp from the softmax above; until a fused-LSE
+            // kernel lands, we compute it composed-ops style: max(scores) +
+            // log(sum(exp(scores - max))).
+            // For now we emit lse=Tensor{} as a placeholder so callers using
+            // .is_valid() detect "not computed" and fall back. Full LSE
+            // emission arrives with the kernel-level fused path in M8.
+            return {output, Tensor{}};
         });
 
     // =========================================================================
@@ -2939,12 +2987,28 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
             bool is_causal = attrs.get_bool(AttrKey::Causal, false);
 
+            // Per docs/internals/attention-contract.md: dropout > 0 not yet
+            // supported on this backend (audit C2 OneAPI). Throw a clear error
+            // so the BMM fallback in nn::functional::scaled_dot_product_attention
+            // picks it up. Full Philox replay arrives with the kernel-level refit.
+            float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+            bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
+            if (dropout_p > 0.0f && is_training) {
+                throw std::runtime_error(
+                    "FlashAttention OneAPI: dropout > 0 not yet supported. Use the "
+                    "BMM fallback path or wait for the kernel-level Philox refit.");
+            }
+
             const Tensor* mask = (inputs.size() > 3) ? &inputs[3] : nullptr;
 
             Tensor output = oneapi::flash_attention_kernel(
                 inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue);
             oneapi::fp16_saturate_if_needed(output, queue);
-            return {output};
+            // Per contract, FlashAttention returns 4-tuple. LSE/seed/offset
+            // arrive with the kernel-level refit; for now emit empty placeholders
+            // so consumers using .is_valid() detect the gap and either compose
+            // backward from scratch or skip dropout replay.
+            return {output, Tensor{}, Tensor{}, Tensor{}};
         });
 
     // =========================================================================
@@ -3020,6 +3084,43 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             return {dQ, dK, dV};
         });
+
+    // =========================================================================
+    // FlexAttention (built-in score_mod registry; M8 lands native programmable)
+    // =========================================================================
+    // Per docs/internals/attention-contract.md, ScoreModId 0=identity, 1=causal.
+    // Both reduce to FusedAttention; other IDs throw until M8.
+    table.register_kernel(OpId::FlexAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttention OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work).");
+        }
+        bool causal = (score_mod_id == 1);
+        OpAttributes fa_attrs;
+        fa_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+        fa_attrs.set(AttrKey::Causal, causal);
+        std::vector<Tensor> fa_inputs(inputs.begin(), inputs.begin() + 3);
+        return tenzor::dispatch(OpId::FusedAttention, fa_inputs, fa_attrs);
+    });
+
+    table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+        if (score_mod_id != 0 && score_mod_id != 1) {
+            throw std::runtime_error(
+                "FlexAttentionBackward OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
+                " not yet implemented (M8 work).");
+        }
+        bool causal = (score_mod_id == 1);
+        OpAttributes bwd_attrs;
+        bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+        bwd_attrs.set(AttrKey::Causal, causal);
+        std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+        return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+    });
 
     // =========================================================================
     // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
