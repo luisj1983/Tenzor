@@ -1,13 +1,13 @@
 /**
  * @file test_fp16_multidtype.cpp
- * @brief Multi-dtype tests for Float16 precision behavior and conversions
+ * @brief Multi-dtype() tests for Float16 precision behavior and conversions
  *
  * This test suite focuses on:
  * - Float16 precision behavior and characteristics
  * - Conversions between Float16, Float32, and Float64
  * - Numerical stability with Float16
  * - BFloat16 operations for comparison
- * - Cross-dtype conversion accuracy
+ * - Cross-dtype() conversion accuracy
  *
  * Coverage:
  * - Float16/BFloat16 core operations
@@ -18,7 +18,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/tenzor.hpp"
 #include <cmath>
@@ -26,6 +26,7 @@
 #include <algorithm>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
 // ============================================================================
 // Test Parameters
@@ -51,14 +52,12 @@ void PrintTo(const DTypeParam& param, std::ostream* os) {
 
 class Float16ConversionTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
-    DType dtype;
-    float tolerance;
+    DType dtype() const { return GetParam().dtype; }
+    float tolerance = 0.0f;
 
     void SetUp() override {
         tenzor::initialize();
-        auto param = GetParam();
-        dtype = param.dtype;
-        tolerance = param.tolerance;
+        tolerance = GetParam().tolerance;
     }
 };
 
@@ -66,19 +65,19 @@ TEST_P(Float16ConversionTest, BasicConversion) {
     std::vector<float> test_values = {0.0f, 1.0f, -1.0f, 2.5f, -3.7f};
 
     for (float val : test_values) {
-        if (dtype == DType::Float16) {
+        if (dtype() == DType::Float16) {
             Float16 f16(val);
             float recovered = static_cast<float>(f16);
             EXPECT_NEAR(recovered, val, tolerance)
                 << "Float16 conversion failed for value: " << val;
-        } else if (dtype == DType::Float32) {
+        } else if (dtype() == DType::Float32) {
             // Float32 should be exact for these values
             EXPECT_FLOAT_EQ(val, val);
-        } else if (dtype == DType::Float64) {
+        } else if (dtype() == DType::Float64) {
             // Float64 should be exact for these values
             double val64 = static_cast<double>(val);
             EXPECT_DOUBLE_EQ(val64, val64);
-        } else if (dtype == DType::BFloat16) {
+        } else if (dtype() == DType::BFloat16) {
             BFloat16 bf16(val);
             float recovered = static_cast<float>(bf16);
             EXPECT_NEAR(recovered, val, tolerance)
@@ -94,13 +93,13 @@ TEST_P(Float16ConversionTest, SmallValues) {
     };
 
     for (float val : small_values) {
-        if (dtype == DType::Float16) {
+        if (dtype() == DType::Float16) {
             Float16 f16(val);
             float recovered = static_cast<float>(f16);
             float relative_error = std::abs((recovered - val) / val);
             EXPECT_LT(relative_error, 0.01f)
                 << "Float16 small value precision lost for: " << val;
-        } else if (dtype == DType::BFloat16) {
+        } else if (dtype() == DType::BFloat16) {
             BFloat16 bf16(val);
             float recovered = static_cast<float>(bf16);
             float relative_error = std::abs((recovered - val) / val);
@@ -111,7 +110,7 @@ TEST_P(Float16ConversionTest, SmallValues) {
 }
 
 TEST_P(Float16ConversionTest, LargeValues) {
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         // Float16 max: 65504
         Float16 f16_max(65504.0f);
         EXPECT_NEAR(static_cast<float>(f16_max), 65504.0f, 1.0f);
@@ -119,15 +118,15 @@ TEST_P(Float16ConversionTest, LargeValues) {
         // Test overflow
         Float16 f16_overflow(100000.0f);
         EXPECT_TRUE(std::isinf(static_cast<float>(f16_overflow)));
-    } else if (dtype == DType::BFloat16) {
+    } else if (dtype() == DType::BFloat16) {
         // BFloat16 has same range as Float32
         BFloat16 bf16_large(3.0e38f);
         EXPECT_GT(static_cast<float>(bf16_large), 1e37f);
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         // Float32 can handle large values
         float large = 3.4e38f;
         EXPECT_LT(large, std::numeric_limits<float>::infinity());
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         // Float64 can handle even larger values
         double large = 1.7e308;
         EXPECT_LT(large, std::numeric_limits<double>::infinity());
@@ -135,7 +134,7 @@ TEST_P(Float16ConversionTest, LargeValues) {
 }
 
 TEST_P(Float16ConversionTest, SpecialValues) {
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         // Infinity
         Float16 f16_inf(std::numeric_limits<float>::infinity());
         EXPECT_TRUE(std::isinf(static_cast<float>(f16_inf)));
@@ -146,7 +145,7 @@ TEST_P(Float16ConversionTest, SpecialValues) {
         // NaN
         Float16 f16_nan(std::numeric_limits<float>::quiet_NaN());
         EXPECT_TRUE(std::isnan(static_cast<float>(f16_nan)));
-    } else if (dtype == DType::BFloat16) {
+    } else if (dtype() == DType::BFloat16) {
         // Infinity
         BFloat16 bf16_inf(std::numeric_limits<float>::infinity());
         EXPECT_TRUE(std::isinf(static_cast<float>(bf16_inf)));
@@ -154,7 +153,7 @@ TEST_P(Float16ConversionTest, SpecialValues) {
         // NaN
         BFloat16 bf16_nan(std::numeric_limits<float>::quiet_NaN());
         EXPECT_TRUE(std::isnan(static_cast<float>(bf16_nan)));
-    } else if (dtype == DType::Float32 || dtype == DType::Float64) {
+    } else if (dtype() == DType::Float32 || dtype() == DType::Float64) {
         // Standard float special values
         EXPECT_TRUE(std::isinf(std::numeric_limits<float>::infinity()));
         EXPECT_TRUE(std::isnan(std::numeric_limits<float>::quiet_NaN()));
@@ -279,14 +278,12 @@ TEST_F(CrossDTypeConversionTest, CompareFloat16VsBFloat16Precision) {
 
 class NumericalStabilityTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
-    DType dtype;
-    float tolerance;
+    DType dtype() const { return GetParam().dtype; }
+    float tolerance = 0.0f;
 
     void SetUp() override {
         tenzor::initialize();
-        auto param = GetParam();
-        dtype = param.dtype;
-        tolerance = param.tolerance;
+        tolerance = GetParam().tolerance;
     }
 };
 
@@ -295,7 +292,7 @@ TEST_P(NumericalStabilityTest, AccumulationError) {
     const int n = 1000;
     const float small_val = 0.001f;
 
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         float sum_f16 = 0.0f;
         for (int i = 0; i < n; ++i) {
             Float16 f16(small_val);
@@ -308,7 +305,7 @@ TEST_P(NumericalStabilityTest, AccumulationError) {
         // Float16 accumulation may have noticeable error
         EXPECT_LT(relative_error, 0.05f)
             << "Float16 accumulation error too large";
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         float sum = 0.0f;
         for (int i = 0; i < n; ++i) {
             sum += small_val;
@@ -316,7 +313,7 @@ TEST_P(NumericalStabilityTest, AccumulationError) {
 
         float expected = n * small_val;
         EXPECT_NEAR(sum, expected, 1e-4f);
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double sum = 0.0;
         for (int i = 0; i < n; ++i) {
             sum += static_cast<double>(small_val);
@@ -331,7 +328,7 @@ TEST_P(NumericalStabilityTest, MultiplicationStability) {
     // Test repeated multiplication
     std::vector<float> factors = {1.1f, 0.9f, 1.05f, 0.95f};
 
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         float product_f16 = 1.0f;
         for (float factor : factors) {
             Float16 f16(factor);
@@ -341,7 +338,7 @@ TEST_P(NumericalStabilityTest, MultiplicationStability) {
         float expected = 1.1f * 0.9f * 1.05f * 0.95f;
         float relative_error = std::abs((product_f16 - expected) / expected);
         EXPECT_LT(relative_error, 0.01f);
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         float product = 1.0f;
         for (float factor : factors) {
             product *= factor;
@@ -353,7 +350,7 @@ TEST_P(NumericalStabilityTest, MultiplicationStability) {
 }
 
 TEST_P(NumericalStabilityTest, SubnormalHandling) {
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         // Float16 smallest normal: ~6.1e-5
         // Test subnormal values
         float subnormal = 1e-7f;
@@ -363,7 +360,7 @@ TEST_P(NumericalStabilityTest, SubnormalHandling) {
         // May underflow to zero or become subnormal
         EXPECT_GE(recovered, 0.0f);
         EXPECT_LE(recovered, subnormal * 10.0f);
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         // Float32 smallest normal: ~1.18e-38
         float subnormal = 1e-40f;
         EXPECT_GE(subnormal, 0.0f);
@@ -371,13 +368,13 @@ TEST_P(NumericalStabilityTest, SubnormalHandling) {
 }
 
 TEST_P(NumericalStabilityTest, ZeroPreservation) {
-    if (dtype == DType::Float16) {
+    if (dtype() == DType::Float16) {
         Float16 f16_pos_zero(0.0f);
         EXPECT_EQ(static_cast<float>(f16_pos_zero), 0.0f);
 
         Float16 f16_neg_zero(-0.0f);
         EXPECT_EQ(static_cast<float>(f16_neg_zero), -0.0f);
-    } else if (dtype == DType::BFloat16) {
+    } else if (dtype() == DType::BFloat16) {
         BFloat16 bf16_pos_zero(0.0f);
         EXPECT_EQ(static_cast<float>(bf16_pos_zero), 0.0f);
 
@@ -407,69 +404,18 @@ INSTANTIATE_TEST_SUITE_P(
 // Tensor Operations with Mixed Precision
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class TensorFloat16Test : public ::testing::TestWithParam<BackendDTypeParam> {
-protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        } else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        } else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-};
+class TensorFloat16Test : public MultiBackendDTypeTest {};
 
 TEST_P(TensorFloat16Test, TensorCreation) {
-    auto t = zeros({2, 3}, dtype, device);
-    EXPECT_EQ(t.dtype(), dtype);
+    auto t = zeros({2, 3}, dtype(), device());
+    EXPECT_EQ(t.dtype(), dtype());
     EXPECT_EQ(t.numel(), 6);
     EXPECT_EQ(t.shape().size(), 2);
 }
 
 TEST_P(TensorFloat16Test, DTypeSize) {
     size_t expected_size = 0;
-    switch (dtype) {
+    switch (dtype()) {
         case DType::Float16:
         case DType::BFloat16:
             expected_size = 2;
@@ -481,15 +427,15 @@ TEST_P(TensorFloat16Test, DTypeSize) {
             expected_size = 8;
             break;
         default:
-            FAIL() << "Unexpected dtype";
+            FAIL() << "Unexpected dtype()";
     }
 
-    EXPECT_EQ(dtype_size(dtype), expected_size);
+    EXPECT_EQ(dtype_size(dtype()), expected_size);
 }
 
 TEST_P(TensorFloat16Test, DTypeName) {
     std::string expected_name;
-    switch (dtype) {
+    switch (dtype()) {
         case DType::Float16:
             expected_name = "float16";
             break;
@@ -503,25 +449,24 @@ TEST_P(TensorFloat16Test, DTypeName) {
             expected_name = "float64";
             break;
         default:
-            FAIL() << "Unexpected dtype";
+            FAIL() << "Unexpected dtype()";
     }
 
-    EXPECT_EQ(dtype_name(dtype), expected_name);
+    EXPECT_EQ(dtype_name(dtype()), expected_name);
 }
 
-// Instantiate for CPU only (Float16/BFloat16 tensor ops may not be supported on all backends)
+// Instantiate for CPU only (Float16/BFloat16 tensor ops may not be supported on all backends).
+// Uses the canonical std::tuple<std::string, DType> param type from MultiBackendDTypeTest.
 INSTANTIATE_TEST_SUITE_P(
     CPU,
     TensorFloat16Test,
     ::testing::Values(
-        BackendDTypeParam{"cpu", DType::Float16, "Float16"},
-        BackendDTypeParam{"cpu", DType::BFloat16, "BFloat16"},
-        BackendDTypeParam{"cpu", DType::Float32, "Float32"},
-        BackendDTypeParam{"cpu", DType::Float64, "Float64"}
+        BackendDTypeParam{"cpu", DType::Float16},
+        BackendDTypeParam{"cpu", DType::BFloat16},
+        BackendDTypeParam{"cpu", DType::Float32},
+        BackendDTypeParam{"cpu", DType::Float64}
     ),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
+    BackendDTypeParamName
 );
 
 // ============================================================================
@@ -679,8 +624,3 @@ TEST_F(EdgeCaseTest, NaNPropagation) {
 // ============================================================================
 // Main
 // ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

@@ -81,11 +81,14 @@ void main() {
     uint k = (tid / params.inner) % params.idx_n;
     uint o = tid / (params.inner * params.idx_n);
 
-    int dest_idx = idx_data[k];
+    // Phase 7.6 2D scatter fix: index lookup must include outer/inner
+    // offsets — was previously `idx_data[k]` which only worked for 1D.
+    uint idx_pos = (o * params.idx_n + k) * params.inner + j;
+    int dest_idx = idx_data[idx_pos];
     if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
 
     uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
-    uint src_pos = (o * params.idx_n + k) * params.inner + j;
+    uint src_pos = idx_pos;
     float val = src_data[src_pos];
 
     if (params.mode == 0u || params.mode == 2u) {

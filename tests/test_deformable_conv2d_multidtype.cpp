@@ -217,7 +217,13 @@ TEST_P(DeformableConv2dTest, BackwardGradientFlow) {
 // exercises the deformable_conv2d backward kernels (bilinear interp
 // gradient + weight + offset) against the CPU reference.
 TEST_P(DeformableConv2dTest, BackwardParityVsCPU) {
-    if (device.type == Device::Type::CPU) GTEST_SKIP();
+    // Test-design skip (not a backend-availability skip): CPU is the parity
+    // reference, so CPU-vs-CPU has nothing to compare. The fixture's SetUp()
+    // already handled TENZOR_SKIP_BACKENDS and TENZOR_REQUIRE_MULTI_BACKEND
+    // for unavailable backends.
+    if (device.type == Device::Type::CPU) {
+        GTEST_SKIP() << "CPU is the parity reference; CPU-vs-CPU parity is meaningless";
+    }
 
     const int64_t in_ch = 2, out_ch = 4, k = 3;
     nn::DeformableConv2d dcn_cpu(in_ch, out_ch, k, 1, 1);

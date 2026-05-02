@@ -912,13 +912,49 @@ auto interpolate(const Variable& input,
     attrs.set(AttrKey::AlignCorners, align_corners);
 
     auto result = dispatch(OpId::Interpolate, inputs_vec, attrs);
-    // No InterpolateBackward exists in this codebase yet — propagating
-    // input.requires_grad() onto the output Variable here would be a lie
-    // (no grad_fn is attached, so backward through the result returns
-    // zero gradients). Force requires_grad=false so callers see the
-    // "interpolate output is detached" semantics explicitly. A real
-    // backward (bilinear/nearest/etc.) is tracked as a follow-up.
-    return Variable(result[0], false);
+    Tensor output = result[0];
+
+    // Phase 7.1 of the test-coverage campaign: wire backward through the
+    // existing `UpsampleBilinearBackward` autograd Function for the bilinear
+    // case (which is also what `nn::Upsample` uses). Other modes do not
+    // currently have a backward implementation; rather than silently
+    // returning zero gradients (the previous behaviour) we attach the
+    // bilinear-backward grad_fn only when the mode supports it and otherwise
+    // explicitly produce a detached Variable.
+    //
+    // Adding nearest/bicubic/trilinear/area backwards is tracked as the
+    // remaining followup work for Phase 7.1; the bilinear path covers the
+    // overwhelming majority of users (segmentation/super-resolution/etc.)
+    // and matches PyTorch's grad-flow semantics for that mode.
+    if (input.requires_grad() && is_grad_enabled() && mode == "bilinear") {
+        const auto in_shape = input.tensor().shape();
+        if (in_shape.size() != 4) {
+            throw std::runtime_error(
+                "interpolate(bilinear): backward requires 4D input (N,C,H,W); "
+                "got " + std::to_string(in_shape.size()) + "D");
+        }
+        int64_t H_in = in_shape[2];
+        int64_t W_in = in_shape[3];
+        auto grad_fn = std::make_shared<UpsampleBilinearBackward>(
+            H_in, W_in, size.first, size.second);
+        grad_fn->save_for_backward({input.tensor()});
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+        std::vector<Variable> input_vars{input};
+        grad_fn->set_input_variables(input_vars);
+
+        Variable result_var(output, /*requires_grad=*/true);
+        result_var.set_grad_fn(grad_fn);
+        return result_var;
+    }
+
+    // Non-bilinear modes (nearest / bicubic / trilinear / area) — no
+    // backward yet. Returning a detached Variable makes the missing-
+    // gradient semantics explicit. Callers that need autograd through a
+    // non-bilinear interpolate should use `nn::Upsample` (bilinear) or
+    // wait for the per-mode backwards to land.
+    return Variable(output, false);
 }
 
 // ============================================================================

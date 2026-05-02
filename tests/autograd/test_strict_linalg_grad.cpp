@@ -82,6 +82,18 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseStillPermissive) {
     auto loss = tenzor::sum(LD);
     EXPECT_NO_THROW(loss.backward())
         << "TENZOR_STRICT_LINALG_GRAD=0 should behave like unset";
+
+    // Same observable behavior as default (zero-gradient stub). Matches the
+    // assertion in LDLFactor_ZeroGradByDefault — without it, EXPECT_NO_THROW
+    // alone could pass even if the strict=0 path silently diverged.
+    ASSERT_TRUE(A.has_grad());
+    auto g = A.grad().value().to(DType::Float64).contiguous();
+    const double* gp = g.data<double>();
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_EQ(gp[i], 0.0)
+            << "TENZOR_STRICT_LINALG_GRAD=0 must produce the same zero "
+               "gradient as the unset default mode";
+    }
 }
 
 }  // namespace

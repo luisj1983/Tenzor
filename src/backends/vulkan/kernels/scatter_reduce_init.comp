@@ -1,0 +1,47 @@
+#version 450
+
+// scatter_reduce !include_self init pass.
+// Writes the per-mode identity value to every output position that will be
+// touched by the subsequent scatter_reduce dispatch. Positions never
+// touched retain their original input value, matching CPU semantics.
+//
+// Modes: 0=sum, 1=prod, 2=mean, 3=amax, 4=amin (identity values vary).
+//
+// Phase 7.6 SumNoIncludeSelf fix.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint out_data[]; };  // float storage as uint
+layout(binding = 1) buffer Index  { int idx_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer;
+    uint dim_size;
+    uint idx_n;
+    uint inner;
+    uint mode;
+} params;
+
+float identity_for(uint mode) {
+    if (mode == 0u || mode == 2u) return 0.0;       // sum / mean
+    if (mode == 1u) return 1.0;                      // prod
+    if (mode == 3u) return -3.402823466e+38;         // amax (-FLT_MAX)
+    return 3.402823466e+38;                          // amin (+FLT_MAX)
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint total = params.outer * params.idx_n * params.inner;
+    if (tid >= total) return;
+
+    uint j = tid % params.inner;
+    uint k = (tid / params.inner) % params.idx_n;
+    uint o = tid / (params.inner * params.idx_n);
+
+    uint idx_pos = (o * params.idx_n + k) * params.inner + j;
+    int dest = idx_data[idx_pos];
+    if (dest < 0 || dest >= int(params.dim_size)) return;
+
+    uint out_pos = (o * params.dim_size + uint(dest)) * params.inner + j;
+    out_data[out_pos] = floatBitsToUint(identity_for(params.mode));
+}

@@ -1,0 +1,38 @@
+#version 450
+
+// scatter_reduce mean divisor pass — divides each output element by its
+// scatter-count (+1 if include_self). Mirrors the CUDA/ROCm/OneAPI
+// post-processing kernel.
+//
+// counts[i] = number of scatter operations that touched position i
+//             (does NOT include the self contribution).
+// With include_self=true the accumulator is `input + sum(scatters)`,
+// so the divisor is `count + 1`. Untouched positions (count == 0)
+// keep their original value.
+//
+// Phase 7.6 mean fix.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint out_data[]; };  // float storage as uint
+layout(binding = 1) buffer Counts { int count_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    uint include_self;  // 0 or 1
+} params;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= params.numel) return;
+    int c = count_data[tid];
+    if (c <= 0) return;
+    uint divisor_int = (params.include_self != 0u)
+        ? uint(c + 1)
+        : uint(c);
+    float divisor = float(divisor_int);
+    uint old_bits = out_data[tid];
+    float old_val = uintBitsToFloat(old_bits);
+    uint new_bits = floatBitsToUint(old_val / divisor);
+    out_data[tid] = new_bits;
+}

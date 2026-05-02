@@ -1,21 +1,41 @@
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <limits>
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
+
+// Pretty-print dtype() for error messages — replaces the old
+// fixture's dtype_name field. Local `inline` so the helper is
+// available in this TU only.
+inline std::string dtype_to_str(DType d) {
+    switch (d) {
+        case DType::Float32: return "float32";
+        case DType::Float64: return "float64";
+        case DType::Float16: return "float16";
+        case DType::BFloat16: return "bfloat16";
+        case DType::Int8: return "int8";
+        case DType::Int16: return "int16";
+        case DType::Int32: return "int32";
+        case DType::Int64: return "int64";
+        case DType::UInt8: return "uint8";
+        case DType::Bool: return "bool";
+        default: return "unknown";
+    }
+}
 
 /**
  * @file test_comparison_ops_multidtype.cpp
  * @brief Dtype-parameterized tests for comparison operations
  *
- * CRITICAL DESIGN: Comparison operations ALWAYS return Bool dtype,
+ * CRITICAL DESIGN: Comparison operations ALWAYS return Bool dtype(),
  * but accept multiple input dtypes (Float32, Float64, Int32, Int64).
  *
  * Tests verify:
  * - Input dtypes: Float32, Float64, Int32, Int64
- * - Output dtype: Bool (always)
+ * - Output dtype(): Bool (always)
  * - Edge cases: NaN for floats, max/min for integers
  */
 
@@ -23,74 +43,11 @@ using namespace tenzor;
 // Nested Parameterization (Backend + Input DType)
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
+class ComparisonOpsMultiDTypeTest : public MultiBackendDTypeTest {
 
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class ComparisonOpsMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
 protected:
-    Device device;
     DType input_dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        input_dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Helper to create tensor with specific value based on dtype
+    // Helper to create tensor with specific value based on dtype()
     template<typename T>
     Tensor createTensorWithValue(const std::vector<int64_t>& shape, T value) {
         auto tensor_cpu = zeros(shape, input_dtype, Device::cpu());
@@ -120,7 +77,7 @@ protected:
             }
         }
 
-        return (device.type == Device::Type::CPU) ? tensor_cpu : tensor_cpu.to(device);
+        return (device().type == Device::Type::CPU) ? tensor_cpu : tensor_cpu.to(device());
     }
 
     // Helper to verify all elements are true
@@ -133,8 +90,8 @@ protected:
         for (int64_t i = 0; i < result_cpu.numel(); ++i) {
             EXPECT_TRUE(data[i])
                 << "Failed for " << op_name
-                << " on backend: " << GetParam().backend_name
-                << " with dtype: " << GetParam().dtype_name
+                << " on backend: " << backend_name()
+                << " with dtype(): " << dtype_to_str(dtype())
                 << " at index " << i;
         }
     }
@@ -149,8 +106,8 @@ protected:
         for (int64_t i = 0; i < result_cpu.numel(); ++i) {
             EXPECT_FALSE(data[i])
                 << "Failed for " << op_name
-                << " on backend: " << GetParam().backend_name
-                << " with dtype: " << GetParam().dtype_name
+                << " on backend: " << backend_name()
+                << " with dtype(): " << dtype_to_str(dtype())
                 << " at index " << i;
         }
     }
@@ -285,7 +242,7 @@ TEST_P(ComparisonOpsFloatEdgeCases, NaN_NotEqualToItself) {
         }
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
 
     // NaN != NaN by IEEE 754 standard
     auto result = eq(a, a);
@@ -316,7 +273,7 @@ TEST_P(ComparisonOpsFloatEdgeCases, NaN_ComparisonAlwaysFalse) {
         }
     }
 
-    auto nan_tensor = (device.type == Device::Type::CPU) ? nan_tensor_cpu : nan_tensor_cpu.to(device);
+    auto nan_tensor = (device().type == Device::Type::CPU) ? nan_tensor_cpu : nan_tensor_cpu.to(device());
 
     // All comparisons with NaN should be false
     auto result_lt = lt(nan_tensor, normal_tensor);
@@ -359,8 +316,8 @@ TEST_P(ComparisonOpsFloatEdgeCases, Infinity_Comparisons) {
         }
     }
 
-    auto pos_inf = (device.type == Device::Type::CPU) ? pos_inf_cpu : pos_inf_cpu.to(device);
-    auto neg_inf = (device.type == Device::Type::CPU) ? neg_inf_cpu : neg_inf_cpu.to(device);
+    auto pos_inf = (device().type == Device::Type::CPU) ? pos_inf_cpu : pos_inf_cpu.to(device());
+    auto neg_inf = (device().type == Device::Type::CPU) ? neg_inf_cpu : neg_inf_cpu.to(device());
 
     // +inf > any finite number
     auto result_pos_gt = gt(pos_inf, normal);
@@ -405,7 +362,7 @@ TEST_P(ComparisonOpsIntEdgeCases, MaxValue_Comparisons) {
         }
     }
 
-    auto max_val = (device.type == Device::Type::CPU) ? max_val_cpu : max_val_cpu.to(device);
+    auto max_val = (device().type == Device::Type::CPU) ? max_val_cpu : max_val_cpu.to(device());
 
     // max_value > normal value
     auto result_gt = gt(max_val, normal);
@@ -440,7 +397,7 @@ TEST_P(ComparisonOpsIntEdgeCases, MinValue_Comparisons) {
         }
     }
 
-    auto min_val = (device.type == Device::Type::CPU) ? min_val_cpu : min_val_cpu.to(device);
+    auto min_val = (device().type == Device::Type::CPU) ? min_val_cpu : min_val_cpu.to(device());
 
     // min_value < normal value
     auto result_lt = lt(min_val, normal);
@@ -480,51 +437,32 @@ TEST_P(ComparisonOpsIntEdgeCases, Zero_Comparisons) {
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateComparisonTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     ComparisonOpsMultiDTypeTest,
-    ::testing::ValuesIn(GenerateComparisonTestCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Int32, DType::Int64, DType::Bool)
+    ),
+    BackendDTypeParamName);
 
 INSTANTIATE_TEST_SUITE_P(
     FloatEdgeCases,
     ComparisonOpsFloatEdgeCases,
-    ::testing::ValuesIn(GenerateComparisonTestCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Int32, DType::Int64, DType::Bool)
+    ),
+    BackendDTypeParamName);
 
 INSTANTIATE_TEST_SUITE_P(
     IntEdgeCases,
     ComparisonOpsIntEdgeCases,
-    ::testing::ValuesIn(GenerateComparisonTestCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Int32, DType::Int64, DType::Bool)
+    ),
+    BackendDTypeParamName);
 
 /*
  * COVERAGE SUMMARY:
@@ -545,7 +483,7 @@ INSTANTIATE_TEST_SUITE_P(
  * - Edge cases (NaN, infinity, max/min values, zero)
  *
  * CRITICAL VERIFICATION:
- * - Output dtype is ALWAYS Bool regardless of input dtype
+ * - Output dtype() is ALWAYS Bool regardless of input dtype()
  * - NaN handling follows IEEE 754 standard
  * - Integer boundary values handled correctly
  */

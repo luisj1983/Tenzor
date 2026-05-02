@@ -1,13 +1,13 @@
 /**
  * @file test_detection_components_multidtype.cpp
- * @brief Multi-dtype tests for detection components
+ * @brief Multi-dtype() tests for detection components
  *
  * Tests detection operations with Float32 and Float64 dtypes
  * across CPU, CUDA, Vulkan, and OneAPI backends.
  */
 
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include "tenzor/nn/detection/anchors.hpp"
 #include "tenzor/nn/detection/roi_ops.hpp"
@@ -15,11 +15,12 @@
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 using namespace tenzor::nn::detection;
 using namespace tenzor::ops;
 
 /**
- * Multi-dtype parameterized testing for detection components
+ * Multi-dtype() parameterized testing for detection components
  *
  * Coverage:
  * - Dtypes: Float32, Float64
@@ -31,86 +32,16 @@ using namespace tenzor::ops;
 // Backend + DType Parameterization
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-    float tolerance;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class DetectionComponentsMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class DetectionComponentsMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    Device device;
-    DType dtype;
-    float tol;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-        tol = param.tolerance;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    void TearDown() override {
-        tenzor::finalize();
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Helper to convert tensor to test dtype
     Tensor toTestDType(const Tensor& t) {
-        if (t.dtype() != dtype) {
-            return t.to(dtype);
-        }
-        return t;
+        return (dtype() == DType::Float32) ? t : t.to(dtype());
+    }
+    using MultiBackendDTypeTest::expectShape;
+    void expectShape(const Variable& v, const std::vector<int64_t>& expected) {
+        auto shape = v.tensor().shape();
+        EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), expected);
+        EXPECT_EQ(v.tensor().dtype(), dtype());
     }
 };
 
@@ -130,7 +61,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorBasic) {
     auto shape = boxes.shape();
     EXPECT_EQ(shape[0], 36);
     EXPECT_EQ(shape[1], 4);
-    EXPECT_EQ(boxes.dtype(), dtype);
+    EXPECT_EQ(boxes.dtype(), dtype());
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorNumAnchors) {
@@ -150,8 +81,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorDifferentStrides) {
 
     EXPECT_EQ(boxes_8.shape()[0], 16);  // 4*4*1*1
     EXPECT_EQ(boxes_16.shape()[0], 4);   // 2*2*1*1
-    EXPECT_EQ(boxes_8.dtype(), dtype);
-    EXPECT_EQ(boxes_16.dtype(), dtype);
+    EXPECT_EQ(boxes_8.dtype(), dtype());
+    EXPECT_EQ(boxes_16.dtype(), dtype());
 }
 
 // ============================================================================
@@ -160,14 +91,14 @@ TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorDifferentStrides) {
 
 TEST_P(DetectionComponentsMultiDTypeTest, NMSBasicShape) {
     // Create boxes and scores
-    Tensor boxes({10, 4}, dtype, device);
-    Tensor scores({10}, dtype, device);
+    Tensor boxes({10, 4}, dtype(), device());
+    Tensor scores({10}, dtype(), device());
 
     // Fill with non-overlapping boxes
     auto boxes_cpu = boxes.to(Device::cpu());
     auto scores_cpu = scores.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* box_data = boxes_cpu.data<float>();
         float* score_data = scores_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
@@ -178,7 +109,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSBasicShape) {
             box_data[i*4 + 3] = i * 20.0f + 10.0f;  // y2
             score_data[i] = 1.0f - i * 0.05f;
         }
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* box_data = boxes_cpu.data<double>();
         double* score_data = scores_cpu.data<double>();
         for (int i = 0; i < 10; ++i) {
@@ -190,8 +121,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSBasicShape) {
         }
     }
 
-    boxes = boxes_cpu.to(device);
-    scores = scores_cpu.to(device);
+    boxes = boxes_cpu.to(device());
+    scores = scores_cpu.to(device());
 
     // Apply NMS
     auto keep = nms(boxes, scores, 0.5);
@@ -202,13 +133,13 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSBasicShape) {
 
 TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
     // Create overlapping boxes
-    Tensor boxes({4, 4}, dtype, device);
-    Tensor scores({4}, dtype, device);
+    Tensor boxes({4, 4}, dtype(), device());
+    Tensor scores({4}, dtype(), device());
 
     auto boxes_cpu = boxes.to(Device::cpu());
     auto scores_cpu = scores.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* box_data = boxes_cpu.data<float>();
         float* score_data = scores_cpu.data<float>();
 
@@ -227,7 +158,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
         // Box 3: (1, 1, 10, 10), score: 0.6 (overlaps with box 0, IoU=0.81)
         box_data[12] = 1.0f; box_data[13] = 1.0f; box_data[14] = 10.0f; box_data[15] = 10.0f;
         score_data[3] = 0.6f;
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* box_data = boxes_cpu.data<double>();
         double* score_data = scores_cpu.data<double>();
 
@@ -245,8 +176,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
         score_data[3] = 0.6;
     }
 
-    boxes = boxes_cpu.to(device);
-    scores = scores_cpu.to(device);
+    boxes = boxes_cpu.to(device());
+    scores = scores_cpu.to(device());
 
     auto keep = nms(boxes, scores, 0.5);
 
@@ -260,21 +191,21 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignBasic) {
     // Create simple feature map
-    auto features = randn({1, 2, 8, 8}, DType::Float32, device);
+    auto features = randn({1, 2, 8, 8}, DType::Float32, device());
     features = toTestDType(features);
 
     // Create single ROI
-    Tensor rois({1, 5}, dtype, device);
+    Tensor rois({1, 5}, dtype(), device());
     auto rois_cpu = rois.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* data = rois_cpu.data<float>();
         data[0] = 0.0f;  // batch_idx
         data[1] = 0.0f;  // x1
         data[2] = 0.0f;  // y1
         data[3] = 8.0f;  // x2
         data[4] = 8.0f;  // y2
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* data = rois_cpu.data<double>();
         data[0] = 0.0;
         data[1] = 0.0;
@@ -283,7 +214,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignBasic) {
         data[4] = 8.0;
     }
 
-    rois = rois_cpu.to(device);
+    rois = rois_cpu.to(device());
 
     // ROIAlign to 3x3 output
     ROIAlign roi_align(3, 3, 1.0, 2, true);
@@ -295,18 +226,18 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignBasic) {
     EXPECT_EQ(shape[1], 2);   // channels
     EXPECT_EQ(shape[2], 3);   // output_h
     EXPECT_EQ(shape[3], 3);   // output_w
-    EXPECT_EQ(aligned.tensor().dtype(), dtype);
+    EXPECT_EQ(aligned.tensor().dtype(), dtype());
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignMultipleROIs) {
-    auto features = randn({2, 4, 16, 16}, DType::Float32, device);
+    auto features = randn({2, 4, 16, 16}, DType::Float32, device());
     features = toTestDType(features);
 
     // Multiple ROIs from different batches
-    Tensor rois({3, 5}, dtype, device);
+    Tensor rois({3, 5}, dtype(), device());
     auto rois_cpu = rois.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* data = rois_cpu.data<float>();
         // ROI 0: batch 0
         data[0] = 0.0f; data[1] = 0.0f; data[2] = 0.0f; data[3] = 16.0f; data[4] = 16.0f;
@@ -314,14 +245,14 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignMultipleROIs) {
         data[5] = 1.0f; data[6] = 8.0f; data[7] = 8.0f; data[8] = 24.0f; data[9] = 24.0f;
         // ROI 2: batch 0
         data[10] = 0.0f; data[11] = 4.0f; data[12] = 4.0f; data[13] = 12.0f; data[14] = 12.0f;
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* data = rois_cpu.data<double>();
         data[0] = 0.0; data[1] = 0.0; data[2] = 0.0; data[3] = 16.0; data[4] = 16.0;
         data[5] = 1.0; data[6] = 8.0; data[7] = 8.0; data[8] = 24.0; data[9] = 24.0;
         data[10] = 0.0; data[11] = 4.0; data[12] = 4.0; data[13] = 12.0; data[14] = 12.0;
     }
 
-    rois = rois_cpu.to(device);
+    rois = rois_cpu.to(device());
 
     ROIAlign roi_align(7, 7, 1.0, 2, true);
     auto aligned = roi_align.forward(Variable(features, false), rois);
@@ -332,26 +263,26 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignMultipleROIs) {
     EXPECT_EQ(shape[1], 4);   // channels
     EXPECT_EQ(shape[2], 7);   // output_h
     EXPECT_EQ(shape[3], 7);   // output_w
-    EXPECT_EQ(aligned.tensor().dtype(), dtype);
+    EXPECT_EQ(aligned.tensor().dtype(), dtype());
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignGradient) {
     // Test gradient flow through ROIAlign
-    auto features = randn({1, 2, 8, 8}, DType::Float32, device);
+    auto features = randn({1, 2, 8, 8}, DType::Float32, device());
     features = toTestDType(features);
 
-    Tensor rois({1, 5}, dtype, device);
+    Tensor rois({1, 5}, dtype(), device());
     auto rois_cpu = rois.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* data = rois_cpu.data<float>();
         data[0] = 0.0f; data[1] = 0.0f; data[2] = 0.0f; data[3] = 8.0f; data[4] = 8.0f;
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* data = rois_cpu.data<double>();
         data[0] = 0.0; data[1] = 0.0; data[2] = 0.0; data[3] = 8.0; data[4] = 8.0;
     }
 
-    rois = rois_cpu.to(device);
+    rois = rois_cpu.to(device());
 
     auto features_var = Variable(features, true);
 
@@ -372,26 +303,26 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignGradient) {
         auto feat_shape = features.shape();
         EXPECT_EQ(std::vector<int64_t>(grad_shape.begin(), grad_shape.end()),
                   std::vector<int64_t>(feat_shape.begin(), feat_shape.end()));
-        EXPECT_EQ(features_var.grad()->dtype(), dtype);
+        EXPECT_EQ(features_var.grad()->dtype(), dtype());
     }
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignDifferentOutputSizes) {
-    auto features = randn({1, 3, 16, 16}, DType::Float32, device);
+    auto features = randn({1, 3, 16, 16}, DType::Float32, device());
     features = toTestDType(features);
 
-    Tensor rois({1, 5}, dtype, device);
+    Tensor rois({1, 5}, dtype(), device());
     auto rois_cpu = rois.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         float* data = rois_cpu.data<float>();
         data[0] = 0.0f; data[1] = 0.0f; data[2] = 0.0f; data[3] = 16.0f; data[4] = 16.0f;
-    } else if (dtype == DType::Float64) {
+    } else if (dtype() == DType::Float64) {
         double* data = rois_cpu.data<double>();
         data[0] = 0.0; data[1] = 0.0; data[2] = 0.0; data[3] = 16.0; data[4] = 16.0;
     }
 
-    rois = rois_cpu.to(device);
+    rois = rois_cpu.to(device());
 
     // Test different output sizes
     std::vector<int> sizes = {3, 5, 7};
@@ -402,7 +333,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignDifferentOutputSizes) {
         auto shape = aligned.tensor().shape();
         EXPECT_EQ(shape[2], size);
         EXPECT_EQ(shape[3], size);
-        EXPECT_EQ(aligned.tensor().dtype(), dtype);
+        EXPECT_EQ(aligned.tensor().dtype(), dtype());
     }
 }
 
@@ -410,31 +341,14 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignDifferentOutputSizes) {
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateDetectionComponentsTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    std::vector<std::tuple<DType, std::string, float>> dtypes = {
-        {DType::Float32, "float32", 1e-3f},
-        {DType::Float64, "float64", 1e-8f},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name, tolerance] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name, tolerance});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     DetectionComponentsMultiDTypeTest,
-    ::testing::ValuesIn(GenerateDetectionComponentsTestCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64)
+    ),
+    BackendDTypeParamName);
 
 /*
  * COVERAGE SUMMARY:

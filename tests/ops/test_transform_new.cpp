@@ -1,30 +1,30 @@
 /**
  * @file test_transform_new.cpp
- * @brief Tests for new transform operations: moveaxis, narrow_copy, column_stack,
- *        row_stack, broadcast_tensors
+ * @brief Multi-backend tests for new transform operations.
+ *
+ * Migrated from CPU-only `::testing::Test` to BackendTest. Covers
+ * moveaxis, narrow_copy, column_stack, row_stack, broadcast_tensors on
+ * every backend that registers them.
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/transform.hpp>
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
-class TransformNewTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
+class TransformNewTest : public BackendTest {};
 
 // ============================================================================
 // moveaxis
 // ============================================================================
 
-TEST_F(TransformNewTest, MoveaxisEquivalentToMovedim) {
-    auto input = rand({2, 3, 4}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, MoveaxisEquivalentToMovedim) {
+    auto input = rand({2, 3, 4}, DType::Float32, device);
 
     auto result_moveaxis = moveaxis(input, {0, 2}, {2, 0});
     auto result_movedim  = movedim(input, {0, 2}, {2, 0});
@@ -34,16 +34,19 @@ TEST_F(TransformNewTest, MoveaxisEquivalentToMovedim) {
         EXPECT_EQ(result_moveaxis.shape()[i], result_movedim.shape()[i]);
     }
 
-    auto* a = result_moveaxis.data<float>();
-    auto* b = result_movedim.data<float>();
+    auto a_cpu = result_moveaxis.to(Device::cpu()).contiguous();
+    auto b_cpu = result_movedim.to(Device::cpu()).contiguous();
+    auto* a = a_cpu.data<float>();
+    auto* b = b_cpu.data<float>();
     for (int64_t i = 0; i < result_moveaxis.numel(); ++i) {
-        EXPECT_FLOAT_EQ(a[i], b[i]) << "Mismatch at index " << i;
+        EXPECT_FLOAT_EQ(a[i], b[i])
+            << "Mismatch at index " << i << " on " << device.to_string();
     }
 }
 
-TEST_F(TransformNewTest, MoveaxisTransposeLike) {
+TEST_P(TransformNewTest, MoveaxisTransposeLike) {
     // Moving axis 0 -> 1 and 1 -> 0 is a transpose for 2D
-    auto input = rand({3, 5}, DType::Float32, Device::cpu());
+    auto input = rand({3, 5}, DType::Float32, device);
     auto result = moveaxis(input, {0, 1}, {1, 0});
 
     EXPECT_EQ(result.shape()[0], 5);
@@ -54,22 +57,29 @@ TEST_F(TransformNewTest, MoveaxisTransposeLike) {
 // narrow_copy
 // ============================================================================
 
-TEST_F(TransformNewTest, NarrowCopyCorrectData) {
-    auto input = zeros({10}, DType::Float32, Device::cpu());
-    auto* d = const_cast<float*>(input.data<float>());
+TEST_P(TransformNewTest, NarrowCopyCorrectData) {
+    // Build the populated input on CPU then move to device — data<float>()
+    // for direct write requires CPU storage. The narrow_copy op runs on the
+    // target device after the move.
+    auto input_cpu = zeros({10}, DType::Float32, Device::cpu());
+    auto* d = const_cast<float*>(input_cpu.data<float>());
     for (int i = 0; i < 10; ++i) d[i] = static_cast<float>(i);
+    auto input = (device.type == Device::Type::CPU) ? input_cpu : input_cpu.to(device);
 
     auto result = narrow_copy(input, 0, 3, 4);  // elements 3,4,5,6
 
     EXPECT_EQ(result.shape()[0], 4);
-    auto* r = result.data<float>();
+    auto result_cpu = result.to(Device::cpu()).contiguous();
+    auto* r = result_cpu.data<float>();
     EXPECT_FLOAT_EQ(r[0], 3.0f);
     EXPECT_FLOAT_EQ(r[1], 4.0f);
     EXPECT_FLOAT_EQ(r[2], 5.0f);
     EXPECT_FLOAT_EQ(r[3], 6.0f);
 }
 
-TEST_F(TransformNewTest, NarrowCopyIsNotView) {
+TEST_P(TransformNewTest, NarrowCopyIsNotView) {
+    // Allocate input on CPU so we can mutate it in-place; the copy semantics
+    // we're verifying don't depend on which backend ran narrow_copy.
     auto input = ones({8}, DType::Float32, Device::cpu());
     auto result = narrow_copy(input, 0, 2, 3);
 
@@ -85,8 +95,8 @@ TEST_F(TransformNewTest, NarrowCopyIsNotView) {
     EXPECT_FLOAT_EQ(r[2], 1.0f);
 }
 
-TEST_F(TransformNewTest, NarrowCopy2D) {
-    auto input = rand({4, 6}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, NarrowCopy2D) {
+    auto input = rand({4, 6}, DType::Float32, device);
     auto result = narrow_copy(input, 1, 1, 3);  // columns 1,2,3
 
     EXPECT_EQ(result.shape()[0], 4);
@@ -97,10 +107,10 @@ TEST_F(TransformNewTest, NarrowCopy2D) {
 // column_stack
 // ============================================================================
 
-TEST_F(TransformNewTest, ColumnStack1DInputs) {
-    auto a = ones({3}, DType::Float32, Device::cpu());
-    auto b = full({3}, 2.0f, DType::Float32, Device::cpu());
-    auto c = full({3}, 3.0f, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, ColumnStack1DInputs) {
+    auto a = ones({3}, DType::Float32, device);
+    auto b = full({3}, 2.0f, DType::Float32, device);
+    auto c = full({3}, 3.0f, DType::Float32, device);
 
     auto result = column_stack({a, b, c});
 
@@ -109,7 +119,8 @@ TEST_F(TransformNewTest, ColumnStack1DInputs) {
     EXPECT_EQ(result.shape()[0], 3);
     EXPECT_EQ(result.shape()[1], 3);
 
-    auto* r = result.data<float>();
+    auto result_cpu = result.to(Device::cpu()).contiguous();
+    auto* r = result_cpu.data<float>();
     // First column: all 1s
     EXPECT_FLOAT_EQ(r[0 * 3 + 0], 1.0f);
     EXPECT_FLOAT_EQ(r[1 * 3 + 0], 1.0f);
@@ -118,9 +129,9 @@ TEST_F(TransformNewTest, ColumnStack1DInputs) {
     EXPECT_FLOAT_EQ(r[0 * 3 + 1], 2.0f);
 }
 
-TEST_F(TransformNewTest, ColumnStack2DInputs) {
-    auto a = ones({3, 2}, DType::Float32, Device::cpu());
-    auto b = full({3, 1}, 5.0f, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, ColumnStack2DInputs) {
+    auto a = ones({3, 2}, DType::Float32, device);
+    auto b = full({3, 1}, 5.0f, DType::Float32, device);
 
     auto result = column_stack({a, b});
 
@@ -133,9 +144,9 @@ TEST_F(TransformNewTest, ColumnStack2DInputs) {
 // row_stack (alias for vstack)
 // ============================================================================
 
-TEST_F(TransformNewTest, RowStackMatchesVstack) {
-    auto a = rand({2, 3}, DType::Float32, Device::cpu());
-    auto b = rand({4, 3}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, RowStackMatchesVstack) {
+    auto a = rand({2, 3}, DType::Float32, device);
+    auto b = rand({4, 3}, DType::Float32, device);
 
     auto result_row   = row_stack({a, b});
     auto result_vstack = vstack({a, b});
@@ -144,10 +155,13 @@ TEST_F(TransformNewTest, RowStackMatchesVstack) {
     EXPECT_EQ(result_row.shape()[0], 6);
     EXPECT_EQ(result_row.shape()[1], 3);
 
-    auto* r1 = result_row.data<float>();
-    auto* r2 = result_vstack.data<float>();
+    auto r1_cpu = result_row.to(Device::cpu()).contiguous();
+    auto r2_cpu = result_vstack.to(Device::cpu()).contiguous();
+    auto* r1 = r1_cpu.data<float>();
+    auto* r2 = r2_cpu.data<float>();
     for (int64_t i = 0; i < result_row.numel(); ++i) {
-        EXPECT_FLOAT_EQ(r1[i], r2[i]) << "Mismatch at index " << i;
+        EXPECT_FLOAT_EQ(r1[i], r2[i])
+            << "Mismatch at index " << i << " on " << device.to_string();
     }
 }
 
@@ -155,9 +169,9 @@ TEST_F(TransformNewTest, RowStackMatchesVstack) {
 // broadcast_tensors
 // ============================================================================
 
-TEST_F(TransformNewTest, BroadcastTensorsBasic) {
-    auto a = ones({3, 1}, DType::Float32, Device::cpu());
-    auto b = ones({1, 4}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, BroadcastTensorsBasic) {
+    auto a = ones({3, 1}, DType::Float32, device);
+    auto b = ones({1, 4}, DType::Float32, device);
 
     auto results = broadcast_tensors({a, b});
 
@@ -168,10 +182,10 @@ TEST_F(TransformNewTest, BroadcastTensorsBasic) {
     EXPECT_EQ(results[1].shape()[1], 4);
 }
 
-TEST_F(TransformNewTest, BroadcastTensorsMultiple) {
-    auto a = ones({2, 1, 5}, DType::Float32, Device::cpu());
-    auto b = ones({3, 1}, DType::Float32, Device::cpu());
-    auto c = ones({2, 3, 5}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, BroadcastTensorsMultiple) {
+    auto a = ones({2, 1, 5}, DType::Float32, device);
+    auto b = ones({3, 1}, DType::Float32, device);
+    auto c = ones({2, 3, 5}, DType::Float32, device);
 
     auto results = broadcast_tensors({a, b, c});
 
@@ -183,9 +197,11 @@ TEST_F(TransformNewTest, BroadcastTensorsMultiple) {
     }
 }
 
-TEST_F(TransformNewTest, BroadcastTensorsIncompatibleShapes) {
-    auto a = ones({3, 4}, DType::Float32, Device::cpu());
-    auto b = ones({5, 4}, DType::Float32, Device::cpu());
+TEST_P(TransformNewTest, BroadcastTensorsIncompatibleShapes) {
+    auto a = ones({3, 4}, DType::Float32, device);
+    auto b = ones({5, 4}, DType::Float32, device);
 
     EXPECT_THROW(broadcast_tensors({a, b}), std::exception);
 }
+
+INSTANTIATE_BACKEND_TESTS(TransformNewTest);

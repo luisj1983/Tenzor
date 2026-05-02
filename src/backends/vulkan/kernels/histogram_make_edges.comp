@@ -1,0 +1,22 @@
+#version 450
+
+// Phase 8.4: produce bin edges (size num_bins+1) from a device-side range buffer.
+// edges[i] = range[0] + i * range[2]   (i in [0, num_bins])
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer RangeBuf { float range[]; };
+layout(binding = 1) buffer EdgeBuf  { float edges[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_bins;
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i > params.num_bins) return;
+
+    float min_val   = range[0];
+    float bin_width = range[2];
+    edges[i] = min_val + float(i) * bin_width;
+}

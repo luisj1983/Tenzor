@@ -1902,16 +1902,15 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
                 endSingleTimeCommands(cmd, device_id);
             }
 
-            // Batch convergence readback: check every 8 iterations to reduce D2H syncs.
-            // The GPU-side convergence shader still runs every iteration, so converged
-            // batches early-exit in the QR shader. We just defer the host-visible check.
-            constexpr uint32_t kConvergenceCheckInterval = 8;
-            if ((iter + 1) % kConvergenceCheckInterval == 0 || iter == max_qr_iterations - 1) {
-                synchronize(device_id);
-
-                Tensor ac_cpu = gpu_all_converged.to(Device::cpu());
-                if (ac_cpu.data<int32_t>()[0] != 0) break;
-            }
+            // Phase 8.4: removed host readback of `gpu_all_converged`. The
+            // per-batch GPU convergence flag still drives the QR shader's
+            // per-batch early-exit (converged batches no-op cheaply), so the
+            // only behavior change is that we always run the full
+            // `max_qr_iterations` outer-loop count instead of breaking when
+            // every batch has converged. For typical eigh problems
+            // (n ≤ 64, max_iters = 30·n ≈ 2k) the wasted iterations cost
+            // microseconds on-device and remove the only D2H sync in the
+            // entire eigh path.
         }
 
         // Step 3: Extract eigenvalues from quasi-upper-triangular (real Schur) form

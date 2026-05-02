@@ -1171,64 +1171,19 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     VkDescriptorSet descriptorSet;
     VkResult result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
 
-    // If descriptor pool is exhausted or fragmented, try reset first, then grow
+    // Phase 8.3: descriptor pool recovery via free-list grow. The old pool is
+    // pushed onto `frozen_pools_` (still alive, still serving in-flight
+    // descriptor sets); a new larger pool becomes the active target. No
+    // `vkDeviceWaitIdle`, no command-pool reset, no pipeline-cache flush —
+    // every existing descriptor set continues to be valid.
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        bool is_fragmented = (result == VK_ERROR_FRAGMENTED_POOL);
-
-        // Force-submit any pending batched commands before resetting pools.
-        // Without this, activeCommandBuffer references descriptors from the pool
-        // we're about to reset, causing use-after-reset corruption.
-        submitBatchIfNeeded(device_id, true);
-        ensurePendingWorkComplete(device_id);
-        // Full device idle ensures no command buffer is still referencing pool descriptors.
-        // ensurePendingWorkComplete only waits on fences we track, but there may be
-        // in-flight commands from other code paths. vkDeviceWaitIdle is the safe barrier.
-        {
-            VkResult waitResult = vkDeviceWaitIdle(ctx.device);
-            if (waitResult == VK_ERROR_DEVICE_LOST) {
-                ctx.device_lost = true;
-                throw std::runtime_error("Device lost during descriptor pool recovery");
-            }
-            vulkan::checkVk(waitResult, "vkDeviceWaitIdle in descriptor pool recovery");
-        }
-
-        // Reset command pool and descriptor pool
-        vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
-                        "Failed to reset command pool during descriptor pool recovery");
-        ctx.nextCommandBufferIndex = 0;
-        ctx.submittedFrames = 0;
-        ctx.currentFrame = 0;
-        ctx.hasPendingWork = false;
-        // Invalidate the active batch command buffer.  submitBatchIfNeeded skips
-        // submission when operationsInBatch == 0, leaving activeCommandBuffer
-        // pointing to a handle that vkResetCommandPool just put back into
-        // "initial" state.  Without this, the next getOrCreateBatchCommandBuffer
-        // returns the stale handle and callers record into an un-begun buffer.
-        ctx.activeCommandBuffer = VK_NULL_HANDLE;
-        ctx.operationsInBatch = 0;
-
-        // Clear pipeline cache — pipelines may reference invalidated descriptor layouts
-        pipelineCaches_[device_id].pipelines.clear();
-
-        if (is_fragmented) {
-            // Fragmentation means the pool has enough total capacity but can't
-            // satisfy the request due to internal fragmentation. Grow to a larger
-            // pool which will be freshly allocated without fragmentation.
-            std::cerr << "[Vulkan WARNING] Descriptor pool fragmentation detected "
-                      << "(allocated=" << ctx.descriptorPool->allocated_sets()
-                      << "/" << ctx.descriptorPool->max_sets()
-                      << "). Growing pool to reduce fragmentation.\n";
-            ctx.descriptorPool->grow();
-        } else {
-            // Out of pool memory — try a simple reset first
-            ctx.descriptorPool->reset();
-        }
-
-        // Retry allocation after reset
+        ctx.descriptorPool->grow();
         allocInfo.descriptorPool = ctx.descriptorPool->pool();
         result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
 
-        // If reset wasn't enough (pool capacity is genuinely too small), grow and retry
+        // If even the larger pool can't satisfy this single allocation,
+        // something is wrong with the request itself (e.g. descriptor count
+        // exceeding device limits) — fall through to the checkVk below.
         if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
             ctx.descriptorPool->grow();
             allocInfo.descriptorPool = ctx.descriptorPool->pool();

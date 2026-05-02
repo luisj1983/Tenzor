@@ -1,133 +1,125 @@
 /**
  * @file test_scatter_reduce.cpp
- * @brief Tests for scatter_reduce operation (sum, prod, mean, amax, amin)
+ * @brief Multi-backend tests for scatter_reduce (sum, prod, mean, amax, amin).
+ *
+ * Migrated to BackendTest. Native scatter_reduce kernels are registered on
+ * every backend (`cuda::scatter_reduce_dispatch`, ROCm/OneAPI/Vulkan natives);
+ * the previous CPU-only test pattern only exercised CPU. Phase 7.6 of the
+ * test-coverage campaign — the kernel-implementation work was already done;
+ * only the test fixture needed migration.
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
-class ScatterReduceTest : public ::testing::Test {
+class ScatterReduceTest : public BackendTest {
 protected:
-    static bool initialized;
-    void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+    // Build the input on CPU so we can populate it via direct write, then
+    // move to the test device. scatter_reduce runs on the target device.
+    template <typename T>
+    Tensor make_filled(std::vector<int64_t> shape, DType dtype,
+                       std::initializer_list<T> values) {
+        auto cpu = zeros(shape, dtype, Device::cpu());
+        auto* p = const_cast<T*>(cpu.data<T>());
+        size_t i = 0;
+        for (T v : values) p[i++] = v;
+        return (device.type == Device::Type::CPU) ? cpu : cpu.to(device);
     }
+
+    bool is_gpu() const { return device.type != Device::Type::CPU; }
 };
 
-bool ScatterReduceTest::initialized = false;
+// Phase 7.6 of the test-coverage campaign exposed real backend bugs in the
+// scatter_reduce kernels on each GPU backend. Three classes of bug were
+// fixed across CUDA / ROCm / OneAPI / Vulkan in this campaign:
+//   - mean divisor: counts didn't include the self contribution, so
+//     include_self=true mean was off by a factor of N/(N+1).
+//   - 2D scatter index lookup: `index[k]` flat-indexed the index tensor,
+//     ignoring outer/inner offsets; for >1D scatters the wrong row's
+//     index was being read.
+//   - Vulkan empty-index path: returned an uninitialised tensor instead
+//     of cloning self, producing zero output.
+//   - Vulkan !include_self init: was a no-op TODO; now writes per-mode
+//     identity to every touched output position before scatter.
+// All four are now real fixes; the test pattern stands as regression
+// coverage.
 
 // ============================================================================
 // scatter_reduce with "sum" mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, SumBasic) {
-    // input: [1, 2, 3, 4, 5] (1D, 5 elements)
-    // index: [0, 1, 0, 1, 0] -> scatter src into positions 0 and 1
-    // src:   [10, 20, 30, 40, 50]
-    // Expected: output[0] = 1 + 10 + 30 + 50 = 91, output[1] = 2 + 20 + 40 = 62, rest unchanged
-    auto input = Tensor({5}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 1; in_data[1] = 2; in_data[2] = 3; in_data[3] = 4; in_data[4] = 5;
-
-    auto index_t = Tensor({5}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 1; idx[2] = 0; idx[3] = 1; idx[4] = 0;
-
-    auto src = Tensor({5}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 10; src_data[1] = 20; src_data[2] = 30; src_data[3] = 40; src_data[4] = 50;
+TEST_P(ScatterReduceTest, SumBasic) {
+    auto input = make_filled<float>({5}, DType::Float32, {1, 2, 3, 4, 5});
+    auto index_t = make_filled<int64_t>({5}, DType::Int64, {0, 1, 0, 1, 0});
+    auto src = make_filled<float>({5}, DType::Float32, {10, 20, 30, 40, 50});
 
     auto result = scatter_reduce(input, 0, index_t, src, "sum");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], 91.0f);  // 1 + 10 + 30 + 50
     EXPECT_FLOAT_EQ(out[1], 62.0f);  // 2 + 20 + 40
-    EXPECT_FLOAT_EQ(out[2], 3.0f);   // unchanged
-    EXPECT_FLOAT_EQ(out[3], 4.0f);   // unchanged
-    EXPECT_FLOAT_EQ(out[4], 5.0f);   // unchanged
+    EXPECT_FLOAT_EQ(out[2], 3.0f);
+    EXPECT_FLOAT_EQ(out[3], 4.0f);
+    EXPECT_FLOAT_EQ(out[4], 5.0f);
 }
 
-TEST_F(ScatterReduceTest, SumNoIncludeSelf) {
-    auto input = Tensor({5}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 1; in_data[1] = 2; in_data[2] = 3; in_data[3] = 4; in_data[4] = 5;
+TEST_P(ScatterReduceTest, SumNoIncludeSelf) {
 
-    auto index_t = Tensor({5}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 1; idx[2] = 0; idx[3] = 1; idx[4] = 0;
-
-    auto src = Tensor({5}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 10; src_data[1] = 20; src_data[2] = 30; src_data[3] = 40; src_data[4] = 50;
+    auto input = make_filled<float>({5}, DType::Float32, {1, 2, 3, 4, 5});
+    auto index_t = make_filled<int64_t>({5}, DType::Int64, {0, 1, 0, 1, 0});
+    auto src = make_filled<float>({5}, DType::Float32, {10, 20, 30, 40, 50});
 
     auto result = scatter_reduce(input, 0, index_t, src, "sum", /*include_self=*/false);
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // include_self=false: touched positions start at 0 (sum identity)
-    EXPECT_FLOAT_EQ(out[0], 90.0f);  // 0 + 10 + 30 + 50
-    EXPECT_FLOAT_EQ(out[1], 60.0f);  // 0 + 20 + 40
-    EXPECT_FLOAT_EQ(out[2], 3.0f);   // untouched, keeps original
-    EXPECT_FLOAT_EQ(out[3], 4.0f);   // untouched
-    EXPECT_FLOAT_EQ(out[4], 5.0f);   // untouched
+    EXPECT_FLOAT_EQ(out[0], 90.0f);
+    EXPECT_FLOAT_EQ(out[1], 60.0f);
+    EXPECT_FLOAT_EQ(out[2], 3.0f);
+    EXPECT_FLOAT_EQ(out[3], 4.0f);
+    EXPECT_FLOAT_EQ(out[4], 5.0f);
 }
 
 // ============================================================================
 // scatter_reduce with "prod" mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, ProdBasic) {
-    auto input = ones({4}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 2; in_data[1] = 3;
-
-    auto index_t = Tensor({3}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0; idx[2] = 1;
-
-    auto src = Tensor({3}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 5; src_data[1] = 4; src_data[2] = 6;
+TEST_P(ScatterReduceTest, ProdBasic) {
+    auto input = make_filled<float>({4}, DType::Float32, {2, 3, 1, 1});
+    auto index_t = make_filled<int64_t>({3}, DType::Int64, {0, 0, 1});
+    auto src = make_filled<float>({3}, DType::Float32, {5, 4, 6});
 
     auto result = scatter_reduce(input, 0, index_t, src, "prod");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // output[0] = 2 * 5 * 4 = 40, output[1] = 3 * 6 = 18
     EXPECT_FLOAT_EQ(out[0], 40.0f);
     EXPECT_FLOAT_EQ(out[1], 18.0f);
-    EXPECT_FLOAT_EQ(out[2], 1.0f);  // unchanged
-    EXPECT_FLOAT_EQ(out[3], 1.0f);  // unchanged
+    EXPECT_FLOAT_EQ(out[2], 1.0f);
+    EXPECT_FLOAT_EQ(out[3], 1.0f);
 }
 
 // ============================================================================
 // scatter_reduce with "amax" mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, AmaxBasic) {
-    auto input = Tensor({4}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = -10; in_data[1] = -10; in_data[2] = -10; in_data[3] = -10;
-
-    auto index_t = Tensor({4}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0; idx[2] = 1; idx[3] = 1;
-
-    auto src = Tensor({4}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 3; src_data[1] = 7; src_data[2] = 2; src_data[3] = 5;
+TEST_P(ScatterReduceTest, AmaxBasic) {
+    auto input = make_filled<float>({4}, DType::Float32, {-10, -10, -10, -10});
+    auto index_t = make_filled<int64_t>({4}, DType::Int64, {0, 0, 1, 1});
+    auto src = make_filled<float>({4}, DType::Float32, {3, 7, 2, 5});
 
     auto result = scatter_reduce(input, 0, index_t, src, "amax");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // output[0] = max(-10, 3, 7) = 7
-    // output[1] = max(-10, 2, 5) = 5
     EXPECT_FLOAT_EQ(out[0], 7.0f);
     EXPECT_FLOAT_EQ(out[1], 5.0f);
     EXPECT_FLOAT_EQ(out[2], -10.0f);
@@ -138,24 +130,15 @@ TEST_F(ScatterReduceTest, AmaxBasic) {
 // scatter_reduce with "amin" mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, AminBasic) {
-    auto input = Tensor({4}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 100; in_data[1] = 100; in_data[2] = 100; in_data[3] = 100;
-
-    auto index_t = Tensor({4}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0; idx[2] = 1; idx[3] = 1;
-
-    auto src = Tensor({4}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 3; src_data[1] = 7; src_data[2] = 2; src_data[3] = 5;
+TEST_P(ScatterReduceTest, AminBasic) {
+    auto input = make_filled<float>({4}, DType::Float32, {100, 100, 100, 100});
+    auto index_t = make_filled<int64_t>({4}, DType::Int64, {0, 0, 1, 1});
+    auto src = make_filled<float>({4}, DType::Float32, {3, 7, 2, 5});
 
     auto result = scatter_reduce(input, 0, index_t, src, "amin");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // output[0] = min(100, 3, 7) = 3
-    // output[1] = min(100, 2, 5) = 2
     EXPECT_FLOAT_EQ(out[0], 3.0f);
     EXPECT_FLOAT_EQ(out[1], 2.0f);
     EXPECT_FLOAT_EQ(out[2], 100.0f);
@@ -166,25 +149,17 @@ TEST_F(ScatterReduceTest, AminBasic) {
 // scatter_reduce with "mean" mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, MeanBasic) {
-    auto input = Tensor({3}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 10; in_data[1] = 20; in_data[2] = 30;
-
-    auto index_t = Tensor({4}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0; idx[2] = 1; idx[3] = 1;
-
-    auto src = Tensor({4}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 2; src_data[1] = 4; src_data[2] = 6; src_data[3] = 12;
+TEST_P(ScatterReduceTest, MeanBasic) {
+    // Phase 7.6 mean fix: count divisor is now `count + 1` for include_self
+    // (was `count`). Fixed across CUDA / ROCm / OneAPI / Vulkan kernels.
+    auto input = make_filled<float>({3}, DType::Float32, {10, 20, 30});
+    auto index_t = make_filled<int64_t>({4}, DType::Int64, {0, 0, 1, 1});
+    auto src = make_filled<float>({4}, DType::Float32, {2, 4, 6, 12});
 
     auto result = scatter_reduce(input, 0, index_t, src, "mean");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // output[0] = mean(10, 2, 4) = 16/3 = 5.333...
-    // output[1] = mean(20, 6, 12) = 38/3 = 12.666...
-    // output[2] = 30 (unchanged, count=1 so no division)
     EXPECT_NEAR(out[0], 16.0f / 3.0f, 1e-5);
     EXPECT_NEAR(out[1], 38.0f / 3.0f, 1e-5);
     EXPECT_FLOAT_EQ(out[2], 30.0f);
@@ -194,31 +169,16 @@ TEST_F(ScatterReduceTest, MeanBasic) {
 // 2D scatter_reduce along dim=1
 // ============================================================================
 
-TEST_F(ScatterReduceTest, Sum2D) {
-    // input: [[1, 2, 3], [4, 5, 6]]  (2x3)
-    // index: [[0, 0], [1, 2]]  (2x2) - scatter along dim=1
-    // src:   [[10, 20], [30, 40]]
+TEST_P(ScatterReduceTest, Sum2D) {
 
-    auto input = Tensor({2, 3}, DType::Float32, Device::cpu());
-    auto* in_data = input.data<float>();
-    in_data[0] = 1; in_data[1] = 2; in_data[2] = 3;
-    in_data[3] = 4; in_data[4] = 5; in_data[5] = 6;
-
-    auto index_t = Tensor({2, 2}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0;  // row 0: both go to col 0
-    idx[2] = 1; idx[3] = 2;  // row 1: go to col 1 and 2
-
-    auto src = Tensor({2, 2}, DType::Float32, Device::cpu());
-    auto* src_data = src.data<float>();
-    src_data[0] = 10; src_data[1] = 20;
-    src_data[2] = 30; src_data[3] = 40;
+    auto input = make_filled<float>({2, 3}, DType::Float32, {1, 2, 3, 4, 5, 6});
+    auto index_t = make_filled<int64_t>({2, 2}, DType::Int64, {0, 0, 1, 2});
+    auto src = make_filled<float>({2, 2}, DType::Float32, {10, 20, 30, 40});
 
     auto result = scatter_reduce(input, 1, index_t, src, "sum");
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
 
-    // Row 0: [1+10+20, 2, 3] = [31, 2, 3]
-    // Row 1: [4, 5+30, 6+40] = [4, 35, 46]
     EXPECT_FLOAT_EQ(out[0], 31.0f);
     EXPECT_FLOAT_EQ(out[1], 2.0f);
     EXPECT_FLOAT_EQ(out[2], 3.0f);
@@ -231,15 +191,14 @@ TEST_F(ScatterReduceTest, Sum2D) {
 // Float64 dtype
 // ============================================================================
 
-TEST_F(ScatterReduceTest, SumFloat64) {
-    auto input = zeros({3}, DType::Float64, Device::cpu());
-    auto index_t = Tensor({3}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 0; idx[2] = 1;
+TEST_P(ScatterReduceTest, SumFloat64) {
+    auto input = zeros({3}, DType::Float64, device);
+    auto index_t = make_filled<int64_t>({3}, DType::Int64, {0, 0, 1});
+    auto src = ones({3}, DType::Float64, device);
 
-    auto src = ones({3}, DType::Float64, Device::cpu());
     auto result = scatter_reduce(input, 0, index_t, src, "sum");
-    auto* out = result.data<double>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<double>();
 
     EXPECT_DOUBLE_EQ(out[0], 2.0);
     EXPECT_DOUBLE_EQ(out[1], 1.0);
@@ -250,14 +209,16 @@ TEST_F(ScatterReduceTest, SumFloat64) {
 // Edge case: empty index
 // ============================================================================
 
-TEST_F(ScatterReduceTest, EmptyIndex) {
-    auto input = ones({5}, DType::Float32, Device::cpu());
-    auto index_t = Tensor({0}, DType::Int64, Device::cpu());
-    auto src = Tensor({0}, DType::Float32, Device::cpu());
+TEST_P(ScatterReduceTest, EmptyIndex) {
+
+    auto input = ones({5}, DType::Float32, device);
+    auto index_t = Tensor({0}, DType::Int64, device);
+    auto src = Tensor({0}, DType::Float32, device);
 
     auto result = scatter_reduce(input, 0, index_t, src, "sum");
     EXPECT_EQ(result.numel(), 5);
-    auto* out = result.data<float>();
+    auto cpu = result.to(Device::cpu()).contiguous();
+    auto* out = cpu.data<float>();
     for (int i = 0; i < 5; i++) {
         EXPECT_FLOAT_EQ(out[i], 1.0f);
     }
@@ -267,12 +228,13 @@ TEST_F(ScatterReduceTest, EmptyIndex) {
 // Invalid reduce mode
 // ============================================================================
 
-TEST_F(ScatterReduceTest, InvalidReduceMode) {
-    auto input = ones({5}, DType::Float32, Device::cpu());
-    auto index_t = Tensor({3}, DType::Int64, Device::cpu());
-    auto* idx = index_t.data<int64_t>();
-    idx[0] = 0; idx[1] = 1; idx[2] = 2;
-    auto src = ones({3}, DType::Float32, Device::cpu());
+TEST_P(ScatterReduceTest, InvalidReduceMode) {
+    auto input = ones({5}, DType::Float32, device);
+    auto index_t = make_filled<int64_t>({3}, DType::Int64, {0, 1, 2});
+    auto src = ones({3}, DType::Float32, device);
 
-    EXPECT_THROW(scatter_reduce(input, 0, index_t, src, "invalid_mode"), std::invalid_argument);
+    EXPECT_THROW(scatter_reduce(input, 0, index_t, src, "invalid_mode"),
+                 std::invalid_argument);
 }
+
+INSTANTIATE_BACKEND_TESTS(ScatterReduceTest);

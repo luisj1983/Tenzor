@@ -1,0 +1,34 @@
+#version 450
+
+// Phase 8.4: histogram variant that reads min/max/bin_width from a device-side
+// range buffer instead of push constants. Used by the auto-range path so that
+// the (min, max) computed by aminmax never has to roundtrip to host.
+//
+// range[0] = min_val, range[1] = max_val, range[2] = bin_width
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf  { float input_data[]; };
+layout(binding = 1) buffer OutputBuf { int   counts[]; };
+layout(binding = 2) buffer RangeBuf  { float range[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint num_bins;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    float min_val   = range[0];
+    float max_val   = range[1];
+    float bin_width = range[2];
+
+    float val = input_data[idx];
+    if (val < min_val || val > max_val) return;
+    int bin = int((val - min_val) / bin_width);
+    if (bin >= int(params.num_bins)) bin = int(params.num_bins) - 1;
+    if (bin < 0) bin = 0;
+    atomicAdd(counts[bin], 1);
+}

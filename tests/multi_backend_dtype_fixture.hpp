@@ -178,6 +178,10 @@ inline std::string BackendDTypeParamName(
         case DType::Int16: dtype_str = "Int16"; break;
         case DType::Int32: dtype_str = "Int32"; break;
         case DType::Int64: dtype_str = "Int64"; break;
+        case DType::UInt8: dtype_str = "UInt8"; break;
+        case DType::Bool: dtype_str = "Bool"; break;
+        case DType::Complex64: dtype_str = "Complex64"; break;
+        case DType::Complex128: dtype_str = "Complex128"; break;
         default: dtype_str = "Unknown"; break;
     }
     return formatBackendTestName(backend) + "_" + dtype_str;

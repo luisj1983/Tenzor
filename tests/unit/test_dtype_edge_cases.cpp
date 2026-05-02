@@ -1,6 +1,6 @@
 /**
  * @file test_dtype_edge_cases.cpp
- * @brief Comprehensive dtype-specific edge case tests
+ * @brief Comprehensive dtype()-specific edge case tests
  *
  * Tests cover:
  * 1. Integer Overflow/Underflow (Int8, Int32, Int64, UInt8)
@@ -9,95 +9,31 @@
  * 4. Special Float Values (NaN, Infinity, -0.0)
  * 5. Boolean Operations (logical ops, comparison dtypes)
  *
- * All tests use backend + dtype parameterization for complete coverage.
+ * All tests use backend + dtype() parameterization for complete coverage.
  */
 
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
+#include "../backend_test_fixture.hpp"  // ComparisonOpsTest below uses BackendTest
 #include <tenzor/tenzor.hpp>
 #include <limits>
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
 // ============================================================================
 // Backend + DType Parameterization
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class DTypeEdgeCaseTest : public ::testing::TestWithParam<BackendDTypeParam> {
-protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-};
+class DTypeEdgeCaseTest : public MultiBackendDTypeTest {};
 
 // ============================================================================
 // 1. INTEGER OVERFLOW/UNDERFLOW TESTS
 // ============================================================================
 
 TEST_P(DTypeEdgeCaseTest, Int8Overflow) {
-    if (dtype != DType::Int8) {
+    if (dtype() != DType::Int8) {
         GTEST_SKIP() << "Test only for Int8";
     }
 
@@ -108,8 +44,8 @@ TEST_P(DTypeEdgeCaseTest, Int8Overflow) {
         a_data[i] = 127;  // INT8_MAX
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({10}, DType::Int8, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({10}, DType::Int8, device());
 
     // 127 + 1 should overflow
     auto c = add(a, b);
@@ -124,7 +60,7 @@ TEST_P(DTypeEdgeCaseTest, Int8Overflow) {
 }
 
 TEST_P(DTypeEdgeCaseTest, Int8Underflow) {
-    if (dtype != DType::Int8) {
+    if (dtype() != DType::Int8) {
         GTEST_SKIP() << "Test only for Int8";
     }
 
@@ -135,8 +71,8 @@ TEST_P(DTypeEdgeCaseTest, Int8Underflow) {
         a_data[i] = -128;  // INT8_MIN
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({10}, DType::Int8, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({10}, DType::Int8, device());
 
     // -128 - 1 should underflow
     auto c = sub(a, b);
@@ -151,7 +87,7 @@ TEST_P(DTypeEdgeCaseTest, Int8Underflow) {
 }
 
 TEST_P(DTypeEdgeCaseTest, UInt8Overflow) {
-    if (dtype != DType::UInt8) {
+    if (dtype() != DType::UInt8) {
         GTEST_SKIP() << "Test only for UInt8";
     }
 
@@ -162,8 +98,8 @@ TEST_P(DTypeEdgeCaseTest, UInt8Overflow) {
         a_data[i] = 255;  // UINT8_MAX
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({10}, DType::UInt8, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({10}, DType::UInt8, device());
 
     // 255 + 1 should overflow to 0
     auto c = add(a, b);
@@ -177,7 +113,7 @@ TEST_P(DTypeEdgeCaseTest, UInt8Overflow) {
 }
 
 TEST_P(DTypeEdgeCaseTest, Int32Overflow) {
-    if (dtype != DType::Int32) {
+    if (dtype() != DType::Int32) {
         GTEST_SKIP() << "Test only for Int32";
     }
 
@@ -188,8 +124,8 @@ TEST_P(DTypeEdgeCaseTest, Int32Overflow) {
         a_data[i] = std::numeric_limits<int32_t>::max();
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({5}, DType::Int32, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({5}, DType::Int32, device());
 
     // INT32_MAX + 1 should overflow
     auto c = add(a, b);
@@ -205,7 +141,7 @@ TEST_P(DTypeEdgeCaseTest, Int32Overflow) {
 }
 
 TEST_P(DTypeEdgeCaseTest, Int64Overflow) {
-    if (dtype != DType::Int64) {
+    if (dtype() != DType::Int64) {
         GTEST_SKIP() << "Test only for Int64";
     }
 
@@ -216,8 +152,8 @@ TEST_P(DTypeEdgeCaseTest, Int64Overflow) {
         a_data[i] = std::numeric_limits<int64_t>::max();
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({5}, DType::Int64, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({5}, DType::Int64, device());
 
     // INT64_MAX + 1 should overflow
     auto c = add(a, b);
@@ -236,7 +172,7 @@ TEST_P(DTypeEdgeCaseTest, Int64Overflow) {
 // ============================================================================
 
 TEST_P(DTypeEdgeCaseTest, Float16PrecisionLoss) {
-    if (dtype != DType::Float16) {
+    if (dtype() != DType::Float16) {
         GTEST_SKIP() << "Test only for Float16";
     }
 
@@ -247,8 +183,8 @@ TEST_P(DTypeEdgeCaseTest, Float16PrecisionLoss) {
         auto a_cpu = full({10}, 3.141592653589793f, DType::Float32, Device::cpu());
         auto a_f16 = a_cpu.to(DType::Float16);
 
-        if (device.type != Device::Type::CPU) {
-            a_f16 = a_f16.to(device);
+        if (device().type != Device::Type::CPU) {
+            a_f16 = a_f16.to(device());
         }
 
         // Convert back to Float32 to check precision loss
@@ -265,29 +201,29 @@ TEST_P(DTypeEdgeCaseTest, Float16PrecisionLoss) {
                 << "Float16 should lose precision at index " << i;
         }
     } catch (...) {
-        GTEST_SKIP() << "Float16 not supported on " << device.to_string();
+        GTEST_SKIP() << "Float16 not supported on " << device().to_string();
     }
 }
 
 TEST_P(DTypeEdgeCaseTest, Float32VsFloat64Precision) {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
         GTEST_SKIP() << "Test only for Float32/Float64";
     }
 
     // Test with value that shows Float32 vs Float64 precision difference
     double precise_value = 1.23456789012345678901234567890;
 
-    // Use appropriate full() overload based on dtype
+    // Use appropriate full() overload based on dtype()
     Tensor a_cpu;
-    if (dtype == DType::Float32) {
-        a_cpu = full({10}, static_cast<float>(precise_value), dtype, Device::cpu());
+    if (dtype() == DType::Float32) {
+        a_cpu = full({10}, static_cast<float>(precise_value), dtype(), Device::cpu());
     } else {
-        a_cpu = full({10}, precise_value, dtype, Device::cpu());
+        a_cpu = full({10}, precise_value, dtype(), Device::cpu());
     }
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
     auto a_result = a.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         const float* data = a_result.data<float>();
         for (int i = 0; i < 10; ++i) {
             // Float32 has ~7 decimal digits
@@ -306,7 +242,7 @@ TEST_P(DTypeEdgeCaseTest, Float32VsFloat64Precision) {
 }
 
 TEST_P(DTypeEdgeCaseTest, DenormalNumbers) {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
         GTEST_SKIP() << "Test only for Float32/Float64";
     }
 
@@ -314,20 +250,20 @@ TEST_P(DTypeEdgeCaseTest, DenormalNumbers) {
     float denormal_f32 = std::numeric_limits<float>::denorm_min();
     double denormal_f64 = std::numeric_limits<double>::denorm_min();
 
-    // Use appropriate full() overload based on dtype to preserve precision
+    // Use appropriate full() overload based on dtype() to preserve precision
     Tensor a_cpu;
-    if (dtype == DType::Float32) {
-        a_cpu = full({10}, denormal_f32, dtype, Device::cpu());
+    if (dtype() == DType::Float32) {
+        a_cpu = full({10}, denormal_f32, dtype(), Device::cpu());
     } else {
-        a_cpu = full({10}, denormal_f64, dtype, Device::cpu());
+        a_cpu = full({10}, denormal_f64, dtype(), Device::cpu());
     }
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
 
     // Test that denormals can be added
     auto b = add(a, a);
     auto b_cpu = b.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         const float* data = b_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
             // Debug output
@@ -354,7 +290,7 @@ TEST_P(DTypeEdgeCaseTest, DenormalNumbers) {
 // ============================================================================
 
 TEST_P(DTypeEdgeCaseTest, FloatToIntTruncation) {
-    if (dtype != DType::Float32) {
+    if (dtype() != DType::Float32) {
         GTEST_SKIP() << "Test requires Float32 source";
     }
 
@@ -373,7 +309,7 @@ TEST_P(DTypeEdgeCaseTest, FloatToIntTruncation) {
     a_data[8] = 100.7f;
     a_data[9] = -100.7f;
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
     auto a_int = a.to(DType::Int32);
     auto a_result = a_int.to(Device::cpu());
     const int32_t* data = a_result.data<int32_t>();
@@ -392,7 +328,7 @@ TEST_P(DTypeEdgeCaseTest, FloatToIntTruncation) {
 }
 
 TEST_P(DTypeEdgeCaseTest, IntToFloatPrecisionLoss) {
-    if (dtype != DType::Int64) {
+    if (dtype() != DType::Int64) {
         GTEST_SKIP() << "Test requires Int64 source";
     }
 
@@ -407,7 +343,7 @@ TEST_P(DTypeEdgeCaseTest, IntToFloatPrecisionLoss) {
     a_data[3] = 9007199254740992LL;  // 2^53 (exactly representable in Float64, not Float32)
     a_data[4] = 9007199254740993LL;  // 2^53 + 1 (NOT exactly representable in Float64)
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
     auto a_f32 = a.to(DType::Float32);
     auto a_f64 = a.to(DType::Float64);
 
@@ -428,12 +364,12 @@ TEST_P(DTypeEdgeCaseTest, IntToFloatPrecisionLoss) {
 }
 
 TEST_P(DTypeEdgeCaseTest, LossyConversionChain) {
-    if (dtype != DType::Float64) {
+    if (dtype() != DType::Float64) {
         GTEST_SKIP() << "Test requires Float64 source";
     }
 
     // Test lossy conversion: Float64 → Float32 → Float16 → Float32 → Float64
-    auto a_f64 = full({10}, 3.14159265358979323846, DType::Float64, device);
+    auto a_f64 = full({10}, 3.14159265358979323846, DType::Float64, device());
 
     // Step 1: Float64 → Float32
     auto a_f32 = a_f64.to(DType::Float32);
@@ -458,12 +394,12 @@ TEST_P(DTypeEdgeCaseTest, LossyConversionChain) {
         }
     } catch (...) {
         // Float16 not supported on this backend, skip the test
-        GTEST_SKIP() << "Float16 not supported on " << device.to_string();
+        GTEST_SKIP() << "Float16 not supported on " << device().to_string();
     }
 }
 
 TEST_P(DTypeEdgeCaseTest, BoolConversion) {
-    if (dtype != DType::Bool) {
+    if (dtype() != DType::Bool) {
         GTEST_SKIP() << "Test only for Bool";
     }
 
@@ -482,7 +418,7 @@ TEST_P(DTypeEdgeCaseTest, BoolConversion) {
     int_data[8] = 0;
     int_data[9] = 1;
 
-    auto int_tensor = (device.type == Device::Type::CPU) ? int_cpu : int_cpu.to(device);
+    auto int_tensor = (device().type == Device::Type::CPU) ? int_cpu : int_cpu.to(device());
     auto bool_tensor = int_tensor.to(DType::Bool);
     auto bool_result = bool_tensor.to(Device::cpu());
     const bool* bool_data = bool_result.data<bool>();
@@ -504,14 +440,14 @@ TEST_P(DTypeEdgeCaseTest, BoolConversion) {
 // ============================================================================
 
 TEST_P(DTypeEdgeCaseTest, NaNPropagation) {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
         GTEST_SKIP() << "Test only for floating point types";
     }
 
     // Create tensor with NaN values
-    auto a_cpu = zeros({10}, dtype, Device::cpu());
+    auto a_cpu = zeros({10}, dtype(), Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         auto a_data = a_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
             a_data[i] = std::numeric_limits<float>::quiet_NaN();
@@ -523,14 +459,14 @@ TEST_P(DTypeEdgeCaseTest, NaNPropagation) {
         }
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = ones({10}, dtype, device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
+    auto b = ones({10}, dtype(), device());
 
     // NaN + 1 should still be NaN
     auto c = add(a, b);
     auto c_cpu = c.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         const float* data = c_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
             EXPECT_TRUE(std::isnan(data[i])) << "NaN propagation failed at index " << i;
@@ -544,13 +480,13 @@ TEST_P(DTypeEdgeCaseTest, NaNPropagation) {
 }
 
 TEST_P(DTypeEdgeCaseTest, InfinityArithmetic) {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
         GTEST_SKIP() << "Test only for floating point types";
     }
 
-    auto a_cpu = zeros({5}, dtype, Device::cpu());
+    auto a_cpu = zeros({5}, dtype(), Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         auto a_data = a_cpu.data<float>();
         a_data[0] = std::numeric_limits<float>::infinity();
         a_data[1] = -std::numeric_limits<float>::infinity();
@@ -566,10 +502,10 @@ TEST_P(DTypeEdgeCaseTest, InfinityArithmetic) {
         a_data[4] = -std::numeric_limits<double>::infinity();
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
 
     // Test: inf + 1 = inf
-    auto b = ones({5}, dtype, device);
+    auto b = ones({5}, dtype(), device());
     auto c1 = add(a, b);
     auto c1_cpu = c1.to(Device::cpu());
 
@@ -577,7 +513,7 @@ TEST_P(DTypeEdgeCaseTest, InfinityArithmetic) {
     auto c2 = sub(a, a);
     auto c2_cpu = c2.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         const float* add_data = c1_cpu.data<float>();
         const float* sub_data = c2_cpu.data<float>();
 
@@ -597,14 +533,14 @@ TEST_P(DTypeEdgeCaseTest, InfinityArithmetic) {
 }
 
 TEST_P(DTypeEdgeCaseTest, NegativeZero) {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
         GTEST_SKIP() << "Test only for floating point types";
     }
 
     // Test that negative zero is preserved
-    auto a_cpu = zeros({10}, dtype, Device::cpu());
+    auto a_cpu = zeros({10}, dtype(), Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         auto a_data = a_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
             a_data[i] = -0.0f;
@@ -616,10 +552,10 @@ TEST_P(DTypeEdgeCaseTest, NegativeZero) {
         }
     }
 
-    auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
+    auto a = (device().type == Device::Type::CPU) ? a_cpu : a_cpu.to(device());
     auto a_result = a.to(Device::cpu());
 
-    if (dtype == DType::Float32) {
+    if (dtype() == DType::Float32) {
         const float* data = a_result.data<float>();
         for (int i = 0; i < 10; ++i) {
             // -0.0 should compare equal to 0.0
@@ -639,7 +575,7 @@ TEST_P(DTypeEdgeCaseTest, NegativeZero) {
 }
 
 // ============================================================================
-// 5. COMPARISON OPERATIONS TESTS (Bool dtype output)
+// 5. COMPARISON OPERATIONS TESTS (Bool dtype() output)
 // ============================================================================
 
 class ComparisonOpsTest : public tenzor::testing::BackendTest {};
@@ -721,40 +657,16 @@ TEST_P(ComparisonOpsTest, BoolComparisons) {
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateDTypeEdgeCaseCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        // Integer types for overflow tests
-        {DType::Int8, "int8"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-        {DType::UInt8, "uint8"},
-        // Float types for precision tests
-        {DType::Float16, "float16"},
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        // Bool for logical ops
-        {DType::Bool, "bool"},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     DTypeEdgeCaseTest,
-    ::testing::ValuesIn(GenerateDTypeEdgeCaseCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Float16,
+                          DType::Int8, DType::Int32, DType::Int64,
+                          DType::UInt8, DType::Bool)
+    ),
+    BackendDTypeParamName);
 
 INSTANTIATE_BACKEND_TESTS(ComparisonOpsTest);
 
@@ -785,14 +697,14 @@ INSTANTIATE_BACKEND_TESTS(ComparisonOpsTest);
  *    - Negative zero preservation and detection
  *
  * 5. COMPARISON OPERATIONS: 2 tests
- *    - Comparison output dtype (always Bool: gt, lt, eq, ge, le, ne)
+ *    - Comparison output dtype() (always Bool: gt, lt, eq, ge, le, ne)
  *    - Bool comparisons (eq/ne on Bool inputs)
  *
  * TOTAL EDGE CASES: 17 unique test scenarios
  *
  * With backend parameterization:
  * - DTypeEdgeCaseTest: 15 tests × 4 backends × 8 dtypes = 480 test scenarios
- *   (actual execution filtered by dtype-specific GTEST_SKIP)
+ *   (actual execution filtered by dtype()-specific GTEST_SKIP)
  * - ComparisonOpsTest: 2 tests × 4 backends = 8 test scenarios
  *
  * EFFECTIVE COVERAGE:
@@ -811,5 +723,5 @@ INSTANTIATE_BACKEND_TESTS(ComparisonOpsTest);
  *   - Type conversion semantics (truncation vs rounding)
  *   - Special IEEE 754 values (NaN, Inf, -0.0)
  *   - Denormal/subnormal number handling
- *   - Comparison operator dtype guarantees
+ *   - Comparison operator dtype() guarantees
  */

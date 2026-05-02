@@ -286,7 +286,8 @@ namespace cuda {
                            const Tensor& bias_ih, const Tensor& bias_hh,
                            const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
     auto gru_forward_cuda(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
-                          const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+                          const Tensor& bias, const Tensor& h0,
+                          const Tensor& bias_hh = {}) -> std::vector<Tensor>;
     auto lstm_multi_layer_forward_cuda(const Tensor& input,
                                        const std::vector<Tensor>& W_ih_list,
                                        const std::vector<Tensor>& W_hh_list,
@@ -3159,10 +3160,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                                        inputs[3], inputs[4], inputs[5], inputs[6]);
     });
 
-    // inputs: [input, W_ih, W_hh, bias, h0]
+    // inputs: [input, W_ih, W_hh, bias_ih, h0, bias_hh?]
+    // bias_hh is optional (legacy 5-input callers still work) but required
+    // for PyTorch-faithful GRU math (Phase 8.5).
     table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor bias_hh = (inputs.size() > 5) ? inputs[5] : Tensor{};
         return cuda::gru_forward_cuda(inputs[0], inputs[1], inputs[2],
-                                      inputs[3], inputs[4]);
+                                      inputs[3], inputs[4], bias_hh);
     });
 
     // inputs: [input, h0, c0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]

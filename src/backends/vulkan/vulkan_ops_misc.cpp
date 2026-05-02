@@ -3505,8 +3505,11 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
 
     // Handle empty tensors
     if (self.numel() == 0 || index.numel() == 0) {
-        std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
-        return Tensor(out_shape, self.dtype(), self.device());
+        // Phase 7.6 EmptyIndex fix: when there's nothing to scatter, the
+        // output equals `self`. Must clone its data — allocating a fresh
+        // tensor of the same shape leaves it uninitialised, which on
+        // Vulkan defaults to zeros and silently corrupts the result.
+        return self.clone();
     }
 
     int32_t device_id = self.device().index;
@@ -3641,8 +3644,11 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     auto self_shape = self.shape();
 
     if (self.numel() == 0 || index.numel() == 0) {
-        std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
-        return Tensor(out_shape, self.dtype(), self.device());
+        // Phase 7.6 EmptyIndex fix: when there's nothing to scatter, the
+        // output equals `self`. Must clone its data — allocating a fresh
+        // tensor of the same shape leaves it uninitialised, which on
+        // Vulkan defaults to zeros and silently corrupts the result.
+        return self.clone();
     }
 
     int32_t device_id = self.device().index;
@@ -3684,21 +3690,16 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     // For simplicity, we re-use the index_add pattern: we initialize using a separate
     // dispatch with the init shader. For the MVP, we handle this by falling back to CPU
     // for !include_self. This is uncommon for GNN use cases.
-    if (!include_self) {
-        // Set touched positions to identity values
-        float identity;
-        if (mode == 0 || mode == 2) identity = 0.0f;
-        else if (mode == 1) identity = 1.0f;
-        else if (mode == 3) identity = -3.402823466e+38f;
-        else identity = 3.402823466e+38f;
-
-        // Use index_fill-like logic to set identity at touched positions
-        // For now, use a simple approach: fill all positions, which is overly aggressive
-        // but correct when include_self=false (positions not touched keep identity, which
-        // is overwritten by the reduce; positions that are touched get the right identity).
-        // A more precise approach would only fill positions that are actually indexed.
-        // TODO: Add a dedicated init shader for scatter_reduce
-    }
+    // Phase 7.6 SumNoIncludeSelf fix: when include_self=false, every output
+    // position that the subsequent scatter touches must be reset to the
+    // mode's identity value first. Untouched positions keep their input
+    // value. The init pass below uses the same per-mode identity logic as
+    // the CUDA / ROCm init kernels.
+    //
+    // We dispatch the init shader BEFORE the index-cast block so it can run
+    // on the original Int64 index buffer — but the init shader expects an
+    // Int32 index buffer for shader compatibility. Defer the dispatch
+    // until after the index-cast block has produced `index_int32`.
 
     // Convert Int64 indices to Int32 for shader compatibility
     Tensor index_int32 = index;
@@ -3732,9 +3733,13 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
         synchronize(device_id);
     }
 
-    // Compute index op parameters
+    // Compute index op parameters.
+    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
+    // the scatter dim, NOT the total numel. For 1D scatter these are equal.
     uint32_t dim_size = static_cast<uint32_t>(self_shape[dim]);
-    uint32_t idx_n = static_cast<uint32_t>(index.numel());
+    uint32_t idx_n = (index.shape().size() > static_cast<size_t>(dim))
+                   ? static_cast<uint32_t>(index.shape()[dim])
+                   : static_cast<uint32_t>(index.numel());
     uint32_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; ++d) outer *= static_cast<uint32_t>(self_shape[d]);
     for (int64_t d = dim + 1; d < ndim; ++d) inner *= static_cast<uint32_t>(self_shape[d]);
@@ -3742,14 +3747,57 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     uint32_t total = outer * idx_n * inner;
     if (total == 0) return output;
 
-    // Allocate count buffer for mean mode
+    // Phase 7.6 SumNoIncludeSelf fix: for !include_self, run the init
+    // shader on every position that the subsequent scatter will touch,
+    // setting it to the mode's identity. Uses the just-built `index_int32`
+    // (cast above).
+    if (!include_self) {
+        auto* init_pipeline = getPipeline("scatter_reduce_init", device_id);
+        std::vector<std::pair<uint32_t, const void*>> init_bindings = {
+            {0, output.data_ptr()},
+            {1, index_int32.data_ptr()},
+        };
+        std::vector<size_t> init_sizes = {
+            static_cast<size_t>(output.numel()) * sizeof(float),
+            static_cast<size_t>(index_int32.numel()) * sizeof(int32_t),
+        };
+        VkDescriptorSet init_ds = allocateAndWriteDescriptorSet(
+            device_id, init_pipeline, init_bindings, init_sizes);
+
+        struct InitPC {
+            uint32_t outer;
+            uint32_t dim_size;
+            uint32_t idx_n;
+            uint32_t inner;
+            uint32_t mode;
+        } init_pc;
+        init_pc.outer = outer;
+        init_pc.dim_size = dim_size;
+        init_pc.idx_n = idx_n;
+        init_pc.inner = inner;
+        init_pc.mode = mode;
+
+        uint32_t init_groups = div_wg(total, devices_[device_id].workgroupSize);
+        VkCommandBuffer init_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(init_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, init_pipeline->pipeline());
+        vkCmdBindDescriptorSets(init_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               init_pipeline->layout(), 0, 1, &init_ds, 0, nullptr);
+        vkCmdPushConstants(init_cmd, init_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(init_pc), &init_pc);
+        vkCmdDispatch(init_cmd, init_groups, 1, 1);
+        insertComputeOnlyBarrier(init_cmd);
+        endSingleTimeCommands(init_cmd, device_id);
+    }
+
+    // Allocate count buffer for mean mode (Phase 7.6 fix — was previously
+    // allocated but never zeroed, leaving stale memory in the count slots
+    // and breaking the mean divisor pass).
     int64_t out_numel = output.numel();
     Tensor count_tensor;
     if (mode == 2) {
         count_tensor = Tensor({out_numel}, DType::Int32, output.device());
-        // Zero-initialize
-        size_t count_bytes = out_numel * sizeof(int32_t);
-        // Use Vulkan fill or memset via the backend
+        size_t count_bytes = static_cast<size_t>(out_numel) * sizeof(int32_t);
+        memset(count_tensor.data_ptr(), 0, count_bytes, device_id);
     }
 
     // Buffers: binding 0 = output (uint for atomics), 1 = source, 2 = index, 3 = counts
@@ -3795,7 +3843,40 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // TODO: For mean mode, add a second dispatch to divide by counts
+    // Phase 7.6 mean fix: second dispatch to divide each output element by
+    // its scatter count (+1 if include_self). Mirrors the CUDA / ROCm /
+    // OneAPI post-pass.
+    if (mode == 2) {
+        auto* div_pipeline = getPipeline("scatter_reduce_mean_div", device_id);
+        std::vector<std::pair<uint32_t, const void*>> div_bindings = {
+            {0, output.data_ptr()},
+            {1, count_tensor.data_ptr()},
+        };
+        std::vector<size_t> div_sizes = {
+            static_cast<size_t>(out_numel) * sizeof(float),
+            static_cast<size_t>(out_numel) * sizeof(int32_t),
+        };
+        VkDescriptorSet div_ds = allocateAndWriteDescriptorSet(
+            device_id, div_pipeline, div_bindings, div_sizes);
+
+        struct MeanDivPC {
+            uint32_t numel;
+            uint32_t include_self;
+        } div_pc;
+        div_pc.numel = static_cast<uint32_t>(out_numel);
+        div_pc.include_self = include_self ? 1u : 0u;
+
+        uint32_t div_groups = div_wg(div_pc.numel, devices_[device_id].workgroupSize);
+        VkCommandBuffer div_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(div_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, div_pipeline->pipeline());
+        vkCmdBindDescriptorSets(div_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               div_pipeline->layout(), 0, 1, &div_ds, 0, nullptr);
+        vkCmdPushConstants(div_cmd, div_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(div_pc), &div_pc);
+        vkCmdDispatch(div_cmd, div_groups, 1, 1);
+        insertComputeOnlyBarrier(div_cmd);
+        endSingleTimeCommands(div_cmd, device_id);
+    }
 
     return output;
 }
@@ -3810,8 +3891,11 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
 
     // Handle empty tensors
     if (self.numel() == 0 || index.numel() == 0) {
-        std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
-        return Tensor(out_shape, self.dtype(), self.device());
+        // Phase 7.6 EmptyIndex fix: when there's nothing to scatter, the
+        // output equals `self`. Must clone its data — allocating a fresh
+        // tensor of the same shape leaves it uninitialised, which on
+        // Vulkan defaults to zeros and silently corrupts the result.
+        return self.clone();
     }
 
     int32_t device_id = self.device().index;
@@ -3933,8 +4017,11 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
     auto self_shape = self.shape();
 
     if (self.numel() == 0 || index.numel() == 0) {
-        std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
-        return Tensor(out_shape, self.dtype(), self.device());
+        // Phase 7.6 EmptyIndex fix: when there's nothing to scatter, the
+        // output equals `self`. Must clone its data — allocating a fresh
+        // tensor of the same shape leaves it uninitialised, which on
+        // Vulkan defaults to zeros and silently corrupts the result.
+        return self.clone();
     }
 
     int32_t device_id = self.device().index;
@@ -4054,8 +4141,11 @@ auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
     auto self_shape = self.shape();
 
     if (self.numel() == 0 || index.numel() == 0) {
-        std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
-        return Tensor(out_shape, self.dtype(), self.device());
+        // Phase 7.6 EmptyIndex fix: when there's nothing to scatter, the
+        // output equals `self`. Must clone its data — allocating a fresh
+        // tensor of the same shape leaves it uninitialised, which on
+        // Vulkan defaults to zeros and silently corrupts the result.
+        return self.clone();
     }
 
     int32_t device_id = self.device().index;
@@ -4736,55 +4826,88 @@ auto VulkanBackend::dispatchNanmedian(const Tensor& input, int64_t dim) -> Tenso
 // ============================================================================
 
 auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
-    // Cast to Float32 if needed
     Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-
-    // If min >= max, compute min/max via GPU reduction + minimal scalar readback
-    if (min_val >= max_val) {
-        // Use existing Vulkan reduction dispatch for min/max (GPU-native)
-        // Flatten to 1D then reduce along dim 0
-        Tensor flat = input_f32.contiguous().reshape({input_f32.numel()});
-        Tensor mn_gpu = dispatchReduction("min", flat, 0, false);
-        Tensor mx_gpu = dispatchReduction("max", flat, 0, false);
-        // Minimal readback: 1 float each (4 bytes)
-        Tensor mn_cpu = mn_gpu.to(Device::cpu());
-        Tensor mx_cpu = mx_gpu.to(Device::cpu());
-        min_val = static_cast<double>(mn_cpu.data<float>()[0]);
-        max_val = static_cast<double>(mx_cpu.data<float>()[0]);
-    }
-
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("histc", device_id);
 
     // Output is uint32 histogram, zero-initialized
     Tensor output_u32 = dispatchFull({bins}, 0.0f, DType::Int32);
 
-    struct { uint32_t num_elements; uint32_t num_bins; float min_val; float max_val; } pc;
-    pc.num_elements = static_cast<uint32_t>(input_f32.numel());
-    pc.num_bins = static_cast<uint32_t>(bins);
-    pc.min_val = static_cast<float>(min_val);
-    pc.max_val = static_cast<float>(max_val);
-
+    const bool auto_range = (min_val >= max_val);
     size_t in_buf = static_cast<size_t>(input_f32.numel()) * sizeof(float);
     size_t out_buf = static_cast<size_t>(bins) * sizeof(int32_t);
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, input_f32.data_ptr()}, {1, output_u32.data_ptr()}
-    };
-    std::vector<size_t> sizes = {in_buf, out_buf};
+    if (auto_range) {
+        // Phase 8.4: auto-range path runs entirely on device. The pack shader
+        // writes (min, max, bin_width) into range_buf; histc_dyn reads it.
+        Tensor flat = input_f32.contiguous().reshape({input_f32.numel()});
+        Tensor mn_gpu = dispatchReduction("min", flat, 0, false).contiguous();
+        Tensor mx_gpu = dispatchReduction("max", flat, 0, false).contiguous();
+        Tensor range_buf({3}, DType::Float32, input.device());
 
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        {
+            auto* pack_pipeline = getPipeline("histogram_pack_range", device_id);
+            struct { uint32_t num_bins; } pack_pc{static_cast<uint32_t>(bins)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, mn_gpu.data_ptr()},
+                {1, mx_gpu.data_ptr()},
+                {2, range_buf.data_ptr()},
+            };
+            std::vector<size_t> sizes = {sizeof(float), sizeof(float), 3 * sizeof(float)};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pack_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pack_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pack_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pack_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pack_pc), &pack_pc);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(input_f32.numel(), devices_[device_id].workgroupSize), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+        auto* hist_pipeline = getPipeline("histc_dyn", device_id);
+        struct { uint32_t num_elements; uint32_t num_bins; } pc{
+            static_cast<uint32_t>(input_f32.numel()), static_cast<uint32_t>(bins)};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input_f32.data_ptr()},
+            {1, output_u32.data_ptr()},
+            {2, range_buf.data_ptr()},
+        };
+        std::vector<size_t> sizes = {in_buf, out_buf, 3 * sizeof(float)};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, hist_pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hist_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               hist_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, hist_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(input_f32.numel(), devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    } else {
+        auto* pipeline = getPipeline("histc", device_id);
+        struct { uint32_t num_elements; uint32_t num_bins; float min_val; float max_val; } pc;
+        pc.num_elements = static_cast<uint32_t>(input_f32.numel());
+        pc.num_bins = static_cast<uint32_t>(bins);
+        pc.min_val = static_cast<float>(min_val);
+        pc.max_val = static_cast<float>(max_val);
 
-    // Convert to Float32 for API compatibility
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input_f32.data_ptr()}, {1, output_u32.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_buf, out_buf};
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(input_f32.numel(), devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
     return output_u32.to(DType::Float32);
 }
 

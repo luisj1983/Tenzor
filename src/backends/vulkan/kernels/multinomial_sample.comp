@@ -11,7 +11,7 @@ layout(binding = 1) buffer OutputBuf { int   out_data[]; };
 layout(push_constant) uniform PushConstants {
     uint num_categories;
     uint num_samples;
-    float total;
+    float total;            // unused — kept for ABI stability; total is read from cdf[end-1] on device
     uint seed_lo;
     uint seed_hi;
     uint cdf_offset;
@@ -22,10 +22,16 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.num_samples) return;
 
+    // Phase 8.4: read CDF total from device memory (last CDF entry). Eliminates
+    // the per-batch host readback that previously fed `params.total`. If the
+    // total is non-positive (degenerate), fall back to 1.0 to avoid NaN.
+    float total_dev = cdf[params.cdf_offset + params.num_categories - 1u];
+    if (!(total_dev > 0.0)) total_dev = 1.0;
+
     uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
     state = state * 1664525u + 1013904223u;
     state = state * 1664525u + 1013904223u;
-    float u = (float(state) / 4294967295.0) * params.total;
+    float u = (float(state) / 4294967295.0) * total_dev;
 
     int lo = 0;
     int hi = int(params.num_categories) - 1;

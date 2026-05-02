@@ -150,15 +150,16 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
     // 2. Prefix sum on not_suppressed flags (inclusive scan giving compacted positions)
     Tensor prefix = dispatchCumSum(not_suppressed, 0);
 
-    // 3. Read back only the total count. Reading a sliced view from Vulkan back
-    // to host returned garbage bytes for Int32 (dispatch-path bug in
-    // .slice().to(cpu)). Work around by materializing the entire prefix tensor
-    // to host and indexing in CPU memory — prefix is 1-D Int32 of length N, so
-    // this is at most ~N * 4 bytes of host RAM, which is negligible.
-    Tensor prefix_cpu = prefix.to(Device::cpu());
-    synchronize(device_id);
-    int32_t num_kept_i32 = prefix_cpu.data<int32_t>()[N - 1];
-    int64_t num_kept = static_cast<int64_t>(num_kept_i32);
+    // 3. Read back only the total count (4 bytes — single int32). Slice the
+    // last element, force a fresh contiguous device copy to land it at offset
+    // 0, then transfer to host. This matches the cudaMemcpyAsync 4-byte
+    // pattern used by CUDA/ROCm NMS (cuda/kernels/nms.cu:259) and the slice
+    // pattern at vulkan_ops_misc.cpp:804 (Unique). The earlier "materialize
+    // entire prefix" workaround pre-dated the dispatchContiguous fix that
+    // now correctly handles non-zero source offsets.
+    Tensor prefix_last = dispatchContiguous(prefix.slice(0, N - 1, N));
+    Tensor count_cpu = prefix_last.to(Device::cpu());
+    int64_t num_kept = static_cast<int64_t>(count_cpu.data<int32_t>()[0]);
 
     if (num_kept == 0) {
         return Tensor({0}, DType::Int64, boxes.device());

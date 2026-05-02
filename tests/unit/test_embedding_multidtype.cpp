@@ -1,6 +1,6 @@
 /**
  * @file test_embedding_multidtype.cpp
- * @brief Multi-dtype parameterized tests for Embedding and EmbeddingBag layers
+ * @brief Multi-dtype() parameterized tests for Embedding and EmbeddingBag layers
  *
  * This file tests embedding operations with different data type conversions:
  * - Float32 (standard precision for embeddings - native format)
@@ -15,7 +15,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -30,82 +30,7 @@ using namespace tenzor::nn;
 // Backend + DType Parameterization
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class EmbeddingMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
-protected:
-    Device device;
-    DType dtype;
-
-    // Small helper to keep per-backend skip logic consistent with the
-    // canonical MultiBackendDTypeTest in multi_backend_dtype_fixture.hpp:
-    // honor TENZOR_SKIP_BACKENDS first, then TENZOR_REQUIRE_MULTI_BACKEND
-    // (hard-FAIL when a non-CPU backend is unavailable in CI).
-    void skipOrFail(const std::string& name, Device::Type type) {
-        const char* skip = std::getenv("TENZOR_SKIP_BACKENDS");
-        if (skip && std::string(skip).find(name) != std::string::npos) {
-            GTEST_SKIP() << name << " excluded via TENZOR_SKIP_BACKENDS";
-        }
-        if (!isBackendAvailable(type)) {
-            const char* req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
-            if (req && *req && *req != '0' && name != "cpu") {
-                FAIL() << name << " required by TENZOR_REQUIRE_MULTI_BACKEND "
-                                  "but unavailable";
-            }
-            GTEST_SKIP() << name << " not available";
-        }
-    }
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            skipOrFail("cuda", Device::Type::CUDA);
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            skipOrFail("vulkan", Device::Type::Vulkan);
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            skipOrFail("oneapi", Device::Type::OneAPI);
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            skipOrFail("rocm", Device::Type::ROCm);
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-};
+class EmbeddingMultiDTypeTest : public MultiBackendDTypeTest {};
 
 // ============================================================================
 // Embedding Tests
@@ -116,15 +41,15 @@ TEST_P(EmbeddingMultiDTypeTest, BasicLookup) {
     auto embedding = std::make_shared<Embedding>(10, 5);
 
     // Input: 3 token indices
-    auto input_data = zeros({3}, DType::Int64, device);
+    auto input_data = zeros({3}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     input_ptr[0] = 0;
     input_ptr[1] = 5;
     input_ptr[2] = 9;
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
@@ -132,19 +57,19 @@ TEST_P(EmbeddingMultiDTypeTest, BasicLookup) {
 
     // Check output shape: [3, 5]
     auto output_shape = output.tensor().shape();
-    ASSERT_EQ(output_shape.size(), 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(output_shape[0], 3) << "Failed on " << device.to_string();
-    EXPECT_EQ(output_shape[1], 5) << "Failed on " << device.to_string();
+    ASSERT_EQ(output_shape.size(), 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(output_shape[0], 3) << "Failed on " << device().to_string();
+    EXPECT_EQ(output_shape[1], 5) << "Failed on " << device().to_string();
 
     // Embeddings output Float32 by default
     EXPECT_EQ(output.tensor().dtype(), DType::Float32)
-        << "Embedding output should be Float32 on " << device.to_string();
+        << "Embedding output should be Float32 on " << device().to_string();
 
-    // Test dtype conversion if requested dtype differs from Float32
-    if (dtype != DType::Float32) {
-        auto converted_output = output.tensor().to(dtype);
-        EXPECT_EQ(converted_output.dtype(), dtype)
-            << "Converted output should have requested dtype on " << device.to_string();
+    // Test dtype() conversion if requested dtype() differs from Float32
+    if (dtype() != DType::Float32) {
+        auto converted_output = output.tensor().to(dtype());
+        EXPECT_EQ(converted_output.dtype(), dtype())
+            << "Converted output should have requested dtype() on " << device().to_string();
 
         // Verify shape is preserved after conversion
         auto converted_shape = converted_output.shape();
@@ -162,7 +87,7 @@ TEST_P(EmbeddingMultiDTypeTest, BasicLookup) {
             break;
         }
     }
-    EXPECT_FALSE(all_same) << "Failed on " << device.to_string();
+    EXPECT_FALSE(all_same) << "Failed on " << device().to_string();
 }
 
 TEST_P(EmbeddingMultiDTypeTest, MultiDimensionalInput) {
@@ -170,15 +95,15 @@ TEST_P(EmbeddingMultiDTypeTest, MultiDimensionalInput) {
     auto embedding = std::make_shared<Embedding>(100, 8);
 
     // Input: [batch=2, seq_len=4]
-    auto input_data = zeros({2, 4}, DType::Int64, device);
+    auto input_data = zeros({2, 4}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     for (int i = 0; i < 8; ++i) {
         input_ptr[i] = i * 10;
     }
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
@@ -186,18 +111,18 @@ TEST_P(EmbeddingMultiDTypeTest, MultiDimensionalInput) {
 
     // Check output shape: [2, 4, 8]
     auto output_shape = output.tensor().shape();
-    ASSERT_EQ(output_shape.size(), 3) << "Failed on " << device.to_string();
-    EXPECT_EQ(output_shape[0], 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(output_shape[1], 4) << "Failed on " << device.to_string();
-    EXPECT_EQ(output_shape[2], 8) << "Failed on " << device.to_string();
+    ASSERT_EQ(output_shape.size(), 3) << "Failed on " << device().to_string();
+    EXPECT_EQ(output_shape[0], 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(output_shape[1], 4) << "Failed on " << device().to_string();
+    EXPECT_EQ(output_shape[2], 8) << "Failed on " << device().to_string();
 
     // Embeddings output Float32
     EXPECT_EQ(output.tensor().dtype(), DType::Float32);
 
-    // Test dtype conversion
-    if (dtype != DType::Float32) {
-        auto converted = output.tensor().to(dtype);
-        EXPECT_EQ(converted.dtype(), dtype);
+    // Test dtype() conversion
+    if (dtype() != DType::Float32) {
+        auto converted = output.tensor().to(dtype());
+        EXPECT_EQ(converted.dtype(), dtype());
         EXPECT_EQ(converted.shape()[0], 2);
         EXPECT_EQ(converted.shape()[1], 4);
         EXPECT_EQ(converted.shape()[2], 8);
@@ -218,15 +143,15 @@ TEST_P(EmbeddingMultiDTypeTest, PaddingIdx) {
     }
 
     // Forward with padding index
-    auto input_data = zeros({3}, DType::Int64, device);
+    auto input_data = zeros({3}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     input_ptr[0] = 0;  // Padding
     input_ptr[1] = 5;
     input_ptr[2] = 0;  // Padding
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
@@ -241,11 +166,11 @@ TEST_P(EmbeddingMultiDTypeTest, PaddingIdx) {
     }
 
     // Test conversion preserves padding zeros
-    if (dtype != DType::Float32) {
-        auto converted = output.tensor().to(dtype);
+    if (dtype() != DType::Float32) {
+        auto converted = output.tensor().to(dtype());
         auto converted_cpu = converted.to(Device::cpu());
 
-        if (dtype == DType::Float64) {
+        if (dtype() == DType::Float64) {
             auto conv_ptr = converted_cpu.data<double>();
             for (int j = 0; j < 5; ++j) {
                 EXPECT_DOUBLE_EQ(conv_ptr[j], 0.0);
@@ -256,21 +181,21 @@ TEST_P(EmbeddingMultiDTypeTest, PaddingIdx) {
 }
 
 TEST_P(EmbeddingMultiDTypeTest, DTypeConversionAccuracy) {
-    // Test that dtype conversion preserves embedding values accurately
+    // Test that dtype() conversion preserves embedding values accurately
     auto embedding = std::make_shared<Embedding>(10, 5);
 
-    auto input_data = zeros({1}, DType::Int64, device);
+    auto input_data = zeros({1}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     input_cpu.data<int64_t>()[0] = 3;
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
     auto output = embedding->forward(input);
 
-    if (dtype == DType::Float64) {
+    if (dtype() == DType::Float64) {
         // Convert to Float64 and verify precision
         auto converted = output.tensor().to(DType::Float64);
         EXPECT_EQ(converted.dtype(), DType::Float64);
@@ -290,18 +215,18 @@ TEST_P(EmbeddingMultiDTypeTest, DTypeConversionAccuracy) {
 }
 
 TEST_P(EmbeddingMultiDTypeTest, EmbeddingBagWithDTypeConversion) {
-    // Test EmbeddingBag with dtype conversion
+    // Test EmbeddingBag with dtype() conversion
     auto embedding_bag = std::make_shared<EmbeddingBag>(10, 5, 0.0, 2.0, false, "mean");
 
-    auto input_data = zeros({3}, DType::Int64, device);
+    auto input_data = zeros({3}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     input_ptr[0] = 0;
     input_ptr[1] = 1;
     input_ptr[2] = 2;
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
@@ -312,10 +237,10 @@ TEST_P(EmbeddingMultiDTypeTest, EmbeddingBagWithDTypeConversion) {
     EXPECT_EQ(output_shape[0], 1);
     EXPECT_EQ(output_shape[1], 5);
 
-    // Test dtype conversion
-    if (dtype != DType::Float32) {
-        auto converted = output.tensor().to(dtype);
-        EXPECT_EQ(converted.dtype(), dtype);
+    // Test dtype() conversion
+    if (dtype() != DType::Float32) {
+        auto converted = output.tensor().to(dtype());
+        EXPECT_EQ(converted.dtype(), dtype());
         EXPECT_EQ(converted.shape()[0], 1);
         EXPECT_EQ(converted.shape()[1], 5);
     }
@@ -323,22 +248,22 @@ TEST_P(EmbeddingMultiDTypeTest, EmbeddingBagWithDTypeConversion) {
 
 TEST_P(EmbeddingMultiDTypeTest, Float64PrecisionBenefit) {
     // Only test Float64 precision benefits
-    if (dtype != DType::Float64) {
+    if (dtype() != DType::Float64) {
         GTEST_SKIP() << "Precision test only for Float64";
     }
 
     auto embedding_bag = std::make_shared<EmbeddingBag>(100, 32, 0.0, 2.0, false, "mean");
 
     // Create input with many elements to test aggregation precision
-    auto input_data = zeros({50}, DType::Int64, device);
+    auto input_data = zeros({50}, DType::Int64, device());
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     for (int i = 0; i < 50; ++i) {
         input_ptr[i] = i;
     }
 
-    if (device.type != Device::Type::CPU) {
-        input_data = input_cpu.to(device);
+    if (device().type != Device::Type::CPU) {
+        input_data = input_cpu.to(device());
     }
 
     auto input = Variable(input_data, false);
@@ -357,43 +282,20 @@ TEST_P(EmbeddingMultiDTypeTest, Float64PrecisionBenefit) {
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateEmbeddingTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    // Embeddings are stored as Float32 internally, but we test conversion to:
-    // - Float32: Native format (baseline)
-    // - Float64: High precision conversion (for scientific computing)
-    // - Float16: Mixed precision (when backend support is available)
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        // Float16 can be added when more backends support it
-        // {DType::Float16, "float16"},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     EmbeddingMultiDTypeTest,
-    ::testing::ValuesIn(GenerateEmbeddingTestCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::Int64)
+    ),
+    BackendDTypeParamName);
 
 /*
  * COVERAGE IMPACT SUMMARY:
  *
  * Original test_embedding.cpp:
- * - 17 tests × 4 backends × 1 dtype (Float32 only) = 68 test scenarios
+ * - 17 tests × 4 backends × 1 dtype() (Float32 only) = 68 test scenarios
  *
  * New test_embedding_multidtype.cpp:
  * - 6 tests × 5 backends × 2 dtypes (Float32, Float64) = 60 test scenarios
@@ -401,7 +303,7 @@ INSTANTIATE_TEST_SUITE_P(
  *
  * Test Categories:
  * 1. Basic Operations (3 tests):
- *    - BasicLookup: Verify embedding lookup, shape, and dtype conversion
+ *    - BasicLookup: Verify embedding lookup, shape, and dtype() conversion
  *    - MultiDimensionalInput: Test batch and sequence dimensions with conversion
  *    - PaddingIdx: Verify padding index produces zero embeddings and converts correctly
  *
@@ -410,7 +312,7 @@ INSTANTIATE_TEST_SUITE_P(
  *    - Float64PrecisionBenefit: Test high-precision aggregation benefits
  *
  * 3. EmbeddingBag (1 test):
- *    - EmbeddingBagWithDTypeConversion: Test bag aggregation with dtype conversion
+ *    - EmbeddingBagWithDTypeConversion: Test bag aggregation with dtype() conversion
  *
  * Coverage Approach:
  * - Embeddings use Float32 storage (industry standard)
@@ -434,7 +336,7 @@ INSTANTIATE_TEST_SUITE_P(
  *
  * Key Benefits:
  * - Ensures embeddings work correctly with Float32 (standard)
- * - Verifies dtype conversions preserve embedding values
+ * - Verifies dtype() conversions preserve embedding values
  * - Tests Float64 conversion for high-precision computation
  * - Validates padding and shape preservation through conversion
  * - Provides foundation for Float16 mixed precision training support
@@ -443,6 +345,6 @@ INSTANTIATE_TEST_SUITE_P(
  * - Embeddings are lookup tables, not computation operations
  * - Float32 is the standard for embedding storage in deep learning
  * - Float64 is useful for high-precision downstream computation
- * - Tests focus on conversion correctness rather than native dtype support
+ * - Tests focus on conversion correctness rather than native dtype() support
  * - This approach aligns with PyTorch/TensorFlow embedding semantics
  */

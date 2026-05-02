@@ -1,18 +1,18 @@
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
 /**
  * @file test_broadcasting_multidtype.cpp
- * @brief Multi-dtype parameterized tests for broadcasting operations
+ * @brief Multi-dtype() parameterized tests for broadcasting operations
  *
  * This file refactors test_broadcasting.cpp to test operations across multiple data types:
  * - Float32, Float64 (floating-point operations)
  * - Int32 (integer operations)
  *
- * Broadcasting operations are dtype-agnostic and work with all numeric types.
+ * Broadcasting operations are dtype()-agnostic and work with all numeric types.
  * Coverage improvement: tests now run with 3 dtypes instead of just Float32
  */
 
@@ -20,74 +20,10 @@ using namespace tenzor::testing;
 // Multi-DType Test Fixture
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
+class BroadcastingMultiDTypeTest : public MultiBackendDTypeTest {
 
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class BroadcastingMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
 protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Helper to set tensor data based on dtype
+    // Helper to set tensor data based on dtype()
     template<typename T>
     void SetData(Tensor& t, const std::vector<T>& values) {
         auto t_cpu = t.to(Device::cpu());
@@ -95,10 +31,10 @@ protected:
         for (size_t i = 0; i < values.size() && i < t.numel(); i++) {
             data[i] = values[i];
         }
-        t = t_cpu.to(device);
+        t = t_cpu.to(device());
     }
 
-    // Helper to verify tensor data based on dtype
+    // Helper to verify tensor data based on dtype()
     template<typename T>
     void VerifyData(const Tensor& t, const std::vector<T>& expected) {
         auto t_cpu = t.to(Device::cpu());
@@ -107,14 +43,14 @@ protected:
             if constexpr (std::is_floating_point_v<T>) {
                 if constexpr (std::is_same_v<T, float>) {
                     EXPECT_FLOAT_EQ(data[i], expected[i])
-                        << "Failed at index " << i << " on " << device.to_string();
+                        << "Failed at index " << i << " on " << device().to_string();
                 } else {
                     EXPECT_DOUBLE_EQ(data[i], expected[i])
-                        << "Failed at index " << i << " on " << device.to_string();
+                        << "Failed at index " << i << " on " << device().to_string();
                 }
             } else {
                 EXPECT_EQ(data[i], expected[i])
-                    << "Failed at index " << i << " on " << device.to_string();
+                    << "Failed at index " << i << " on " << device().to_string();
             }
         }
     }
@@ -126,10 +62,10 @@ protected:
 
 TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToVector) {
     // Test: (3,) + (1,) -> (3,)
-    auto a = ones({3}, dtype, device);
-    auto b = ones({1}, dtype, device);
+    auto a = ones({3}, dtype(), device());
+    auto b = ones({1}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             SetData<float>(a, {1.0f, 2.0f, 3.0f});
             SetData<float>(b, {10.0f});
@@ -143,14 +79,14 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToVector) {
             SetData<int32_t>(b, {10});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 3) << "Failed on " << device().to_string();
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {11.0f, 12.0f, 13.0f});
             break;
@@ -161,16 +97,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToVector) {
             VerifyData<int32_t>(c, {11, 12, 13});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
 TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_RowToMatrix) {
     // Test: (2, 3) + (1, 3) -> (2, 3)
-    auto a = ones({2, 3}, dtype, device);
-    auto b = ones({1, 3}, dtype, device);
+    auto a = ones({2, 3}, dtype(), device());
+    auto b = ones({1, 3}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             SetData<float>(a, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
             SetData<float>(b, {10.0f, 20.0f, 30.0f});
@@ -184,16 +120,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_RowToMatrix) {
             SetData<int32_t>(b, {10, 20, 30});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device().to_string();
 
     // Expected: [[11, 22, 33], [14, 25, 36]]
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {11.0f, 22.0f, 33.0f, 14.0f, 25.0f, 36.0f});
             break;
@@ -204,16 +140,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_RowToMatrix) {
             VerifyData<int32_t>(c, {11, 22, 33, 14, 25, 36});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
 TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ColumnToMatrix) {
     // Test: (2, 3) + (2, 1) -> (2, 3)
-    auto a = ones({2, 3}, dtype, device);
-    auto b = ones({2, 1}, dtype, device);
+    auto a = ones({2, 3}, dtype(), device());
+    auto b = ones({2, 1}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             SetData<float>(a, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
             SetData<float>(b, {100.0f, 200.0f});
@@ -227,16 +163,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ColumnToMatrix) {
             SetData<int32_t>(b, {100, 200});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device().to_string();
 
     // Expected: [[101, 102, 103], [204, 205, 206]]
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {101.0f, 102.0f, 103.0f, 204.0f, 205.0f, 206.0f});
             break;
@@ -247,16 +183,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ColumnToMatrix) {
             VerifyData<int32_t>(c, {101, 102, 103, 204, 205, 206});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
 TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToMatrix) {
     // Test: (2, 3) + (1, 1) -> (2, 3)
-    auto a = ones({2, 3}, dtype, device);
-    auto b = ones({1, 1}, dtype, device);
+    auto a = ones({2, 3}, dtype(), device());
+    auto b = ones({1, 1}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             SetData<float>(a, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
             SetData<float>(b, {1000.0f});
@@ -270,16 +206,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToMatrix) {
             SetData<int32_t>(b, {1000});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device().to_string();
 
     // Expected: [[1001, 1002, 1003], [1004, 1005, 1006]]
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {1001.0f, 1002.0f, 1003.0f, 1004.0f, 1005.0f, 1006.0f});
             break;
@@ -290,16 +226,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_ScalarToMatrix) {
             VerifyData<int32_t>(c, {1001, 1002, 1003, 1004, 1005, 1006});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
 TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_DifferentDimensions) {
     // Test: (3, 2) + (2,) -> (3, 2)
-    auto a = ones({3, 2}, dtype, device);
-    auto b = ones({2}, dtype, device);
+    auto a = ones({3, 2}, dtype(), device());
+    auto b = ones({2}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             SetData<float>(a, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
             SetData<float>(b, {10.0f, 20.0f});
@@ -313,16 +249,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_DifferentDimensions) {
             SetData<int32_t>(b, {10, 20});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 3) << "Failed on " << device.to_string();
-    EXPECT_EQ(c.shape()[1], 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 3) << "Failed on " << device().to_string();
+    EXPECT_EQ(c.shape()[1], 2) << "Failed on " << device().to_string();
 
     // Expected: [[11, 22], [13, 24], [15, 26]]
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {11.0f, 22.0f, 13.0f, 24.0f, 15.0f, 26.0f});
             break;
@@ -333,16 +269,16 @@ TEST_P(BroadcastingMultiDTypeTest, AddBroadcast_DifferentDimensions) {
             VerifyData<int32_t>(c, {11, 22, 13, 24, 15, 26});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
 TEST_P(BroadcastingMultiDTypeTest, AddNoBroadcast_SameShape) {
     // Test that same-shape operations still work (fast path)
-    auto a = ones({2, 3}, dtype, device);
-    auto b = ones({2, 3}, dtype, device);
+    auto a = ones({2, 3}, dtype(), device());
+    auto b = ones({2, 3}, dtype(), device());
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32: {
             std::vector<float> a_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
             std::vector<float> b_data = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f};
@@ -365,15 +301,15 @@ TEST_P(BroadcastingMultiDTypeTest, AddNoBroadcast_SameShape) {
             break;
         }
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 
     auto c = add(a, b);
 
-    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device.to_string();
-    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.shape()[0], 2) << "Failed on " << device().to_string();
+    EXPECT_EQ(c.shape()[1], 3) << "Failed on " << device().to_string();
 
-    switch(dtype) {
+    switch(dtype()) {
         case DType::Float32:
             VerifyData<float>(c, {11.0f, 22.0f, 33.0f, 44.0f, 55.0f, 66.0f});
             break;
@@ -384,7 +320,7 @@ TEST_P(BroadcastingMultiDTypeTest, AddNoBroadcast_SameShape) {
             VerifyData<int32_t>(c, {11, 22, 33, 44, 55, 66});
             break;
         default:
-            FAIL() << "Unsupported dtype";
+            FAIL() << "Unsupported dtype()";
     }
 }
 
@@ -392,40 +328,21 @@ TEST_P(BroadcastingMultiDTypeTest, AddNoBroadcast_SameShape) {
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    // Test with these dtypes - broadcasting works with all numeric types
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     BroadcastingMultiDTypeTest,
-    ::testing::ValuesIn(GenerateBackendDTypeCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Int32)
+    ),
+    BackendDTypeParamName);
 
 /*
  * COVERAGE IMPACT SUMMARY:
  *
  * Original test_broadcasting.cpp:
- * - 7 tests × 4 backends × 1 dtype (Float32) = 28 test scenarios
- * - One test already included Int32, so partial multi-dtype coverage
+ * - 7 tests × 4 backends × 1 dtype() (Float32) = 28 test scenarios
+ * - One test already included Int32, so partial multi-dtype() coverage
  *
  * Refactored test_broadcasting_multidtype.cpp:
  * - 6 tests × 4 backends × 3 dtypes (Float32, Float64, Int32) = 72 test scenarios
@@ -446,7 +363,7 @@ INSTANTIATE_TEST_SUITE_P(
  * - Float64 (NEW - adds double precision testing)
  * - Int32 (expanded - now tested in all scenarios instead of just one)
  *
- * Broadcasting operations are dtype-agnostic and work uniformly across numeric types.
+ * Broadcasting operations are dtype()-agnostic and work uniformly across numeric types.
  * This refactoring ensures comprehensive coverage across floating-point and integer types.
  *
  * Estimated coverage increase: From ~10% (mostly Float32) to ~30% (3 numeric dtypes)

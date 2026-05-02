@@ -1,6 +1,6 @@
 /**
  * @file test_roberta_electra_multidtype.cpp
- * @brief Multi-dtype tests for RoBERTa and ELECTRA models
+ * @brief Multi-dtype() tests for RoBERTa and ELECTRA models
  *
  * Converted from test_roberta_electra.cpp to support multiple data types:
  * - Float32 (standard precision)
@@ -11,93 +11,30 @@
  */
 
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/roberta.hpp"
 #include "../../include/tenzor/models/electra.hpp"
 #include "../../include/tenzor/nn/offload.hpp"
 
 using namespace tenzor;
+using namespace tenzor::testing;
 using namespace tenzor::models;
 
 // ============================================================================
 // Multi-DType Test Parameter Structure
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
 // ============================================================================
 // Multi-DType Test Fixture
 // ============================================================================
 
-class RoBERTaELECTRAMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class RoBERTaELECTRAMultiDTypeTest : public MultiBackendDTypeTest {
+
 protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
     // Helper to create input token IDs with valid values
     auto create_input_ids(int64_t batch_size, int64_t seq_len, int64_t vocab_size = 50265) -> Variable {
-        // Create on CPU first, then move to target device
+        // Create on CPU first, then move to target device()
         Tensor input_ids_cpu({batch_size, seq_len}, DType::Int64, Device::cpu());
 
         // Fill with valid token IDs within vocabulary range
@@ -107,15 +44,15 @@ protected:
         }
         std::copy(data.begin(), data.end(), input_ids_cpu.data<int64_t>());
 
-        // Move to target device
-        Tensor input_ids = (device == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device);
+        // Move to target device()
+        Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
         return Variable(input_ids, true);
     }
 
-    // Get tolerance based on dtype
+    // Get tolerance based on dtype()
     double get_tolerance() const {
-        switch(dtype) {
+        switch(dtype()) {
             case DType::Float32: return 1e-5;
             case DType::Float64: return 1e-10;
             case DType::Float16: return 1e-2;
@@ -123,14 +60,14 @@ protected:
         }
     }
 
-    // Helper to verify tensor values with dtype-specific tolerance
+    // Helper to verify tensor values with dtype()-specific tolerance
     template<typename T>
     void verify_near(T actual, T expected, const std::string& msg = "") {
         if constexpr (std::is_floating_point_v<T>) {
             EXPECT_NEAR(static_cast<double>(actual), static_cast<double>(expected),
-                       get_tolerance()) << msg << " on " << device.to_string();
+                       get_tolerance()) << msg << " on " << device().to_string();
         } else {
-            EXPECT_EQ(actual, expected) << msg << " on " << device.to_string();
+            EXPECT_EQ(actual, expected) << msg << " on " << device().to_string();
         }
     }
 };
@@ -154,9 +91,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseForwardShape) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype and device
-    model->to(dtype);
-    model->to(device);
+    // Convert model to test dtype() and device()
+    model->to(dtype());
+    model->to(device());
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -167,16 +104,16 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseForwardShape) {
     auto shape = output.sequence_output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{batch_size, seq_len, 768}));
-    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseGradientFlow) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype and device
-    model->to(dtype);
-    model->to(device);
+    // Convert model to test dtype() and device()
+    model->to(dtype());
+    model->to(device());
 
     model->train();
 
@@ -188,10 +125,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseGradientFlow) {
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 
-    // Verify gradient exists and has correct dtype
+    // Verify gradient exists and has correct dtype()
     for (const auto& p : params) {
         if (p->grad()) {
-            EXPECT_EQ(p->grad()->dtype(), dtype);
+            EXPECT_EQ(p->grad()->dtype(), dtype());
         }
     }
 }
@@ -200,9 +137,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseParameterCount) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype and device
-    model->to(dtype);
-    model->to(device);
+    // Convert model to test dtype() and device()
+    model->to(dtype());
+    model->to(device());
 
     auto params = model->parameters();
 
@@ -213,7 +150,7 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseParameterCount) {
             param_size *= dim;
         }
         total_params += param_size;
-        EXPECT_EQ(p->tensor().dtype(), dtype);
+        EXPECT_EQ(p->tensor().dtype(), dtype());
     }
 
     // RoBERTa-Base should have ~125M parameters (allow 20% tolerance)
@@ -238,9 +175,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype and device
-    model->to(dtype);
-    model->to(device);
+    // Convert model to test dtype() and device()
+    model->to(dtype());
+    model->to(device());
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -251,7 +188,7 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
     auto shape = output.sequence_output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{batch_size, seq_len, 1024}));
-    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeGradientFlow) {
@@ -259,29 +196,29 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeGradientFlow) {
 
     // For float64, RoBERTa-Large (355M params * 8 bytes = 2.84GB) plus activations
     // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
-    bool is_float64 = (dtype == DType::Float64);
-    bool is_gpu_float64 = is_float64 && (GetParam().backend_name == "cuda" || GetParam().backend_name == "vulkan");
+    bool is_float64 = (dtype() == DType::Float64);
+    bool is_gpu_float64 = is_float64 && (backend_name() == "cuda" || backend_name() == "vulkan");
     if (is_gpu_float64) {
         config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA/Vulkan
     }
 
     auto model = std::make_shared<RobertaModel>(config);
-    model->to(dtype);
+    model->to(dtype());
 
     // Use CPU-start offloading for CUDA float64 (Vulkan doesn't support this yet)
     std::unique_ptr<nn::OffloadContext> offload_ctx;
-    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && is_float64);
+    bool is_cuda_float64 = (backend_name() == "cuda" && is_float64);
 
     if (is_cuda_float64) {
         nn::OffloadContext::Config offload_config;
-        offload_config.target_device = device;
+        offload_config.target_device = device();
         offload_config.offload_parameters = true;
         offload_config.offload_gradients = true;
         offload_config.prefetch_depth = 1;
         offload_ctx = std::make_unique<nn::OffloadContext>(*model, offload_config);
         offload_ctx->enable();
     } else {
-        model->to(device);
+        model->to(device());
     }
 
     model->train();
@@ -312,9 +249,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallForwardShape) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype and device
-    discriminator->to(dtype);
-    discriminator->to(device);
+    // Convert model to test dtype() and device()
+    discriminator->to(dtype());
+    discriminator->to(device());
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -325,14 +262,14 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallForwardShape) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{batch_size, seq_len}));
-    EXPECT_EQ(output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallGradientFlow) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
-    discriminator->to(dtype);
-    discriminator->to(device);
+    discriminator->to(dtype());
+    discriminator->to(device());
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -361,9 +298,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseForwardShape) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype and device
-    discriminator->to(dtype);
-    discriminator->to(device);
+    // Convert model to test dtype() and device()
+    discriminator->to(dtype());
+    discriminator->to(device());
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -374,14 +311,14 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseForwardShape) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{batch_size, seq_len}));
-    EXPECT_EQ(output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseGradientFlow) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
-    discriminator->to(dtype);
-    discriminator->to(device);
+    discriminator->to(dtype());
+    discriminator->to(device());
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -401,9 +338,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype and device
-    discriminator->to(dtype);
-    discriminator->to(device);
+    // Convert model to test dtype() and device()
+    discriminator->to(dtype());
+    discriminator->to(device());
 
     int64_t batch_size = 1;
     int64_t seq_len = 128;
@@ -414,7 +351,7 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{batch_size, seq_len}));
-    EXPECT_EQ(output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
@@ -422,29 +359,29 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
 
     // For float64, ELECTRA-Large (335M discriminator params * 8 bytes = 2.68GB) plus activations
     // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
-    bool is_float64 = (dtype == DType::Float64);
-    bool is_gpu_float64 = is_float64 && (GetParam().backend_name == "cuda" || GetParam().backend_name == "vulkan");
+    bool is_float64 = (dtype() == DType::Float64);
+    bool is_gpu_float64 = is_float64 && (backend_name() == "cuda" || backend_name() == "vulkan");
     if (is_gpu_float64) {
         config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA/Vulkan
     }
 
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
-    discriminator->to(dtype);
+    discriminator->to(dtype());
 
     // Use CPU-start offloading for CUDA float64 (Vulkan doesn't support this yet)
     std::unique_ptr<nn::OffloadContext> offload_ctx;
-    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && is_float64);
+    bool is_cuda_float64 = (backend_name() == "cuda" && is_float64);
 
     if (is_cuda_float64) {
         nn::OffloadContext::Config offload_config;
-        offload_config.target_device = device;
+        offload_config.target_device = device();
         offload_config.offload_parameters = true;
         offload_config.offload_gradients = true;
         offload_config.prefetch_depth = 1;
         offload_ctx = std::make_unique<nn::OffloadContext>(*discriminator, offload_config);
         offload_ctx->enable();
     } else {
-        discriminator->to(device);
+        discriminator->to(device());
     }
 
     discriminator->train();
@@ -466,9 +403,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBatchSizeOne) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype and device
-    model->to(dtype);
-    model->to(device);
+    // Convert model to test dtype() and device()
+    model->to(dtype());
+    model->to(device());
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -476,16 +413,16 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBatchSizeOne) {
     auto shape = output.sequence_output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{1, 64, 768}));
-    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype);
+    EXPECT_EQ(output.sequence_output.tensor().dtype(), dtype());
 }
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRAVariableSequenceLength) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype and device
-    discriminator->to(dtype);
-    discriminator->to(device);
+    // Convert model to test dtype() and device()
+    discriminator->to(dtype());
+    discriminator->to(device());
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, 30522);
@@ -493,47 +430,28 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRAVariableSequenceLength) {
     auto shape_32 = output_32.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_32.begin(), shape_32.end()),
               (std::vector<int64_t>{2, 32}));
-    EXPECT_EQ(output_32.tensor().dtype(), dtype);
+    EXPECT_EQ(output_32.tensor().dtype(), dtype());
 
     auto input_256 = create_input_ids(1, 256, 30522);
     auto output_256 = discriminator->forward(input_256, Tensor{}, Variable{});
     auto shape_256 = output_256.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_256.begin(), shape_256.end()),
               (std::vector<int64_t>{1, 256}));
-    EXPECT_EQ(output_256.tensor().dtype(), dtype);
+    EXPECT_EQ(output_256.tensor().dtype(), dtype());
 }
 
 // ============================================================================
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    // NLP models primarily use floating-point types
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Float16, "float16"},  // For mixed precision training
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     RoBERTaELECTRAMultiDTypeTest,
-    ::testing::ValuesIn(GenerateBackendDTypeCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::Int64)
+    ),
+    BackendDTypeParamName);
 
 // ============================================================================
 // Main
@@ -551,7 +469,7 @@ int main(int argc, char** argv) {
  * COVERAGE IMPACT SUMMARY:
  *
  * Original test_roberta_electra.cpp:
- * - 15 tests × 1 backend (CPU) × 1 dtype (Float32) = 15 test scenarios
+ * - 15 tests × 1 backend (CPU) × 1 dtype() (Float32) = 15 test scenarios
  *
  * Refactored test_roberta_electra_multidtype.cpp:
  * - 15 tests × 4 backends (CPU, CUDA, Vulkan, OneAPI) × 3 dtypes (Float32, Float64, Float16)

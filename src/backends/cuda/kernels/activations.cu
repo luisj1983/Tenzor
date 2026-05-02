@@ -4293,8 +4293,13 @@ __global__ void scatter_reduce_f32(float* output, const float* source, const int
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
-    int64_t src_pos = (o * idx_n + k) * inner + j;
+    // Phase 7.6 2D scatter fix: index has shape matching src (outer, idx_n,
+    // inner), so the per-thread index lookup must include the outer/inner
+    // offsets. Previous `index[k]` only worked for 1D scatters where the
+    // index lookup happens to be flat-equivalent.
+    int64_t idx_pos = (o * idx_n + k) * inner + j;
+    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
+    int64_t src_pos = idx_pos;
     float val = source[src_pos];
 
     if (mode == 0 || mode == 2) {
@@ -4349,7 +4354,9 @@ __global__ void scatter_reduce_init_f32(float* output, const int64_t* index,
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
+    // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
+    int64_t idx_pos = (o * idx_n + k) * inner + j;
+    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
 
     float identity;
     if (mode == 0 || mode == 2) identity = 0.0f;       // sum/mean
@@ -4360,15 +4367,22 @@ __global__ void scatter_reduce_init_f32(float* output, const int64_t* index,
     output[out_pos] = identity;
 }
 
-// Divide by counts for mean mode
+// Divide by counts for mean mode.
+//
+// `counts[tid]` is the number of scatter operations that touched this output
+// position (incremented in scatter_reduce_f32; does not include the self
+// contribution). With include_self=true the accumulator already contains
+// `input + sum(scatters)` so the divisor must be `count + 1` (the +1 is the
+// self). With include_self=false the accumulator is just `sum(scatters)`
+// and the divisor is `count`. Untouched positions (count=0) keep their
+// initial value and are skipped.
 __global__ void scatter_reduce_mean_div_f32(float* output, const int* counts, int64_t numel, int include_self) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numel) return;
     int c = counts[tid];
-    int base = include_self ? 1 : 0;
-    if (c > base) {
-        output[tid] /= static_cast<float>(c);
-    }
+    if (c <= 0) return;  // untouched — leave the original value alone
+    float divisor = include_self ? static_cast<float>(c + 1) : static_cast<float>(c);
+    output[tid] /= divisor;
 }
 
 Tensor scatter_reduce_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -4394,7 +4408,14 @@ Tensor scatter_reduce_dispatch(std::span<const Tensor> inputs, const OpAttribute
     auto shape = output.shape();
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
-    int64_t dim_size = shape[dim], idx_n = inputs[1].numel();
+    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
+    // the scatter dim, NOT the total numel. For 1D scatter these are equal;
+    // for >1D they differ and the previous `numel()` would over-iterate and
+    // miscompute index offsets.
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = inputs[1].shape().size() > static_cast<size_t>(dim)
+                  ? inputs[1].shape()[dim]
+                  : inputs[1].numel();
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];

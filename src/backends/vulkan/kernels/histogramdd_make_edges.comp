@@ -1,0 +1,23 @@
+#version 450
+
+// Phase 8.4: emit one per-dimension edge buffer of length nb+1.
+// edges[i] = dim_params[2*d + 0] + i * dim_params[2*d + 1], i in [0, nb].
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer ParamsBuf { float dim_params[]; };
+layout(binding = 1) buffer EdgeBuf   { float edges[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint d;
+    uint nb;
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i > params.nb) return;
+
+    float fmin = dim_params[params.d * 2u + 0u];
+    float step = dim_params[params.d * 2u + 1u];
+    edges[i] = fmin + float(i) * step;
+}

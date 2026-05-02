@@ -1,9 +1,21 @@
 /**
  * @file test_numerical_gradients.cpp
- * @brief Numerical gradient verification for differentiable operations
+ * @brief CPU-only numerical gradient verification for differentiable
+ *        operations. Uses gradcheck() to confirm analytical gradients match
+ *        finite-difference numerical gradients on small inputs.
  *
- * Uses gradcheck() to verify analytical gradients match finite-difference
- * numerical gradients for core operations. Uses small tensor sizes for speed.
+ * NOTE: This file is intentionally CPU-only and is NOT a multi-backend
+ * test. The gradcheck() infrastructure runs finite-difference perturbations
+ * directly on raw tensor pointers (CPU memory), so multi-backend coverage
+ * lives in tests/autograd/test_gradcheck_multibackend.cpp instead. Keeping
+ * this file CPU-only is the correct test design: it acts as the reference
+ * the multi-backend gradchecks compare against.
+ *
+ * If you are adding a new op's gradcheck, prefer:
+ *   - tests/autograd/test_gradcheck_multibackend.cpp (5 backends × Float32+Float64)
+ *   - tests/autograd/test_gradcheck_missing.cpp (CPU-only sweep)
+ * Add to this file ONLY when you specifically want to assert the CPU
+ * reference gradient against finite differences without involving GPUs.
  */
 
 #include <gtest/gtest.h>

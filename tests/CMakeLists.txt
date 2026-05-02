@@ -437,6 +437,11 @@ add_executable(test_mfcc_multidtype test_mfcc_multidtype.cpp)
 target_link_libraries(test_mfcc_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_mfcc_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# LazyTensor deferred-execution tests (Phase 5.2)
+add_executable(test_lazy_tensor test_lazy_tensor.cpp)
+target_link_libraries(test_lazy_tensor PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_tensor DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)
 target_link_libraries(vulkan_tensor_test PRIVATE tenzor_core)

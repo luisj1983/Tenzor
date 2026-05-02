@@ -240,27 +240,42 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     auto& ctx = devices_[device_id];
     std::lock_guard<std::recursive_mutex> lock(ctx.mutex);
 
+    // Phase 8.3 fast-path: if the device has no pending work, skip the
+    // full vkDeviceWaitIdle/command-pool-reset cycle. Common case in
+    // tight inference loops where each op already calls
+    // endSingleTimeCommands which submits and waits on its own fence.
+    // This eliminates dozens of redundant device-wide barriers per
+    // forward pass.
+    if (!ctx.hasPendingWork && ctx.submittedFrames == 0 &&
+        ctx.activeCommandBuffer == VK_NULL_HANDLE) {
+        return;
+    }
+
     // Submit any pending batched commands before synchronizing
     if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
         submitBatchIfNeeded(device_id, true);  // Force submit any pending work
     }
 
-    // Wait for all device operations to complete.
-    // vkDeviceWaitIdle is equivalent to waiting on all queue fences and is
-    // simpler than tracking individual frame fences for a full synchronize.
-    VkResult waitResult = vkDeviceWaitIdle(ctx.device);
-    if (waitResult == VK_ERROR_DEVICE_LOST) {
-        ctx.device_lost = true;
-        throw std::runtime_error("Vulkan: device lost during synchronize()");
-    }
-    vulkan::checkVk(waitResult, "vkDeviceWaitIdle in synchronize");
+    // Phase 8.3: replace `vkDeviceWaitIdle` with a per-submission fence wait.
+    // Every submission this backend makes goes through `endSingleTimeCommandsAsync`,
+    // which already attaches one of `frameFences[MAX_FRAMES_IN_FLIGHT]` to the
+    // submission. `ensurePendingWorkComplete` walks those fences and waits only
+    // on the ones that are actually pending (`vkGetFenceStatus == VK_NOT_READY`).
+    //
+    // Functionally equivalent to vkDeviceWaitIdle for our single-compute-queue
+    // backend, but does not stall on unrelated queue activity (transfer queue
+    // when one is added later, presentation queue if a swapchain is integrated).
+    // It is also a step toward a timeline-semaphore-based design — the per-queue
+    // timeline counter is just a single-fence collapse of `frameFences[]`.
+    //
+    // The original vkDeviceWaitIdle is preserved as a fallback in
+    // `try_reset_device()` for the device-lost recovery path, where the queue
+    // state is already corrupted and a hardware-level barrier is needed.
+    ensurePendingWorkComplete(device_id);
 
-    // Reset fence tracking state — all work is now complete
-    ctx.submittedFrames = 0;
-    ctx.currentFrame = 0;
-    ctx.hasPendingWork = false;
-
-    // Reset command pool and pool index
+    // Reset command pool and pool index — safe because all submitted command
+    // buffers have completed (per-fence wait above is equivalent to idle for
+    // this device's compute queue).
     vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
                     "Failed to reset command pool during synchronize");
     ctx.nextCommandBufferIndex = 0;
@@ -272,11 +287,13 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     // Flush deferred frees now that all GPU work is complete
     flush_deferred_frees(device_id);
 
-    // Reset descriptor pool to reclaim descriptor sets
-    // This is safe because all GPU work is complete after vkDeviceWaitIdle
-    if (ctx.descriptorPool) {
-        ctx.descriptorPool->reset();
-    }
+    // Phase 8.3: do NOT reset the descriptor pool on every synchronize().
+    // The pool grows on demand (`grow()` doubles capacity on
+    // `VK_ERROR_OUT_OF_POOL_MEMORY`); resetting on every synchronize() defeats
+    // that growth and makes pool exhaustion paths chatty in tight inference
+    // loops. The pool's ~64K-set ceiling is reset only at backend destruction.
+    // If a future workload genuinely needs per-step reclamation, the user can
+    // call `descriptorPool->reset()` explicitly.
 }
 
 auto VulkanBackend::is_device_lost(int32_t device_id) const -> bool {

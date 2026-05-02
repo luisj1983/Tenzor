@@ -647,6 +647,15 @@ namespace oneapi {
     auto flash_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 const Tensor* mask, float scale, bool is_causal,
                                 sycl::queue& queue) -> Tensor;
+    // Phase 8.2: variant that also writes per-query LSE for fused backward.
+    auto flash_attention_kernel_with_lse(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                          const Tensor* mask, float scale, bool is_causal,
+                                          sycl::queue& queue, Tensor* L_out) -> Tensor;
+    // Phase 8.2: fused FlashAttention backward (Float32, head_dim ∈ {32, 64, 128}).
+    auto flash_attention_backward_oneapi_f32(
+        const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
+        const Tensor& O, const Tensor& L, float scale, bool causal,
+        sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // ---- Fused optimizer steps (kernels/fused_ops.cpp) ----
     auto fused_adam_step_kernel(
@@ -3054,22 +3063,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             const Tensor* mask = (inputs.size() > 3) ? &inputs[3] : nullptr;
 
-            Tensor output = oneapi::flash_attention_kernel(
-                inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue);
+            // Phase 8.2: compute LSE alongside the forward pass for the fused
+            // backward kernel. Allocation happens inside _with_lse if Q/K/V are
+            // 3D and dtype is supported. For dropout-enabled paths we still
+            // emit placeholders for seed/offset (kernel-level Philox refit
+            // arrives separately).
+            Tensor lse;
+            Tensor output = oneapi::flash_attention_kernel_with_lse(
+                inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue, &lse);
             oneapi::fp16_saturate_if_needed(output, queue);
-            // Per contract, FlashAttention returns 4-tuple. LSE/seed/offset
-            // arrive with the kernel-level refit; for now emit empty placeholders
-            // so consumers using .is_valid() detect the gap and either compose
-            // backward from scratch or skip dropout replay.
-            return {output, Tensor{}, Tensor{}, Tensor{}};
+            return {output, lse, Tensor{}, Tensor{}};
         });
 
     // =========================================================================
-    // Flash Attention Backward (composed-ops fallback using high-level ops)
+    // Flash Attention Backward (Phase 8.2: fused tile-based SYCL kernel for
+    // Float32 + head_dim ∈ {32,64,128} when LSE is provided; composed-ops
+    // fallback otherwise).
+    //
+    // The fused path mirrors src/backends/cuda/kernels/fused_ops.cu's
+    // flash_attention_backward_kernel: one workgroup per (batch_head, kv_tile),
+    // local memory for K/V/Q/dO/S tiles, dQ via sycl::atomic_ref<float>.
+    // Working memory per workgroup is O(Br·Bc + Br·D + Bc·D) instead of the
+    // composed-ops O(B·H·S²) attention matrix materialization.
     // =========================================================================
     table.register_kernel(OpId::FlashAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            // inputs: [dO, Q, K, V, O] or [dO, Q, K, V, O, L]
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
 
@@ -3077,6 +3096,43 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& Q = inputs[1];
             const Tensor& K = inputs[2];
             const Tensor& V = inputs[3];
+            const Tensor& O = inputs[4];
+
+            // Phase 8.2: try the fused path when L is supplied, dtype is Float32,
+            // and head_dim is one of the supported tile-friendly sizes. Q is shaped
+            // [B, H, S, D]; the SYCL kernel works on a flattened [B*H, S, D] view.
+            const bool has_lse = inputs.size() >= 6 && inputs[5].is_valid()
+                                  && inputs[5].numel() > 0;
+            const int64_t head_dim = Q.shape().back();
+            const bool fused_supported =
+                (Q.dtype() == DType::Float32) &&
+                (head_dim == 32 || head_dim == 64 || head_dim == 128) &&
+                Q.ndim() == 4;
+            if (has_lse && fused_supported) {
+                auto flatten_bh = [](const Tensor& t) -> Tensor {
+                    auto s = t.shape();
+                    return tenzor::reshape(t, {s[0] * s[1], s[2], s[3]});
+                };
+                const Tensor& L_in = inputs[5];
+                Tensor dO_flat = flatten_bh(dO).contiguous();
+                Tensor Q_flat = flatten_bh(Q).contiguous();
+                Tensor K_flat = flatten_bh(K).contiguous();
+                Tensor V_flat = flatten_bh(V).contiguous();
+                Tensor O_flat = flatten_bh(O).contiguous();
+                Tensor L_flat = (L_in.ndim() == 3)
+                    ? tenzor::reshape(L_in, {L_in.shape()[0] * L_in.shape()[1], L_in.shape()[2]}).contiguous()
+                    : L_in.contiguous();
+
+                auto& queue = get_q(inputs);
+                auto [dQf, dKf, dVf] = oneapi::flash_attention_backward_oneapi_f32(
+                    dO_flat, Q_flat, K_flat, V_flat, O_flat, L_flat, scale, causal, queue);
+                auto orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
+                return {tenzor::reshape(dQf, orig),
+                        tenzor::reshape(dKf, orig),
+                        tenzor::reshape(dVf, orig)};
+            }
+
+            // Composed-ops fallback for unsupported shapes / missing LSE / non-F32.
 
             // Recompute attention weights: attn = softmax(Q @ K^T * scale)
             Tensor Kt = tenzor::transpose(K, -1, -2);

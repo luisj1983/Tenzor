@@ -1,8 +1,23 @@
 /**
  * @file test_fp8_ops.cpp
- * @brief Tests for FP8 (E4M3 and E5M2) tensor operations.
+ * @brief CPU-reference tests for FP8 (E4M3 and E5M2) tensor operations.
  *
- * Verifies that:
+ * NOTE — Phase 7.4 of the test-coverage campaign:
+ *
+ * This file is intentionally CPU-only and is the *reference* for FP8 ops.
+ * The CPU FP8 path is software emulation (`fp8_emulation.hpp`) and acts
+ * as the canonical correctness oracle. GPU FP8 has hardware-specific
+ * tensor-core paths that vary across CUDA (Hopper+), ROCm (CDNA3+),
+ * OneAPI, and Vulkan; their parity is exercised in
+ * `tests/backend_parity/test_fp8_parity.cpp`, which compares each GPU
+ * backend's FP8 output to this file's CPU reference.
+ *
+ * Type-promotion tests in this file are device-agnostic (operate on
+ * `DType` enum, not on hardware). The arithmetic and matmul tests
+ * exercise the CPU FP8 path explicitly because that's the reference
+ * being tested.
+ *
+ * Verifies:
  * 1. FP8+FP8 operations preserve FP8 output dtype (no silent Float32 promotion)
  * 2. Mixed FP8 types promote to FP8_E5M2
  * 3. FP8+Float32 still promotes to Float32

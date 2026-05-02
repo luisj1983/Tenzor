@@ -228,67 +228,138 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
     Tensor in_f32 = (input.dtype() == DType::Float32) ? input.contiguous()
                                                        : dispatchCast(input.contiguous(), DType::Float32);
     int64_t n = in_f32.numel();
-
-    // Auto-range via aminmax dispatch (single kernel, single D2H transfer)
-    if (min_val == 0.0 && max_val == 0.0 && n > 0) {
-        // aminmax returns (min, max) in one dispatch, avoiding two separate D2H syncs
-        auto [min_t, max_t] = tenzor::aminmax(in_f32);
-        // Pack into single 2-element tensor for one D2H transfer
-        Tensor minmax = tenzor::cat({min_t.reshape({1}), max_t.reshape({1})}, 0);
-        Tensor minmax_cpu = minmax.to(Device::cpu()).to(DType::Float32);
-        min_val = static_cast<double>(minmax_cpu.data<float>()[0]);
-        max_val = static_cast<double>(minmax_cpu.data<float>()[1]);
-    }
-    if (max_val <= min_val) max_val = min_val + 1.0;
-    float bin_width = static_cast<float>((max_val - min_val) / bins);
-
-    // Counts allocated as int32 (matches shader); promoted to int64 at the end
-    Tensor counts_i32(std::vector<int64_t>{bins}, DType::Int32, input.device());
-    // Zero-initialise via dispatch (on-device fill)
-    counts_i32 = dispatchCast(counts_i32, DType::Int32);  // forces a clean buffer
-
-    // Actually we need to memset the counts to zero; use a small zero shader or
-    // the existing fill infrastructure. Use full(0) instead.
-    counts_i32 = tenzor::zeros({bins}, DType::Int32, input.device());
-
     int32_t device_id = input.device().index;
-    if (n > 0) {
-        auto* pipeline = getPipeline("histogram", device_id);
-        HistogramPC pc{static_cast<uint32_t>(n),
-                       static_cast<uint32_t>(bins),
-                       static_cast<float>(min_val),
-                       bin_width,
-                       static_cast<float>(max_val)};
-        std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, in_f32.data_ptr()},
-            {1, counts_i32.data_ptr()},
-        };
-        std::vector<size_t> sizes = {
-            static_cast<size_t>(n) * sizeof(float),
-            static_cast<size_t>(bins) * sizeof(int32_t),
-        };
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                          0, sizeof(HistogramPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
-        vkCmdDispatch(cmd, workgroups, 1, 1);
-        insertComputeOnlyBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
+
+    Tensor counts_i32 = tenzor::zeros({bins}, DType::Int32, input.device());
+    Tensor edges({bins + 1}, DType::Float32, input.device());
+
+    const bool auto_range = (min_val == 0.0 && max_val == 0.0 && n > 0);
+
+    if (auto_range) {
+        // Phase 8.4: auto-range path — compute min/max on-device and feed both
+        // the histogram dispatch and the edges shader from a 3-float device
+        // buffer (no D2H readback).
+        auto [min_t, max_t] = tenzor::aminmax(in_f32);
+        Tensor min_dev = min_t.reshape({1}).contiguous();
+        Tensor max_dev = max_t.reshape({1}).contiguous();
+        Tensor range_buf({3}, DType::Float32, input.device());
+
+        // Pack: (min, max, bin_width) into range_buf
+        {
+            auto* pack_pipeline = getPipeline("histogram_pack_range", device_id);
+            struct { uint32_t num_bins; } pack_pc{static_cast<uint32_t>(bins)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, min_dev.data_ptr()},
+                {1, max_dev.data_ptr()},
+                {2, range_buf.data_ptr()},
+            };
+            std::vector<size_t> sizes = {
+                sizeof(float), sizeof(float), 3 * sizeof(float),
+            };
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pack_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pack_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pack_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pack_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pack_pc), &pack_pc);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
+
+        // Histogram (dynamic-range variant reads min/max/bin_width from range_buf)
+        {
+            auto* hist_pipeline = getPipeline("histogram_dyn", device_id);
+            struct { uint32_t n; uint32_t num_bins; } hist_pc{
+                static_cast<uint32_t>(n), static_cast<uint32_t>(bins)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, in_f32.data_ptr()},
+                {1, counts_i32.data_ptr()},
+                {2, range_buf.data_ptr()},
+            };
+            std::vector<size_t> sizes = {
+                static_cast<size_t>(n) * sizeof(float),
+                static_cast<size_t>(bins) * sizeof(int32_t),
+                3 * sizeof(float),
+            };
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, hist_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hist_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   hist_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, hist_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(hist_pc), &hist_pc);
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmd, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
+
+        // Edges (also reads from range_buf)
+        {
+            auto* edge_pipeline = getPipeline("histogram_make_edges", device_id);
+            struct { uint32_t num_bins; } edge_pc{static_cast<uint32_t>(bins)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, range_buf.data_ptr()},
+                {1, edges.data_ptr()},
+            };
+            std::vector<size_t> sizes = {3 * sizeof(float),
+                                         static_cast<size_t>(bins + 1) * sizeof(float)};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, edge_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, edge_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   edge_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, edge_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(edge_pc), &edge_pc);
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(bins + 1),
+                                          devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmd, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
         synchronize(device_id);
+    } else {
+        // Explicit range path — host knows min/max, no readback needed.
+        if (max_val <= min_val) max_val = min_val + 1.0;
+        float bin_width = static_cast<float>((max_val - min_val) / bins);
+
+        if (n > 0) {
+            auto* pipeline = getPipeline("histogram", device_id);
+            HistogramPC pc{static_cast<uint32_t>(n),
+                           static_cast<uint32_t>(bins),
+                           static_cast<float>(min_val),
+                           bin_width,
+                           static_cast<float>(max_val)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, in_f32.data_ptr()},
+                {1, counts_i32.data_ptr()},
+            };
+            std::vector<size_t> sizes = {
+                static_cast<size_t>(n) * sizeof(float),
+                static_cast<size_t>(bins) * sizeof(int32_t),
+            };
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(HistogramPC), &pc);
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmd, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+            synchronize(device_id);
+        }
+
+        edges = tenzor::arange(0, bins + 1, 1, DType::Float32, input.device());
+        edges = tenzor::mul(edges, tenzor::full({bins + 1}, bin_width, DType::Float32, input.device()));
+        edges = tenzor::add(edges, tenzor::full({bins + 1}, static_cast<float>(min_val), DType::Float32, input.device()));
     }
 
-    // Promote counts to int64 (the API returns int64) via dispatchCast
     Tensor counts_i64 = dispatchCast(counts_i32, DType::Int64);
-
-    // Bin edges: build via tenzor::arange + scale (all on-device dispatches)
-    Tensor edges = tenzor::arange(0, bins + 1, 1, DType::Float32, input.device());
-    edges = tenzor::mul(edges, tenzor::full({bins + 1}, bin_width, DType::Float32, input.device()));
-    edges = tenzor::add(edges, tenzor::full({bins + 1}, static_cast<float>(min_val), DType::Float32, input.device()));
-
     return {counts_i64, edges};
 }
 
@@ -312,55 +383,23 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
                                                        : dispatchCast(input.contiguous(), DType::Float32);
     int32_t device_id = input.device().index;
 
-    // Auto-detect ranges from data if not provided
-    bool auto_range = ranges.empty();
+    // Auto-detect ranges from data if not provided.
+    // Phase 8.4: in the auto-range path, dim_params and edges are built on
+    // device by reading col_min/col_max directly — no host readback.
+    const bool auto_range = ranges.empty();
+    const bool auto_with_data = auto_range && N > 0;
     if (auto_range) {
         ranges.resize(static_cast<size_t>(D));
-    }
-
-    if (auto_range && N > 0) {
-        // Compute per-column min/max entirely on GPU via standard reduction ops
-        // in_f32 is (N, D); reduce along dim 0 to get (D,) min and max vectors
-        Tensor col_min = tenzor::min(in_f32, /*dim=*/0, /*keepdim=*/false);
-        Tensor col_max = tenzor::max(in_f32, /*dim=*/0, /*keepdim=*/false);
-
-        // Single D2H for the D-sized min/max vectors (small, acceptable)
-        Tensor min_cpu = col_min.to(Device::cpu());
-        Tensor max_cpu = col_max.to(Device::cpu());
-        const float* min_data = min_cpu.data<float>();
-        const float* max_data = max_cpu.data<float>();
-        for (int64_t d = 0; d < D; ++d) {
-            float vmin = min_data[d];
-            float vmax = max_data[d];
-            if (vmin == vmax) {
-                vmin -= 0.5f;
-                vmax += 0.5f;
+        if (!auto_with_data) {
+            // N == 0: deterministic default ranges (no aminmax to read)
+            for (int64_t d = 0; d < D; ++d) {
+                ranges[static_cast<size_t>(d)] = {0.0, 1.0};
             }
-            ranges[static_cast<size_t>(d)] = {static_cast<double>(vmin),
-                                                static_cast<double>(vmax)};
         }
-    } else if (auto_range) {
-        // N == 0: use default ranges
-        for (int64_t d = 0; d < D; ++d) {
-            ranges[static_cast<size_t>(d)] = {0.0, 1.0};
-        }
+        // For auto_with_data we leave ranges[] zero — params are built on device.
     }
 
-    // Build per-dimension parameters: (min, step) pairs and strides
-    std::vector<float> dim_params(static_cast<size_t>(D) * 2);
-    std::vector<float> dim_steps(static_cast<size_t>(D));
-
-    for (int64_t d = 0; d < D; ++d) {
-        auto sd = static_cast<size_t>(d);
-        float fmin = static_cast<float>(ranges[sd].first);
-        float fmax = static_cast<float>(ranges[sd].second);
-        float step = (fmax - fmin) / static_cast<float>(bins[sd]);
-        dim_params[sd * 2]     = fmin;
-        dim_params[sd * 2 + 1] = step;
-        dim_steps[sd] = step;
-    }
-
-    // Compute strides (row-major)
+    // Compute strides (row-major) — host-side scalars, not data-dependent.
     std::vector<int64_t> out_shape(bins.begin(), bins.end());
     std::vector<int32_t> out_strides(static_cast<size_t>(D));
     int64_t stride = 1;
@@ -370,43 +409,125 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
     }
     int64_t total_bins = stride;
 
-    // Build edge tensors on-device
+    // Allocate dim_params on device. In the auto_with_data path the pack
+    // shader fills it from col_min/col_max; otherwise we stage from host.
+    Tensor params_buf({static_cast<int64_t>(D) * 2}, DType::Float32, input.device());
+    Tensor bins_buf({D}, DType::Int32, input.device());
+
+    if (auto_with_data) {
+        // Stage bins_buf from host (host knows the bin counts; data-independent).
+        Tensor bins_cpu({D}, DType::Int32, Device::cpu());
+        for (int64_t d = 0; d < D; ++d) {
+            bins_cpu.data<int32_t>()[d] = static_cast<int32_t>(bins[static_cast<size_t>(d)]);
+        }
+        bins_buf = bins_cpu.to(input.device());
+
+        // Per-column min/max via standard GPU reductions (D-element vectors).
+        Tensor col_min = tenzor::min(in_f32, /*dim=*/0, /*keepdim=*/false).contiguous();
+        Tensor col_max = tenzor::max(in_f32, /*dim=*/0, /*keepdim=*/false).contiguous();
+
+        auto* pack_pipeline = getPipeline("histogramdd_pack_params", device_id);
+        struct { uint32_t D; } pack_pc{static_cast<uint32_t>(D)};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, col_min.data_ptr()},
+            {1, col_max.data_ptr()},
+            {2, bins_buf.data_ptr()},
+            {3, params_buf.data_ptr()},
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(D) * sizeof(float),
+            static_cast<size_t>(D) * sizeof(float),
+            static_cast<size_t>(D) * sizeof(int32_t),
+            static_cast<size_t>(D) * 2 * sizeof(float),
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pack_pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pack_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pack_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pack_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pack_pc), &pack_pc);
+        uint32_t workgroups = div_wg(static_cast<uint32_t>(D), devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmd, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    } else {
+        // Explicit ranges OR auto-range with N == 0: stage params from host.
+        std::vector<float> dim_params(static_cast<size_t>(D) * 2);
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            float fmin = static_cast<float>(ranges[sd].first);
+            float fmax = static_cast<float>(ranges[sd].second);
+            float step = (fmax - fmin) / static_cast<float>(bins[sd]);
+            dim_params[sd * 2]     = fmin;
+            dim_params[sd * 2 + 1] = step;
+        }
+        Tensor params_cpu({static_cast<int64_t>(D) * 2}, DType::Float32, Device::cpu());
+        std::memcpy(params_cpu.data<float>(), dim_params.data(),
+                    dim_params.size() * sizeof(float));
+        params_buf = params_cpu.to(input.device());
+    }
+
+    // Build edge tensors. In the auto_with_data path the edge shader reads
+    // params_buf on device (no host roundtrip). In the explicit path the
+    // params are already host-known so we use the cheaper arange chain.
     std::vector<Tensor> edges_vec;
     edges_vec.reserve(static_cast<size_t>(D));
-    for (int64_t d = 0; d < D; ++d) {
-        auto sd = static_cast<size_t>(d);
-        int64_t nb = bins[sd];
-        float fmin = dim_params[sd * 2];
-        float step = dim_params[sd * 2 + 1];
-
-        // Build edges using arange + scale on device
-        Tensor edge = tenzor::arange(0, nb + 1, 1, DType::Float32, input.device());
-        edge = tenzor::mul(edge, tenzor::full({nb + 1}, step, DType::Float32, input.device()));
-        edge = tenzor::add(edge, tenzor::full({nb + 1}, fmin, DType::Float32, input.device()));
-        edges_vec.push_back(std::move(edge));
+    if (auto_with_data) {
+        auto* edge_pipeline = getPipeline("histogramdd_make_edges", device_id);
+        for (int64_t d = 0; d < D; ++d) {
+            int64_t nb = bins[static_cast<size_t>(d)];
+            Tensor edge({nb + 1}, DType::Float32, input.device());
+            struct { uint32_t d; uint32_t nb; } edge_pc{static_cast<uint32_t>(d), static_cast<uint32_t>(nb)};
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, params_buf.data_ptr()},
+                {1, edge.data_ptr()},
+            };
+            std::vector<size_t> sizes = {
+                static_cast<size_t>(D) * 2 * sizeof(float),
+                static_cast<size_t>(nb + 1) * sizeof(float),
+            };
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, edge_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, edge_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   edge_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, edge_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(edge_pc), &edge_pc);
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(nb + 1),
+                                          devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmd, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+            edges_vec.push_back(std::move(edge));
+        }
+    } else {
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            int64_t nb = bins[sd];
+            float fmin = static_cast<float>(ranges[sd].first);
+            float fmax = static_cast<float>(ranges[sd].second);
+            float step = (fmax - fmin) / static_cast<float>(bins[sd]);
+            Tensor edge = tenzor::arange(0, nb + 1, 1, DType::Float32, input.device());
+            edge = tenzor::mul(edge, tenzor::full({nb + 1}, step, DType::Float32, input.device()));
+            edge = tenzor::add(edge, tenzor::full({nb + 1}, fmin, DType::Float32, input.device()));
+            edges_vec.push_back(std::move(edge));
+        }
     }
 
     // Allocate counts as int32 (shader uses atomicAdd on int)
     Tensor counts_i32 = tenzor::zeros(out_shape, DType::Int32, input.device());
 
+    // Strides buffer (host-side scalars, data-independent).
+    Tensor strides_buf({D}, DType::Int32, input.device());
+    {
+        Tensor strides_cpu({D}, DType::Int32, Device::cpu());
+        std::memcpy(strides_cpu.data<int32_t>(), out_strides.data(),
+                    static_cast<size_t>(D) * sizeof(int32_t));
+        strides_buf = strides_cpu.to(input.device());
+    }
+
     if (N > 0) {
-        // Upload dim_params and strides buffers to device
-        Tensor params_buf({static_cast<int64_t>(dim_params.size())}, DType::Float32, input.device());
-        Tensor strides_buf({D}, DType::Int32, input.device());
-
-        // We need to fill these buffers. Use CPU staging.
-        {
-            Tensor params_cpu({static_cast<int64_t>(dim_params.size())}, DType::Float32, Device::cpu());
-            std::memcpy(params_cpu.data<float>(), dim_params.data(), dim_params.size() * sizeof(float));
-            params_buf = params_cpu.to(input.device());
-        }
-        {
-            Tensor strides_cpu({D}, DType::Int32, Device::cpu());
-            std::memcpy(strides_cpu.data<int32_t>(), out_strides.data(),
-                        static_cast<size_t>(D) * sizeof(int32_t));
-            strides_buf = strides_cpu.to(input.device());
-        }
-
         auto* pipeline = getPipeline("histogramdd", device_id);
         HistogramddPC pc{static_cast<uint32_t>(N),
                          static_cast<uint32_t>(D),
@@ -421,7 +542,7 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
         std::vector<size_t> sizes = {
             static_cast<size_t>(N * D) * sizeof(float),
             static_cast<size_t>(total_bins) * sizeof(int32_t),
-            dim_params.size() * sizeof(float),
+            static_cast<size_t>(D) * 2 * sizeof(float),
             static_cast<size_t>(D) * sizeof(int32_t),
         };
 
@@ -445,16 +566,52 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
     // Density normalization
     Tensor result = counts_i64;
     if (density && N > 0) {
-        double bin_volume = 1.0;
-        for (int64_t d = 0; d < D; ++d) {
-            bin_volume *= static_cast<double>(dim_steps[static_cast<size_t>(d)]);
-        }
-        double norm = static_cast<double>(N) * bin_volume;
-        float inv_norm = static_cast<float>(1.0 / norm);
-
-        // Convert counts to float, multiply by inv_norm
         Tensor counts_f = dispatchCast(counts_i32, DType::Float32);
-        result = tenzor::mul(counts_f, tenzor::full(out_shape, inv_norm, DType::Float32, input.device()));
+        if (auto_with_data) {
+            // Phase 8.4: bin_volume = prod(step[d]) is computed entirely on device
+            // by reading params_buf via the histogramdd_density shader.
+            auto* dens_pipeline = getPipeline("histogramdd_density", device_id);
+            struct { uint32_t total_bins; uint32_t D; uint32_t N; } dens_pc{
+                static_cast<uint32_t>(total_bins),
+                static_cast<uint32_t>(D),
+                static_cast<uint32_t>(N)};
+            Tensor dens_out(out_shape, DType::Float32, input.device());
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, counts_f.data_ptr()},
+                {1, params_buf.data_ptr()},
+                {2, dens_out.data_ptr()},
+            };
+            std::vector<size_t> sizes = {
+                static_cast<size_t>(total_bins) * sizeof(float),
+                static_cast<size_t>(D) * 2 * sizeof(float),
+                static_cast<size_t>(total_bins) * sizeof(float),
+            };
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, dens_pipeline, bindings, sizes);
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dens_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   dens_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, dens_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(dens_pc), &dens_pc);
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(total_bins),
+                                          devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmd, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+            synchronize(device_id);
+            result = dens_out;
+        } else {
+            double bin_volume = 1.0;
+            for (int64_t d = 0; d < D; ++d) {
+                auto sd = static_cast<size_t>(d);
+                float step = static_cast<float>(
+                    (ranges[sd].second - ranges[sd].first) / static_cast<double>(bins[sd]));
+                bin_volume *= static_cast<double>(step);
+            }
+            double norm = static_cast<double>(N) * bin_volume;
+            float inv_norm = static_cast<float>(1.0 / norm);
+            result = tenzor::mul(counts_f, tenzor::full(out_shape, inv_norm, DType::Float32, input.device()));
+        }
     }
 
     return {result, std::move(edges_vec)};
@@ -516,75 +673,65 @@ auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples
 
     auto [seed_lo, seed_hi] = seed_split();
 
-    // Per-batch dispatch with offset-based shader bindings (no slice copies, no host fallback).
-    // For each row b: dispatch CDF (single thread) → read CDF[end] (1 scalar D2H = metadata sync,
-    // not compute fallback) → dispatch sampler with computed offsets.
+    // Phase 8.4: per-batch dispatch with NO host readback. The sampler shader reads
+    // the CDF total directly from cdf[cdf_offset + num_categories - 1] on device,
+    // so we no longer need to copy CDF[end] to host between the CDF and sampler
+    // passes. Both passes are recorded into a single command buffer with a barrier
+    // and submitted once per batch row.
     for (int64_t b = 0; b < batch_size; ++b) {
-        // CDF dispatch (single workgroup, single thread, computes prefix sum at offset)
-        {
-            MultinomialCdfPC pc{static_cast<uint32_t>(num_categories),
+        MultinomialCdfPC cdf_pc{static_cast<uint32_t>(num_categories),
                                 static_cast<uint32_t>(b * num_categories),
                                 static_cast<uint32_t>(b * num_categories)};
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, input.data_ptr()},
-                {1, cdf_buf.data_ptr()},
-            };
-            std::vector<size_t> sizes = {
-                static_cast<size_t>(input.numel())  * sizeof(float),
-                static_cast<size_t>(cdf_buf.numel()) * sizeof(float),
-            };
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, cdf_pipeline, bindings, sizes);
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cdf_pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   cdf_pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, cdf_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(MultinomialCdfPC), &pc);
-            vkCmdDispatch(cmd, 1, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-            synchronize(device_id);
-        }
+        MultinomialSamplePC samp_pc{static_cast<uint32_t>(num_categories),
+                                    static_cast<uint32_t>(num_samples),
+                                    0.0f,  // unused — total is read from device
+                                    seed_lo ^ static_cast<uint32_t>(b * 0x9E3779B9u),
+                                    seed_hi,
+                                    static_cast<uint32_t>(b * num_categories),
+                                    static_cast<uint32_t>(b * num_samples)};
 
-        // Read CDF total for this batch element.
-        // Gather the last CDF value per row into a slice and transfer.
-        Tensor last_val = cdf_buf.slice(0, b, b + 1).slice(1, num_categories - 1, num_categories);
-        Tensor last_cpu = last_val.to(Device::cpu()).to(DType::Float32);
-        float total = last_cpu.template item<float>();
-        if (total <= 0.0f) total = 1.0f;
+        std::vector<std::pair<uint32_t, const void*>> cdf_bindings = {
+            {0, input.data_ptr()},
+            {1, cdf_buf.data_ptr()},
+        };
+        std::vector<size_t> cdf_sizes = {
+            static_cast<size_t>(input.numel())  * sizeof(float),
+            static_cast<size_t>(cdf_buf.numel()) * sizeof(float),
+        };
+        VkDescriptorSet cdf_ds = allocateAndWriteDescriptorSet(device_id, cdf_pipeline, cdf_bindings, cdf_sizes);
 
-        // Sampler dispatch
-        {
-            MultinomialSamplePC pc{static_cast<uint32_t>(num_categories),
-                                   static_cast<uint32_t>(num_samples),
-                                   total,
-                                   seed_lo ^ static_cast<uint32_t>(b * 0x9E3779B9u),
-                                   seed_hi,
-                                   static_cast<uint32_t>(b * num_categories),
-                                   static_cast<uint32_t>(b * num_samples)};
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, cdf_buf.data_ptr()},
-                {1, result_i32.data_ptr()},
-            };
-            std::vector<size_t> sizes = {
-                static_cast<size_t>(cdf_buf.numel())   * sizeof(float),
-                static_cast<size_t>(result_i32.numel()) * sizeof(int32_t),
-            };
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, sample_pipeline, bindings, sizes);
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sample_pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   sample_pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, sample_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(MultinomialSamplePC), &pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(num_samples),
-                                          devices_[device_id].workgroupSize);
-            vkCmdDispatch(cmd, workgroups, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-            synchronize(device_id);
-        }
+        std::vector<std::pair<uint32_t, const void*>> samp_bindings = {
+            {0, cdf_buf.data_ptr()},
+            {1, result_i32.data_ptr()},
+        };
+        std::vector<size_t> samp_sizes = {
+            static_cast<size_t>(cdf_buf.numel())   * sizeof(float),
+            static_cast<size_t>(result_i32.numel()) * sizeof(int32_t),
+        };
+        VkDescriptorSet samp_ds = allocateAndWriteDescriptorSet(device_id, sample_pipeline, samp_bindings, samp_sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        // Pass 1: CDF (single thread)
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cdf_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               cdf_pipeline->layout(), 0, 1, &cdf_ds, 0, nullptr);
+        vkCmdPushConstants(cmd, cdf_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(MultinomialCdfPC), &cdf_pc);
+        vkCmdDispatch(cmd, 1, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        // Pass 2: sampler reads CDF total from device
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sample_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               sample_pipeline->layout(), 0, 1, &samp_ds, 0, nullptr);
+        vkCmdPushConstants(cmd, sample_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(MultinomialSamplePC), &samp_pc);
+        uint32_t workgroups = div_wg(static_cast<uint32_t>(num_samples),
+                                      devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmd, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
+    synchronize(device_id);
 
     if (was_1d) result_i32 = tenzor::reshape(result_i32, {num_samples});
     return dispatchCast(result_i32, DType::Int64);

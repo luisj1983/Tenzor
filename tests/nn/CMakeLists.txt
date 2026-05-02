@@ -117,6 +117,14 @@ target_link_libraries(test_batchnorm1d_multidtype PRIVATE tenzor_core GTest::gte
 add_executable(test_batchnorm3d_multidtype layers/test_batchnorm3d_multidtype.cpp)
 target_link_libraries(test_batchnorm3d_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+# Bilinear layer (Phase 7.2)
+add_executable(test_bilinear_multidtype layers/test_bilinear_multidtype.cpp)
+target_link_libraries(test_bilinear_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
+# Interpolate backward (Phase 7.1) — bilinear-mode autograd through interpolate()
+add_executable(test_interpolate_backward layers/test_interpolate_backward.cpp)
+target_link_libraries(test_interpolate_backward PRIVATE tenzor_core GTest::gtest_main)
+
 add_executable(test_normalization_multidtype layers/test_normalization_multidtype.cpp)
 target_link_libraries(test_normalization_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
@@ -198,6 +206,8 @@ tenzor_discover_tests(test_pooling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 D
 tenzor_discover_tests(test_dropout_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_batchnorm2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_batchnorm1d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_bilinear_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_interpolate_backward LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_batchnorm3d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

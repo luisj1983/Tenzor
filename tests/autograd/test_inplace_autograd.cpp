@@ -17,6 +17,7 @@
 #include <tenzor/autograd/engine.hpp>
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/creation.hpp>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -202,6 +203,12 @@ TEST_F(InplaceAutogradTest, InplaceAfterForwardNoSavedTensorsAdd) {
     auto loss = tenzor::sum(y);
     EXPECT_NO_THROW(loss.backward())
         << "AddBackward has no saved tensors, so in-place modification is undetected";
+
+    // Even though the input was modified in place, backward should still
+    // populate a non-zero gradient — AddBackward's gradient is `grad_output`
+    // for each addend, independent of the input value, so the post-zero_()
+    // input still produces a real gradient. Verifies backward actually ran.
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_F(InplaceAutogradTest, NoModificationNoThrow) {
@@ -213,8 +220,7 @@ TEST_F(InplaceAutogradTest, NoModificationNoThrow) {
     EXPECT_NO_THROW(loss.backward())
         << "backward() should succeed when no in-place modification occurred";
 
-    // Gradient should exist
-    EXPECT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ============================================================================

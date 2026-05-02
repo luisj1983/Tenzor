@@ -2190,6 +2190,10 @@ auto fused_adagrad_step_kernel(
 // Templated implementation: ComputeT is the accumulation type (always float for half types),
 // DataT is the storage type, KernelName is the SYCL kernel tag.
 // IsBFloat16 enables the bf16 conversion path.
+//
+// Phase 8.2: now also writes the per-query log-sum-exp into L_out so the fused
+// backward kernel can recover P = exp(S - L) without rerunning the softmax pass.
+// L_out is shape [batch_heads, seq_len_q] in Float32.
 template<typename DataT, typename ComputeT, typename KernelName, bool IsBFloat16 = false>
 auto flash_attention_impl(
     const Tensor& Q,    // [batch_heads, seq_len_q, head_dim]
@@ -2198,7 +2202,8 @@ auto flash_attention_impl(
     const Tensor* mask,  // optional [batch_heads, seq_len_q, seq_len_k] or broadcastable
     ComputeT scale,
     bool is_causal,
-    sycl::queue& queue
+    sycl::queue& queue,
+    Tensor* L_out = nullptr  // optional [batch_heads, seq_len_q] Float32
 ) -> Tensor {
     auto q_shape = Q.shape();
     auto k_shape = K.shape();
@@ -2225,6 +2230,12 @@ auto flash_attention_impl(
     const DataT* k_ptr = get_data_ptr<const DataT>(K);
     const DataT* v_ptr = get_data_ptr<const DataT>(V);
     DataT* o_ptr = get_data_ptr<DataT>(output);
+
+    // Phase 8.2: optional logsumexp output for the fused backward kernel.
+    float* l_ptr = nullptr;
+    if (L_out != nullptr && L_out->is_valid() && L_out->numel() > 0) {
+        l_ptr = get_data_ptr<float>(*L_out);
+    }
 
     // Audit C4 OneAPI fix: actually honor the `mask` parameter. Previously it
     // was passed in but never captured by the kernel lambda, so callers'
@@ -2263,6 +2274,7 @@ auto flash_attention_impl(
         const float* m_ptr = mask_ptr;
         const int64_t m_bstr = mask_b_stride;
         const int64_t m_qstr = mask_q_stride;
+        float* lse_ptr = l_ptr;  // Phase 8.2: capture for kernel
 
         cgh.parallel_for<KernelName>(
             sycl::nd_range<2>(
@@ -2423,11 +2435,72 @@ auto flash_attention_impl(
                         }
                     }
                 }
+
+                // Phase 8.2: emit LSE per (batch_head, query_idx) for the
+                // fused backward kernel. LSE = log(sum_kv exp(scaled_score)) =
+                // log(l_prev) + m_prev. Single-thread write (tid 0 only).
+                if (lse_ptr != nullptr && tid == 0) {
+                    float lse_val;
+                    if (l_prev > ComputeT(0)) {
+                        lse_val = static_cast<float>(sycl::log(l_prev) + m_prev);
+                    } else {
+                        // No valid attention positions (e.g. fully-masked row);
+                        // emit -inf so backward's exp(s - lse) zeros out cleanly.
+                        lse_val = -std::numeric_limits<float>::infinity();
+                    }
+                    lse_ptr[batch_head * slq + query_idx] = lse_val;
+                }
             }
         );
     });
 
     return output;
+}
+
+// Phase 8.2: forward variant that also writes LSE per query row. LSE is the
+// log-sum-exp of (scaled, masked) Q·K^T scores along the K axis — exactly the
+// quantity the fused backward kernel needs to recompute attention weights as
+// P = exp(S - LSE) without rerunning the softmax pass over all KV positions.
+auto flash_attention_kernel_with_lse(
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    const Tensor* mask,
+    float scale,
+    bool is_causal,
+    sycl::queue& queue,
+    Tensor* L_out  // [batch_heads, seq_len_q] Float32
+) -> Tensor {
+    if (Q.shape().size() != 3 || K.shape().size() != 3 || V.shape().size() != 3) {
+        throw std::invalid_argument(
+            "flash_attention_kernel: Q, K, V must be 3D [batch_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype()) {
+        throw std::invalid_argument("flash_attention_kernel: Q, K, V must have the same dtype");
+    }
+
+    // Allocate LSE if requested but not yet allocated.
+    if (L_out != nullptr && (!L_out->is_valid() || L_out->numel() == 0)) {
+        const int64_t bh = Q.shape()[0];
+        const int64_t sq = Q.shape()[1];
+        *L_out = Tensor(std::vector<int64_t>{bh, sq}, DType::Float32, Q.device());
+    }
+
+    if (Q.dtype() == DType::Float32) {
+        return flash_attention_impl<float, float, FlashAttentionKernelFloat32>(
+            Q, K, V, mask, scale, is_causal, queue, L_out);
+    } else if (Q.dtype() == DType::Float64) {
+        return flash_attention_impl<double, double, FlashAttentionKernelFloat64>(
+            Q, K, V, mask, scale, is_causal, queue, L_out);
+    } else if (Q.dtype() == DType::Float16) {
+        return flash_attention_impl<sycl::half, float, FlashAttentionKernelFloat16>(
+            Q, K, V, mask, scale, is_causal, queue, L_out);
+    } else if (Q.dtype() == DType::BFloat16) {
+        return flash_attention_impl<uint16_t, float, FlashAttentionKernelBFloat16, true>(
+            Q, K, V, mask, scale, is_causal, queue, L_out);
+    } else {
+        throw std::runtime_error("flash_attention_kernel: unsupported dtype");
+    }
 }
 
 auto flash_attention_kernel(
@@ -2439,29 +2512,314 @@ auto flash_attention_kernel(
     bool is_causal,
     sycl::queue& queue
 ) -> Tensor {
-    if (Q.shape().size() != 3 || K.shape().size() != 3 || V.shape().size() != 3) {
-        throw std::invalid_argument(
-            "flash_attention_kernel: Q, K, V must be 3D [batch_heads, seq_len, head_dim]");
-    }
-    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype()) {
-        throw std::invalid_argument("flash_attention_kernel: Q, K, V must have the same dtype");
+    Tensor lse_unused;
+    return flash_attention_kernel_with_lse(Q, K, V, mask, scale, is_causal, queue, &lse_unused);
+}
+
+// ============================================================================
+// Phase 8.2: Flash Attention Backward — fused tile-based SYCL kernel (Float32)
+// ============================================================================
+
+// Kernel name tag (one per (head_dim, dtype) combination would be ideal, but
+// SYCL handles distinct lambdas per nd_range submission via the lambda type).
+struct FlashAttentionBackwardKernelF32 {};
+
+namespace fa_bwd {
+
+// Tile sizes match the CUDA kernel for parity (Br=Bc=32, BLOCK_SIZE=128 to
+// fit OneAPI's smaller default workgroup limits).
+constexpr int Br_const = 32;
+constexpr int Bc_const = 32;
+constexpr int BLOCK_SIZE_const = 128;
+
+// Per-thread accumulator capacity: ceil(Bc * HEAD_DIM / BLOCK_SIZE).
+// HEAD_DIM <= 128 supported → 32*128/128 = 32 elements per thread.
+constexpr int MAX_ELEMS_PER_THREAD_const = (Bc_const * 128 + BLOCK_SIZE_const - 1) / BLOCK_SIZE_const;
+
+}  // namespace fa_bwd
+
+/**
+ * Fused FlashAttention backward (Float32).
+ *
+ * Algorithm mirrors src/backends/cuda/kernels/fused_ops.cu :: flash_attention_backward_kernel.
+ * One workgroup per (batch_head, kv_tile). Iterates over Q tiles. Local memory
+ * holds K/V tiles, Q/dO tiles, S-tile (Br × Bc), per-row LSE and D = rowsum(dO ⊙ O).
+ * dK/dV accumulated in private memory then written; dQ via atomic_ref<float>.
+ *
+ * Working memory per workgroup: 2*Bc*HEAD_DIM + 2*Br*HEAD_DIM + Br*Bc + 2*Br floats.
+ * For HEAD_DIM=128, Br=Bc=32: 2*32*128 + 2*32*128 + 32*32 + 64 = ~17.4K floats = 70K bytes.
+ * Fits in 64KB SLM on most Intel GPUs (Iris Xe, Arc).
+ */
+auto flash_attention_backward_oneapi_f32(
+    const Tensor& dO,    // [batch_heads, seq_len, head_dim]
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    const Tensor& O,
+    const Tensor& L,     // [batch_heads, seq_len] logsumexp
+    float scale,
+    bool causal,
+    sycl::queue& queue
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    const int64_t batch_heads = Q.shape()[0];
+    const int64_t seq_len = Q.shape()[1];
+    const int64_t head_dim = Q.shape()[2];
+
+    if (head_dim != 32 && head_dim != 64 && head_dim != 128) {
+        throw std::runtime_error(
+            "flash_attention_backward_oneapi_f32: head_dim must be 32, 64, or 128. Got "
+            + std::to_string(head_dim));
     }
 
-    if (Q.dtype() == DType::Float32) {
-        return flash_attention_impl<float, float, FlashAttentionKernelFloat32>(
-            Q, K, V, mask, scale, is_causal, queue);
-    } else if (Q.dtype() == DType::Float64) {
-        return flash_attention_impl<double, double, FlashAttentionKernelFloat64>(
-            Q, K, V, mask, scale, is_causal, queue);
-    } else if (Q.dtype() == DType::Float16) {
-        return flash_attention_impl<sycl::half, float, FlashAttentionKernelFloat16>(
-            Q, K, V, mask, scale, is_causal, queue);
-    } else if (Q.dtype() == DType::BFloat16) {
-        return flash_attention_impl<uint16_t, float, FlashAttentionKernelBFloat16, true>(
-            Q, K, V, mask, scale, is_causal, queue);
-    } else {
-        throw std::runtime_error("flash_attention_kernel: unsupported dtype");
-    }
+    using namespace fa_bwd;
+    const int Br = Br_const;
+    const int Bc = Bc_const;
+    const int BLOCK_SIZE = BLOCK_SIZE_const;
+
+    Tensor dQ(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+              DType::Float32, Q.device());
+    Tensor dK(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+              DType::Float32, K.device());
+    Tensor dV(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+              DType::Float32, V.device());
+
+    // Zero-init dQ (atomicAdd target). dK/dV are fully written once per kv_tile.
+    queue.memset(dQ.data_ptr(), 0, batch_heads * seq_len * head_dim * sizeof(float)).wait();
+
+    const int num_kv_tiles = static_cast<int>((seq_len + Bc - 1) / Bc);
+    const int hd = static_cast<int>(head_dim);
+    const int sl = static_cast<int>(seq_len);
+
+    // Local memory layout (floats):
+    //   K_tile [Bc][hd] | V_tile [Bc][hd] | Q_tile [Br][hd] | dO_tile [Br][hd]
+    //   | S_tile [Br][Bc] | l_tile [Br] | D_tile [Br]
+    const size_t local_floats =
+        static_cast<size_t>(2 * Bc * hd + 2 * Br * hd + Br * Bc + 2 * Br);
+
+    const float* q_ptr  = get_data_ptr<const float>(Q);
+    const float* k_ptr  = get_data_ptr<const float>(K);
+    const float* v_ptr  = get_data_ptr<const float>(V);
+    const float* o_ptr  = get_data_ptr<const float>(O);
+    const float* do_ptr = get_data_ptr<const float>(dO);
+    const float* l_ptr  = get_data_ptr<const float>(L);
+    float* dq_ptr = get_data_ptr<float>(dQ);
+    float* dk_ptr = get_data_ptr<float>(dK);
+    float* dv_ptr = get_data_ptr<float>(dV);
+
+    queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<float, 1> lmem(local_floats, cgh);
+
+        const int hd_k = hd;
+        const int sl_k = sl;
+        const float sc_k = scale;
+        const bool causal_k = causal;
+        const int num_q_tiles = (sl + Br - 1) / Br;
+
+        cgh.parallel_for<FlashAttentionBackwardKernelF32>(
+            sycl::nd_range<2>(
+                sycl::range<2>(static_cast<size_t>(batch_heads),
+                               static_cast<size_t>(num_kv_tiles) * BLOCK_SIZE),
+                sycl::range<2>(1, BLOCK_SIZE)),
+            [=](sycl::nd_item<2> item) {
+                const int batch_head = static_cast<int>(item.get_global_id(0));
+                const int kv_tile_idx = static_cast<int>(item.get_global_id(1)) / BLOCK_SIZE;
+                const int tid = static_cast<int>(item.get_local_id(1));
+
+                const int kv_start = kv_tile_idx * Bc;
+                if (kv_start >= sl_k) return;
+                const int actual_Bc = sycl::min(Bc, sl_k - kv_start);
+
+                const float* Q_base  = q_ptr  + batch_head * sl_k * hd_k;
+                const float* K_base  = k_ptr  + batch_head * sl_k * hd_k;
+                const float* V_base  = v_ptr  + batch_head * sl_k * hd_k;
+                const float* O_base  = o_ptr  + batch_head * sl_k * hd_k;
+                const float* dO_base = do_ptr + batch_head * sl_k * hd_k;
+                const float* L_base  = l_ptr  + batch_head * sl_k;
+                float* dQ_base = dq_ptr + batch_head * sl_k * hd_k;
+                float* dK_base = dk_ptr + batch_head * sl_k * hd_k;
+                float* dV_base = dv_ptr + batch_head * sl_k * hd_k;
+
+                float* slm = lmem.template get_multi_ptr<sycl::access::decorated::no>().get();
+                float* K_tile  = slm;
+                float* V_tile  = K_tile  + Bc * hd_k;
+                float* Q_tile  = V_tile  + Bc * hd_k;
+                float* dO_tile = Q_tile  + Br * hd_k;
+                float* S_tile  = dO_tile + Br * hd_k;
+                float* l_tile  = S_tile  + Br * Bc;
+                float* D_tile  = l_tile  + Br;
+
+                // Load K_j, V_j tiles
+                for (int i = tid; i < actual_Bc * hd_k; i += BLOCK_SIZE) {
+                    int row = i / hd_k;
+                    int col = i % hd_k;
+                    K_tile[row * hd_k + col] = K_base[(kv_start + row) * hd_k + col];
+                    V_tile[row * hd_k + col] = V_base[(kv_start + row) * hd_k + col];
+                }
+                for (int i = tid + actual_Bc * hd_k; i < Bc * hd_k; i += BLOCK_SIZE) {
+                    K_tile[i] = 0.0f;
+                    V_tile[i] = 0.0f;
+                }
+                sycl::group_barrier(item.get_group());
+
+                // Per-thread dK/dV accumulators
+                float dk_acc[MAX_ELEMS_PER_THREAD_const];
+                float dv_acc[MAX_ELEMS_PER_THREAD_const];
+                for (int e = 0; e < MAX_ELEMS_PER_THREAD_const; ++e) {
+                    dk_acc[e] = 0.0f;
+                    dv_acc[e] = 0.0f;
+                }
+
+                for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
+                    const int q_start = q_tile_idx * Br;
+                    if (q_start >= sl_k) break;
+                    const int actual_Br = sycl::min(Br, sl_k - q_start);
+
+                    // Causal early-exit: skip if all Q rows precede all K cols
+                    if (causal_k && (q_start + actual_Br - 1) < kv_start) continue;
+
+                    // Load Q_i, dO_i tiles
+                    for (int i = tid; i < actual_Br * hd_k; i += BLOCK_SIZE) {
+                        int row = i / hd_k;
+                        int col = i % hd_k;
+                        Q_tile[row * hd_k + col]  = Q_base[(q_start + row) * hd_k + col];
+                        dO_tile[row * hd_k + col] = dO_base[(q_start + row) * hd_k + col];
+                    }
+                    for (int i = tid + actual_Br * hd_k; i < Br * hd_k; i += BLOCK_SIZE) {
+                        Q_tile[i] = 0.0f;
+                        dO_tile[i] = 0.0f;
+                    }
+
+                    // Load LSE and compute D_i = sum_d (dO_i[d] * O_i[d])
+                    for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+                        l_tile[row] = L_base[q_start + row];
+                        float dsum = 0.0f;
+                        for (int d = 0; d < hd_k; ++d) {
+                            dsum += dO_base[(q_start + row) * hd_k + d]
+                                  * O_base[(q_start + row) * hd_k + d];
+                        }
+                        D_tile[row] = dsum;
+                    }
+                    for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
+                        l_tile[row] = -std::numeric_limits<float>::infinity();
+                        D_tile[row] = 0.0f;
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // S_ij = Q_i · K_j^T * scale
+                    for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+                        int i = idx / actual_Bc;
+                        int j = idx % actual_Bc;
+                        float dot = 0.0f;
+                        for (int d = 0; d < hd_k; ++d) {
+                            dot += Q_tile[i * hd_k + d] * K_tile[j * hd_k + d];
+                        }
+                        S_tile[i * Bc + j] = dot * sc_k;
+                    }
+                    // Out-of-bounds entries -> -inf so exp() gives 0
+                    for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+                        int i = idx / Bc;
+                        int j = idx % Bc;
+                        if (i >= actual_Br || j >= actual_Bc) {
+                            S_tile[idx] = -std::numeric_limits<float>::infinity();
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // P_ij = exp(S_ij - L_i) (with causal mask -> 0)
+                    for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+                        int i = idx / Bc;
+                        int j = idx % Bc;
+                        float p = 0.0f;
+                        if (i < actual_Br && j < actual_Bc) {
+                            if (causal_k && (q_start + i) < (kv_start + j)) {
+                                p = 0.0f;
+                            } else {
+                                p = sycl::exp(S_tile[i * Bc + j] - l_tile[i]);
+                            }
+                        }
+                        S_tile[i * Bc + j] = p;  // reuse S_tile as P_ij
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // dV_j += P_ij^T · dO_i  → per-thread (j, d) accumulators
+                    {
+                        int e = 0;
+                        for (int idx = tid; idx < Bc * hd_k; idx += BLOCK_SIZE, ++e) {
+                            int j = idx / hd_k;
+                            int d = idx % hd_k;
+                            if (j < actual_Bc) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < actual_Br; ++i) {
+                                    sum += S_tile[i * Bc + j] * dO_tile[i * hd_k + d];
+                                }
+                                dv_acc[e] += sum;
+                            }
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // dS_ij = P_ij * (dP_ij - D_i) where dP_ij = dO_i · V_j
+                    for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+                        int i = idx / actual_Bc;
+                        int j = idx % actual_Bc;
+                        float dp = 0.0f;
+                        for (int d = 0; d < hd_k; ++d) {
+                            dp += dO_tile[i * hd_k + d] * V_tile[j * hd_k + d];
+                        }
+                        float p_ij = S_tile[i * Bc + j];
+                        S_tile[i * Bc + j] = p_ij * (dp - D_tile[i]);
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // dK_j += dS_ij^T · Q_i * scale
+                    {
+                        int e = 0;
+                        for (int idx = tid; idx < Bc * hd_k; idx += BLOCK_SIZE, ++e) {
+                            int j = idx / hd_k;
+                            int d = idx % hd_k;
+                            if (j < actual_Bc) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < actual_Br; ++i) {
+                                    sum += S_tile[i * Bc + j] * Q_tile[i * hd_k + d];
+                                }
+                                dk_acc[e] += sum * sc_k;
+                            }
+                        }
+                    }
+
+                    // dQ_i += dS_ij · K_j * scale (atomic, multiple kv_tiles contribute)
+                    for (int idx = tid; idx < actual_Br * hd_k; idx += BLOCK_SIZE) {
+                        int i = idx / hd_k;
+                        int d = idx % hd_k;
+                        float sum = 0.0f;
+                        for (int j = 0; j < actual_Bc; ++j) {
+                            sum += S_tile[i * Bc + j] * K_tile[j * hd_k + d];
+                        }
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                         sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space>
+                            atomic_dq(dQ_base[(q_start + i) * hd_k + d]);
+                        atomic_dq.fetch_add(sum * sc_k);
+                    }
+                    sycl::group_barrier(item.get_group());
+                }
+
+                // Write accumulated dK_j, dV_j to global memory
+                {
+                    int e = 0;
+                    for (int idx = tid; idx < Bc * hd_k; idx += BLOCK_SIZE, ++e) {
+                        int row = idx / hd_k;
+                        int col = idx % hd_k;
+                        if (row < actual_Bc) {
+                            dK_base[(kv_start + row) * hd_k + col] = dk_acc[e];
+                            dV_base[(kv_start + row) * hd_k + col] = dv_acc[e];
+                        }
+                    }
+                }
+            });
+    }).wait();
+
+    return {dQ, dK, dV};
 }
 
 } // namespace oneapi

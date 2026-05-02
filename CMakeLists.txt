@@ -327,6 +327,22 @@ endif()
 if(TENZOR_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+
+    # Phase 10 of the test-coverage campaign — TESTING.md contract lint.
+    # Runs `tools/lint_test_contract.py` and uses the baseline file to ratchet
+    # down pre-existing violations. Invoke via:
+    #     ctest -L lint
+    find_package(Python COMPONENTS Interpreter QUIET)
+    if(Python_FOUND)
+        add_test(
+            NAME lint_test_contract
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/lint_test_contract.py
+                --tests-dir ${CMAKE_SOURCE_DIR}/tests
+                --baseline ${CMAKE_SOURCE_DIR}/tools/lint_test_contract_baseline.txt
+        )
+        set_tests_properties(lint_test_contract PROPERTIES LABELS "lint")
+    endif()
 endif()
 
 # Benchmarks

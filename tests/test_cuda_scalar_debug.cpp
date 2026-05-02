@@ -3,23 +3,12 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
+#include "backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor;
 
-static bool isCudaAvailable() {
-    try {
-        Device test_device = Device::cuda(0);
-        auto t = zeros({2}, DType::Float32, test_device);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
 TEST(CUDAScalarDebug, BasicSum) {
-    if (!isCudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
+    SKIP_IF_NO_CUDA;
 
     Device device = Device::cuda(0);
 
@@ -61,9 +50,7 @@ TEST(CUDAScalarDebug, BasicSum) {
 }
 
 TEST(CUDAScalarDebug, MeanReduction) {
-    if (!isCudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
+    SKIP_IF_NO_CUDA;
 
     Device device = Device::cuda(0);
 

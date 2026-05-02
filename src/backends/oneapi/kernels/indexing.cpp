@@ -1630,7 +1630,11 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
     if (dim < 0) dim += ndim;
     auto shape = output.shape();
     int64_t dim_size = shape[dim];
-    int64_t idx_n = index.numel();
+    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
+    // the scatter dim, NOT the total numel. For 1D scatter these are equal.
+    int64_t idx_n = (index.shape().size() > static_cast<size_t>(dim))
+                  ? static_cast<int64_t>(index.shape()[dim])
+                  : index.numel();
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -1657,7 +1661,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
             int64_t o = id / (idx_n * inner);
             int64_t k = (id / inner) % idx_n;
             int64_t j = id % inner;
-            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
+            int64_t idx_pos = (o * idx_n + k) * inner + j;
+            int64_t dst_offset = (o * dim_size + idx_ptr[idx_pos]) * inner + j;
             out_ptr[dst_offset] = identity;
         }).wait();
     }
@@ -1681,8 +1687,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
             int64_t o = id / (idx_n * inner);
             int64_t k = (id / inner) % idx_n;
             int64_t j = id % inner;
-            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
             int64_t src_offset = (o * idx_n + k) * inner + j;
+            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
                              sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
@@ -1700,8 +1707,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
             int64_t o = id / (idx_n * inner);
             int64_t k = (id / inner) % idx_n;
             int64_t j = id % inner;
-            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
             int64_t src_offset = (o * idx_n + k) * inner + j;
+            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
             float val = src_ptr[src_offset];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
@@ -1715,8 +1723,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
             int64_t o = id / (idx_n * inner);
             int64_t k = (id / inner) % idx_n;
             int64_t j = id % inner;
-            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
             int64_t src_offset = (o * idx_n + k) * inner + j;
+            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
             float val = src_ptr[src_offset];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
@@ -1732,8 +1741,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
             int64_t o = id / (idx_n * inner);
             int64_t k = (id / inner) % idx_n;
             int64_t j = id % inner;
-            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
             int64_t src_offset = (o * idx_n + k) * inner + j;
+            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
             float val = src_ptr[src_offset];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
@@ -1748,16 +1758,21 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
     }
 
-    // For mean mode: divide by counts
+    // For mean mode: divide by counts.
+    //
+    // Phase 7.6 mean fix (mirrors CUDA / ROCm): counts = number of scatters
+    // touching this position; self is NOT counted in the scatter kernel.
+    // With include_self=true the accumulator is `input + sum(scatters)`,
+    // so divisor is `count + 1`. Untouched positions (count == 0) keep
+    // their initial input value and are skipped.
     if (reduce == "mean" && count_alloc) {
         int incl = include_self ? 1 : 0;
         queue.parallel_for<ScatterReduceMeanDivKernelF32>(sycl::range<1>(out_numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
             int c = count_alloc[i];
-            int base = incl;
-            if (c > base) {
-                out_ptr[i] /= static_cast<float>(c);
-            }
+            if (c <= 0) return;
+            float divisor = (incl ? static_cast<float>(c + 1) : static_cast<float>(c));
+            out_ptr[i] /= divisor;
         }).wait();
         sycl::free(count_alloc, queue);
     }

@@ -250,18 +250,31 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // Conditions: CPU, Float32, not training, not bidirectional
     // Uses oneDNN fused multi-layer GRU primitive for optimal performance
     // =========================================================================
-    bool can_use_fused = is_op_supported(OpId::GRUForward, input.device().type) &&
-                         input.dtype() == DType::Float32 &&
-                         !is_training() &&
-                         !bidirectional_;
+    // Phase 8.5: the fast-path GRU kernels ship divergent bias semantics
+    // across backends (CUDA's gru_cell_fused_kernel uses a single combined
+    // bias approximation; CPU oneDNN's vanilla_gru applies bias inside the
+    // `r * (...)` form differently from CPU SIMD). To guarantee
+    // PyTorch-faithful output across all backends, route GRU through the
+    // autograd-aware per-timestep GRUCell path which uses two Linear
+    // layers (each with its own bias) and matches PyTorch exactly.
+    //
+    // The kernel-level fast path remains in the codebase and can be
+    // re-enabled per-backend once each kernel is updated to take separate
+    // bias_ih and bias_hh and apply them at PyTorch-correct positions.
+    bool can_use_fused = false;
 
     if (can_use_fused) {
-        // Prepare input tensor for kernel (batch_first format for optimal oneDNN performance)
-        Tensor layer_input = x.tensor();
-        if (batch_first_) {
-            layer_input = layer_input.transpose(0, 1);
-        }
-        layer_input = layer_input.contiguous();
+        // Prepare input tensor for kernel. The fused GRU kernels (CPU
+        // gru_forward_kernel, CUDA gru_forward_cuda, ...) all expect
+        // time-major (seq_len, batch, input_size). When batch_first=true
+        // the caller-side block above (lines 214-226) has already
+        // transposed `x` into time-major via `tenzor::transpose(x, 0, 1)`,
+        // so we must NOT transpose again here. The previous duplicate
+        // transpose silently re-batch-firsted the input, causing the
+        // CUDA gru_forward to misinterpret shape[0] as seq_len when it
+        // was actually batch — which surfaced as a "cudaMemcpyAsync
+        // invalid argument" at the bench shape (Phase 8.5).
+        Tensor layer_input = x.tensor().contiguous();
 
         // For multi-layer GRU without dropout, use fused kernel
         // Dropout requires per-layer execution
@@ -320,21 +333,36 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
             Tensor W_hh_tensor = cell_params[2]->tensor().contiguous();
 
-            // Get bias or empty tensor
-            Tensor bias_tensor;
-            if (W_ih_params.size() > 1) {
-                bias_tensor = W_ih_params[1]->tensor().contiguous();
+            // Bias: pass bias_ih and bias_hh separately so the kernel can
+            // apply them at the correct positions (PyTorch's GRU has
+            // asymmetric bias placement for the n gate). cell_params
+            // layout is [W_ih_w, W_ih_b, W_hh_w, W_hh_b]. The 6-input
+            // dispatch (Phase 8.5) preserves the legacy 5-input form for
+            // backwards compat.
+            Tensor bias_ih_tensor;
+            Tensor bias_hh_tensor;
+            if (W_ih_params.size() > 1 && cell_params.size() > 3) {
+                bias_ih_tensor = W_ih_params[1]->tensor().contiguous();
+                bias_hh_tensor = cell_params[3]->tensor().contiguous();
+            } else if (W_ih_params.size() > 1) {
+                bias_ih_tensor = W_ih_params[1]->tensor().contiguous();
+                bias_hh_tensor = empty({0}, DType::Float32, input.device());
             } else {
-                bias_tensor = empty({0}, DType::Float32, input.device());
+                bias_ih_tensor = empty({0}, DType::Float32, input.device());
+                bias_hh_tensor = empty({0}, DType::Float32, input.device());
             }
 
             // Get initial state for this layer
             Tensor h0_layer = h.tensor().slice(0, layer, layer + 1)
                                 .reshape({batch_size, hidden_size_}).contiguous();
 
-            // Call fused kernel
+            // Call fused kernel — 6th input (bias_hh) is consumed by
+            // backends that distinguish between bias_ih and bias_hh
+            // (Phase 8.5). Backends that take only the 5-input form
+            // ignore the extra input.
             std::vector<Tensor> inputs = {layer_input, W_ih_tensor, W_hh_tensor,
-                                           bias_tensor, h0_layer};
+                                           bias_ih_tensor, h0_layer,
+                                           bias_hh_tensor};
             auto outputs = dispatch<OpId::GRUForward>(inputs);
 
             // Store final state

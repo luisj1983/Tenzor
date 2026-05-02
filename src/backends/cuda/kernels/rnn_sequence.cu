@@ -219,12 +219,25 @@ auto lstm_forward_cuda(
 // GRU Forward (single layer, full sequence)
 // ============================================================================
 
+// PyTorch GRU formula:
+//   r = sigmoid(W_ir@x + b_ir + W_hr@h + b_hr)
+//   z = sigmoid(W_iz@x + b_iz + W_hz@h + b_hz)
+//   n = tanh(W_in@x + b_in + r * (W_hn@h + b_hn))
+//   h_out = (1 - z) * n + z * h_prev
+//
+// To match this exactly, the kernel needs both b_ih and b_hh applied at
+// the right places: r/z gates fold both biases together; n gate keeps
+// b_hn inside `r * (...)`. The signature accepts bias = bias_ih (size
+// 3*hidden) and bias_hh (size 3*hidden); when bias_hh is empty (legacy
+// callers) we fall back to the single-bias approximation that previously
+// shipped (matches CPU SIMD; off-by-r*b_hn for the n gate).
 auto gru_forward_cuda(
     const Tensor& input,     // (seq_len, batch, input_size)
     const Tensor& W_ih,      // (3*hidden, input_size)
     const Tensor& W_hh,      // (3*hidden, hidden)
-    const Tensor& bias,      // (3*hidden) or empty — combined bias
-    const Tensor& h0         // (batch, hidden)
+    const Tensor& bias,      // bias_ih: (3*hidden) or empty
+    const Tensor& h0,        // (batch, hidden)
+    const Tensor& bias_hh    // bias_hh: (3*hidden) or empty
 ) -> std::vector<Tensor> {
     auto shape = input.shape();
     int64_t seq_len = shape[0];
@@ -238,7 +251,22 @@ auto gru_forward_cuda(
     cudaStream_t stream = stream_guard.get();
 
     Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
-    Tensor h_prev = h0.contiguous();
+    // Phase 8.5 root-cause fix: explicit two-buffer ping-pong instead of
+    // std::swap on Tensor handles. The previous swap pattern was correct
+    // in principle but tripped a CUDA driver "invalid argument" on
+    // cudaMemcpyAsync at t=1 with the BenchShape inputs (batch=32,
+    // hidden=256, seq=128). Suspected cause: `Tensor` swap rebinds the
+    // shared_ptr-style storage handle and the next iteration's
+    // `h_out.data_ptr()` returns a pointer that the driver doesn't
+    // recognise as part of the current memcpy domain.
+    //
+    // Allocating two distinct ping-pong buffers up front and indexing
+    // them by `t & 1` gives the driver stable, never-rebinding device
+    // pointers across the whole loop.
+    Tensor h_buf[2] = {
+        h0.clone(),
+        Tensor({batch, hidden}, input.dtype(), input.device()),
+    };
 
     bool has_bias = bias.numel() > 0;
 
@@ -262,8 +290,6 @@ auto gru_forward_cuda(
     // Reshape to (seq_len, batch, gate_size) for zero-copy per-timestep slicing
     Tensor all_gates_ih_3d = all_gates_ih.reshape({seq_len, batch, gate_size});
 
-    // Pre-allocate reusable h_out buffer (avoids per-timestep allocation)
-    Tensor h_out({batch, hidden}, input.dtype(), input.device());
     size_t hidden_step_bytes = batch * hidden * dtype_size(input.dtype());
 
     // Pre-compute GRU cell launch config (constant across timesteps)
@@ -272,13 +298,33 @@ auto gru_forward_cuda(
     int grid = (total + block - 1) / block;
 
     for (int64_t t = 0; t < seq_len; ++t) {
-        // Zero-copy view into pre-computed input gates for this timestep
-        Tensor gates_ih_t = all_gates_ih_3d.slice(0, t, t + 1).squeeze(0);
+        // Zero-copy view into pre-computed input gates for this timestep.
+        // The slice+squeeze on a contiguous 3D tensor is contiguous; the
+        // explicit .contiguous() copy is a defensive guard against any
+        // backend that might surface a non-base data_ptr for sliced views.
+        Tensor gates_ih_t = all_gates_ih_3d.slice(0, t, t + 1).squeeze(0).contiguous();
+
+        Tensor& h_prev = h_buf[t & 1];
+        Tensor& h_out  = h_buf[(t + 1) & 1];
 
         // Hidden-to-hidden: h_prev @ W_hh_t (pre-transposed)
         Tensor gates_hh = cublas_matmul(h_prev, W_hh_t);
 
-        // GRU cell — write into pre-allocated h_out buffer
+        // Add bias_hh to gates_hh so the kernel's gates_hh slots already
+        // include b_hr / b_hz / b_hn — matches PyTorch's per-gate bias
+        // placement (b_hn ends up under `r * (...)` automatically because
+        // the kernel multiplies n_hh by r).
+        if (bias_hh.numel() > 0) {
+            if (input.dtype() == DType::Float32) {
+                launch_add_bias(gates_hh.data<float>(), bias_hh.data<float>(),
+                                batch, gate_size, stream);
+            } else if (input.dtype() == DType::Float64) {
+                launch_add_bias(gates_hh.data<double>(), bias_hh.data<double>(),
+                                batch, gate_size, stream);
+            }
+        }
+
+        // GRU cell — write into the next-step buffer.
         if (input.dtype() == DType::Float32) {
             gru_cell_fused_kernel<float><<<grid, block, 0, stream>>>(
                 gates_ih_t.data<float>(), gates_hh.data<float>(),
@@ -299,17 +345,13 @@ auto gru_forward_cuda(
             hidden_step_bytes,
             cudaMemcpyDeviceToDevice,
             stream);
-
-        // Swap: h_prev now points to current output, h_out gets a fresh buffer for next step
-        std::swap(h_prev, h_out);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    // After the loop, h_prev holds the final hidden state (due to the swap at end of last iteration)
-    // But we need to return the actual last h — which was written to output and also to h_out before swap
-    // After last iteration's swap, h_prev = last h_out (the result), h_out = previous h_prev
-    // So h_prev is correct.
-
-    return {output, h_prev};
+    // Final hidden state lives in h_buf[seq_len & 1] after the last iteration
+    // wrote into the (t+1)&1 buffer.
+    cudaStreamSynchronize(stream);
+    return {output, h_buf[seq_len & 1]};
 }
 
 // ============================================================================
@@ -405,7 +447,7 @@ auto gru_multi_layer_forward_cuda(
 
         auto result = gru_forward_cuda(
             layer_input, W_ih_list[l], W_hh_list[l],
-            bias_list[l], h_l);
+            bias_list[l], h_l, Tensor{});
 
         layer_input = result[0];
 

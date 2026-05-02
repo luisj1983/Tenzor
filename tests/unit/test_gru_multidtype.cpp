@@ -1,13 +1,13 @@
 #include <gtest/gtest.h>
-#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
 // Helper function to convert DType to string
-std::string dtype_to_string(DType dtype) {
-    switch(dtype) {
+std::string dtype_to_string(DType d) {
+    switch(d) {
         case DType::Float32: return "float32";
         case DType::Float64: return "float64";
         case DType::Float16: return "float16";
@@ -20,78 +20,14 @@ std::string dtype_to_string(DType dtype) {
 // Multi-DType Test Fixture
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
-    DType dtype;
-    std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
 // ============================================================================
 // GRUCell Multi-DType Tests
 // ============================================================================
 
-class GRUCellMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class GRUCellMultiDTypeTest : public MultiBackendDTypeTest {
+
 protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Helper to get dtype-specific tolerance
+    // Helper to get dtype()-specific tolerance
     template<typename T>
     T getTolerance() const {
         if (std::is_same<T, double>::value) {
@@ -103,8 +39,8 @@ protected:
         }
     }
 
-    double getTolerance(DType dtype) const {
-        switch (dtype) {
+    double getTolerance(DType dtype()) const {
+        switch (dtype()) {
             case DType::Float64: return 1e-5;
             case DType::Float32: return 1e-4;
             case DType::Float16:
@@ -114,11 +50,11 @@ protected:
     }
 
     double get_tolerance() const {
-        if (dtype == DType::Float32) {
+        if (dtype() == DType::Float32) {
             return 1e-4;
-        } else if (dtype == DType::Float64) {
+        } else if (dtype() == DType::Float64) {
             return 1e-5;
-        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-4;
@@ -130,16 +66,16 @@ TEST_P(GRUCellMultiDTypeTest, BasicForward) {
 
     // Test basic forward pass
     nn::GRUCell cell(10, 20);
-    cell.to(device);
-    auto input = Variable(randn({5, 10}, dtype, device), true);
-    auto h = Variable(randn({5, 20}, dtype, device), true);
+    cell.to(device());
+    auto input = Variable(randn({5, 10}, dtype(), device()), true);
+    auto h = Variable(randn({5, 20}, dtype(), device()), true);
 
     auto h_next = cell.forward(input, h);
 
-    EXPECT_EQ(h_next.shape().size(), 2) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_next.shape().size(), 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUCellMultiDTypeTest, NoInitialHidden) {
@@ -147,15 +83,15 @@ TEST_P(GRUCellMultiDTypeTest, NoInitialHidden) {
 
     // Test with zero-initialized hidden state
     nn::GRUCell cell(10, 20);
-    cell.to(device);
-    auto input = Variable(randn({5, 10}, dtype, device), true);
+    cell.to(device());
+    auto input = Variable(randn({5, 10}, dtype(), device()), true);
 
     auto h_next = cell.forward(input);
 
-    EXPECT_EQ(h_next.shape().size(), 2) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_next.shape().size(), 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUCellMultiDTypeTest, NoBias) {
@@ -163,14 +99,14 @@ TEST_P(GRUCellMultiDTypeTest, NoBias) {
 
     // Test without bias
     nn::GRUCell cell(10, 20, false);
-    cell.to(device);
-    auto input = Variable(randn({5, 10}, dtype, device), true);
+    cell.to(device());
+    auto input = Variable(randn({5, 10}, dtype(), device()), true);
 
     auto h_next = cell.forward(input);
 
-    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_next.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUCellMultiDTypeTest, HiddenStateEvolution) {
@@ -178,17 +114,17 @@ TEST_P(GRUCellMultiDTypeTest, HiddenStateEvolution) {
 
     // Test that hidden state evolves across time steps
     nn::GRUCell cell(10, 20);
-    cell.to(device);
-    auto input = Variable(randn({5, 10}, dtype, device), true);
+    cell.to(device());
+    auto input = Variable(randn({5, 10}, dtype(), device()), true);
 
     auto h1 = cell.forward(input);
     auto h2 = cell.forward(input, h1);
     auto h3 = cell.forward(input, h2);
 
     // Each step should produce outputs
-    EXPECT_EQ(h3.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h3.shape()[1], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h3.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h3.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h3.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h3.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUCellMultiDTypeTest, ParameterCount) {
@@ -202,65 +138,16 @@ TEST_P(GRUCellMultiDTypeTest, ParameterCount) {
     // weight_ih: (3*hidden, input) - input-to-hidden for all 3 gates combined
     // weight_hh: (3*hidden, hidden) - hidden-to-hidden for all 3 gates combined
     // 2 linear layers * 2 params (weight + bias) = 4 parameters
-    EXPECT_EQ(params.size(), 4) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(params.size(), 4) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 // ============================================================================
 // GRU Multi-DType Tests
 // ============================================================================
 
-class GRUMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class GRUMultiDTypeTest : public MultiBackendDTypeTest {
+
 protected:
-    Device device;
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-
-        auto param = GetParam();
-        dtype = param.dtype;
-
-        HONOR_BACKEND_ENV_VARS(param.backend_name);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
     double getTolerance(DType dt) const {
         switch (dt) {
             case DType::Float64: return 1e-5;
@@ -272,11 +159,11 @@ protected:
     }
 
     double get_tolerance() const {
-        if (dtype == DType::Float32) {
+        if (dtype() == DType::Float32) {
             return 1e-4;
-        } else if (dtype == DType::Float64) {
+        } else if (dtype() == DType::Float64) {
             return 1e-5;
-        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-4;
@@ -288,23 +175,23 @@ TEST_P(GRUMultiDTypeTest, BasicForward) {
 
     // Test basic forward pass
     nn::GRU gru(10, 20, 1);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);  // (seq_len, batch, features)
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);  // (seq_len, batch, features)
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // seq_len
-    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // batch
-    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size
+    EXPECT_EQ(output.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // seq_len
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // batch
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size
 
-    EXPECT_EQ(h_n.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_n.shape()[0], 1) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // num_layers
-    EXPECT_EQ(h_n.shape()[1], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // batch
-    EXPECT_EQ(h_n.shape()[2], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size
+    EXPECT_EQ(h_n.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_n.shape()[0], 1) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // num_layers
+    EXPECT_EQ(h_n.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // batch
+    EXPECT_EQ(h_n.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size
 
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
-    EXPECT_EQ(h_n.tensor().dtype(), dtype) << "Hidden state dtype mismatch";
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    EXPECT_EQ(h_n.tensor().dtype(), dtype()) << "Hidden state dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, MultiLayer) {
@@ -312,17 +199,17 @@ TEST_P(GRUMultiDTypeTest, MultiLayer) {
 
     // Test multi-layer GRU
     nn::GRU gru(10, 20, 3);  // 3 layers
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
-    EXPECT_EQ(h_n.shape()[0], 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // 3 layers
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_n.shape()[0], 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // 3 layers
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, BatchFirst) {
@@ -330,15 +217,15 @@ TEST_P(GRUMultiDTypeTest, BatchFirst) {
 
     // Test with batch_first=true
     nn::GRU gru(10, 20, 1, true, true);  // batch_first=true
-    gru.to(device);
-    auto input = Variable(randn({5, 7, 10}, dtype, device), true);  // (batch, seq_len, features)
+    gru.to(device());
+    auto input = Variable(randn({5, 7, 10}, dtype(), device()), true);  // (batch, seq_len, features)
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // batch
-    EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // seq_len
-    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // batch
+    EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // seq_len
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, Bidirectional) {
@@ -346,17 +233,17 @@ TEST_P(GRUMultiDTypeTest, Bidirectional) {
 
     // Test bidirectional GRU
     nn::GRU gru(10, 20, 1, true, false, 0.0, true);  // bidirectional=true
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size * 2
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size * 2
 
-    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // num_layers * num_directions
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // num_layers * num_directions
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, BidirectionalMultiLayer) {
@@ -364,14 +251,14 @@ TEST_P(GRUMultiDTypeTest, BidirectionalMultiLayer) {
 
     // Test bidirectional multi-layer GRU
     nn::GRU gru(10, 20, 2, true, false, 0.0, true);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size * 2
-    EXPECT_EQ(h_n.shape()[0], 4) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);     // num_layers * num_directions
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size * 2
+    EXPECT_EQ(h_n.shape()[0], 4) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());     // num_layers * num_directions
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, WithDropout) {
@@ -379,15 +266,15 @@ TEST_P(GRUMultiDTypeTest, WithDropout) {
 
     // Test with dropout between layers
     nn::GRU gru(10, 20, 3, true, false, 0.5);  // 50% dropout
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, InitialHiddenState) {
@@ -395,15 +282,15 @@ TEST_P(GRUMultiDTypeTest, InitialHiddenState) {
 
     // Test with provided initial hidden state
     nn::GRU gru(10, 20, 2);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
-    auto h0 = Variable(randn({2, 5, 20}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
+    auto h0 = Variable(randn({2, 5, 20}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, h0);
 
-    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, SequenceLengthVariation) {
@@ -411,20 +298,20 @@ TEST_P(GRUMultiDTypeTest, SequenceLengthVariation) {
 
     // Test with different sequence lengths
     nn::GRU gru(10, 20);
-    gru.to(device);
+    gru.to(device());
 
     // Short sequence
-    auto input1 = Variable(randn({3, 5, 10}, dtype, device), true);
+    auto input1 = Variable(randn({3, 5, 10}, dtype(), device()), true);
     auto [output1, h_n1] = gru.forward(input1, Variable{});
-    EXPECT_EQ(output1.shape()[0], 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(output1.shape()[0], 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     // Long sequence
-    auto input2 = Variable(randn({50, 5, 10}, dtype, device), true);
+    auto input2 = Variable(randn({50, 5, 10}, dtype(), device()), true);
     auto [output2, h_n2] = gru.forward(input2, Variable{});
-    EXPECT_EQ(output2.shape()[0], 50) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(output2.shape()[0], 50) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
-    EXPECT_EQ(output1.tensor().dtype(), dtype) << "Output dtype mismatch";
-    EXPECT_EQ(output2.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output1.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    EXPECT_EQ(output2.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, BatchSizeVariation) {
@@ -432,20 +319,20 @@ TEST_P(GRUMultiDTypeTest, BatchSizeVariation) {
 
     // Test with different batch sizes
     nn::GRU gru(10, 20);
-    gru.to(device);
+    gru.to(device());
 
     // Small batch
-    auto input1 = Variable(randn({7, 2, 10}, dtype, device), true);
+    auto input1 = Variable(randn({7, 2, 10}, dtype(), device()), true);
     auto [output1, h_n1] = gru.forward(input1, Variable{});
-    EXPECT_EQ(output1.shape()[1], 2) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(output1.shape()[1], 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     // Large batch
-    auto input2 = Variable(randn({7, 32, 10}, dtype, device), true);
+    auto input2 = Variable(randn({7, 32, 10}, dtype(), device()), true);
     auto [output2, h_n2] = gru.forward(input2, Variable{});
-    EXPECT_EQ(output2.shape()[1], 32) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(output2.shape()[1], 32) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
-    EXPECT_EQ(output1.tensor().dtype(), dtype) << "Output dtype mismatch";
-    EXPECT_EQ(output2.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output1.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    EXPECT_EQ(output2.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, SingleTimestep) {
@@ -453,13 +340,13 @@ TEST_P(GRUMultiDTypeTest, SingleTimestep) {
 
     // Test with single timestep
     nn::GRU gru(10, 20);
-    gru.to(device);
-    auto input = Variable(randn({1, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({1, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 1) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 1) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, OutputConsistency) {
@@ -467,18 +354,18 @@ TEST_P(GRUMultiDTypeTest, OutputConsistency) {
 
     // Test that output is deterministic
     nn::GRU gru(10, 20);
-    gru.to(device);
-    auto input = Variable(ones({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(ones({7, 5, 10}, dtype(), device()), true);
 
     auto [output1, h_n1] = gru.forward(input, Variable{});
     auto [output2, h_n2] = gru.forward(input, Variable{});
 
     // Shapes should match
     for (size_t i = 0; i < 3; ++i) {
-        EXPECT_EQ(output1.shape()[i], output2.shape()[i]) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-        EXPECT_EQ(h_n1.shape()[i], h_n2.shape()[i]) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+        EXPECT_EQ(output1.shape()[i], output2.shape()[i]) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+        EXPECT_EQ(h_n1.shape()[i], h_n2.shape()[i]) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     }
-    EXPECT_EQ(output1.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output1.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, GradientFlow) {
@@ -486,13 +373,13 @@ TEST_P(GRUMultiDTypeTest, GradientFlow) {
     // drops grad to zero would pass EXPECT_NO_THROW, which is the failure
     // mode this suite must catch.
     nn::GRU gru(10, 20);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
     EXPECT_TRUE(output.requires_grad())
-        << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+        << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     // sum(Variable) preserves the autograd graph; Variable(sum(tensor), true)
     // would break it and silently produce zero gradients.
@@ -500,14 +387,14 @@ TEST_P(GRUMultiDTypeTest, GradientFlow) {
     loss.backward();
 
     ASSERT_TRUE(input.has_grad())
-        << "input.grad missing on " << device.to_string() << " / " << dtype_to_string(dtype);
+        << "input.grad missing on " << device().to_string() << " / " << dtype_to_string(dtype());
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel())
-        << device.to_string() << " / " << dtype_to_string(dtype);
+        << device().to_string() << " / " << dtype_to_string(dtype());
 
     auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g_max.item<float>(), 0.0f)
         << "input.grad all-zero — autograd graph broken on "
-        << device.to_string() << " / " << dtype_to_string(dtype);
+        << device().to_string() << " / " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, TrainingMode) {
@@ -516,13 +403,13 @@ TEST_P(GRUMultiDTypeTest, TrainingMode) {
     // Test training/eval mode switching
     nn::GRU gru(10, 20, 2, true, false, 0.5);
 
-    EXPECT_TRUE(gru.is_training()) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_TRUE(gru.is_training()) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     gru.eval();
-    EXPECT_FALSE(gru.is_training()) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_FALSE(gru.is_training()) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     gru.train();
-    EXPECT_TRUE(gru.is_training()) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_TRUE(gru.is_training()) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, ParameterCount) {
@@ -535,7 +422,7 @@ TEST_P(GRUMultiDTypeTest, ParameterCount) {
     // Each GRUCell uses PyTorch-style combined weight matrices:
     // weight_ih + weight_hh = 2 linear layers * 2 params = 4 params per cell
     // 2 layers * 4 params = 8 parameters total
-    EXPECT_EQ(params.size(), 8) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(params.size(), 8) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, LargeHidden) {
@@ -543,13 +430,13 @@ TEST_P(GRUMultiDTypeTest, LargeHidden) {
 
     // Test with large hidden size
     nn::GRU gru(10, 512);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[2], 512) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[2], 512) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, VeryDeepNetwork) {
@@ -557,13 +444,13 @@ TEST_P(GRUMultiDTypeTest, VeryDeepNetwork) {
 
     // Test with many layers
     nn::GRU gru(10, 20, 5);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(h_n.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // 5 layers
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(h_n.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // 5 layers
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, LongSequence) {
@@ -571,13 +458,13 @@ TEST_P(GRUMultiDTypeTest, LongSequence) {
 
     // Test with very long sequence
     nn::GRU gru(10, 20);
-    gru.to(device);
-    auto input = Variable(randn({100, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({100, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 100) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 100) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, InvalidNumLayers) {
@@ -586,7 +473,7 @@ TEST_P(GRUMultiDTypeTest, InvalidNumLayers) {
     // Test that invalid num_layers throws
     EXPECT_THROW({
         nn::GRU gru(10, 20, 0);
-    }, std::invalid_argument) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    }, std::invalid_argument) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, InvalidDropout) {
@@ -595,30 +482,30 @@ TEST_P(GRUMultiDTypeTest, InvalidDropout) {
     // Test that invalid dropout throws
     EXPECT_THROW({
         nn::GRU gru(10, 20, 2, true, false, 1.5);
-    }, std::invalid_argument) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    }, std::invalid_argument) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, GateOutputRanges) {
-    double tol = getTolerance(dtype);
+    double tol = getTolerance(dtype());
 
     // Test that GRU gates produce reasonable outputs
     nn::GRU gru(10, 20);
-    gru.to(device);
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    gru.to(device());
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
     // Hidden state values should be in reasonable range (due to tanh in new gate)
     auto h_cpu = h_n.tensor().to(Device::cpu());
 
-    // Check dtype-specific ranges
+    // Check dtype()-specific ranges
     double max_value = 10.0;
-    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
         max_value = 15.0;  // Half precision may have slightly higher variance
     }
 
     bool all_reasonable = true;
-    if (dtype == DType::Float64) {
+    if (dtype() == DType::Float64) {
         const double* h_data = h_cpu.data<double>();
         for (int64_t i = 0; i < h_cpu.numel(); ++i) {
             if (std::abs(h_data[i]) > max_value) {
@@ -626,7 +513,7 @@ TEST_P(GRUMultiDTypeTest, GateOutputRanges) {
                 break;
             }
         }
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         const float* h_data = h_cpu.data<float>();
         for (int64_t i = 0; i < h_cpu.numel(); ++i) {
             if (std::abs(h_data[i]) > max_value) {
@@ -636,7 +523,7 @@ TEST_P(GRUMultiDTypeTest, GateOutputRanges) {
         }
     }
     // Note: Float16 range testing skipped due to limited half type support
-    EXPECT_TRUE(all_reasonable || dtype == DType::Float16 || dtype == DType::BFloat16) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_TRUE(all_reasonable || dtype() == DType::Float16 || dtype() == DType::BFloat16) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, BatchFirstBidirectional) {
@@ -644,43 +531,43 @@ TEST_P(GRUMultiDTypeTest, BatchFirstBidirectional) {
 
     // Test combination of batch_first and bidirectional
     nn::GRU gru(10, 20, 1, true, true, 0.0, true);
-    gru.to(device);
-    auto input = Variable(randn({5, 7, 10}, dtype, device), true);  // (batch, seq, features)
+    gru.to(device());
+    auto input = Variable(randn({5, 7, 10}, dtype(), device()), true);  // (batch, seq, features)
 
     auto [output, h_n] = gru.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // batch
-    EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);  // seq_len
-    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype); // hidden_size * 2
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype mismatch";
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // batch
+    EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // seq_len
+    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size * 2
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, ComparisonWithLSTM) {
 
     // Ensure GRU has similar behavior to LSTM (fewer parameters, similar performance)
     nn::GRU gru(10, 20, 2);
-    gru.to(device);
+    gru.to(device());
     nn::LSTM lstm(10, 20, 2);
-    lstm.to(device);
+    lstm.to(device());
 
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [gru_output, gru_h] = gru.forward(input, Variable{});
     auto [lstm_output, lstm_states] = lstm.forward(input, {Variable{}, Variable{}});
 
     // Both should produce same shaped outputs
-    EXPECT_EQ(gru_output.shape()[0], lstm_output.shape()[0]) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(gru_output.shape()[1], lstm_output.shape()[1]) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(gru_output.shape()[2], lstm_output.shape()[2]) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(gru_output.shape()[0], lstm_output.shape()[0]) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(gru_output.shape()[1], lstm_output.shape()[1]) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(gru_output.shape()[2], lstm_output.shape()[2]) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     // GRU has more parameters due to separate gate transforms
     // (GRU uses 6 separate Linear layers vs LSTM's 2 combined layers)
     auto gru_params = gru.parameters();
     auto lstm_params = lstm.parameters();
-    EXPECT_GT(gru_params.size(), lstm_params.size()) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_GT(gru_params.size(), lstm_params.size()) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
-    EXPECT_EQ(gru_output.tensor().dtype(), dtype) << "GRU output dtype mismatch";
-    EXPECT_EQ(lstm_output.tensor().dtype(), dtype) << "LSTM output dtype mismatch";
+    EXPECT_EQ(gru_output.tensor().dtype(), dtype()) << "GRU output dtype() mismatch";
+    EXPECT_EQ(lstm_output.tensor().dtype(), dtype()) << "LSTM output dtype() mismatch";
 }
 
 TEST_P(GRUMultiDTypeTest, MemoryEfficiency) {
@@ -688,45 +575,45 @@ TEST_P(GRUMultiDTypeTest, MemoryEfficiency) {
 
     // Test that GRU uses less memory than LSTM
     nn::GRU gru(10, 20);
-    gru.to(device);
+    gru.to(device());
     nn::LSTM lstm(10, 20);
-    lstm.to(device);
+    lstm.to(device());
 
     // GRU only returns hidden state, LSTM returns both hidden and cell
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
 
     auto [gru_output, gru_h] = gru.forward(input, Variable{});
     auto [lstm_output, lstm_states] = lstm.forward(input, {Variable{}, Variable{}});
     auto [lstm_h, lstm_c] = lstm_states;
 
     // GRU hidden state shape
-    EXPECT_EQ(gru_h.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(gru_h.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
     // LSTM has both h and c
-    EXPECT_EQ(lstm_h.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(lstm_c.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_EQ(lstm_h.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(lstm_c.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 
-    EXPECT_EQ(gru_h.tensor().dtype(), dtype) << "GRU hidden state dtype mismatch";
-    EXPECT_EQ(lstm_h.tensor().dtype(), dtype) << "LSTM hidden state dtype mismatch";
+    EXPECT_EQ(gru_h.tensor().dtype(), dtype()) << "GRU hidden state dtype() mismatch";
+    EXPECT_EQ(lstm_h.tensor().dtype(), dtype()) << "LSTM hidden state dtype() mismatch";
 }
 
 // DType-specific numerical accuracy tests
 TEST_P(GRUMultiDTypeTest, NumericalPrecision) {
-    double tol = getTolerance(dtype);
+    double tol = getTolerance(dtype());
 
     // Test numerical precision across dtypes
     nn::GRU gru(10, 20);
-    gru.to(device);
+    gru.to(device());
 
     // Use small values to test precision
-    auto input = Variable(full({7, 5, 10}, 0.1, dtype, device), true);
+    auto input = Variable(full({7, 5, 10}, 0.1, dtype(), device()), true);
     auto [output, h_n] = gru.forward(input, Variable{});
 
     // Output should not contain NaN or Inf
     auto out_cpu = output.tensor().to(Device::cpu());
     bool has_invalid = false;
 
-    if (dtype == DType::Float64) {
+    if (dtype() == DType::Float64) {
         auto data = out_cpu.data<double>();
         for (int64_t i = 0; i < out_cpu.numel(); ++i) {
             if (std::isnan(data[i]) || std::isinf(data[i])) {
@@ -734,7 +621,7 @@ TEST_P(GRUMultiDTypeTest, NumericalPrecision) {
                 break;
             }
         }
-    } else if (dtype == DType::Float32) {
+    } else if (dtype() == DType::Float32) {
         auto data = out_cpu.data<float>();
         for (int64_t i = 0; i < out_cpu.numel(); ++i) {
             if (std::isnan(data[i]) || std::isinf(data[i])) {
@@ -746,22 +633,22 @@ TEST_P(GRUMultiDTypeTest, NumericalPrecision) {
     // Note: Float16 testing skipped due to limited support in test data access
     // Future: Add proper Float16 data access when available
 
-    EXPECT_FALSE(has_invalid) << "Output contains NaN or Inf on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_FALSE(has_invalid) << "Output contains NaN or Inf on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
 }
 
 TEST_P(GRUMultiDTypeTest, CrossDTypeConsistency) {
 
     // Test that different dtypes produce consistent shapes
     nn::GRU gru(10, 20);
-    gru.to(device);
+    gru.to(device());
 
-    auto input = Variable(randn({7, 5, 10}, dtype, device), true);
+    auto input = Variable(randn({7, 5, 10}, dtype(), device()), true);
     auto [output, h_n] = gru.forward(input, Variable{});
 
     // Verify output properties
-    EXPECT_EQ(output.shape().size(), 3) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
-    EXPECT_EQ(output.tensor().dtype(), dtype) << "Output dtype should match input dtype";
-    EXPECT_EQ(h_n.tensor().dtype(), dtype) << "Hidden state dtype should match input dtype";
+    EXPECT_EQ(output.shape().size(), 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
+    EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() should match input dtype()";
+    EXPECT_EQ(h_n.tensor().dtype(), dtype()) << "Hidden state dtype() should match input dtype()";
     EXPECT_TRUE(output.requires_grad()) << "Output should require gradients";
 }
 
@@ -771,44 +658,44 @@ TEST_P(GRUMultiDTypeTest, CrossDTypeConsistency) {
 
 TEST_P(GRUCellMultiDTypeTest, GRUCellBackwardGradPopulated) {
     nn::GRUCell cell(8, 16);
-    cell.to(device);
+    cell.to(device());
 
-    auto input = Variable(randn({4, 8}, dtype, device), true);
-    auto h0    = Variable(randn({4, 16}, dtype, device), true);
+    auto input = Variable(randn({4, 8}, dtype(), device()), true);
+    auto h0    = Variable(randn({4, 16}, dtype(), device()), true);
     auto h1 = cell.forward(input, h0);
     sum(h1).backward();
 
-    ASSERT_TRUE(input.has_grad()) << device.to_string();
-    ASSERT_TRUE(h0.has_grad())    << device.to_string();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    ASSERT_TRUE(h0.has_grad())    << device().to_string();
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
     EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel());
 
     auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g_max.item<float>(), 0.0f)
-        << "input grad all-zero on " << device.to_string();
+        << "input grad all-zero on " << device().to_string();
 }
 
 TEST_P(GRUMultiDTypeTest, GRUBackwardGradPopulated) {
     nn::GRU gru(8, 16);
-    gru.to(device);
+    gru.to(device());
 
-    auto input = Variable(randn({5, 4, 8}, dtype, device), true);
+    auto input = Variable(randn({5, 4, 8}, dtype(), device()), true);
     auto [output, h_n] = gru.forward(input, Variable{});
     sum(output).backward();
 
-    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
 
     auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g_max.item<float>(), 0.0f)
-        << "input grad all-zero on " << device.to_string();
+        << "input grad all-zero on " << device().to_string();
 }
 
 TEST_P(GRUMultiDTypeTest, GRUBackwardWeightsUpdated) {
     nn::GRU gru(4, 8);
-    gru.to(device);
+    gru.to(device());
 
-    auto input = Variable(randn({3, 2, 4}, dtype, device), false);
+    auto input = Variable(randn({3, 2, 4}, dtype(), device()), false);
     auto [output, h_n] = gru.forward(input, Variable{});
     sum(output).backward();
 
@@ -820,63 +707,43 @@ TEST_P(GRUMultiDTypeTest, GRUBackwardWeightsUpdated) {
         }
     }
     EXPECT_GT(populated, 0)
-        << "no GRU weight gradient populated on " << device.to_string();
+        << "no GRU weight gradient populated on " << device().to_string();
 }
 
 TEST_P(GRUMultiDTypeTest, GRUBidirectionalBackward) {
     nn::GRU gru(4, 8, /*num_layers=*/1, /*bias=*/true,
                 /*batch_first=*/false, /*dropout=*/0.0,
                 /*bidirectional=*/true);
-    gru.to(device);
+    gru.to(device());
 
-    auto input = Variable(randn({3, 2, 4}, dtype, device), true);
+    auto input = Variable(randn({3, 2, 4}, dtype(), device()), true);
     auto [output, h_n] = gru.forward(input, Variable{});
     sum(output).backward();
 
-    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
     auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g_max.item<float>(), 0.0f)
-        << "bidirectional grad all-zero on " << device.to_string();
+        << "bidirectional grad all-zero on " << device().to_string();
 }
 
 // ============================================================================
 // Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    // Test with floating-point dtypes (GRU works with floating-point)
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Float16, "float16"},
-        {DType::BFloat16, "bfloat16"},
-    };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     GRUCellMultiDTypeTest,
-    ::testing::ValuesIn(GenerateBackendDTypeCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::BFloat16)
+    ),
+    BackendDTypeParamName);
 
 INSTANTIATE_TEST_SUITE_P(
     AllBackendsAllDTypes,
     GRUMultiDTypeTest,
-    ::testing::ValuesIn(GenerateBackendDTypeCombinations()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+    ::testing::Combine(
+        STANDARD_BACKENDS,
+        ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::BFloat16)
+    ),
+    BackendDTypeParamName);

@@ -2925,8 +2925,10 @@ __global__ void scatter_reduce_f32_kernel(float* output, const float* source, co
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
-    int64_t src_pos = (o * idx_n + k) * inner + j;
+    // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
+    int64_t idx_pos = (o * idx_n + k) * inner + j;
+    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
+    int64_t src_pos = idx_pos;
     float val = source[src_pos];
 
     if (mode == 0 || mode == 2) {
@@ -2970,7 +2972,9 @@ __global__ void scatter_reduce_init_f32_kernel(float* output, const int64_t* ind
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
+    // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
+    int64_t idx_pos = (o * idx_n + k) * inner + j;
+    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
 
     float identity;
     if (mode == 0 || mode == 2) identity = 0.0f;
@@ -2981,14 +2985,18 @@ __global__ void scatter_reduce_init_f32_kernel(float* output, const int64_t* ind
     output[out_pos] = identity;
 }
 
+// Mirror of CUDA scatter_reduce_mean_div_f32 (Phase 7.6 mean fix). counts
+// = number of scatters touching this position; self is NOT counted in the
+// kernel. With include_self=true the accumulator is
+// `input + sum(scatters)` so the divisor is `count + 1`. Untouched
+// positions keep their initial input value.
 __global__ void scatter_reduce_mean_div_f32_kernel(float* output, const int* counts, int64_t numel, int include_self) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numel) return;
     int c = counts[tid];
-    int base = include_self ? 1 : 0;
-    if (c > base) {
-        output[tid] /= static_cast<float>(c);
-    }
+    if (c <= 0) return;
+    float divisor = include_self ? static_cast<float>(c + 1) : static_cast<float>(c);
+    output[tid] /= divisor;
 }
 
 auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
@@ -3008,7 +3016,11 @@ auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor
     if (dim < 0) dim += ndim;
 
     int64_t dim_size = shape[dim];
-    int64_t idx_n = index.numel();
+    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
+    // the scatter dim, NOT the total numel. For 1D scatter these are equal.
+    int64_t idx_n = (index.shape().size() > static_cast<size_t>(dim))
+                  ? static_cast<int64_t>(index.shape()[dim])
+                  : index.numel();
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];

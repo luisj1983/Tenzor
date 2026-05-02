@@ -455,15 +455,18 @@ private:
 };
 
 /**
- * @brief RAII wrapper for Vulkan descriptor pool
+ * @brief RAII wrapper for a Vulkan descriptor pool with free-list growth.
+ *
+ * Phase 8.3: on exhaustion the pool no longer destroys-and-recreates (which
+ * required a `vkDeviceWaitIdle` to invalidate in-flight descriptor sets).
+ * Instead it pushes the now-full pool onto a frozen list and creates a new
+ * larger pool. Old descriptor sets remain valid for the life of the backend.
+ * All pools are destroyed together at backend teardown.
  */
 class DescriptorPool {
     static constexpr uint32_t MAX_DESCRIPTOR_POOL_SETS = 65536;
 
-public:
-    DescriptorPool(VkDevice device, uint32_t maxSets)
-        : device_(device), max_sets_(maxSets) {
-
+    static VkDescriptorPool createPool(VkDevice device, uint32_t maxSets) {
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         poolSize.descriptorCount = maxSets * 8; // Up to 8 buffers per set
@@ -475,20 +478,32 @@ public:
         poolInfo.maxSets = maxSets;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
-        checkVk(vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool_),
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        checkVk(vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool),
                 "Failed to create descriptor pool");
+        return pool;
+    }
+
+public:
+    DescriptorPool(VkDevice device, uint32_t maxSets)
+        : device_(device), max_sets_(maxSets) {
+        active_pool_ = createPool(device_, max_sets_);
     }
 
     ~DescriptorPool() {
-        if (pool_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device_, pool_, nullptr);
+        if (active_pool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, active_pool_, nullptr);
+        }
+        for (VkDescriptorPool p : frozen_pools_) {
+            vkDestroyDescriptorPool(device_, p, nullptr);
         }
     }
 
     DescriptorPool(const DescriptorPool&) = delete;
     DescriptorPool& operator=(const DescriptorPool&) = delete;
 
-    VkDescriptorPool pool() const { return pool_; }
+    /// The current active pool that new allocations target.
+    VkDescriptorPool pool() const { return active_pool_; }
 
     /// Track a descriptor set allocation and warn if pool usage exceeds 80%.
     void trackAllocation() {
@@ -499,41 +514,49 @@ public:
                 std::cerr << "[Vulkan WARNING] Descriptor pool usage at "
                           << allocated_sets_ << "/" << max_sets_
                           << " (" << (allocated_sets_ * 100 / max_sets_)
-                          << "%). Consider calling synchronize() to reclaim sets.\n";
+                          << "%). Will free-list-grow on next exhaustion.\n";
                 warning_issued_ = true;
             }
         }
     }
 
-    /// Return current allocation count.
+    /// Return current allocation count in the active pool.
     uint32_t allocated_sets() const { return allocated_sets_; }
 
-    /// Return pool capacity (maxSets).
+    /// Return active pool capacity (maxSets).
     uint32_t max_sets() const { return max_sets_; }
 
+    /// Number of frozen (full) pools still alive serving in-flight descriptor sets.
+    size_t frozen_pool_count() const { return frozen_pools_.size(); }
+
     /**
-     * @brief Reset the descriptor pool, freeing all allocated descriptor sets
+     * @brief Reset the active descriptor pool, freeing all allocated descriptor sets.
      *
-     * This should only be called when no descriptor sets are in use (i.e., after
-     * synchronization). All previously allocated descriptor sets become invalid.
+     * Must NOT be called while any descriptor set from the active pool is in
+     * use by an in-flight command buffer. Frozen pools (from prior grows) are
+     * left alone — they continue to serve descriptor sets that were allocated
+     * before the most recent grow().
+     *
+     * Phase 8.3 backend behavior: this is no longer called on every
+     * `synchronize()`. The pool is left to free-list-grow as needed and is
+     * fully torn down at backend destruction.
      */
     void reset() {
-        if (pool_ != VK_NULL_HANDLE) {
-            vkResetDescriptorPool(device_, pool_, 0);
+        if (active_pool_ != VK_NULL_HANDLE) {
+            vkResetDescriptorPool(device_, active_pool_, 0);
             allocated_sets_ = 0;
             warning_issued_ = false;
         }
     }
 
     /**
-     * @brief Grow the descriptor pool by destroying and recreating with larger capacity.
+     * @brief Phase 8.3 free-list grow: freeze the current pool and create a new
+     *        larger one. Old descriptor sets remain valid.
      *
-     * Called when VK_ERROR_OUT_OF_POOL_MEMORY or VK_ERROR_FRAGMENTED_POOL is
-     * encountered and a simple reset is not sufficient (e.g., live descriptor sets
-     * still in use). The new pool has 2x the previous maxSets capacity.
-     *
-     * @warning All previously allocated descriptor sets become invalid. Callers must
-     *          ensure no in-flight command buffers reference old descriptor sets.
+     * Called on `VK_ERROR_OUT_OF_POOL_MEMORY` / `VK_ERROR_FRAGMENTED_POOL`.
+     * No `vkDeviceWaitIdle` is required: the previous pool stays alive in
+     * `frozen_pools_` so any in-flight descriptor sets it produced remain
+     * legal until the entire `DescriptorPool` is destroyed.
      */
     void grow() {
         uint32_t new_max = max_sets_ * 2;
@@ -545,29 +568,17 @@ public:
                 return;
             }
         }
-        std::cerr << "[Vulkan WARNING] Descriptor pool exhausted/fragmented (capacity="
-                  << max_sets_ << "). Growing to " << new_max << " sets.\n";
+        std::cerr << "[Vulkan INFO] Descriptor pool free-list grow (was "
+                  << max_sets_ << ", new " << new_max << ", frozen pools="
+                  << frozen_pools_.size() + 1 << ").\n";
 
-        // Destroy old pool
-        if (pool_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device_, pool_, nullptr);
-            pool_ = VK_NULL_HANDLE;
+        // Phase 8.3: keep the old pool alive in frozen_pools_; do NOT destroy.
+        if (active_pool_ != VK_NULL_HANDLE) {
+            frozen_pools_.push_back(active_pool_);
+            active_pool_ = VK_NULL_HANDLE;
         }
 
-        // Create new, larger pool
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = new_max * 8;  // Up to 8 buffers per set
-
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = new_max;
-        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-
-        checkVk(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &pool_),
-                "Failed to create grown descriptor pool");
+        active_pool_ = createPool(device_, new_max);
 
         max_sets_ = new_max;
         allocated_sets_ = 0;
@@ -576,7 +587,8 @@ public:
 
 private:
     VkDevice device_;
-    VkDescriptorPool pool_ = VK_NULL_HANDLE;
+    VkDescriptorPool active_pool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> frozen_pools_;  // Phase 8.3: kept alive until dtor.
     uint32_t max_sets_ = 0;
     uint32_t allocated_sets_ = 0;
     bool warning_issued_ = false;

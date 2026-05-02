@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "backend_parity/parity_test_utils.hpp"
+#include "grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -207,10 +209,11 @@ TEST_F(BmmAutogradTest, OneInputRequiresGrad) {
 
 #ifdef TENZOR_USE_CUDA
 TEST_F(BmmAutogradTest, CUDABackward) {
-    // Test on CUDA device
-    if (!Device::cuda_available()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
+    // Skip when CUDA is not available on this host. SKIP_IF_NO_CUDA goes
+    // through the canonical has_cuda() probe, which honors
+    // TENZOR_SKIP_BACKENDS — TESTING.md bans inline cuda_available() checks
+    // because they bypass that env var.
+    SKIP_IF_NO_CUDA;
 
     auto cuda_device = Device::cuda(0);
 
@@ -223,12 +226,10 @@ TEST_F(BmmAutogradTest, CUDABackward) {
     auto c = autograd::bmm(a, b);
     auto loss = autograd::sum(c);
 
-    // Should not throw
-    EXPECT_NO_THROW(loss.backward());
+    loss.backward();
 
-    // Check gradients exist
-    EXPECT_TRUE(a.has_grad());
-    EXPECT_TRUE(b.has_grad());
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
 }
 #endif
 

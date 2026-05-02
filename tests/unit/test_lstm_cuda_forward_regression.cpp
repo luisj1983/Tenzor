@@ -123,14 +123,37 @@ TEST_F(LSTMCudaForwardRegression, SmallShape) {
     EXPECT_LT(max_abs_diff(cpu_out, cuda_out), 1e-3f);
 }
 
-// GRU variant. NOTE: After the cuBLAS fix landed, GRU forward exposes a
-// SEPARATE pre-existing bug (CUDA kernel launch returns "invalid argument"
-// at rnn_sequence.cu:287, the gru_cell_fused_kernel launch site) that traces
-// to the swap-pattern around h_prev / h_out reusing h0's storage.
-// Tracked as a follow-up; this test documents the failure mode and is
-// disabled until the GRU loop is restructured. Do NOT re-enable without
-// fixing rnn_sequence.cu:gru_forward_cuda first.
-TEST_F(LSTMCudaForwardRegression, DISABLED_GRU_BenchShape) {
+// Smaller GRU shape — used to validate the numerical path independently
+// of the BenchShape configuration.
+TEST_F(LSTMCudaForwardRegression, GRU_SmallShape) {
+    const int64_t batch = 4, seq = 16, in_size = 32, hidden = 32;
+
+    nn::GRU cpu_layer(in_size, hidden, 1, true, true, 0.0, false);
+    cpu_layer.eval();
+
+    nn::GRU cuda_layer(in_size, hidden, 1, true, true, 0.0, false);
+    copy_params(cpu_layer, cuda_layer);
+    cuda_layer.eval();
+    cuda_layer.cuda();
+
+    auto x_cpu = randn({batch, seq, in_size}, DType::Float32, Device::cpu());
+    auto x_cuda = x_cpu.to(Device::cuda(0));
+
+    auto cpu_out = cpu_layer.forward_impl(Variable(x_cpu, false)).tensor();
+    auto cuda_out = cuda_layer.forward_impl(Variable(x_cuda, false)).tensor();
+    Device::cuda(0).synchronize();
+
+    EXPECT_LT(max_abs_diff(cpu_out, cuda_out), 1e-3f);
+}
+
+
+// Bench shape — exercises the originally-failing path. Phase 8.5 fixed:
+//   1. Removed duplicate transpose in gru.cpp fast path that fed the
+//      kernel batch-major input it then misread as time-major.
+//   2. Replaced std::swap on Tensor handles with explicit two-buffer
+//      ping-pong so the CUDA driver sees stable device pointers.
+//   3. Made gates_ih_t.contiguous() explicit (defensive).
+TEST_F(LSTMCudaForwardRegression, GRU_BenchShape) {
     const int64_t batch = 32, seq = 128, in_size = 256, hidden = 256;
 
     nn::GRU cpu_layer(in_size, hidden, 1, true, true, 0.0, false);
