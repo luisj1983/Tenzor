@@ -3050,21 +3050,58 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_val, posinf_val, neginf_val)};
     });
 
-    // Bitwise ops (int32 only on Vulkan). These have their own standalone
-    // int32 shaders and must go through dispatchBitwiseBinaryOp — the generic
-    // dispatchBinaryOp routes through math.comp's opcode switch which does
-    // not have bitwise cases and throws "Unknown binary operation".
+    // Bitwise ops on Vulkan: SPIR-V shaders are int32-only (AND/OR/XOR/NOT/
+    // shifts). For Int8/Int16/Int64 inputs we promote to Int32 around the
+    // shader call. Bit-preservation guarantees:
+    //   - AND/OR/XOR/NOT: bit patterns are preserved through sign-extension
+    //     and narrowing for any width whose values fit in Int32.
+    //   - Shifts: C++ promotes narrow integer operands to int before shifting
+    //     anyway, so the cast-promote-cast pattern matches native semantics
+    //     when the shift count is < 32 and the value fits in Int32.
+    //   - Int64 values outside [-2^31, 2^31) would lose information through
+    //     this path; until a dedicated int64 shader is added, callers passing
+    //     such values will get truncated bits in the high word.
+    //
+    // The narrow-back step (Int32 → original dtype) goes through CPU because
+    // Vulkan's cast_f32_i8 / cast_f32_i16 shaders saturate to the target
+    // range while PyTorch/numpy/CPU semantics is modular truncation. CPU's
+    // Int32 → Int8 cast already truncates correctly, so the small CPU
+    // round-trip here yields semantically correct values.
     table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", inputs[0], inputs[1])};
+        DType d = inputs[0].dtype();
+        if (d == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", inputs[0], inputs[1])};
+        }
+        Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", a32, b32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
     });
     table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", inputs[0], inputs[1])};
+        DType d = inputs[0].dtype();
+        if (d == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", inputs[0], inputs[1])};
+        }
+        Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", a32, b32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
     });
     table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", inputs[0], inputs[1])};
+        DType d = inputs[0].dtype();
+        if (d == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", inputs[0], inputs[1])};
+        }
+        Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", a32, b32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
     });
     table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", inputs[0])};
+        const Tensor& in = inputs[0];
+        if (in.dtype() == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", in)};
+        }
+        Tensor in32 = in.to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchUnaryOp("bitwise_not", in32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(in.dtype()).to(out32.device())};
     });
 
     // Native Vulkan RReLU forward
@@ -3093,14 +3130,49 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchCountNonzero(inputs[0]);
     });
 
-    // Native Vulkan Nansum
-    table.register_single_output_kernel(OpId::Nansum, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        return get_vulkan_backend()->dispatchNansum(inputs[0]);
+    // Native Vulkan Nansum / Nanmean.
+    //
+    // The native dispatchNansum/dispatchNanmean shaders always reduce to a
+    // scalar — they neither read AttrKey::Dim nor AttrKey::Keepdim. When
+    // the user calls nansum(x, dim=k), the composed ops in
+    // src/ops/reduction.cpp expect a dim-aware reduction; routing that
+    // through the scalar shader was returning the same value broadcast
+    // across all rows, which silently broke nanvar's per-row variance
+    // (caught by tests/backend_parity/test_nanstats_parity).
+    //
+    // Compose dim-aware nansum/nanmean from existing primitives so the
+    // result has the correct shape and per-slice values:
+    //     nansum(x, dim, keepdim)
+    //         = sum(where(isnan(x), 0, x), dim, keepdim)
+    //     nanmean(x, dim, keepdim)
+    //         = nansum / count_non_nan
+    table.register_single_output_kernel(OpId::Nansum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        const Tensor& x = inputs[0];
+        if (!attrs.has(AttrKey::Dim)) {
+            return get_vulkan_backend()->dispatchNansum(x);
+        }
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        Tensor mask = isnan(x);
+        Tensor zero = zeros_like(x);
+        Tensor cleaned = where(mask, zero, x);
+        return tenzor::sum(cleaned, dim, keepdim);
     });
 
-    // Native Vulkan Nanmean
-    table.register_single_output_kernel(OpId::Nanmean, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        return get_vulkan_backend()->dispatchNanmean(inputs[0]);
+    table.register_single_output_kernel(OpId::Nanmean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        const Tensor& x = inputs[0];
+        if (!attrs.has(AttrKey::Dim)) {
+            return get_vulkan_backend()->dispatchNanmean(x);
+        }
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        Tensor mask = isnan(x);
+        Tensor zero = zeros_like(x);
+        Tensor cleaned = where(mask, zero, x);
+        Tensor numer = tenzor::sum(cleaned, dim, keepdim);
+        // count_non_nan = sum(!mask) cast to input dtype
+        Tensor count = tenzor::sum(logical_not(mask).to(x.dtype()), dim, keepdim);
+        return tenzor::div(numer, count);
     });
 
     // Native Vulkan Aminmax (returns 2 tensors: min, max)
@@ -3295,11 +3367,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
 
     // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders
+    // Same Int32-promote pattern as the AND/OR/XOR registrations above —
+    // see the comment block at OpId::BitwiseAnd for the bit-preservation
+    // guarantees, the Int64-truncation caveat, and why the narrow-back goes
+    // through CPU (Vulkan's cast_f32_i8 saturates instead of truncating).
     table.register_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", inputs[0], inputs[1])};
+        const Tensor& a = inputs[0];
+        const Tensor& b = inputs[1];
+        if (a.dtype() == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", a, b)};
+        }
+        Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", a32, b32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(a.dtype()).to(out32.device())};
     });
     table.register_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", inputs[0], inputs[1])};
+        const Tensor& a = inputs[0];
+        const Tensor& b = inputs[1];
+        if (a.dtype() == DType::Int32) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", a, b)};
+        }
+        Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
+        Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", a32, b32);
+        return std::vector<Tensor>{out32.to(Device::cpu()).to(a.dtype()).to(out32.device())};
     });
 
     // =========================================================================
@@ -3484,12 +3574,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto mask = inputs[1];
         auto source = inputs[2];
 
-        // Convert mask to float for CumSum, compute prefix sum
-        Tensor mask_f32 = mask.to(DType::Float32);
-        Tensor prefix = tenzor::cumsum(mask_f32, 0);
-        Tensor prefix_i32 = prefix.to(DType::Int32);
+        // The masked_scatter.comp shader indexes prefix_data by the flat
+        // global invocation id, so the prefix sum has to be FLAT — i.e. a
+        // cumulative count of mask trues across the entire flattened mask.
+        // Earlier this called cumsum(mask, 0) on the 2-D mask directly,
+        // which produced per-column cumulative sums and yielded incorrect
+        // source indices for any mask whose first axis had more than one
+        // element. Flatten before cumsum, then the shader-facing prefix
+        // is correct regardless of the original mask's rank.
+        Tensor mask_f32_flat = mask.to(DType::Float32).reshape({-1}).contiguous();
+        Tensor prefix_flat = tenzor::cumsum(mask_f32_flat, 0);
+        Tensor prefix_i32 = prefix_flat.to(DType::Int32);
 
-        // Use dispatchMaskedScatter with the prefix sum
         auto* backend = get_vulkan_backend();
         return backend->dispatchMaskedScatterWithPrefix(input, mask, source, prefix_i32);
     });

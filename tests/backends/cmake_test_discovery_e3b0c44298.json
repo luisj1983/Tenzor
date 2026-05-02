@@ -1,0 +1,432 @@
+{
+  "tests": 70,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/BackendKernelOpsTest",
+      "tests": 70,
+      "testsuite": [
+        {
+          "name": "AddFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 44
+        },
+        {
+          "name": "AddFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 44
+        },
+        {
+          "name": "AddFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 44
+        },
+        {
+          "name": "AddFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 44
+        },
+        {
+          "name": "AddFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 44
+        },
+        {
+          "name": "AddFloat32LargeArray\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 62
+        },
+        {
+          "name": "AddFloat32LargeArray\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 62
+        },
+        {
+          "name": "AddFloat32LargeArray\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 62
+        },
+        {
+          "name": "AddFloat32LargeArray\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 62
+        },
+        {
+          "name": "AddFloat32LargeArray\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 62
+        },
+        {
+          "name": "SubFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 92
+        },
+        {
+          "name": "SubFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 92
+        },
+        {
+          "name": "SubFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 92
+        },
+        {
+          "name": "SubFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 92
+        },
+        {
+          "name": "SubFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 92
+        },
+        {
+          "name": "MulFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 115
+        },
+        {
+          "name": "MulFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 115
+        },
+        {
+          "name": "MulFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 115
+        },
+        {
+          "name": "MulFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 115
+        },
+        {
+          "name": "MulFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 115
+        },
+        {
+          "name": "DivFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 140
+        },
+        {
+          "name": "DivFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 140
+        },
+        {
+          "name": "DivFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 140
+        },
+        {
+          "name": "DivFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 140
+        },
+        {
+          "name": "DivFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 140
+        },
+        {
+          "name": "NegFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 165
+        },
+        {
+          "name": "NegFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 165
+        },
+        {
+          "name": "NegFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 165
+        },
+        {
+          "name": "NegFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 165
+        },
+        {
+          "name": "NegFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 165
+        },
+        {
+          "name": "AbsFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 184
+        },
+        {
+          "name": "AbsFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 184
+        },
+        {
+          "name": "AbsFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 184
+        },
+        {
+          "name": "AbsFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 184
+        },
+        {
+          "name": "AbsFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 184
+        },
+        {
+          "name": "SqrtFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 203
+        },
+        {
+          "name": "SqrtFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 203
+        },
+        {
+          "name": "SqrtFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 203
+        },
+        {
+          "name": "SqrtFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 203
+        },
+        {
+          "name": "SqrtFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 203
+        },
+        {
+          "name": "ExpFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 222
+        },
+        {
+          "name": "ExpFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 222
+        },
+        {
+          "name": "ExpFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 222
+        },
+        {
+          "name": "ExpFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 222
+        },
+        {
+          "name": "ExpFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 222
+        },
+        {
+          "name": "LogFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 241
+        },
+        {
+          "name": "LogFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 241
+        },
+        {
+          "name": "LogFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 241
+        },
+        {
+          "name": "LogFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 241
+        },
+        {
+          "name": "LogFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 241
+        },
+        {
+          "name": "PowFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 260
+        },
+        {
+          "name": "PowFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 260
+        },
+        {
+          "name": "PowFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 260
+        },
+        {
+          "name": "PowFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 260
+        },
+        {
+          "name": "PowFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 260
+        },
+        {
+          "name": "ClampFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 282
+        },
+        {
+          "name": "ClampFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 282
+        },
+        {
+          "name": "ClampFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 282
+        },
+        {
+          "name": "ClampFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 282
+        },
+        {
+          "name": "ClampFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 282
+        },
+        {
+          "name": "SumFloat32FullReduction\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 307
+        },
+        {
+          "name": "SumFloat32FullReduction\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 307
+        },
+        {
+          "name": "SumFloat32FullReduction\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 307
+        },
+        {
+          "name": "SumFloat32FullReduction\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 307
+        },
+        {
+          "name": "SumFloat32FullReduction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 307
+        },
+        {
+          "name": "MeanFloat32Basic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 324
+        },
+        {
+          "name": "MeanFloat32Basic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 324
+        },
+        {
+          "name": "MeanFloat32Basic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 324
+        },
+        {
+          "name": "MeanFloat32Basic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 324
+        },
+        {
+          "name": "MeanFloat32Basic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_backend_kernel_ops.cpp",
+          "line": 324
+        }
+      ]
+    }
+  ]
+}

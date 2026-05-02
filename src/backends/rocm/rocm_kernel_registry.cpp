@@ -20,6 +20,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/indexing.hpp"  // for where(), needed by composed Nansum/Nanmean dim path
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -4133,13 +4134,35 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         }
         return rocm::count_nonzero_dim_kernel(inputs[0], dim, get_hip_stream(attrs));
     });
-    // Nansum: native HIP full reduction
+    // Nansum / Nanmean. The native HIP nansum_kernel/nanmean_kernel only
+    // implement the full-reduction (scalar) form, so a user-supplied
+    // AttrKey::Dim was silently ignored — composed callers (notably
+    // nanvar in src/ops/reduction.cpp) saw a scalar broadcast across all
+    // rows and produced wildly wrong per-row results. Compose the
+    // dim-aware path from sum + isnan + where; fall through to the
+    // native scalar reducer when no dim is requested.
     table.register_single_output_kernel(OpId::Nansum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return rocm::nansum_kernel(inputs[0], get_hip_stream(attrs));
+        const Tensor& x = inputs[0];
+        if (!attrs.has(AttrKey::Dim)) {
+            return rocm::nansum_kernel(x, get_hip_stream(attrs));
+        }
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        Tensor cleaned = tenzor::where(isnan(x), zeros_like(x), x);
+        return tenzor::sum(cleaned, dim, keepdim);
     });
-    // Nanmean: native HIP full reduction
     table.register_single_output_kernel(OpId::Nanmean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return rocm::nanmean_kernel(inputs[0], get_hip_stream(attrs));
+        const Tensor& x = inputs[0];
+        if (!attrs.has(AttrKey::Dim)) {
+            return rocm::nanmean_kernel(x, get_hip_stream(attrs));
+        }
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        Tensor mask = isnan(x);
+        Tensor cleaned = where(mask, zeros_like(x), x);
+        Tensor numer = tenzor::sum(cleaned, dim, keepdim);
+        Tensor count = tenzor::sum(logical_not(mask).to(x.dtype()), dim, keepdim);
+        return tenzor::div(numer, count);
     });
     // Aminmax: native HIP dual min/max reduction (returns 2 tensors)
     table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {

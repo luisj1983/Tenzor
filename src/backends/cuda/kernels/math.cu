@@ -8439,6 +8439,12 @@ Tensor log_sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
 }
 
 // Bitwise ops
+__global__ void bitwise_and_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
+}
+__global__ void bitwise_and_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
+}
 __global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
 }
@@ -8451,7 +8457,11 @@ auto bitwise_and_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -
     Tensor result(shape, a.dtype(), a.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) {
+    if (a.dtype() == DType::Int8) {
+        bitwise_and_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+    } else if (a.dtype() == DType::Int16) {
+        bitwise_and_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
         bitwise_and_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
     } else if (a.dtype() == DType::Int64) {
         bitwise_and_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
@@ -8464,6 +8474,12 @@ Tensor bitwise_and_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
     return bitwise_and_kernel(inputs[0], inputs[1], stream);
 }
 
+__global__ void bitwise_or_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
+}
+__global__ void bitwise_or_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
+}
 __global__ void bitwise_or_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
 }
@@ -8476,7 +8492,9 @@ auto bitwise_or_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) ->
     Tensor result(shape, a.dtype(), a.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) { bitwise_or_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    if (a.dtype() == DType::Int8) { bitwise_or_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n); }
+    else if (a.dtype() == DType::Int16) { bitwise_or_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (a.dtype() == DType::Int32) { bitwise_or_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
     else if (a.dtype() == DType::Int64) { bitwise_or_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_or: unsupported dtype"); }
     CUDA_CHECK(cudaGetLastError());
@@ -8487,6 +8505,12 @@ Tensor bitwise_or_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
     return bitwise_or_kernel(inputs[0], inputs[1], stream);
 }
 
+__global__ void bitwise_xor_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
+}
+__global__ void bitwise_xor_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
+}
 __global__ void bitwise_xor_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
 }
@@ -8499,7 +8523,9 @@ auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -
     Tensor result(shape, a.dtype(), a.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) { bitwise_xor_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    if (a.dtype() == DType::Int8) { bitwise_xor_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n); }
+    else if (a.dtype() == DType::Int16) { bitwise_xor_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (a.dtype() == DType::Int32) { bitwise_xor_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
     else if (a.dtype() == DType::Int64) { bitwise_xor_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_xor: unsupported dtype"); }
     CUDA_CHECK(cudaGetLastError());
@@ -8510,6 +8536,12 @@ Tensor bitwise_xor_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
     return bitwise_xor_kernel(inputs[0], inputs[1], stream);
 }
 
+__global__ void bitwise_not_i8(const int8_t* in, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; }
+}
+__global__ void bitwise_not_i16(const int16_t* in, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; }
+}
 __global__ void bitwise_not_i32(const int32_t* in, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; }
 }
@@ -8522,7 +8554,9 @@ auto bitwise_not_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { bitwise_not_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8) { bitwise_not_i8<<<grid, block, 0, stream>>>(input.data<int8_t>(), result.data<int8_t>(), n); }
+    else if (input.dtype() == DType::Int16) { bitwise_not_i16<<<grid, block, 0, stream>>>(input.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { bitwise_not_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { bitwise_not_i64<<<grid, block, 0, stream>>>(input.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_not: unsupported dtype"); }
     CUDA_CHECK(cudaGetLastError());
@@ -8533,6 +8567,12 @@ Tensor bitwise_not_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
     return bitwise_not_kernel(inputs[0], stream);
 }
 
+__global__ void bitwise_lshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
+}
+__global__ void bitwise_lshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
+}
 __global__ void bitwise_lshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
 }
@@ -8545,7 +8585,9 @@ auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, cudaStr
     Tensor result(shape, input.dtype(), input.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { bitwise_lshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8) { bitwise_lshift_i8<<<grid, block, 0, stream>>>(input.data<int8_t>(), shift.data<int8_t>(), result.data<int8_t>(), n); }
+    else if (input.dtype() == DType::Int16) { bitwise_lshift_i16<<<grid, block, 0, stream>>>(input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { bitwise_lshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { bitwise_lshift_i64<<<grid, block, 0, stream>>>(input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_left_shift: unsupported dtype"); }
     CUDA_CHECK(cudaGetLastError());
@@ -8556,6 +8598,12 @@ Tensor bitwise_left_shift_dispatch(std::span<const Tensor> inputs, const OpAttri
     return bitwise_left_shift_kernel(inputs[0], inputs[1], stream);
 }
 
+__global__ void bitwise_rshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
+}
+__global__ void bitwise_rshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
+}
 __global__ void bitwise_rshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
 }
@@ -8568,7 +8616,9 @@ auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, cudaSt
     Tensor result(shape, input.dtype(), input.device());
     if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { bitwise_rshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8) { bitwise_rshift_i8<<<grid, block, 0, stream>>>(input.data<int8_t>(), shift.data<int8_t>(), result.data<int8_t>(), n); }
+    else if (input.dtype() == DType::Int16) { bitwise_rshift_i16<<<grid, block, 0, stream>>>(input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { bitwise_rshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { bitwise_rshift_i64<<<grid, block, 0, stream>>>(input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_right_shift: unsupported dtype"); }
     CUDA_CHECK(cudaGetLastError());

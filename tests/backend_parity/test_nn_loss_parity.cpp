@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/loss/contrastive.hpp>  // InfoNCELoss / NTXentLoss / TripletLoss
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
@@ -277,6 +278,100 @@ TEST_P(NNLossParity, KLDivLoss_GradientParity) {
             return loss.forward(log_probs, in[1]);
         },
         {pred, target}, {}, 1e-4f, 1e-5f, 1e-3f, 1e-4f, {}, "KLDivLoss_Grad");
+}
+
+// ============================================================================
+// Audit-driven additions (2026-05-02 E): six losses with zero parity coverage
+// ============================================================================
+
+TEST_P(NNLossParity, GaussianNLLLoss) {
+    auto pred   = randn({4, 8}, DType::Float32, Device::cpu());
+    auto target = randn({4, 8}, DType::Float32, Device::cpu());
+    // Variance must be strictly positive — sigmoid * 2 + 0.1 keeps it in
+    // (0.1, 2.1) which avoids log(near-zero) instability.
+    auto var    = sigmoid(randn({4, 8}, DType::Float32, Device::cpu())) * 2.0f + 0.1f;
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        nn::GaussianNLLLoss loss;
+        return loss.forward(Variable(in[0], false),
+                            Variable(in[1], false),
+                            Variable(in[2], false)).tensor();
+    }, std::vector<Tensor>{pred, target, var}, device, 1e-4f, 1e-5f, "GaussianNLLLoss");
+}
+
+TEST_P(NNLossParity, MultiLabelMarginLoss) {
+    // 4 samples × 5 classes; target is multi-label with -1 padding so
+    // every sample has a different number of positive labels (but at
+    // least one each). Layout per row: [c0, c1, ..., -1, -1].
+    auto input = randn({4, 5}, DType::Float32, Device::cpu());
+    Tensor target = full({4, 5}, 0.0, DType::Int64, Device::cpu());
+    int64_t* tp = target.data<int64_t>();
+    int64_t pattern[4][5] = {{0, 2, -1, -1, -1},
+                             {1, -1, -1, -1, -1},
+                             {3, 4, -1, -1, -1},
+                             {0, 1, 2, -1, -1}};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 5; ++j) tp[i*5+j] = pattern[i][j];
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        nn::MultiLabelMarginLoss loss;
+        return loss.forward(Variable(in[0], false), in[1]).tensor();
+    }, std::vector<Tensor>{input, target}, device, 1e-4f, 1e-5f, "MultiLabelMarginLoss");
+}
+
+TEST_P(NNLossParity, TripletMarginWithDistanceLoss) {
+    auto anchor   = randn({4, 16}, DType::Float32, Device::cpu());
+    auto positive = randn({4, 16}, DType::Float32, Device::cpu());
+    auto negative = randn({4, 16}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        // L2 distance in feature space (sqrt(sum((a-b)^2, dim=-1))).
+        auto distance = [](const Variable& a, const Variable& b) {
+            auto d = a + (b * -1.0f);
+            return sum(d * d, /*dim=*/-1);
+        };
+        nn::TripletMarginWithDistanceLoss loss(distance, /*margin=*/1.0);
+        return loss.forward(Variable(in[0], false),
+                            Variable(in[1], false),
+                            Variable(in[2], false)).tensor();
+    }, std::vector<Tensor>{anchor, positive, negative}, device,
+       1e-4f, 1e-5f, "TripletMarginWithDistanceLoss");
+}
+
+TEST_P(NNLossParity, InfoNCELoss) {
+    auto queries = randn({4, 32}, DType::Float32, Device::cpu());
+    auto keys    = randn({4, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        nn::InfoNCELoss loss(/*temperature=*/0.07);
+        return loss.forward(Variable(in[0], false),
+                            Variable(in[1], false)).tensor();
+    }, std::vector<Tensor>{queries, keys}, device, 1e-4f, 1e-5f, "InfoNCELoss");
+}
+
+TEST_P(NNLossParity, NTXentLoss) {
+    auto z_i = randn({4, 32}, DType::Float32, Device::cpu());
+    auto z_j = randn({4, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        nn::NTXentLoss loss(/*temperature=*/0.5);
+        return loss.forward(Variable(in[0], false),
+                            Variable(in[1], false)).tensor();
+    }, std::vector<Tensor>{z_i, z_j}, device, 1e-4f, 1e-5f, "NTXentLoss");
+}
+
+TEST_P(NNLossParity, TripletLoss_Contrastive) {
+    auto anchor   = randn({4, 16}, DType::Float32, Device::cpu());
+    auto positive = randn({4, 16}, DType::Float32, Device::cpu());
+    auto negative = randn({4, 16}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& in) {
+        nn::TripletLoss loss(/*margin=*/1.0, /*p=*/2.0);
+        return loss.forward(Variable(in[0], false),
+                            Variable(in[1], false),
+                            Variable(in[2], false)).tensor();
+    }, std::vector<Tensor>{anchor, positive, negative}, device,
+       1e-4f, 1e-5f, "TripletLoss_Contrastive");
 }
 
 INSTANTIATE_BACKEND_TESTS(NNLossParity);

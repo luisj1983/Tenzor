@@ -1,0 +1,1272 @@
+{
+  "tests": 210,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiBackendDType\/AutogradAdditionalMultiDTypeTest",
+      "tests": 210,
+      "testsuite": [
+        {
+          "name": "VariableDefaultConstructor\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableDefaultConstructor\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 35
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableConstructorWithoutGrad\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 42
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableSetRequiresGrad\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 52
+        },
+        {
+          "name": "VariableGradAccumulation\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableGradAccumulation\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "VariableRetainGrad\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableRetainGrad\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 80
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableDetachRemovesGradFn\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 95
+        },
+        {
+          "name": "VariableZeroGrad\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "VariableZeroGrad\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "BackwardWithGradientTensor\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "MultipleBackwardWithRetainGraph\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 138
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ComplexMultiInputGraph\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "ExpBackwardCorrectGradients\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "LogBackwardCorrectGradients\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 210
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "NegBackwardCorrectGradients\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        },
+        {
+          "name": "RegisterHookModifiesGradient\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_autograd_additional_multidtype.cpp",
+          "line": 244
+        }
+      ]
+    }
+  ]
+}

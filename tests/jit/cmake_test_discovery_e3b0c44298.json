@@ -1,0 +1,62 @@
+{
+  "tests": 10,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "JITBackendParity",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "LinearChain",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 35
+        },
+        {
+          "name": "Conv2dBNReLU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 75
+        },
+        {
+          "name": "AttentionBlock",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 120
+        },
+        {
+          "name": "ResNetBottleneck",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 163
+        },
+        {
+          "name": "LSTMSequence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 226
+        },
+        {
+          "name": "SoftmaxCrossEntropy",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 278
+        },
+        {
+          "name": "LayerNormMLP",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 314
+        },
+        {
+          "name": "EmbeddingLookup",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 362
+        },
+        {
+          "name": "MultiHeadAttentionBlock",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 412
+        },
+        {
+          "name": "ConvPool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/jit\/test_jit_backend_parity.cpp",
+          "line": 464
+        }
+      ]
+    }
+  ]
+}

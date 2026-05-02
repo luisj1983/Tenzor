@@ -6412,73 +6412,97 @@ auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, doubl
 }
 
 // Bitwise ops
+__global__ void bitwise_and_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
+__global__ void bitwise_and_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
 __global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
 __global__ void bitwise_and_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
 auto bitwise_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_and_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_and_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_and_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_and_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_and_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_and_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_and: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+__global__ void bitwise_or_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
+__global__ void bitwise_or_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
 __global__ void bitwise_or_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
 __global__ void bitwise_or_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
 auto bitwise_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_or_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_or_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_or_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_or_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_or_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_or_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_or: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+__global__ void bitwise_xor_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
+__global__ void bitwise_xor_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
 __global__ void bitwise_xor_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
 __global__ void bitwise_xor_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
 auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_xor_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_xor_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_xor_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_xor_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_xor_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_xor_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_xor: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+__global__ void bitwise_not_i8(const int8_t* in, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
+__global__ void bitwise_not_i16(const int16_t* in, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
 __global__ void bitwise_not_i32(const int32_t* in, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
 __global__ void bitwise_not_i64(const int64_t* in, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
 auto bitwise_not_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_not_i32, grid, block, 0, stream, input.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8)       { hipLaunchKernelGGL(bitwise_not_i8,  grid, block, 0, stream, input.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (input.dtype() == DType::Int16) { hipLaunchKernelGGL(bitwise_not_i16, grid, block, 0, stream, input.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_not_i32, grid, block, 0, stream, input.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_not_i64, grid, block, 0, stream, input.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_not: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+__global__ void bitwise_lshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
+__global__ void bitwise_lshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
 __global__ void bitwise_lshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
 __global__ void bitwise_lshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
 auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
     int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_lshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8)       { hipLaunchKernelGGL(bitwise_lshift_i8,  grid, block, 0, stream, input.data<int8_t>(),  shift.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (input.dtype() == DType::Int16) { hipLaunchKernelGGL(bitwise_lshift_i16, grid, block, 0, stream, input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_lshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_lshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_left_shift: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+__global__ void bitwise_rshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
+__global__ void bitwise_rshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
 __global__ void bitwise_rshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
 __global__ void bitwise_rshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
 auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
     int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_rshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    if (input.dtype() == DType::Int8)       { hipLaunchKernelGGL(bitwise_rshift_i8,  grid, block, 0, stream, input.data<int8_t>(),  shift.data<int8_t>(),  result.data<int8_t>(),  n); }
+    else if (input.dtype() == DType::Int16) { hipLaunchKernelGGL(bitwise_rshift_i16, grid, block, 0, stream, input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
+    else if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_rshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
     else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_rshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
     else { throw std::runtime_error("bitwise_right_shift: unsupported dtype"); }
     HIP_CHECK(hipGetLastError()); return result;

@@ -1,0 +1,552 @@
+{
+  "tests": 90,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiBackendDType\/DDPUnusedParamsMultiDTypeTest",
+      "tests": 90,
+      "testsuite": [
+        {
+          "name": "ClassExists\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "ClassExists\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "GradBucketConstruction\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketConstruction\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 56
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradBucketFieldAssignment\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 68
+        },
+        {
+          "name": "GradientBufferSimulation\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "GradientBufferSimulation\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "ParameterInitSimulation\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "ParameterInitSimulation\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleBucketsIndependent\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ddp_unused_params_multidtype.cpp",
+          "line": 106
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+    "_comment": [
+        "Performance baseline for tests/backend_parity/test_performance_regression.cpp.",
+        "Format: { '<op>_<size>': { '<backend>:<index>': { 'median_ms': X, 'p99_ms': Y } } }.",
+        "Values are populated by `tools/regen_perf_baseline.py` after a known-good run.",
+        "Until a real baseline is recorded the regression check will SKIP rather than fail \u2014",
+        "see test_performance_regression.cpp::BaselineRegression_MatMul.",
+        "",
+        "Tolerance (env-tunable):",
+        "  TENZOR_PERF_REGRESSION_RTOL \u2014 multiplicative tolerance on median (default: 1.25).",
+        "  TENZOR_PERF_REGRESSION_P99_RTOL \u2014 multiplicative tolerance on p99 (default: 1.50).",
+        "",
+        "Hardware identity is captured in the 'host' field below; running the regression",
+        "check on a different host will SKIP rather than fail (different hardware \u21d2 different",
+        "baseline expectations)."
+    ],
+    "host": "leeslappy",
+    "tenzor_version": "unknown",
+    "captured_at_iso8601": "2026-05-02T12:45:33.698064Z",
+    "ops": {
+        "MatMul_512x512": {
+            "cpu": {
+                "median_ms": 0.448,
+                "p99_ms": 0.477
+            },
+            "cuda:0": {
+                "median_ms": 0.024,
+                "p99_ms": 0.029
+            },
+            "oneapi:0": {
+                "median_ms": 1.439,
+                "p99_ms": 2.878
+            },
+            "vulkan:0": {
+                "median_ms": 0.215,
+                "p99_ms": 0.228
+            },
+            "rocm:0": {
+                "median_ms": 0.356,
+                "p99_ms": 0.4
+            }
+        }
+    }
+}

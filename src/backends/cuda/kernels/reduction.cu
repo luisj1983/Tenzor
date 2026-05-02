@@ -5736,10 +5736,15 @@ __global__ void cosine_similarity_along_dim_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    // Compute multi-dimensional indices for output position
+    // Compute multi-dimensional indices for the row-major output position.
+    // The earlier loop peeled dims left-to-right which corresponds to
+    // column-major storage; output is row-major so the lowest digit is the
+    // LAST dim. Walking d from ndim-1 down to 0 with `tmp /= shape[d]`
+    // gives the right (i_0, i_1, ...) tuple. Caught by
+    // tests/backend_parity/test_stable_math_parity (CosineSimilarity_LastDim).
     int64_t indices[8];
     int64_t tmp = out_idx;
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; d--) {
         if (d == dim) {
             indices[d] = 0;
             continue;

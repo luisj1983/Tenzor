@@ -540,6 +540,39 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
         return static_cast<float>(max_diff);
     }
 
+    if (a_cpu.dtype() == DType::Int16) {
+        const int16_t* a_data = a_cpu.data<int16_t>();
+        const int16_t* b_data = b_cpu.data<int16_t>();
+        int32_t max_diff = 0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff,
+                                std::abs(static_cast<int32_t>(a_data[i]) - static_cast<int32_t>(b_data[i])));
+        }
+        return static_cast<float>(max_diff);
+    }
+
+    if (a_cpu.dtype() == DType::Int8) {
+        const int8_t* a_data = a_cpu.data<int8_t>();
+        const int8_t* b_data = b_cpu.data<int8_t>();
+        int32_t max_diff = 0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff,
+                                std::abs(static_cast<int32_t>(a_data[i]) - static_cast<int32_t>(b_data[i])));
+        }
+        return static_cast<float>(max_diff);
+    }
+
+    if (a_cpu.dtype() == DType::UInt8 || a_cpu.dtype() == DType::Bool) {
+        const uint8_t* a_data = a_cpu.data<uint8_t>();
+        const uint8_t* b_data = b_cpu.data<uint8_t>();
+        int32_t max_diff = 0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff,
+                                std::abs(static_cast<int32_t>(a_data[i]) - static_cast<int32_t>(b_data[i])));
+        }
+        return static_cast<float>(max_diff);
+    }
+
     if (a_cpu.dtype() == DType::Complex64 || a_cpu.dtype() == DType::Complex128) {
         // Treat the storage as interleaved (real, imag) pairs of
         // the underlying real component type and take the max abs

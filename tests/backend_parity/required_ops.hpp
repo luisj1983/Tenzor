@@ -200,6 +200,107 @@ inline std::vector<OpId> get_required_ops() {
 
         // Histogram family (test_histogramdd_multidtype + test_histogram)
         OpId::Histogram, OpId::Histogramdd,
+
+        // ====================================================================
+        // Audit-driven floor expansion (Phase 3 of test-coverage plan)
+        //
+        // After the 2026-05-02 audit confirmed every backend (CPU/CUDA/ROCm/
+        // Vulkan/OneAPI) registers all 462 valid OpIds (RegistrationReport
+        // shows 100% coverage on each), we promote every previously-skipped
+        // family to the enforced floor. This means a backend cannot silently
+        // drop one of these kernels without test_kernel_completeness failing.
+        //
+        // Excludes only:
+        //  - MPS (out of scope per the audit plan)
+        //  - Specialized fused ops (FusedConv2d* variants), which are perf
+        //    optimizations rather than a correctness floor
+        // ====================================================================
+
+        // Linalg (420-427, 510-518, 600-607) — full coverage now confirmed
+        OpId::LinalgDet, OpId::LinalgInv, OpId::LinalgSolve,
+        OpId::LinalgSVD, OpId::LinalgQR, OpId::LinalgEigh, OpId::LinalgEig,
+        OpId::LinalgCholesky,
+        OpId::LinalgLU, OpId::LinalgLUSolve, OpId::LinalgHouseholder,
+        OpId::LinalgLDLFactor, OpId::LinalgLDLSolve,
+        OpId::LinalgVectorNorm, OpId::LinalgMatrixNorm,
+        OpId::LinalgVecdot, OpId::LinalgCholeskySolve,
+        OpId::DiagEmbed, OpId::Diagflat,
+        OpId::SolveTriangular, OpId::CholeskyInverse,
+        OpId::TensorInv, OpId::TensorSolve,
+        OpId::Ormqr, OpId::Geqrf,
+
+        // FFT family (400-407)
+        OpId::FFT, OpId::IFFT, OpId::RFFT, OpId::IRFFT,
+        OpId::FFT2, OpId::IFFT2, OpId::FFTN, OpId::IFFTN,
+
+        // Sparse family (460-469)
+        OpId::SparseSpMM, OpId::SparseSpMV,
+        OpId::SparseToDense, OpId::DenseToSparse,
+        OpId::SparseAdd, OpId::SparseSpGEMM,
+        OpId::SparseTrsv, OpId::SparseTrsm,
+        OpId::SparseSoftmax, OpId::SparseLogSoftmax,
+
+        // Index family (132-133, 411-416, 610-611)
+        OpId::AdvancedIndex, OpId::AdvancedIndexPut,
+        OpId::IndexAdd, OpId::IndexCopy, OpId::IndexFill,
+        OpId::SelectScatter, OpId::SliceScatter, OpId::DiagonalScatter,
+        OpId::TakeAlongDim, OpId::MaskedScatter,
+
+        // Cumulative / scan (292-293, 544, 560, 580-581)
+        OpId::CumSum, OpId::CumProd,
+        OpId::Logcumsumexp,
+        OpId::CumMax, OpId::CumMin,
+        OpId::CumulativeTrapezoid,
+
+        // Bitwise (520-525)
+        OpId::BitwiseAnd, OpId::BitwiseOr, OpId::BitwiseXor,
+        OpId::BitwiseNot, OpId::BitwiseLeftShift, OpId::BitwiseRightShift,
+
+        // Special math (490-504, 565, 685-688)
+        OpId::Gamma, OpId::Lgamma, OpId::Digamma, OpId::Polygamma,
+        OpId::Beta, OpId::BetaInc,
+        OpId::BesselJ0, OpId::BesselJ1, OpId::BesselY0, OpId::BesselY1,
+        OpId::BesselI0, OpId::BesselI1,
+        OpId::ErfInv, OpId::Sinc, OpId::Zeta,
+        OpId::Multigammaln,
+        OpId::I0e, OpId::I1e, OpId::Entr, OpId::SphericalBesselJ0,
+
+        // Forward+backward pairs for newer attentions (295-296, 693-694, 675-676)
+        OpId::FlashAttention, OpId::FlashAttentionBackward,
+        OpId::FlexAttention, OpId::FlexAttentionBackward,
+        OpId::NestedAttention, OpId::NestedAttentionBackward,
+
+        // EmbeddingBag forward + backward (435-436)
+        OpId::EmbeddingBagForward, OpId::EmbeddingBagBackward,
+
+        // DeformableConv2d full set (184-187)
+        OpId::DeformableConv2dForward,
+        OpId::DeformableConv2dBackwardInput,
+        OpId::DeformableConv2dBackwardWeight,
+        OpId::DeformableConv2dBackwardBias,
+
+        // Inplace ops (7-10, 89-93)
+        OpId::AddInplace, OpId::SubInplace, OpId::MulInplace, OpId::DivInplace,
+        OpId::ReLUInplace, OpId::SigmoidInplace, OpId::TanhInplace,
+        OpId::LeakyReLUInplace, OpId::GeluInplace,
+
+        // Signal processing tail (474-476)
+        OpId::IDCT, OpId::MelScale, OpId::MFCC,
+
+        // Phase-5 PyTorch-parity math
+        OpId::Deg2Rad, OpId::Rad2Deg, OpId::Logit, OpId::Signbit,
+        OpId::FloatPower, OpId::Xlog1py, OpId::Ldexp,
+        OpId::IsReal, OpId::IsPosInf, OpId::IsNegInf, OpId::Frexp,
+
+        // Numerically stable math (680-684)
+        OpId::LogAddExp, OpId::LogAddExp2,
+        OpId::XLogY, OpId::CosineSimilarity, OpId::Renorm,
+
+        // NaN-aware statistics + quantiles + Cov/Corrcoef
+        OpId::NanVar, OpId::NanStd, OpId::Nanmedian,
+        OpId::Quantile, OpId::Nanquantile,
+        OpId::Histc, OpId::Kthvalue, OpId::UniqueConsecutive,
+        OpId::Cov, OpId::Corrcoef,
     };
 }
 

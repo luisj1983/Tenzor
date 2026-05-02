@@ -6047,6 +6047,14 @@ auto bitwise_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
             break;
         }
+        case DType::Int16: {
+            const int16_t* a_d = a.data<int16_t>();
+            const int16_t* b_d = b.data<int16_t>();
+            int16_t* o_d = output.data<int16_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
+            break;
+        }
         case DType::Bool: {
             const bool* a_d = a.data<bool>();
             const bool* b_d = b.data<bool>();
@@ -6079,6 +6087,10 @@ auto bitwise_or_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int8_t* a_d = a.data<int8_t>(); const int8_t* b_d = b.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
         }
+        case DType::Int16: {
+            const int16_t* a_d = a.data<int16_t>(); const int16_t* b_d = b.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
+            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
+        }
         case DType::Bool: {
             const bool* a_d = a.data<bool>(); const bool* b_d = b.data<bool>(); bool* o_d = output.data<bool>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] || b_d[i]; break;
@@ -6104,6 +6116,10 @@ auto bitwise_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
         case DType::Int8: {
             const int8_t* a_d = a.data<int8_t>(); const int8_t* b_d = b.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
+            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
+        }
+        case DType::Int16: {
+            const int16_t* a_d = a.data<int16_t>(); const int16_t* b_d = b.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
         }
         case DType::Bool: {
@@ -6133,6 +6149,10 @@ auto bitwise_not_kernel(const Tensor& input) -> Tensor {
             const int8_t* i_d = input.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = ~i_d[i]; break;
         }
+        case DType::Int16: {
+            const int16_t* i_d = input.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
+            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = ~i_d[i]; break;
+        }
         case DType::Bool: {
             const bool* i_d = input.data<bool>(); bool* o_d = output.data<bool>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = !i_d[i]; break;
@@ -6160,6 +6180,10 @@ auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift) -> Tens
             const int8_t* i_d = input.data<int8_t>(); const int8_t* s_d = shift.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
         }
+        case DType::Int16: {
+            const int16_t* i_d = input.data<int16_t>(); const int16_t* s_d = shift.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
+            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
+        }
         default: throw std::runtime_error("bitwise_left_shift: unsupported dtype (expected integer)");
     }
     return output;
@@ -6181,6 +6205,10 @@ auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift) -> Ten
         }
         case DType::Int8: {
             const int8_t* i_d = input.data<int8_t>(); const int8_t* s_d = shift.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
+            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
+        }
+        case DType::Int16: {
+            const int16_t* i_d = input.data<int16_t>(); const int16_t* s_d = shift.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
             _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
         }
         default: throw std::runtime_error("bitwise_right_shift: unsupported dtype (expected integer)");

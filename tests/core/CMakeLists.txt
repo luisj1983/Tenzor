@@ -85,7 +85,12 @@ tenzor_add_test(NAME test_dimname SOURCE test_dimname.cpp LABELS core)
 tenzor_add_test(NAME test_sparse_bsr SOURCE test_sparse_bsr.cpp LABELS core)
 tenzor_add_test(NAME test_quantized_dtype SOURCE test_quantized_dtype.cpp LABELS core)
 tenzor_add_test(NAME test_view_tracking SOURCE test_view_tracking.cpp LABELS core)
-tenzor_add_test(NAME test_dtype_promotion SOURCE test_dtype_promotion.cpp LABELS core)
+# Smoke-tagged: bypass tenzor_add_test() (which strips the \; escape
+# through cmake_parse_arguments) and call tenzor_discover_tests directly
+# with the escaped LABELS form so both labels reach set_tests_properties.
+add_executable(test_dtype_promotion test_dtype_promotion.cpp)
+target_link_libraries(test_dtype_promotion PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dtype_promotion DISCOVERY_TIMEOUT 60 LABELS "core\;smoke")
 tenzor_add_test(NAME test_alias_detection SOURCE test_alias_detection.cpp LABELS core)
 tenzor_add_test(NAME test_from_blob_overflow SOURCE test_from_blob_overflow.cpp LABELS core)
 tenzor_add_test(NAME test_dtype_capability_queries SOURCE test_dtype_capability_queries.cpp LABELS core)

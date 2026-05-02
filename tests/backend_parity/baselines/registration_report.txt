@@ -1,31 +1,35 @@
 Running main() from /usr/src/debug/gtest/googletest-1.17.0/googletest/src/gtest_main.cc
-Initializing Tenzor library v1.0.0
-Loading CPU backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cpu.so"
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from RegistrationReport
+[ RUN      ] RegistrationReport.CoverageMatrix
+Initializing Tenzor library v0.1.0
+Loading CPU backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cpu.so"
 CPU backend registered: cpu
 [dispatch_table] WARNING: OpId 156 already registered in a different kernel array
-CPU dispatch table initialized (467 operations registered)
-Loading CUDA backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cuda.so"
+CPU dispatch table initialized (469 operations registered)
+Loading CUDA backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cuda.so"
 CUDA backend registered: cuda
 Found 1 CUDA device(s)
-CUDA dispatch table initialized (467 operations registered)
-Loading ROCm backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_rocm.so"
+CUDA dispatch table initialized (469 operations registered)
+Loading ROCm backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_rocm.so"
 ROCm backend registered: rocm
 Found 1 ROCm device(s)
 ROCm dispatch table initialized with O(1) lookup
-ROCm dispatch table initialized (416 operations registered)
-Loading OneAPI backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_oneapi.so"
+ROCm dispatch table initialized (469 operations registered)
+Loading OneAPI backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_oneapi.so"
 OneAPI backend registered: oneapi
 Found 1 OneAPI device(s)
 [dispatch_table] WARNING: overwriting kernel for OpId 518
-OneAPI dispatch table initialized (422 operations registered)
-Loading Vulkan backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_vulkan.so"
+OneAPI dispatch table initialized (469 operations registered)
+Loading Vulkan backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_vulkan.so"
 Found dedicated GPU: NVIDIA GeForce RTX 5070 Laptop GPU
 Found integrated GPU: AMD Radeon 890M Graphics (RADV STRIX1)
 Default Vulkan device (index 0): Dedicated GPU
 Vulkan backend registered: vulkan
 Found 2 Vulkan device(s)
 Vulkan dispatch table initialized with O(1) lookup
-Vulkan dispatch table initialized (467 operations registered)
+Vulkan dispatch table initialized (469 operations registered)
 Tenzor initialization complete
 
 ========================================================================
@@ -39,12 +43,12 @@ sub                               1     yes     yes     yes     yes     yes
 mul                               2     yes     yes     yes     yes     yes
 div                               3     yes     yes     yes     yes     yes
 matmul                            4     yes     yes     yes     yes     yes
-bmm                               5     yes     yes       -     yes     yes
-dot                               6     yes     yes       -     yes     yes
-add_inplace                       7     yes     yes       -     yes       -
-sub_inplace                       8     yes     yes       -     yes       -
-mul_inplace                       9     yes     yes       -     yes       -
-div_inplace                      10     yes     yes       -     yes       -
+bmm                               5     yes     yes     yes     yes     yes
+dot                               6     yes     yes     yes     yes     yes
+add_inplace                       7     yes     yes     yes     yes     yes
+sub_inplace                       8     yes     yes     yes     yes     yes
+mul_inplace                       9     yes     yes     yes     yes     yes
+div_inplace                      10     yes     yes     yes     yes     yes
 sum                              11     yes     yes     yes     yes     yes
 mean                             12     yes     yes     yes     yes     yes
 max                              13     yes     yes     yes     yes     yes
@@ -55,21 +59,21 @@ prod                             17     yes     yes     yes     yes     yes
 var                              18     yes     yes     yes     yes     yes
 std                              19     yes     yes     yes     yes     yes
 norm                             20     yes     yes     yes     yes     yes
-argsort                          21     yes     yes       -     yes     yes
+argsort                          21     yes     yes     yes     yes     yes
 any                              22     yes     yes     yes     yes     yes
 all                              23     yes     yes     yes     yes     yes
 median                           24     yes     yes     yes     yes     yes
 mode                             25     yes     yes     yes     yes     yes
-count_nonzero                    26     yes     yes       -     yes     yes
+count_nonzero                    26     yes     yes     yes     yes     yes
 nansum                           27     yes     yes     yes     yes     yes
 nanmean                          28     yes     yes     yes     yes     yes
 aminmax                          29     yes     yes     yes     yes     yes
 sqrt                             30     yes     yes     yes     yes     yes
 neg                              31     yes     yes     yes     yes     yes
 abs                              32     yes     yes     yes     yes     yes
-sign                             33     yes     yes       -     yes     yes
-log                              34     yes     yes       -     yes     yes
-exp                              35     yes     yes       -     yes     yes
+sign                             33     yes     yes     yes     yes     yes
+log                              34     yes     yes     yes     yes     yes
+exp                              35     yes     yes     yes     yes     yes
 pow                              36     yes     yes     yes     yes     yes
 clamp                            37     yes     yes     yes     yes     yes
 clamp_min                        38     yes     yes     yes     yes     yes
@@ -79,9 +83,9 @@ floor                            41     yes     yes     yes     yes     yes
 ceil                             42     yes     yes     yes     yes     yes
 round                            43     yes     yes     yes     yes     yes
 trunc                            44     yes     yes     yes     yes     yes
-frac                             45     yes     yes     yes     yes       -
-heaviside                        46     yes     yes     yes     yes       -
-nan_to_num                       47     yes     yes     yes     yes       -
+frac                             45     yes     yes     yes     yes     yes
+heaviside                        46     yes     yes     yes     yes     yes
+nan_to_num                       47     yes     yes     yes     yes     yes
 rsqrt                            48     yes     yes     yes     yes     yes
 square                           49     yes     yes     yes     yes     yes
 sin                              50     yes     yes     yes     yes     yes
@@ -93,14 +97,14 @@ atan                             55     yes     yes     yes     yes     yes
 sinh                             56     yes     yes     yes     yes     yes
 cosh                             57     yes     yes     yes     yes     yes
 tanh                             58     yes     yes     yes     yes     yes
-asinh                            59     yes     yes       -     yes     yes
-acosh                            60     yes     yes       -     yes     yes
-atanh                            61     yes     yes       -     yes     yes
+asinh                            59     yes     yes     yes     yes     yes
+acosh                            60     yes     yes     yes     yes     yes
+atanh                            61     yes     yes     yes     yes     yes
 relu                             65     yes     yes     yes     yes     yes
 relu_backward                    66     yes     yes     yes     yes     yes
 sigmoid                          67     yes     yes     yes     yes     yes
 sigmoid_backward                 68     yes     yes     yes     yes     yes
-tanh_activation                  69     yes     yes     yes     yes       -
+tanh_activation                  69     yes     yes     yes     yes     yes
 tanh_backward                    70     yes     yes     yes     yes     yes
 gelu                             71     yes     yes     yes     yes     yes
 gelu_backward                    72     yes     yes     yes     yes     yes
@@ -113,58 +117,58 @@ elu_backward                     78     yes     yes     yes     yes     yes
 selu                             79     yes     yes     yes     yes     yes
 selu_backward                    80     yes     yes     yes     yes     yes
 mish                             81     yes     yes     yes     yes     yes
-mish_backward                    82     yes     yes     yes     yes       -
+mish_backward                    82     yes     yes     yes     yes     yes
 softplus                         83     yes     yes     yes     yes     yes
 softplus_backward                84     yes     yes     yes     yes     yes
 softmax                          85     yes     yes     yes     yes     yes
 softmax_backward                 86     yes     yes     yes     yes     yes
 log_softmax                      87     yes     yes     yes     yes     yes
-log_softmax_backward             88     yes     yes       -     yes     yes
-relu_inplace                     89     yes     yes       -     yes       -
-sigmoid_inplace                  90     yes     yes       -     yes       -
+log_softmax_backward             88     yes     yes     yes     yes     yes
+relu_inplace                     89     yes     yes     yes     yes     yes
+sigmoid_inplace                  90     yes     yes     yes     yes     yes
 tanh_inplace                     91     yes     yes     yes     yes     yes
-leaky_relu_inplace               92     yes     yes     yes     yes       -
-gelu_inplace                     93     yes     yes     yes     yes       -
-log_sigmoid                      94     yes     yes     yes     yes       -
-log_sigmoid_backward             95     yes     yes       -     yes     yes
-rrelu                            96     yes     yes       -     yes     yes
+leaky_relu_inplace               92     yes     yes     yes     yes     yes
+gelu_inplace                     93     yes     yes     yes     yes     yes
+log_sigmoid                      94     yes     yes     yes     yes     yes
+log_sigmoid_backward             95     yes     yes     yes     yes     yes
+rrelu                            96     yes     yes     yes     yes     yes
 rrelu_backward                   97     yes     yes     yes     yes     yes
 reshape                         100     yes     yes     yes     yes     yes
 transpose                       101     yes     yes     yes     yes     yes
 permute                         102     yes     yes     yes     yes     yes
 squeeze                         103     yes     yes     yes     yes     yes
 unsqueeze                       104     yes     yes     yes     yes     yes
-flatten                         105     yes     yes     yes     yes       -
+flatten                         105     yes     yes     yes     yes     yes
 contiguous                      106     yes     yes     yes     yes     yes
 clone                           107     yes     yes     yes     yes     yes
 fill                            108     yes     yes     yes     yes     yes
 repeat                          109     yes     yes     yes     yes     yes
-tile                            110     yes     yes       -     yes       -
-expand                          111     yes     yes       -     yes     yes
+tile                            110     yes     yes     yes     yes     yes
+expand                          111     yes     yes     yes     yes     yes
 stack                           112     yes     yes     yes     yes     yes
 split                           113     yes     yes     yes     yes     yes
 chunk                           114     yes     yes     yes     yes     yes
-to_memory_format                115     yes     yes       -     yes     yes
+to_memory_format                115     yes     yes     yes     yes     yes
 index_select                    120     yes     yes     yes     yes     yes
 gather                          121     yes     yes     yes     yes     yes
 scatter                         122     yes     yes     yes     yes     yes
 masked_select                   123     yes     yes     yes     yes     yes
 masked_fill                     124     yes     yes     yes     yes     yes
 where                           125     yes     yes     yes     yes     yes
-slice                           126     yes     yes     yes     yes       -
+slice                           126     yes     yes     yes     yes     yes
 cat                             127     yes     yes     yes     yes     yes
-take                            128     yes     yes     yes     yes       -
+take                            128     yes     yes     yes     yes     yes
 put                             129     yes     yes     yes     yes     yes
 nonzero                         130     yes     yes     yes     yes     yes
-one_hot                         131     yes     yes       -     yes     yes
-advanced_index                  132     yes     yes       -     yes       -
-advanced_index_put              133     yes     yes       -     yes       -
+one_hot                         131     yes     yes     yes     yes     yes
+advanced_index                  132     yes     yes     yes     yes     yes
+advanced_index_put              133     yes     yes     yes     yes     yes
 eq                              140     yes     yes     yes     yes     yes
 ne                              141     yes     yes     yes     yes     yes
 lt                              142     yes     yes     yes     yes     yes
-le                              143     yes     yes       -     yes     yes
-gt                              144     yes     yes       -     yes     yes
-ge                              145     yes     yes       -     yes     yes
+le                              143     yes     yes     yes     yes     yes
+gt                              144     yes     yes     yes     yes     yes
+ge                              145     yes     yes     yes     yes     yes
 batchnorm2d_mean_var            150     yes     yes     yes     yes     yes
 batchnorm2d_forward             151     yes     yes     yes     yes     yes
 batchnorm2d_forward_affine      152     yes     yes     yes     yes     yes
@@ -179,13 +183,13 @@ instance_norm                   160     yes     yes     yes     yes     yes
 instance_norm_backward          161     yes     yes     yes     yes     yes
 rms_norm                        162     yes     yes     yes     yes     yes
 rms_norm_backward               163     yes     yes     yes     yes     yes
-conv2d_forward                  170     yes     yes       -     yes     yes
+conv2d_forward                  170     yes     yes     yes     yes     yes
 conv2d_backward_input           171     yes     yes     yes     yes     yes
 conv2d_backward_weight          172     yes     yes     yes     yes     yes
 conv2d_backward_bias            173     yes     yes     yes     yes     yes
-conv_transpose2d_forward        174     yes     yes       -     yes     yes
-depthwise_conv2d                175     yes     yes       -     yes     yes
-conv_transpose3d_forward        176     yes     yes       -     yes     yes
+conv_transpose2d_forward        174     yes     yes     yes     yes     yes
+depthwise_conv2d                175     yes     yes     yes     yes     yes
+conv_transpose3d_forward        176     yes     yes     yes     yes     yes
 conv_transpose3d_backward_input  177     yes     yes     yes     yes     yes
 conv_transpose3d_backward_weight  178     yes     yes     yes     yes     yes
 conv_transpose3d_backward_bias  179     yes     yes     yes     yes     yes
@@ -200,13 +204,13 @@ deformable_conv2d_backward_bias  187     yes     yes     yes     yes     yes
 maxpool2d_forward               190     yes     yes     yes     yes     yes
 maxpool2d_backward              191     yes     yes     yes     yes     yes
 avgpool2d_forward               192     yes     yes     yes     yes     yes
-avgpool2d_backward              193     yes     yes       -     yes     yes
+avgpool2d_backward              193     yes     yes     yes     yes     yes
 adaptive_avgpool2d              194     yes     yes     yes     yes     yes
-adaptive_avgpool2d_backward     195     yes     yes       -     yes     yes
+adaptive_avgpool2d_backward     195     yes     yes     yes     yes     yes
 adaptive_maxpool2d              196     yes     yes     yes     yes     yes
 adaptive_maxpool2d_backward     197     yes     yes     yes     yes     yes
-unfold                          200     yes     yes       -     yes       -
-fold                            201     yes     yes       -     yes       -
+unfold                          200     yes     yes     yes     yes     yes
+fold                            201     yes     yes     yes     yes     yes
 interpolate                     202     yes     yes     yes     yes     yes
 roi_align_forward               203     yes     yes     yes     yes     yes
 roi_align_backward              204     yes     yes     yes     yes     yes
@@ -214,13 +218,13 @@ box_iou                         205     yes     yes     yes     yes     yes
 gather_relative_position_bias   206     yes     yes     yes     yes     yes
 nms                             207     yes     yes     yes     yes     yes
 grid_sample                     208     yes     yes     yes     yes     yes
-affine_grid                     209     yes     yes     yes     yes       -
-fused_linear_relu               210     yes     yes       -     yes     yes
-fused_conv2d_relu               211     yes     yes     yes     yes       -
+affine_grid                     209     yes     yes     yes     yes     yes
+fused_linear_relu               210     yes     yes     yes     yes     yes
+fused_conv2d_relu               211     yes     yes     yes     yes     yes
 fused_batchnorm_relu            212     yes     yes     yes     yes     yes
 fused_softmax_cross_entropy     213     yes     yes     yes     yes     yes
-fused_add_relu                  214     yes     yes       -     yes     yes
-fused_gelu                      215     yes     yes       -     yes     yes
+fused_add_relu                  214     yes     yes     yes     yes     yes
+fused_gelu                      215     yes     yes     yes     yes     yes
 fused_layer_norm                216     yes     yes     yes     yes     yes
 fused_rms_norm                  217     yes     yes     yes     yes     yes
 fused_attention                 218     yes     yes     yes     yes     yes
@@ -231,9 +235,9 @@ fused_adadelta_step             222     yes     yes     yes     yes     yes
 fused_adagrad_step              223     yes     yes     yes     yes     yes
 fused_adam_atan2_step           224     yes     yes     yes     yes     yes
 fused_conv2d_sigmoid            225     yes     yes     yes     yes     yes
-fused_conv2d_tanh               226     yes     yes       -     yes       -
-fused_conv2d_swish              227     yes     yes       -     yes       -
-fused_conv2d_bn_relu            228     yes     yes       -     yes       -
+fused_conv2d_tanh               226     yes     yes     yes     yes     yes
+fused_conv2d_swish              227     yes     yes     yes     yes     yes
+fused_conv2d_bn_relu            228     yes     yes     yes     yes     yes
 fused_layer_norm_backward       229     yes     yes     yes     yes     yes
 zeros                           230     yes     yes     yes     yes     yes
 ones                            231     yes     yes     yes     yes     yes
@@ -253,33 +257,33 @@ gru_forward                     255     yes     yes     yes     yes     yes
 lstm_multi_layer_forward        256     yes     yes     yes     yes     yes
 gru_multi_layer_forward         257     yes     yes     yes     yes     yes
 bilstm_forward                  258     yes     yes     yes     yes     yes
-embedding                       260     yes     yes       -     yes     yes
-embedding_backward              261     yes     yes       -     yes     yes
-linear                          270     yes     yes       -     yes       -
+embedding                       260     yes     yes     yes     yes     yes
+embedding_backward              261     yes     yes     yes     yes     yes
+linear                          270     yes     yes     yes     yes     yes
 linear_backward                 271     yes     yes     yes     yes     yes
 dropout                         280     yes     yes     yes     yes     yes
-dropout_backward                281     yes     yes       -     yes       -
+dropout_backward                281     yes     yes     yes     yes     yes
 topk                            290     yes     yes     yes     yes     yes
 sort                            291     yes     yes     yes     yes     yes
-cumsum                          292     yes     yes       -     yes     yes
-cumprod                         293     yes     yes       -     yes     yes
+cumsum                          292     yes     yes     yes     yes     yes
+cumprod                         293     yes     yes     yes     yes     yes
 unique                          294     yes     yes     yes     yes     yes
 flash_attention                 295     yes     yes     yes     yes     yes
 flash_attention_backward        296     yes     yes     yes     yes     yes
 einsum                          297     yes     yes     yes     yes     yes
-conv3d_forward                  301     yes     yes       -     yes     yes
+conv3d_forward                  301     yes     yes     yes     yes     yes
 conv3d_backward_input           302     yes     yes     yes     yes     yes
 conv3d_backward_weight          303     yes     yes     yes     yes     yes
 conv3d_backward_bias            304     yes     yes     yes     yes     yes
 maxpool3d_forward               305     yes     yes     yes     yes     yes
-maxpool3d_backward              306     yes     yes       -     yes     yes
+maxpool3d_backward              306     yes     yes     yes     yes     yes
 avgpool3d_forward               307     yes     yes     yes     yes     yes
 avgpool3d_backward              308     yes     yes     yes     yes     yes
 adaptive_maxpool3d              309     yes     yes     yes     yes     yes
-adaptive_maxpool3d_backward     310     yes     yes       -     yes     yes
-adaptive_avgpool3d              311     yes     yes       -     yes     yes
-adaptive_avgpool3d_backward     312     yes     yes       -     yes     yes
-cast                            316     yes     yes       -     yes     yes
+adaptive_maxpool3d_backward     310     yes     yes     yes     yes     yes
+adaptive_avgpool3d              311     yes     yes     yes     yes     yes
+adaptive_avgpool3d_backward     312     yes     yes     yes     yes     yes
+cast                            316     yes     yes     yes     yes     yes
 log2                            320     yes     yes     yes     yes     yes
 log10                           321     yes     yes     yes     yes     yes
 log1p                           322     yes     yes     yes     yes     yes
@@ -290,75 +294,75 @@ erfc                            326     yes     yes     yes     yes     yes
 isnan                           327     yes     yes     yes     yes     yes
 isinf                           328     yes     yes     yes     yes     yes
 isfinite                        329     yes     yes     yes     yes     yes
-atan2                           330     yes     yes       -     yes     yes
+atan2                           330     yes     yes     yes     yes     yes
 fmod                            331     yes     yes     yes     yes     yes
 remainder                       332     yes     yes     yes     yes     yes
 lerp                            333     yes     yes     yes     yes     yes
 hypot                           334     yes     yes     yes     yes     yes
 copysign                        335     yes     yes     yes     yes     yes
-nextafter                       336     yes     yes       -     yes     yes
+nextafter                       336     yes     yes     yes     yes     yes
 gcd                             337     yes     yes     yes     yes     yes
 lcm                             338     yes     yes     yes     yes     yes
 addcmul                         339     yes     yes     yes     yes     yes
 triu                            340     yes     yes     yes     yes     yes
 tril                            341     yes     yes     yes     yes     yes
 diag                            342     yes     yes     yes     yes     yes
-trace                           343     yes     yes       -     yes     yes
-flip                            344     yes     yes       -     yes     yes
-roll                            345     yes     yes       -     yes       -
+trace                           343     yes     yes     yes     yes     yes
+flip                            344     yes     yes     yes     yes     yes
+roll                            345     yes     yes     yes     yes     yes
 logical_and                     350     yes     yes     yes     yes     yes
-logical_or                      351     yes     yes       -     yes     yes
-logical_not                     352     yes     yes       -     yes     yes
-logical_xor                     353     yes     yes       -     yes     yes
-minimum                         360     yes     yes       -     yes     yes
-maximum                         361     yes     yes       -     yes     yes
-cross                           362     yes     yes       -     yes       -
+logical_or                      351     yes     yes     yes     yes     yes
+logical_not                     352     yes     yes     yes     yes     yes
+logical_xor                     353     yes     yes     yes     yes     yes
+minimum                         360     yes     yes     yes     yes     yes
+maximum                         361     yes     yes     yes     yes     yes
+cross                           362     yes     yes     yes     yes     yes
 maxpool1d_forward               370     yes     yes     yes     yes     yes
-maxpool1d_backward              371     yes     yes       -     yes     yes
+maxpool1d_backward              371     yes     yes     yes     yes     yes
 avgpool1d_forward               372     yes     yes     yes     yes     yes
 avgpool1d_backward              373     yes     yes     yes     yes     yes
 adaptive_maxpool1d              374     yes     yes     yes     yes     yes
-adaptive_maxpool1d_backward     375     yes     yes       -     yes     yes
-adaptive_avgpool1d              376     yes     yes       -     yes     yes
-adaptive_avgpool1d_backward     377     yes     yes       -     yes     yes
-searchsorted                    390     yes     yes       -     yes       -
-gumbel_softmax                  391     yes     yes       -     yes       -
+adaptive_maxpool1d_backward     375     yes     yes     yes     yes     yes
+adaptive_avgpool1d              376     yes     yes     yes     yes     yes
+adaptive_avgpool1d_backward     377     yes     yes     yes     yes     yes
+searchsorted                    390     yes     yes     yes     yes     yes
+gumbel_softmax                  391     yes     yes     yes     yes     yes
 fft                             400     yes     yes     yes     yes     yes
 ifft                            401     yes     yes     yes     yes     yes
 rfft                            402     yes     yes     yes     yes     yes
 irfft                           403     yes     yes     yes     yes     yes
 fft2                            404     yes     yes     yes     yes     yes
-ifft2                           405     yes     yes       -     yes     yes
-fftn                            406     yes     yes       -     yes     yes
+ifft2                           405     yes     yes     yes     yes     yes
+fftn                            406     yes     yes     yes     yes     yes
 ifftn                           407     yes     yes     yes     yes     yes
 scatter_add                     410     yes     yes     yes     yes     yes
 index_add                       411     yes     yes     yes     yes     yes
 index_copy                      412     yes     yes     yes     yes     yes
 index_fill                      413     yes     yes     yes     yes     yes
-linalg_det                      420     yes     yes       -     yes     yes
-linalg_inv                      421     yes     yes       -     yes     yes
+linalg_det                      420     yes     yes     yes     yes     yes
+linalg_inv                      421     yes     yes     yes     yes     yes
 linalg_solve                    422     yes     yes     yes     yes     yes
 linalg_svd                      423     yes     yes     yes     yes     yes
 linalg_qr                       424     yes     yes     yes     yes     yes
 linalg_eigh                     425     yes     yes     yes     yes     yes
 linalg_eig                      426     yes     yes     yes     yes     yes
 linalg_cholesky                 427     yes     yes     yes     yes     yes
-strided_fill                    428     yes     yes     yes     yes       -
-quantized_linear                429     yes     yes       -     yes     yes
-quantized_conv2d                430     yes     yes       -     yes     yes
-embedding_with_bounds_check     431     yes     yes       -     yes     yes
+strided_fill                    428     yes     yes     yes     yes     yes
+quantized_linear                429     yes     yes     yes     yes     yes
+quantized_conv2d                430     yes     yes     yes     yes     yes
+embedding_with_bounds_check     431     yes     yes     yes     yes     yes
 logsumexp                       433     yes     yes     yes     yes     yes
 has_inf_nan                     434     yes     yes     yes     yes     yes
-embedding_bag_forward           435     yes     yes       -     yes     yes
+embedding_bag_forward           435     yes     yes     yes     yes     yes
 embedding_bag_backward          436     yes     yes     yes     yes     yes
 conj                            440     yes     yes     yes     yes     yes
 real                            441     yes     yes     yes     yes     yes
-imag                            442     yes     yes       -     yes     yes
-angle                           443     yes     yes       -     yes     yes
-polar                           444     yes     yes       -     yes     yes
-sparse_spmm                     460     yes     yes       -     yes       -
+imag                            442     yes     yes     yes     yes     yes
+angle                           443     yes     yes     yes     yes     yes
+polar                           444     yes     yes     yes     yes     yes
+sparse_spmm                     460     yes     yes     yes     yes     yes
 sparse_spmv                     461     yes     yes     yes     yes     yes
-sparse_to_dense                 462     yes     yes       -     yes       -
+sparse_to_dense                 462     yes     yes     yes     yes     yes
 dense_to_sparse                 463     yes     yes     yes     yes     yes
 sparse_add                      464     yes     yes     yes     yes     yes
 sparse_spgemm                   465     yes     yes     yes     yes     yes
@@ -368,20 +372,20 @@ stft                            470     yes     yes     yes     yes     yes
 istft                           471     yes     yes     yes     yes     yes
 cdist                           472     yes     yes     yes     yes     yes
 dct                             473     yes     yes     yes     yes     yes
-idct                            474     yes     yes       -     yes       -
-mel_scale                       475     yes     yes       -     yes       -
-mfcc                            476     yes     yes       -     yes       -
+idct                            474     yes     yes     yes     yes     yes
+mel_scale                       475     yes     yes     yes     yes     yes
+mfcc                            476     yes     yes     yes     yes     yes
 multinomial                     480     yes     yes     yes     yes     yes
 bernoulli                       481     yes     yes     yes     yes     yes
 histogram                       482     yes     yes     yes     yes     yes
 bucketize                       483     yes     yes     yes     yes     yes
-normal_sample                   484     yes     yes       -     yes       -
-poisson_sample                  485     yes     yes       -     yes       -
-exponential_sample              486     yes     yes       -     yes       -
+normal_sample                   484     yes     yes     yes     yes     yes
+poisson_sample                  485     yes     yes     yes     yes     yes
+exponential_sample              486     yes     yes     yes     yes     yes
 histogramdd                     487     yes     yes     yes     yes     yes
-gamma                           490     yes     yes       -     yes     yes
-lgamma                          491     yes     yes       -     yes     yes
-digamma                         492     yes     yes       -     yes     yes
+gamma                           490     yes     yes     yes     yes     yes
+lgamma                          491     yes     yes     yes     yes     yes
+digamma                         492     yes     yes     yes     yes     yes
 polygamma                       493     yes     yes     yes     yes     yes
 beta                            494     yes     yes     yes     yes     yes
 betainc                         495     yes     yes     yes     yes     yes
@@ -390,43 +394,43 @@ bessel_j1                       497     yes     yes     yes     yes     yes
 bessel_y0                       498     yes     yes     yes     yes     yes
 bessel_y1                       499     yes     yes     yes     yes     yes
 bessel_i0                       500     yes     yes     yes     yes     yes
-bessel_i1                       501     yes     yes       -     yes     yes
-erfinv                          502     yes     yes       -     yes     yes
-sinc                            503     yes     yes       -     yes     yes
+bessel_i1                       501     yes     yes     yes     yes     yes
+erfinv                          502     yes     yes     yes     yes     yes
+sinc                            503     yes     yes     yes     yes     yes
 zeta                            504     yes     yes     yes     yes     yes
 linalg_lu                       510     yes     yes     yes     yes     yes
 linalg_lu_solve                 511     yes     yes     yes     yes     yes
-linalg_householder              512     yes     yes       -     yes       -
+linalg_householder              512     yes     yes     yes     yes     yes
 linalg_ldl_factor               513     yes     yes     yes     yes     yes
-linalg_ldl_solve                514     yes     yes     yes     yes       -
+linalg_ldl_solve                514     yes     yes     yes     yes     yes
 linalg_vector_norm              515     yes     yes     yes     yes     yes
-linalg_matrix_norm              516     yes     yes       -     yes     yes
+linalg_matrix_norm              516     yes     yes     yes     yes     yes
 linalg_vecdot                   517     yes     yes     yes     yes     yes
 linalg_cholesky_solve           518     yes     yes     yes     yes     yes
 bitwise_and                     520     yes     yes     yes     yes     yes
 bitwise_or                      521     yes     yes     yes     yes     yes
 bitwise_xor                     522     yes     yes     yes     yes     yes
-bitwise_not                     523     yes     yes       -     yes       -
-bitwise_left_shift              524     yes     yes       -     yes       -
-bitwise_right_shift             525     yes     yes       -     yes       -
-scatter_reduce                  530     yes     yes       -     yes     yes
+bitwise_not                     523     yes     yes     yes     yes     yes
+bitwise_left_shift              524     yes     yes     yes     yes     yes
+bitwise_right_shift             525     yes     yes     yes     yes     yes
+scatter_reduce                  530     yes     yes     yes     yes     yes
 addmm                           540     yes     yes     yes     yes     yes
 addmv                           541     yes     yes     yes     yes     yes
 baddbmm                         542     yes     yes     yes     yes     yes
 trapezoid                       543     yes     yes     yes     yes     yes
 cumulative_trapezoid            544     yes     yes     yes     yes     yes
-gradient                        545     yes     yes       -     yes       -
-pairwise_distance               546     yes     yes       -     yes       -
+gradient                        545     yes     yes     yes     yes     yes
+pairwise_distance               546     yes     yes     yes     yes     yes
 pdist                           547     yes     yes     yes     yes     yes
-repeat_interleave               550     yes     yes       -     yes       -
+repeat_interleave               550     yes     yes     yes     yes     yes
 logcumsumexp                    560     yes     yes     yes     yes     yes
 bincount                        561     yes     yes     yes     yes     yes
-segment_reduce                  562     yes     yes     yes     yes       -
-ndtr                            563     yes     yes       -     yes     yes
-log_ndtr                        564     yes     yes       -     yes     yes
-multigammaln                    565     yes     yes       -     yes     yes
-igamma                          570     yes     yes       -     yes     yes
-igammac                         571     yes     yes       -     yes     yes
+segment_reduce                  562     yes     yes     yes     yes     yes
+ndtr                            563     yes     yes     yes     yes     yes
+log_ndtr                        564     yes     yes     yes     yes     yes
+multigammaln                    565     yes     yes     yes     yes     yes
+igamma                          570     yes     yes     yes     yes     yes
+igammac                         571     yes     yes     yes     yes     yes
 addcdiv                         572     yes     yes     yes     yes     yes
 cummax                          580     yes     yes     yes     yes     yes
 cummin                          581     yes     yes     yes     yes     yes
@@ -435,32 +439,32 @@ kthvalue                        583     yes     yes     yes     yes     yes
 fmax                            584     yes     yes     yes     yes     yes
 fmin                            585     yes     yes     yes     yes     yes
 quantile                        586     yes     yes     yes     yes     yes
-nanquantile                     587     yes     yes       -     yes     yes
-nanmedian                       588     yes     yes       -     yes     yes
-histc                           589     yes     yes       -     yes     yes
+nanquantile                     587     yes     yes     yes     yes     yes
+nanmedian                       588     yes     yes     yes     yes     yes
+histc                           589     yes     yes     yes     yes     yes
 unique_consecutive              590     yes     yes     yes     yes     yes
 diag_embed                      600     yes     yes     yes     yes     yes
 diagflat                        601     yes     yes     yes     yes     yes
 solve_triangular                602     yes     yes     yes     yes     yes
 cholesky_inverse                603     yes     yes     yes     yes     yes
-tensorinv                       604     yes     yes       -     yes       -
-tensorsolve                     605     yes     yes       -     yes       -
-ormqr                           606     yes     yes       -     yes       -
+tensorinv                       604     yes     yes     yes     yes     yes
+tensorsolve                     605     yes     yes     yes     yes     yes
+ormqr                           606     yes     yes     yes     yes     yes
 geqrf                           607     yes     yes     yes     yes     yes
 take_along_dim                  610     yes     yes     yes     yes     yes
 masked_scatter                  611     yes     yes     yes     yes     yes
-tril_indices                    612     yes     yes     yes     yes       -
-triu_indices                    613     yes     yes       -     yes       -
-as_strided                      614     yes     yes       -     yes       -
-complex                         615     yes     yes       -     yes     yes
+tril_indices                    612     yes     yes     yes     yes     yes
+triu_indices                    613     yes     yes     yes     yes     yes
+as_strided                      614     yes     yes     yes     yes     yes
+complex                         615     yes     yes     yes     yes     yes
 fractional_max_pool2d_forward   620     yes     yes     yes     yes     yes
 fractional_max_pool2d_backward  621     yes     yes     yes     yes     yes
 fractional_max_pool3d_forward   622     yes     yes     yes     yes     yes
 fractional_max_pool3d_backward  623     yes     yes     yes     yes     yes
 max_unpool2d_forward            624     yes     yes     yes     yes     yes
-max_unpool2d_backward           625     yes     yes     yes     yes       -
-max_unpool3d_forward            626     yes     yes     yes     yes       -
-max_unpool3d_backward           627     yes     yes     yes     yes       -
+max_unpool2d_backward           625     yes     yes     yes     yes     yes
+max_unpool3d_forward            626     yes     yes     yes     yes     yes
+max_unpool3d_backward           627     yes     yes     yes     yes     yes
 nanvar                          628     yes     yes     yes     yes     yes
 nanstd                          629     yes     yes     yes     yes     yes
 deg2rad                         630     yes     yes     yes     yes     yes
@@ -470,16 +474,16 @@ signbit                         633     yes     yes     yes     yes     yes
 float_power                     634     yes     yes     yes     yes     yes
 xlog1py                         635     yes     yes     yes     yes     yes
 ldexp                           636     yes     yes     yes     yes     yes
-isreal                          637     yes     yes       -     yes     yes
-isposinf                        638     yes     yes       -     yes     yes
-isneginf                        639     yes     yes       -     yes     yes
+isreal                          637     yes     yes     yes     yes     yes
+isposinf                        638     yes     yes     yes     yes     yes
+isneginf                        639     yes     yes     yes     yes     yes
 frexp                           640     yes     yes     yes     yes     yes
 nested_softmax                  670     yes     yes     yes     yes     yes
 nested_log_softmax              671     yes     yes     yes     yes     yes
 nested_layer_norm               672     yes     yes     yes     yes     yes
-nested_sum                      673     yes     yes       -     yes     yes
+nested_sum                      673     yes     yes     yes     yes     yes
 nested_mean                     674     yes     yes     yes     yes     yes
-nested_attention                675     yes     yes     yes     yes       -
+nested_attention                675     yes     yes     yes     yes     yes
 nested_attention_backward       676     yes     yes     yes     yes     yes
 nested_to_padded                677     yes     yes     yes     yes     yes
 nested_from_padded              678     yes     yes     yes     yes     yes
@@ -487,14 +491,14 @@ nested_linear                   679     yes     yes     yes     yes     yes
 logaddexp                       680     yes     yes     yes     yes     yes
 logaddexp2                      681     yes     yes     yes     yes     yes
 xlogy                           682     yes     yes     yes     yes     yes
-cosine_similarity               683     yes     yes     yes     yes       -
-renorm                          684     yes     yes     yes     yes       -
+cosine_similarity               683     yes     yes     yes     yes     yes
+renorm                          684     yes     yes     yes     yes     yes
 i0e                             685     yes     yes     yes     yes     yes
 i1e                             686     yes     yes     yes     yes     yes
 entr                            687     yes     yes     yes     yes     yes
-spherical_bessel_j0             688     yes     yes       -     yes     yes
-cov                             689     yes     yes       -     yes       -
-corrcoef                        690     yes     yes       -     yes       -
+spherical_bessel_j0             688     yes     yes     yes     yes     yes
+cov                             689     yes     yes     yes     yes     yes
+corrcoef                        690     yes     yes     yes     yes     yes
 lobpcg                          691     yes     yes     yes     yes     yes
 
 ========================================================================
@@ -507,11 +511,15 @@ Backend     Registered   Missing    Coverage
 --------------------------------------------
 CPU                462         0      100.0%
 CUDA               462         0      100.0%
-ROCm               336       126       72.7%
+ROCm               462         0      100.0%
 Vulkan             462         0      100.0%
-OneAPI             397        65       85.9%
+OneAPI             462         0      100.0%
 
-Operations missing on at least one available backend: 149
+Operations missing on at least one available backend: 0
 
-[==========] 1 test from 1 test suite ran. (759 ms total)
+[       OK ] RegistrationReport.CoverageMatrix (1110 ms)
+[----------] 1 test from RegistrationReport (1110 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (1110 ms total)
 [  PASSED  ] 1 test.

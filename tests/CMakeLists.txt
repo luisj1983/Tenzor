@@ -47,7 +47,16 @@ function(tenzor_discover_tests target)
         list(APPEND PROPS TIMEOUT ${TENZOR_TEST_TIMEOUT})
     endif()
 
-    # Inject LABELS if provided
+    # Inject LABELS if provided.
+    #
+    # Multi-label note: to attach more than one label, escape the
+    # semicolon at the call site (e.g. `LABELS "nn\;smoke"`). A bare
+    # `LABELS "nn;smoke"` is split into a CMake list before reaching
+    # gtest_discover_tests, which then writes `LABELS nn smoke` into
+    # the generated tests.cmake — and CTest only picks up the first.
+    # The escaped form `nn\;smoke` survives as a single literal string
+    # all the way through to set_tests_properties, which then parses
+    # the embedded `;` as a real list separator.
     if(ARG_LABELS)
         list(APPEND PROPS LABELS "${ARG_LABELS}")
     endif()
@@ -154,9 +163,12 @@ add_executable(test_cuda_scalar_debug test_cuda_scalar_debug.cpp)
 target_link_libraries(test_cuda_scalar_debug PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 60)
 
-# Legacy integration tests (kept for compatibility)
+# Legacy integration tests (kept for compatibility).
+# integration/test_nn.cpp moved out into the dedicated test_nn_smoke
+# executable below (audit 2026-05-02 I.1) so its small-MLP cases can be
+# tagged for the smoke set without dragging in the heavier tests in
+# this bundle.
 add_executable(tenzor_integration_tests
-    integration/test_nn.cpp
     integration/test_training.cpp
     integration/test_debug_mlp.cpp
 )
@@ -167,6 +179,22 @@ target_link_libraries(tenzor_integration_tests PRIVATE
 )
 
 tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 60)
+
+# Audit 2026-05-02 I.1: extract just the smallest-MLP integration cases
+# from test_nn.cpp into a separate executable so they can be tagged for
+# the smoke set (`ctest -L smoke`) without dragging in the heavier
+# test_training.cpp + test_debug_mlp.cpp content of the parent bundle.
+add_executable(test_nn_smoke
+    integration/test_nn.cpp
+)
+target_link_libraries(test_nn_smoke PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+tenzor_discover_tests(test_nn_smoke
+    LABELS "integration\;smoke"
+    DISCOVERY_TIMEOUT 60
+)
 
 # Conv1d tests
 add_executable(test_conv1d test_conv1d.cpp)
@@ -442,6 +470,16 @@ add_executable(test_lazy_tensor test_lazy_tensor.cpp)
 target_link_libraries(test_lazy_tensor PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_lazy_tensor DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# LazyTensor multi-backend × multi-dtype tests (audit 2026-05-02 D.2)
+add_executable(test_lazy_tensor_multidtype test_lazy_tensor_multidtype.cpp)
+target_link_libraries(test_lazy_tensor_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_tensor_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# LazyTensor: materialise -> Variable -> backward parity (audit 2026-05-02 D.3)
+add_executable(test_lazy_tensor_backward test_lazy_tensor_backward.cpp)
+target_link_libraries(test_lazy_tensor_backward PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_tensor_backward DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)
 target_link_libraries(vulkan_tensor_test PRIVATE tenzor_core)
@@ -532,6 +570,16 @@ if(TENZOR_BUILD_PYTHON)
         set(PYTHON_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python")
         set(PYTHON_TEST_ENV "PYTHONPATH=${CMAKE_BINARY_DIR}/python")
 
+        # Python tests in this list also get the "smoke" label so the
+        # fast-feedback `ctest -L smoke` set covers basic Python-binding
+        # surface (audit 2026-05-02 I.1). Each must be a small,
+        # fast-running test that exercises a load-bearing path.
+        set(PYTHON_SMOKE_TESTS
+            test_loss_simple
+            test_tensor_ops
+            test_autograd
+        )
+
         file(GLOB PYTHON_TEST_FILES "${PYTHON_TEST_DIR}/test_*.py")
         foreach(test_file ${PYTHON_TEST_FILES})
             get_filename_component(test_name ${test_file} NAME_WE)
@@ -540,8 +588,14 @@ if(TENZOR_BUILD_PYTHON)
                 COMMAND ${Python_EXECUTABLE} ${test_file}
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
             )
+            list(FIND PYTHON_SMOKE_TESTS ${test_name} _smoke_idx)
+            if(_smoke_idx GREATER -1)
+                set(_py_labels "python;smoke")
+            else()
+                set(_py_labels "python")
+            endif()
             set_tests_properties("python_${test_name}" PROPERTIES
-                LABELS "python"
+                LABELS "${_py_labels}"
                 TIMEOUT ${TENZOR_TEST_TIMEOUT}
                 ENVIRONMENT "${PYTHON_TEST_ENV}"
             )

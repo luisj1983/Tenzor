@@ -209,3 +209,60 @@ ctest --test-dir build -j1 -R test_registration_report -V
 # Python test subset
 cd <repo_root> && PYTHONPATH=python:build/python python -m pytest tests/python/<file>.py -v
 ```
+
+## Smoke set
+
+A subset of fast tests is tagged with `LABELS smoke` so they can be run as
+a quick-feedback gate before the full suite (the full suite runs 15+ hours
+and is reserved for CI; see `MEMORY.md` -> `feedback_testing.md`).
+
+```bash
+# Run the smoke set — completes in < 5 minutes on a single shell.
+ctest --test-dir build -j1 -L smoke --output-on-failure
+```
+
+The smoke set today covers:
+- `test_kernel_completeness` and `test_registration_report` — catch dispatch-table regressions on every backend.
+- `test_inplace_ops_parity` — ~50 cross-backend in-place op cases.
+- `test_dropout`, `test_batchnorm2d`, `test_pooling` — common nn layers.
+- `test_gradcheck` — basic autograd correctness.
+
+To add a new test to the smoke set, pass `LABELS "<existing>\;smoke"` to
+`tenzor_discover_tests` (note the **backslash-escaped semicolon** — see the
+helper's comment in `tests/CMakeLists.txt` for why this form is required).
+For tests that go through `add_parity_test`, follow up with an explicit
+`set_tests_properties(<target> PROPERTIES LABELS "backend_parity;smoke")`.
+
+## Performance regression check
+
+`tests/backend_parity/test_performance_regression.cpp` benchmarks a small
+matmul on every backend and prints timings every run. A second test
+(`DISABLED_BaselineRegressionCheck_MatMul512`) compares those timings
+against `tests/backend_parity/baselines/perf_baseline.json` and fails
+when current median exceeds `baseline × TENZOR_PERF_REGRESSION_RTOL` or
+p99 exceeds `baseline × TENZOR_PERF_REGRESSION_P99_RTOL` (defaults: 1.5
+and 3.0).
+
+The check is **disabled by default** because consumer-GPU run-to-run
+variance (cache warmth, thermal throttling, scheduler jitter) routinely
+exceeds those thresholds and would make CI flaky. Opt in on a
+controlled benchmark host:
+
+```bash
+# Regenerate baseline after a known-good change.
+python tools/regen_perf_baseline.py
+
+# Run the regression check (disabled tests must be explicitly enabled).
+build/bin/test_performance_regression \
+    --gtest_filter='*BaselineRegressionCheck*' \
+    --gtest_also_run_disabled_tests
+
+# Loosen thresholds for noisier hardware:
+TENZOR_PERF_REGRESSION_RTOL=2.0 TENZOR_PERF_REGRESSION_P99_RTOL=5.0 \
+    build/bin/test_performance_regression \
+        --gtest_filter='*BaselineRegressionCheck*' \
+        --gtest_also_run_disabled_tests
+```
+
+Baselines are hardware-specific — the check skips with a clear message
+when the recorded `host` field doesn't match the current machine.

@@ -1,0 +1,462 @@
+{
+  "tests": 75,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiBackendDType\/ZeROProfilingMultiDTypeTest",
+      "tests": 75,
+      "testsuite": [
+        {
+          "name": "EnableDisableProfiling\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "EnableDisableProfiling\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 55
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "StepWithProfilingEnabled\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "ProfilingReport\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ProfilingReport\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "ResetProfiling\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "ResetProfiling\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        },
+        {
+          "name": "MultipleStepsWithProfiling\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
+          "line": 122
+        }
+      ]
+    }
+  ]
+}

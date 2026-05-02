@@ -123,6 +123,44 @@ TEST(GraphViz, ShowDTypesFlagDoesNotCrash) {
                                  "show_dtypes/show_memory_usage was enabled.";
 }
 
+// ----------------------------------------------------------------------------
+// Audit 2026-05-02 G.3 additions: stronger structural invariants.
+// ----------------------------------------------------------------------------
+
+// Every node label in the DOT output must be non-empty. An empty label
+// means the graph traversal failed to read the function's name —
+// historically a sign that a custom autograd Function forgot to
+// override `name()`, which then breaks anomaly_mode tracebacks.
+TEST(GraphViz, AllNodesHaveNonEmptyLabels) {
+    Variable x(randn({4, 1}, DType::Float32, Device::cpu()), true);
+    Variable W(randn({3, 4}, DType::Float32, Device::cpu()), true);
+    Variable b(randn({3, 1}, DType::Float32, Device::cpu()), true);
+    auto loss = build_small_graph(x, W, b);
+    auto dot = make_dot(loss, /*params=*/{});
+
+    EXPECT_EQ(dot.find("label=\"\""), std::string::npos)
+        << "DOT output contains a node with an empty label";
+    EXPECT_EQ(dot.find("label=\"\\n\""), std::string::npos)
+        << "DOT output contains a node whose label is just \\n";
+}
+
+// detach() severs the autograd graph at that point. The DOT for a graph
+// rooted at a non-grad-tracking Variable should still be a syntactically
+// valid digraph (header + closing brace).
+TEST(GraphViz, DetachTerminatesGraph) {
+    Variable x(randn({4, 1}, DType::Float32, Device::cpu()), true);
+    Variable W(randn({3, 4}, DType::Float32, Device::cpu()), true);
+    Variable b(randn({3, 1}, DType::Float32, Device::cpu()), true);
+    auto loss = build_small_graph(x, W, b);
+
+    Variable detached(loss.tensor(), false);  // no grad_fn → no parents
+    auto dot = make_dot(detached, /*params=*/{});
+    EXPECT_NE(dot.find("digraph"), std::string::npos)
+        << "DOT for a detached root must still start with 'digraph'";
+    EXPECT_NE(dot.find("}"), std::string::npos)
+        << "DOT for a detached root must still close with '}'";
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     try { tenzor::initialize(); } catch (...) {}

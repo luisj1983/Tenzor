@@ -5293,64 +5293,128 @@ struct BitwiseNotI32 {};
 struct BitwiseLShiftI32 {};
 struct BitwiseRShiftI32 {};
 
+// SYCL requires distinct kernel name types per (op, dtype). Tags below cover
+// Int8/Int16/Int64 in addition to the original Int32 tags above so the bitwise
+// op family supports the same integer dtypes as CPU/CUDA/ROCm.
+struct BitwiseAndI8 {}; struct BitwiseAndI16 {}; struct BitwiseAndI64 {};
+struct BitwiseOrI8 {};  struct BitwiseOrI16 {};  struct BitwiseOrI64 {};
+struct BitwiseXorI8 {}; struct BitwiseXorI16 {}; struct BitwiseXorI64 {};
+struct BitwiseNotI8 {}; struct BitwiseNotI16 {}; struct BitwiseNotI64 {};
+struct BitwiseLShiftI8 {}; struct BitwiseLShiftI16 {}; struct BitwiseLShiftI64 {};
+struct BitwiseRShiftI8 {}; struct BitwiseRShiftI16 {}; struct BitwiseRShiftI64 {};
+
 auto bitwise_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
-    if (a.dtype() == DType::Int32) {
+    if (a.dtype() == DType::Int8) {
+        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseAndI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int16) {
+        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseAndI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int32) {
         const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseAndI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_and: use Int32"); }
+    } else if (a.dtype() == DType::Int64) {
+        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseAndI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_and: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 auto bitwise_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
-    if (a.dtype() == DType::Int32) {
+    if (a.dtype() == DType::Int8) {
+        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseOrI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int16) {
+        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseOrI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int32) {
         const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseOrI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_or: use Int32"); }
+    } else if (a.dtype() == DType::Int64) {
+        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseOrI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_or: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
-    if (a.dtype() == DType::Int32) {
+    if (a.dtype() == DType::Int8) {
+        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseXorI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int16) {
+        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseXorI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+    } else if (a.dtype() == DType::Int32) {
         const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseXorI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_xor: use Int32"); }
+    } else if (a.dtype() == DType::Int64) {
+        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseXorI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_xor: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 auto bitwise_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
     if (n == 0) return result;
-    if (input.dtype() == DType::Int32) {
+    if (input.dtype() == DType::Int8) {
+        const int8_t* id = input.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseNotI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ~id[i]; }).wait();
+    } else if (input.dtype() == DType::Int16) {
+        const int16_t* id = input.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseNotI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ~id[i]; }).wait();
+    } else if (input.dtype() == DType::Int32) {
         const int32_t* id = input.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseNotI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ~id[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_not: use Int32"); }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* id = input.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseNotI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ~id[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_not: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
     if (n == 0) return result;
-    if (input.dtype() == DType::Int32) {
+    if (input.dtype() == DType::Int8) {
+        const int8_t* id = input.data<int8_t>(); const int8_t* sd = shift.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseLShiftI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+    } else if (input.dtype() == DType::Int16) {
+        const int16_t* id = input.data<int16_t>(); const int16_t* sd = shift.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseLShiftI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+    } else if (input.dtype() == DType::Int32) {
         const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseLShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_left_shift: use Int32"); }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* id = input.data<int64_t>(); const int64_t* sd = shift.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseLShiftI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_left_shift: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
     if (n == 0) return result;
-    if (input.dtype() == DType::Int32) {
+    if (input.dtype() == DType::Int8) {
+        const int8_t* id = input.data<int8_t>(); const int8_t* sd = shift.data<int8_t>(); int8_t* od = result.data<int8_t>();
+        queue.parallel_for<BitwiseRShiftI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+    } else if (input.dtype() == DType::Int16) {
+        const int16_t* id = input.data<int16_t>(); const int16_t* sd = shift.data<int16_t>(); int16_t* od = result.data<int16_t>();
+        queue.parallel_for<BitwiseRShiftI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+    } else if (input.dtype() == DType::Int32) {
         const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
         queue.parallel_for<BitwiseRShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_right_shift: use Int32"); }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* id = input.data<int64_t>(); const int64_t* sd = shift.data<int64_t>(); int64_t* od = result.data<int64_t>();
+        queue.parallel_for<BitwiseRShiftI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_right_shift: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
 

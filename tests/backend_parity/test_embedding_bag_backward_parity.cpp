@@ -1,0 +1,192 @@
+/**
+ * @file test_embedding_bag_backward_parity.cpp
+ * @brief Cross-backend parity for EmbeddingBag forward + backward.
+ *
+ * Covers OpId::EmbeddingBagForward (435) and OpId::EmbeddingBagBackward
+ * (436). The audit (2026-05-02) found zero parity-test references for
+ * EmbeddingBagBackward despite the kernel being registered on every
+ * non-MPS backend.
+ */
+
+#include <gtest/gtest.h>
+#include <tenzor/tenzor.hpp>
+#include <tenzor/nn/layers/embedding.hpp>
+#include <tenzor/autograd/ops.hpp>
+#include "../backend_test_fixture.hpp"
+#include "parity_test_utils.hpp"
+
+using namespace tenzor;
+using namespace tenzor::testing;
+
+class EmbeddingBagParity : public BackendTest {};
+
+namespace {
+
+// Build a small EmbeddingBag-friendly input set:
+//   indices: 12 word ids in [0, vocab)
+//   offsets: 3 bags starting at 0, 4, 8 (each of size 4)
+//   weight:  (vocab × embedding_dim) lookup table
+struct BagInputs {
+    Tensor indices;
+    Tensor offsets;
+    Tensor weight;
+};
+
+BagInputs make_bag_inputs(int64_t vocab = 16, int64_t emb_dim = 8) {
+    BagInputs b;
+    b.indices = full({12}, 0.0, DType::Int64, Device::cpu());
+    int64_t pattern[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    for (int64_t i = 0; i < 12; ++i) b.indices.data<int64_t>()[i] = pattern[i] % vocab;
+
+    b.offsets = full({3}, 0.0, DType::Int64, Device::cpu());
+    b.offsets.data<int64_t>()[0] = 0;
+    b.offsets.data<int64_t>()[1] = 4;
+    b.offsets.data<int64_t>()[2] = 8;
+
+    b.weight = randn({vocab, emb_dim}, DType::Float32, Device::cpu());
+    return b;
+}
+
+}  // namespace
+
+// ----------------------------------------------------------------------------
+// Forward parity for each aggregation mode
+// ----------------------------------------------------------------------------
+
+TEST_P(EmbeddingBagParity, Forward_MeanMode) {
+    auto b = make_bag_inputs();
+
+    auto run = [&](Device target) {
+        nn::EmbeddingBag layer(/*vocab=*/16, /*emb_dim=*/8,
+                               /*max_norm=*/0.0, /*norm_type=*/2.0,
+                               /*scale_grad_by_freq=*/false, /*mode=*/"mean");
+        // EmbeddingBag stores its weight inside its `embedding` submodule.
+// get_parameter() doesn't recurse, so we look up via named_parameters().
+for (auto& [name, ptr] : layer.named_parameters()) {
+    if (name == "embedding.weight") {
+        *ptr = Variable(b.weight.to(target), true);
+        break;
+    }
+}
+        auto out = layer.forward(Variable(b.indices.to(target), false),
+                                 Variable(b.offsets.to(target), false));
+        target.synchronize();
+        return out.tensor().to(Device::cpu());
+    };
+
+    auto cpu = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;
+    auto dev = run(device);
+    EXPECT_LT(max_abs_diff(cpu, dev), 1e-4f) << "Mean mode forward diff on " << backend_name(device);
+}
+
+TEST_P(EmbeddingBagParity, Forward_SumMode) {
+    auto b = make_bag_inputs();
+
+    auto run = [&](Device target) {
+        nn::EmbeddingBag layer(16, 8, 0.0, 2.0, false, "sum");
+        // EmbeddingBag stores its weight inside its `embedding` submodule.
+// get_parameter() doesn't recurse, so we look up via named_parameters().
+for (auto& [name, ptr] : layer.named_parameters()) {
+    if (name == "embedding.weight") {
+        *ptr = Variable(b.weight.to(target), true);
+        break;
+    }
+}
+        auto out = layer.forward(Variable(b.indices.to(target), false),
+                                 Variable(b.offsets.to(target), false));
+        target.synchronize();
+        return out.tensor().to(Device::cpu());
+    };
+
+    auto cpu = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;
+    auto dev = run(device);
+    EXPECT_LT(max_abs_diff(cpu, dev), 1e-4f) << "Sum mode forward diff on " << backend_name(device);
+}
+
+TEST_P(EmbeddingBagParity, Forward_MaxMode) {
+    auto b = make_bag_inputs();
+
+    auto run = [&](Device target) {
+        nn::EmbeddingBag layer(16, 8, 0.0, 2.0, false, "max");
+        // EmbeddingBag stores its weight inside its `embedding` submodule.
+// get_parameter() doesn't recurse, so we look up via named_parameters().
+for (auto& [name, ptr] : layer.named_parameters()) {
+    if (name == "embedding.weight") {
+        *ptr = Variable(b.weight.to(target), true);
+        break;
+    }
+}
+        auto out = layer.forward(Variable(b.indices.to(target), false),
+                                 Variable(b.offsets.to(target), false));
+        target.synchronize();
+        return out.tensor().to(Device::cpu());
+    };
+
+    auto cpu = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;
+    auto dev = run(device);
+    EXPECT_LT(max_abs_diff(cpu, dev), 1e-4f) << "Max mode forward diff on " << backend_name(device);
+}
+
+// ----------------------------------------------------------------------------
+// Backward parity — exercises EmbeddingBagBackward (436)
+// ----------------------------------------------------------------------------
+
+TEST_P(EmbeddingBagParity, Backward_GradWeightMatchesCPU) {
+    auto b = make_bag_inputs();
+
+    auto run = [&](Device target) {
+        nn::EmbeddingBag layer(16, 8, 0.0, 2.0, false, "mean");
+        // EmbeddingBag stores its weight inside its `embedding` submodule.
+// get_parameter() doesn't recurse, so we look up via named_parameters().
+for (auto& [name, ptr] : layer.named_parameters()) {
+    if (name == "embedding.weight") {
+        *ptr = Variable(b.weight.to(target), true);
+        break;
+    }
+}
+        auto out = layer.forward(Variable(b.indices.to(target), false),
+                                 Variable(b.offsets.to(target), false));
+        // Deterministic loss = sum(out)
+        auto loss = sum(out);
+        loss.backward();
+        target.synchronize();
+        // Same lookup pattern — get the weight Variable by full name.
+        std::shared_ptr<Variable> w;
+        for (auto& [name, ptr] : layer.named_parameters()) {
+            if (name == "embedding.weight") { w = ptr; break; }
+        }
+        return (*w->grad()).to(Device::cpu());
+    };
+
+    auto cpu_grad = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;
+    auto dev_grad = run(device);
+    EXPECT_LT(max_abs_diff(cpu_grad, dev_grad), 1e-4f)
+        << "EmbeddingBagBackward grad_weight diff on " << backend_name(device);
+}
+
+INSTANTIATE_BACKEND_TESTS(EmbeddingBagParity);
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+
+    try {
+        if (!::testing::GTEST_FLAG(list_tests)) {
+            tenzor::initialize();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;
+        return 1;
+    }
+
+    int result = RUN_ALL_TESTS();
+
+    try {
+        tenzor::finalize();
+    } catch (...) {}
+
+    return result;
+}

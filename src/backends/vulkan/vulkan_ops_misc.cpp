@@ -1814,6 +1814,14 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
+    } else if (src_dtype == DType::Int16 || target_dtype == DType::Int16) {
+        // No native Int16 SPIR-V cast shaders. Round-trip through CPU; this
+        // matches the existing BFloat16/FP8 fallback pattern in this file
+        // when no direct GPU path exists. Used by the Int32-promoted bitwise
+        // path in vulkan_kernel_registry.cpp for Int16 inputs.
+        Tensor cpu_input = input.to(Device::cpu());
+        Tensor cpu_output = cpu_input.to(target_dtype);
+        return cpu_output.to(input.device());
     } else {
         // Should not reach here; all paths covered. Safety fallback.
         throw std::runtime_error("Vulkan cast: unsupported dtype pair (" +

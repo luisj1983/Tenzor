@@ -178,12 +178,12 @@ target_link_libraries(test_sliding_window_attention PRIVATE tenzor_core GTest::g
 # ============================================================================
 # Test Registration
 # ============================================================================
-tenzor_discover_tests(test_dropout LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_batchnorm2d LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_dropout LABELS "nn\;smoke" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_batchnorm2d LABELS "nn\;smoke" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm1d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm3d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-tenzor_discover_tests(test_pooling LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_pooling LABELS "nn\;smoke" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_schedulers LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1 LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
@@ -222,6 +222,24 @@ target_link_libraries(test_pytorch_loader PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_fsdp test_fsdp.cpp)
 target_link_libraries(test_fsdp PRIVATE tenzor_core GTest::gtest_main)
 
+# FSDP2 (audit 2026-05-02 F.2 — zero test references for the v2 wrapper)
+add_executable(test_fsdp2 test_fsdp2.cpp)
+target_link_libraries(test_fsdp2 PRIVATE tenzor_core GTest::gtest_main)
+
+# Anchor generator (audit 2026-05-02 F.3 — zero test references)
+add_executable(test_anchor_generator test_anchor_generator.cpp)
+target_link_libraries(test_anchor_generator PRIVATE tenzor_core GTest::gtest_main)
+
+add_executable(test_anchor_generator_multidtype test_anchor_generator_multidtype.cpp)
+target_link_libraries(test_anchor_generator_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
+# KnowledgeDistillation (audit 2026-05-02 F.4 — zero test references)
+add_executable(test_knowledge_distillation test_knowledge_distillation.cpp)
+target_link_libraries(test_knowledge_distillation PRIVATE tenzor_core GTest::gtest_main)
+
+add_executable(test_knowledge_distillation_multidtype test_knowledge_distillation_multidtype.cpp)
+target_link_libraries(test_knowledge_distillation_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
 # Tensor Parallelism tests
 add_executable(test_tensor_parallel test_tensor_parallel.cpp)
 target_link_libraries(test_tensor_parallel PRIVATE tenzor_core GTest::gtest_main)
@@ -237,6 +255,11 @@ target_link_libraries(test_safetensors PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_hrm LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pytorch_loader LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fsdp LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_fsdp2 LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_anchor_generator LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_anchor_generator_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_knowledge_distillation LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_knowledge_distillation_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_tensor_parallel LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_functional LABELS "nn" DISCOVERY_TIMEOUT 120)
 tenzor_discover_tests(test_safetensors LABELS "nn" DISCOVERY_TIMEOUT 120)

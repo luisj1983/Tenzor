@@ -296,6 +296,10 @@ auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
     }
 
     NewOpAttributes attrs;
+    // Every backend kernel reads AttrKey::Alpha; MPS and the JIT tracer read
+    // AttrKey::Negative_slope. Set both so the value isn't silently dropped
+    // on either side. (See feedback_attr_key_bug.md in MEMORY.md.)
+    attrs.set(AttrKey::Alpha, negative_slope);
     attrs.set(AttrKey::Negative_slope, negative_slope);
     dispatch_inplace(OpId::LeakyReLUInplace, input, std::span<const Tensor>{}, attrs);
 

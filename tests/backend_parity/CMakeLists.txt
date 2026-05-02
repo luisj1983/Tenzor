@@ -240,6 +240,63 @@ add_parity_test(test_kernel_completeness test_kernel_completeness.cpp)
 # Registration report (Phase 4B — informational coverage matrix)
 add_parity_test(test_registration_report test_registration_report.cpp)
 
+# Audit 2026-05-02 I.3: skip-policy meta-test.
+add_parity_test(test_skip_policy test_skip_policy.cpp)
+
+# Audit 2026-05-02 I.1: extend the backend_parity LABELS on the two
+# coverage tests with "smoke" so they run in the fast feedback set
+# (`ctest -L smoke`). Both are <2s and catch dispatch-table regressions
+# instantly. We replace rather than append because set_tests_properties
+# overwrites the LABELS list. add_parity_test() set "backend_parity"
+# alone above; we now set "backend_parity;smoke".
+set_tests_properties(test_kernel_completeness PROPERTIES
+    LABELS "backend_parity;smoke")
+set_tests_properties(test_registration_report PROPERTIES
+    LABELS "backend_parity;smoke")
+# test_inplace_ops_parity smoke-tag is set after that test is added below
+# (set_tests_properties must come AFTER add_test).
+
+# ==============================================================================
+# Audit-driven additions (2026-05-02 test-coverage plan, Workstream C)
+# ==============================================================================
+
+# In-place ops parity (covers AddInplace..GeluInplace; was 0% covered by name)
+add_parity_test(test_inplace_ops_parity test_inplace_ops_parity.cpp)
+# Smoke-tag this fast (~16s) cross-backend test so it runs in the smoke set.
+set_tests_properties(test_inplace_ops_parity PROPERTIES
+    LABELS "backend_parity;smoke")
+
+# Advanced (NumPy-style fancy) indexing parity
+add_parity_test(test_advanced_index_parity test_advanced_index_parity.cpp)
+
+# Bitwise integer ops parity (BitwiseAnd/Or/Xor/Not/LeftShift/RightShift × Int8-Int64)
+add_parity_test(test_bitwise_parity test_bitwise_parity.cpp)
+
+# Signal-processing tail (IDCT, MelScale, MFCC) — extends the existing
+# STFT/ISTFT/DCT coverage in test_special_math_parity.
+add_parity_test(test_signal_processing_full_parity test_signal_processing_full_parity.cpp)
+
+# Scatter family parity (SelectScatter, SliceScatter, DiagonalScatter,
+# MaskedScatter, TakeAlongDim) — none had dedicated parity coverage before.
+add_parity_test(test_index_scatter_parity test_index_scatter_parity.cpp)
+
+# DeformableConv2d forward + 3 backward variants — backward had zero parity
+# refs even though kernels are registered everywhere.
+add_parity_test(test_deformable_conv2d_backward_parity test_deformable_conv2d_backward_parity.cpp)
+
+# EmbeddingBag forward + backward parity — backward had zero parity refs.
+add_parity_test(test_embedding_bag_backward_parity test_embedding_bag_backward_parity.cpp)
+
+# Phase-5 PyTorch-parity math (Deg2Rad, Rad2Deg, Logit, Signbit, FloatPower,
+# Xlog1py, Ldexp, IsReal, IsPosInf, IsNegInf, Frexp).
+add_parity_test(test_phase5_math_parity test_phase5_math_parity.cpp)
+
+# Numerically-stable math (LogAddExp, LogAddExp2, XLogY, CosineSimilarity, Renorm).
+add_parity_test(test_stable_math_parity test_stable_math_parity.cpp)
+
+# NaN-aware stats + quantiles + Cov/Corrcoef.
+add_parity_test(test_nanstats_parity test_nanstats_parity.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================

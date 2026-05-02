@@ -106,7 +106,7 @@ tenzor_discover_tests(test_higher_order_nn LABELS "autograd" DISCOVERY_TIMEOUT 6
 # runs at ctest time rather than build time.  POST_BUILD discovery fails
 # when tenzor::initialize() cannot enumerate GPUs in the build sandbox,
 # causing ctest to silently register 0 tests (root cause of 0% coverage).
-tenzor_discover_tests(test_gradcheck LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_gradcheck LABELS "autograd\;smoke" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_gradcheck_direct LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradcheck_extended LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
@@ -182,6 +182,21 @@ tenzor_discover_tests(test_vmap_expanded LABELS "autograd" DISCOVERY_TIMEOUT 60)
 add_executable(test_anomaly_detection test_anomaly_detection.cpp)
 target_link_libraries(test_anomaly_detection PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_anomaly_detection LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit 2026-05-02 G.1: AnomalyMode RAII / nesting / thread-safety
+add_executable(test_anomaly_mode_full test_anomaly_mode_full.cpp)
+target_link_libraries(test_anomaly_mode_full PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_anomaly_mode_full LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit 2026-05-02 G.2: GraphOptimizer pass coverage
+add_executable(test_graph_optimizer test_graph_optimizer.cpp)
+target_link_libraries(test_graph_optimizer PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_graph_optimizer LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit 2026-05-02 G.4: JVP-rules vs finite-difference reference
+add_executable(test_jvp_rules test_jvp_rules.cpp)
+target_link_libraries(test_jvp_rules PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jvp_rules LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
 # HigherOrderGradMode::Warn disconnection counter and is_higher_order_stub() tests
 add_executable(test_warn_mode_counter test_warn_mode_counter.cpp)

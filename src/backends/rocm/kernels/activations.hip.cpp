@@ -2571,16 +2571,20 @@ void leaky_relu_inplace_kernel(Tensor& target, float alpha, hipStream_t stream) 
     if (n == 0) return;
     if (target.dtype() == DType::Float32) {
         int nb = get_num_blocks(n);
+        // Kernel signature is (input, output, n, alpha) — see leaky_relu_forward_kernel
+        // at the top of this file. Earlier code passed (alpha, n) here, so n was
+        // truncated from a float to 0 and the loop never ran (the input was
+        // returned unchanged). Caught by tests/backend_parity/test_inplace_ops_parity.
         hipLaunchKernelGGL(leaky_relu_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
-                          target.data<float>(), target.data<float>(), alpha, n);
+                          target.data<float>(), target.data<float>(), n, alpha);
     } else if (target.dtype() == DType::Float64) {
         int nb = get_num_blocks(n);
         hipLaunchKernelGGL(leaky_relu_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
-                          target.data<double>(), target.data<double>(), static_cast<double>(alpha), n);
+                          target.data<double>(), target.data<double>(), n, static_cast<double>(alpha));
     } else if (target.dtype() == DType::Float16) {
         int nb = get_num_blocks(n);
         auto* p = reinterpret_cast<__half*>(target.data<Float16>());
-        hipLaunchKernelGGL(leaky_relu_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, alpha, n);
+        hipLaunchKernelGGL(leaky_relu_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, n, alpha);
     } else if (target.dtype() == DType::BFloat16) {
         auto tmp = leaky_relu_kernel(target, alpha, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),

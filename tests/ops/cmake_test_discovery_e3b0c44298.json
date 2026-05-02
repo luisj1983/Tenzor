@@ -1,0 +1,732 @@
+{
+  "tests": 120,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiBackendDType\/TransformNewMultiDTypeTest",
+      "tests": 120,
+      "testsuite": [
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "MoveaxisEquivalentToMovedim\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 17
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyCorrectShape\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 28
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "NarrowCopyIsNotView\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 34
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "ColumnStack1DInputs\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 41
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "RowStackMatchesVstack\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 51
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsBasic\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 63
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "BroadcastTensorsIncompatibleShapes\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 75
+        },
+        {
+          "name": "DTypePreserved\/Cpu_Float32",
+          "value_param": "(\"cpu\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Cpu_Float64",
+          "value_param": "(\"cpu\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Cpu_Float16",
+          "value_param": "(\"cpu\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Cuda0_Float32",
+          "value_param": "(\"cuda\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Cuda0_Float64",
+          "value_param": "(\"cuda\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Cuda0_Float16",
+          "value_param": "(\"cuda\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Vulkan0_Float32",
+          "value_param": "(\"vulkan\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Vulkan0_Float64",
+          "value_param": "(\"vulkan\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Vulkan0_Float16",
+          "value_param": "(\"vulkan\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Oneapi0_Float32",
+          "value_param": "(\"oneapi\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Oneapi0_Float64",
+          "value_param": "(\"oneapi\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Oneapi0_Float16",
+          "value_param": "(\"oneapi\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Rocm0_Float32",
+          "value_param": "(\"rocm\", 1-byte object <00>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Rocm0_Float64",
+          "value_param": "(\"rocm\", 1-byte object <01>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        },
+        {
+          "name": "DTypePreserved\/Rocm0_Float16",
+          "value_param": "(\"rocm\", 1-byte object <02>)",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_transform_new_multidtype.cpp",
+          "line": 81
+        }
+      ]
+    }
+  ]
+}

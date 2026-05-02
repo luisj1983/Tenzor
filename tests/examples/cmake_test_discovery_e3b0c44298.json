@@ -1,0 +1,112 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ExampleRegression",
+      "tests": 20,
+      "testsuite": [
+        {
+          "name": "XorTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 63
+        },
+        {
+          "name": "LinearRegressionTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 73
+        },
+        {
+          "name": "BinaryClassificationTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 83
+        },
+        {
+          "name": "MulticlassClassificationTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 93
+        },
+        {
+          "name": "ConvolutionalTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 103
+        },
+        {
+          "name": "AutoencoderTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 113
+        },
+        {
+          "name": "RnnSequenceTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 123
+        },
+        {
+          "name": "BatchNormalizationTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 133
+        },
+        {
+          "name": "DropoutTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 143
+        },
+        {
+          "name": "CustomLossTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 153
+        },
+        {
+          "name": "ResidualNetworkTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 163
+        },
+        {
+          "name": "VAETrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 173
+        },
+        {
+          "name": "GANTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 183
+        },
+        {
+          "name": "LSTMTextTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 200
+        },
+        {
+          "name": "SelfAttentionTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 210
+        },
+        {
+          "name": "WordEmbeddingTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 220
+        },
+        {
+          "name": "TransferLearningTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 230
+        },
+        {
+          "name": "LayerNormalizationTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 241
+        },
+        {
+          "name": "MultitaskLearningTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 251
+        },
+        {
+          "name": "SiameseNetworkTrains",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/examples\/test_all_autograd_examples.cpp",
+          "line": 261
+        }
+      ]
+    }
+  ]
+}

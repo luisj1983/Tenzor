@@ -798,8 +798,18 @@ auto spherical_bessel_j0(const Tensor& x) -> Tensor {
 
 auto cosine_similarity(const Tensor& x1, const Tensor& x2,
                        int64_t dim, double eps) -> Tensor {
+    // Normalise the dim once at the dispatch layer so every backend kernel
+    // (and every step of the GPU composed-ops fallback that builds cosine
+    // similarity from sum + norm + div) receives the same non-negative
+    // index. Without this, only CPU + CUDA happened to normalise the
+    // negative dim correctly; Vulkan/OneAPI/ROCm passed the raw negative
+    // through their internal `dispatchReduction`/`dispatchNorm` chain
+    // which reduced the wrong axis. See [Negative-dim normalization gaps]
+    // in MEMORY.md.
+    int64_t ndim = static_cast<int64_t>(x1.shape().size());
+    int64_t actual_dim = (dim < 0) ? dim + ndim : dim;
     OpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, actual_dim);
     attrs.set(AttrKey::Eps, eps);
     std::array<Tensor, 2> inputs = {x1, x2};
     return dispatch_single(OpId::CosineSimilarity, inputs, attrs);
