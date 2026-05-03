@@ -673,6 +673,10 @@ namespace rocm {
                                    int64_t out_d, int64_t out_h, int64_t out_w, hipStream_t stream) -> Tensor;
     auto max_unpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
                                     const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto max_unpool1d_forward_hip(const Tensor& input, const Tensor& indices,
+                                   int64_t out_l, hipStream_t stream) -> Tensor;
+    auto max_unpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                    const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
 
     // Normalization operations
     auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
@@ -4606,6 +4610,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return rocm::max_unpool3d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase A.1: Max Unpool 1D (ROCm — wraps the 2D kernel via reshape).
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_l = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return rocm::max_unpool1d_forward_hip(inputs[0], inputs[1], out_l, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::max_unpool1d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
     });
 
     // =========================================================================

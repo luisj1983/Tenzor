@@ -4146,5 +4146,34 @@ auto max_unpool3d_backward_hip(
     return grad_input;
 }
 
+// ============================================================================
+// Phase A.1 — Max Unpool 1D (ROCm). Reshape (N, C, L) → (N, C, L, 1) and
+// reuse the existing 2D kernel; reshape is metadata-only on the GPU.
+// ============================================================================
+
+auto max_unpool1d_forward_hip(const Tensor& input, const Tensor& indices,
+                              int64_t out_l, hipStream_t stream) -> Tensor
+{
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], in_l = shape[2];
+    auto input_4d = input.contiguous().reshape({N, C, in_l, 1});
+    auto indices_4d = indices.contiguous().reshape({N, C, in_l, 1});
+    auto out_4d = max_unpool2d_forward_hip(input_4d, indices_4d, out_l, /*out_w=*/1, stream);
+    return out_4d.reshape({N, C, out_l});
+}
+
+auto max_unpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                const std::vector<int64_t>& input_shape,
+                                hipStream_t stream) -> Tensor
+{
+    int64_t N = input_shape[0], C = input_shape[1], in_l = input_shape[2];
+    int64_t out_l = grad_output.shape()[2];
+    std::vector<int64_t> input_shape_4d = {N, C, in_l, 1};
+    auto grad_4d = grad_output.contiguous().reshape({N, C, out_l, 1});
+    auto indices_4d = indices.contiguous().reshape({N, C, in_l, 1});
+    auto grad_in_4d = max_unpool2d_backward_hip(grad_4d, indices_4d, input_shape_4d, stream);
+    return grad_in_4d.reshape({N, C, in_l});
+}
+
 } // namespace rocm
 } // namespace tenzor

@@ -342,4 +342,35 @@ auto IRFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
     return {fft_autograd::rfft(grad_outputs[0], std::nullopt, dim_, invert_fft_norm(norm_))};
 }
 
+// ============================================================================
+// Phase A.3 — STFT / ISTFT backward.
+// STFT and ISTFT are mutual adjoint-inverse linear operators (with proper
+// window normalization), so the gradient of STFT w.r.t. its time-domain
+// input flows through ISTFT with the same parameters, and vice versa.
+// This matches PyTorch's autograd convention for these ops.
+// ============================================================================
+
+auto STFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("STFTBackward::forward should not be called");
+}
+
+auto STFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // grad_outputs[0] has STFT shape (..., freq_bins, num_frames).
+    // Apply ISTFT with the same params to push the gradient back to time domain.
+    return {fft::istft(grad_outputs[0], n_fft_, hop_length_, win_length_,
+                       window_, center_, normalized_, onesided_,
+                       /*length=*/signal_length_)};
+}
+
+auto ISTFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("ISTFTBackward::forward should not be called");
+}
+
+auto ISTFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // grad_outputs[0] has ISTFT output shape (..., signal_length).
+    // STFT with the same params yields the gradient in the STFT domain.
+    return {fft::stft(grad_outputs[0], n_fft_, hop_length_, win_length_,
+                      window_, center_, normalized_, onesided_)};
+}
+
 } // namespace tenzor

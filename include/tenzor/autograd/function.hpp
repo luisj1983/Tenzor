@@ -1913,6 +1913,55 @@ private:
     std::string norm_;
 };
 
+
+// =====================================================================
+// Phase A.3 — STFT / ISTFT autograd. STFT and ISTFT are mutual
+// adjoint-inverse linear operators (when the window satisfies COLA),
+// so the gradient of one flows through the other with the same params.
+// =====================================================================
+
+class STFTBackward : public Function {
+public:
+    STFTBackward(int64_t n_fft, int64_t hop_length, int64_t win_length,
+                 Tensor window, bool center, bool normalized, bool onesided,
+                 int64_t signal_length)
+        : n_fft_(n_fft), hop_length_(hop_length), win_length_(win_length),
+          window_(std::move(window)), center_(center), normalized_(normalized),
+          onesided_(onesided), signal_length_(signal_length) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "STFTBackward"; }
+private:
+    int64_t n_fft_;
+    int64_t hop_length_;
+    int64_t win_length_;
+    Tensor window_;
+    bool center_;
+    bool normalized_;
+    bool onesided_;
+    int64_t signal_length_;
+};
+
+class ISTFTBackward : public Function {
+public:
+    ISTFTBackward(int64_t n_fft, int64_t hop_length, int64_t win_length,
+                  Tensor window, bool center, bool normalized, bool onesided)
+        : n_fft_(n_fft), hop_length_(hop_length), win_length_(win_length),
+          window_(std::move(window)), center_(center), normalized_(normalized),
+          onesided_(onesided) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ISTFTBackward"; }
+private:
+    int64_t n_fft_;
+    int64_t hop_length_;
+    int64_t win_length_;
+    Tensor window_;
+    bool center_;
+    bool normalized_;
+    bool onesided_;
+};
+
 // =========================================================================
 // Linear Algebra Backward Functions
 // =========================================================================

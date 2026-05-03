@@ -1942,6 +1942,61 @@ auto irfft(const Variable& input,
     return output;
 }
 
+// ============================================================================
+// Phase A.3 — STFT / ISTFT Variable wrappers.
+// ============================================================================
+
+auto stft(const Variable& input,
+          int64_t n_fft,
+          int64_t hop_length,
+          int64_t win_length,
+          const Tensor& window,
+          bool center,
+          bool normalized,
+          bool onesided) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::stft(input.tensor(), n_fft, hop_length, win_length,
+                                           window, center, normalized, onesided),
+                        false);
+    }
+    int64_t signal_length = input.tensor().shape().back();
+    auto result = tenzor::fft::stft(input.tensor(), n_fft, hop_length, win_length,
+                                     window, center, normalized, onesided);
+    auto grad_fn = std::make_shared<STFTBackward>(
+        n_fft, hop_length, win_length, window, center, normalized, onesided,
+        signal_length);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto istft(const Variable& input,
+           int64_t n_fft,
+           int64_t hop_length,
+           int64_t win_length,
+           const Tensor& window,
+           bool center,
+           bool normalized,
+           bool onesided,
+           std::optional<int64_t> length) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::istft(input.tensor(), n_fft, hop_length, win_length,
+                                            window, center, normalized, onesided, length),
+                        false);
+    }
+    auto result = tenzor::fft::istft(input.tensor(), n_fft, hop_length, win_length,
+                                      window, center, normalized, onesided, length);
+    auto grad_fn = std::make_shared<ISTFTBackward>(
+        n_fft, hop_length, win_length, window, center, normalized, onesided);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace fft_autograd
 
 // ============================================================================

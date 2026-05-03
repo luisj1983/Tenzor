@@ -666,6 +666,26 @@ auto max_unpool2d(const Variable& input, const Tensor& indices,
     -> Variable;
 
 /**
+ * @brief Functional max-unpool 1d (Phase A.1).
+ *
+ * Inverse of MaxPool1d: scatter input values into a larger tensor at the
+ * indices saved by the matching MaxPool1d forward.
+ *
+ * @param input    [N, C, L_pool]   — the pooled values to scatter.
+ * @param indices  [N, C, L_pool]   — Int64 spatial indices (linear within L).
+ * @param kernel_size  size of the original pooling window.
+ * @param stride       pooling stride (default = kernel_size).
+ * @param padding      pooling padding (default = 0).
+ * @param output_size  optional explicit output L (computes via formula otherwise).
+ */
+auto max_unpool1d(const Variable& input, const Tensor& indices,
+                  int64_t kernel_size,
+                  int64_t stride = -1,
+                  int64_t padding = 0,
+                  std::optional<int64_t> output_size = std::nullopt)
+    -> Variable;
+
+/**
  * @brief 3D max unpooling (inverse of max_pool3d)
  *
  * @param input Pooled tensor [N, C, D_pool, H_pool, W_pool]

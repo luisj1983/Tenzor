@@ -403,6 +403,69 @@ TEST_P(NNPoolingParity, MaxUnpool2d) {
     }
 }
 
+// Phase A.1 — MaxUnpool1d parity (forward).
+TEST_P(NNPoolingParity, MaxUnpool1d) {
+    // Pooled output shape (1, 2, 2). Original length = 4 (kernel=2 stride=2).
+    auto pooled = randn({1, 2, 2}, DType::Float32, Device::cpu());
+    // Choose first element of each window — flat indices 0, 2 in length-4 spatial.
+    auto indices = zeros({1, 2, 2}, DType::Int64, Device::cpu());
+    auto* idx = indices.data<int64_t>();
+    int64_t pattern[] = {0, 2};
+    for (int64_t c = 0; c < 2; ++c) {
+        for (int64_t k = 0; k < 2; ++k) {
+            idx[c * 2 + k] = pattern[k];
+        }
+    }
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+
+    Tensor ref;
+    try {
+        auto un = nn::functional::max_unpool1d(
+            Variable(pooled, false), indices, /*kernel_size=*/2);
+        ref = un.tensor();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "MaxUnpool1d CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto un = nn::functional::max_unpool1d(
+                Variable(pooled.to(backends[i]), false),
+                indices.to(backends[i]),
+                /*kernel_size=*/2);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("MaxUnpool1d on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, un.tensor().to(Device::cpu()),
+                                 1e-5f, 1e-7f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "MaxUnpool1d failed on " << backend_name(backends[i])
+                      << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// Phase A.1 — MaxUnpool1d backward parity.
+TEST_P(NNPoolingParity, MaxUnpool1d_Backward) {
+    auto input = randn({1, 2, 2}, DType::Float32, Device::cpu()) * 5.0f + 2.0f;
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            // Build matching indices on the device of the input.
+            auto idx = zeros({1, 2, 2}, DType::Int64, in[0].tensor().device());
+            // Index pattern (host-side), then move to device.
+            auto idx_cpu = idx.to(Device::cpu());
+            auto* p = idx_cpu.data<int64_t>();
+            int64_t pat[] = {0, 2};
+            for (int64_t c = 0; c < 2; ++c) {
+                for (int64_t k = 0; k < 2; ++k) p[c * 2 + k] = pat[k];
+            }
+            idx = idx_cpu.to(in[0].tensor().device());
+            return nn::functional::max_unpool1d(in[0], idx, /*kernel_size=*/2);
+        },
+        {input}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "MaxUnpool1d_Grad");
+}
+
 // ============================================================================
 // Main
 // ============================================================================

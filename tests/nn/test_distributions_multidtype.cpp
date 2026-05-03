@@ -142,6 +142,118 @@ TEST_P(DistributionsMultiDTypeTest, UniformVariance) {
 }
 
 // ============================================================================
+// Phase C.3 — Extended distribution backend smoke. Verifies each
+// distribution constructs and samples end-to-end on every backend ×
+// dtype, catching missing-op-on-backend regressions.
+// ============================================================================
+
+TEST_P(DistributionsMultiDTypeTest, ExponentialSampleNonneg) {
+    auto rate = tenzor::full({4}, 1.0f, dtype(), device());
+    Exponential dist(rate);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f) << "Exponential sample must be non-negative";
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, GammaSamplePositive) {
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Gamma sampler is Float32/Float64 only";
+    }
+    auto concentration = tenzor::full({4}, 2.0f, dtype(), device());
+    auto rate = tenzor::full({4}, 1.0f, dtype(), device());
+    Gamma dist(concentration, rate);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f) << "Gamma samples must be non-negative";
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, BetaSampleInZeroOne) {
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Beta sampler (uses Gamma) is Float32/Float64 only";
+    }
+    auto a = tenzor::full({4}, 2.0f, dtype(), device());
+    auto b = tenzor::full({4}, 3.0f, dtype(), device());
+    Beta dist(a, b);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], -1e-3f);
+        EXPECT_LE(p[i], 1.0f + 1e-3f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, LogNormalSamplePositive) {
+    auto loc = tenzor::full({4}, 0.0f, dtype(), device());
+    auto scale = tenzor::full({4}, 1.0f, dtype(), device());
+    LogNormal dist(loc, scale);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GT(p[i], 0.0f) << "LogNormal samples must be positive";
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, CauchySampleFinite) {
+    if (dtype() == DType::Float16) {
+        GTEST_SKIP() << "Cauchy in Float16 has unbounded tails that overflow Float16 range";
+    }
+    auto loc = tenzor::full({4}, 0.0f, dtype(), device());
+    auto scale = tenzor::full({4}, 1.0f, dtype(), device());
+    Cauchy dist(loc, scale);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(p[i])) << "Cauchy sample non-finite";
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, HalfNormalSampleNonneg) {
+    auto scale = tenzor::full({4}, 1.0f, dtype(), device());
+    HalfNormal dist(scale);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, Chi2SampleNonneg) {
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Chi2 (uses Gamma) is Float32/Float64 only";
+    }
+    auto df = tenzor::full({4}, 3.0f, dtype(), device());
+    Chi2 dist(df);
+    auto s = dist.sample();
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, CategoricalSampleInRange) {
+    auto probs = tenzor::full({3}, 1.0f / 3.0f, dtype(), device());
+    Categorical dist(probs);
+    auto s = dist.sample({16});
+    auto cpu = s.to(Device::cpu()).to(DType::Int64).contiguous();
+    auto* p = cpu.data<int64_t>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0);
+        EXPECT_LT(p[i], 3);
+    }
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 

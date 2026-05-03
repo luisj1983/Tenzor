@@ -101,6 +101,83 @@ TEST_P(FP8Parity, NativeQueryPerBackend) {
     SUCCEED();
 }
 
+// ====================================================================
+// Phase D.1 — FP8 MatMul parity. The CPU emulated FP8 matmul is the
+// reference; each GPU backend's FP8 matmul (native or widen-narrow)
+// must match within the documented FP8 accumulation tolerance band.
+// ====================================================================
+
+TEST_P(FP8Parity, MatMul_FP8_E4M3) {
+    auto a_f32 = randn({4, 4}, DType::Float32, Device::cpu()) * 0.5f;
+    auto b_f32 = randn({4, 4}, DType::Float32, Device::cpu()) * 0.5f;
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("fp8 matmul parity");
+
+    Tensor ref_f32;
+    try {
+        auto a_e4m3 = a_f32.to(DType::FP8_E4M3);
+        auto b_e4m3 = b_f32.to(DType::FP8_E4M3);
+        auto out_e4m3 = ::tenzor::matmul(a_e4m3, b_e4m3);
+        ref_f32 = out_e4m3.to(DType::Float32);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "FP8 MatMul CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        const auto& dev = backends[i];
+        try {
+            auto a_dev = a_f32.to(dev).to(DType::FP8_E4M3);
+            auto b_dev = b_f32.to(dev).to(DType::FP8_E4M3);
+            auto out_dev = ::tenzor::matmul(a_dev, b_dev);
+            dev.synchronize();
+            auto out_cpu = out_dev.to(DType::Float32).to(Device::cpu());
+            SCOPED_TRACE(std::string("FP8_E4M3 MatMul on ") + backend_name(dev));
+            // FP8_E4M3 has 3 mantissa bits + Float32 accumulation.
+            // 4-element dot products typically incur 5-10% per-element error.
+            EXPECT_TENSORS_CLOSE(ref_f32, out_cpu, 0.6f, 0.1f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "FP8_E4M3 MatMul failed on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
+TEST_P(FP8Parity, MatMul_FP8_E5M2) {
+    auto a_f32 = randn({4, 4}, DType::Float32, Device::cpu()) * 0.5f;
+    auto b_f32 = randn({4, 4}, DType::Float32, Device::cpu()) * 0.5f;
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("fp8 matmul parity");
+
+    Tensor ref_f32;
+    try {
+        auto a_e5m2 = a_f32.to(DType::FP8_E5M2);
+        auto b_e5m2 = b_f32.to(DType::FP8_E5M2);
+        auto out_e5m2 = ::tenzor::matmul(a_e5m2, b_e5m2);
+        ref_f32 = out_e5m2.to(DType::Float32);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "FP8 MatMul CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        const auto& dev = backends[i];
+        try {
+            auto a_dev = a_f32.to(dev).to(DType::FP8_E5M2);
+            auto b_dev = b_f32.to(dev).to(DType::FP8_E5M2);
+            auto out_dev = ::tenzor::matmul(a_dev, b_dev);
+            dev.synchronize();
+            auto out_cpu = out_dev.to(DType::Float32).to(Device::cpu());
+            SCOPED_TRACE(std::string("FP8_E5M2 MatMul on ") + backend_name(dev));
+            // FP8_E5M2 has 2 mantissa bits — looser tolerance.
+            EXPECT_TENSORS_CLOSE(ref_f32, out_cpu, 1.0f, 0.2f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "FP8_E5M2 MatMul failed on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
 INSTANTIATE_BACKEND_TESTS(FP8Parity);
 
 

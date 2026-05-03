@@ -179,6 +179,7 @@ inline std::vector<OpId> get_required_ops() {
         OpId::FractionalMaxPool2dForward,  OpId::FractionalMaxPool2dBackward,
         OpId::FractionalMaxPool3dForward,  OpId::FractionalMaxPool3dBackward,
         OpId::MaxUnpool2dForward,
+        OpId::MaxUnpool1dForward, OpId::MaxUnpool1dBackward,
 
         // Signal processing — STFT/ISTFT/DCT all have cross-backend coverage
         OpId::STFT, OpId::ISTFT, OpId::DCT,

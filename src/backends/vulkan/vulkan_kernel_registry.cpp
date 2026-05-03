@@ -3671,6 +3671,30 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchMaxUnpool3dBackward(inputs[0], inputs[1], input_shape);
     });
 
+    // =========================================================================
+    // Phase A.1: Max Unpool 1D (Vulkan — wraps the 2D dispatcher via reshape).
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_l = attrs.get_int(AttrKey::OutputSizeW, 1);
+        auto in_shape = inputs[0].shape();
+        int64_t N = in_shape[0], C = in_shape[1], in_l = in_shape[2];
+        auto input_4d = inputs[0].contiguous().reshape({N, C, in_l, 1});
+        auto indices_4d = inputs[1].contiguous().reshape({N, C, in_l, 1});
+        auto out_4d = get_vulkan_backend()->dispatchMaxUnpool2dForward(input_4d, indices_4d, out_l, /*out_w=*/1);
+        return out_4d.reshape({N, C, out_l});
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t N = input_shape[0], C = input_shape[1], in_l = input_shape[2];
+        int64_t out_l = inputs[0].shape()[2];
+        auto grad_4d = inputs[0].contiguous().reshape({N, C, out_l, 1});
+        auto indices_4d = inputs[1].contiguous().reshape({N, C, in_l, 1});
+        std::vector<int64_t> input_shape_4d = {N, C, in_l, 1};
+        auto grad_in_4d = get_vulkan_backend()->dispatchMaxUnpool2dBackward(grad_4d, indices_4d, input_shape_4d);
+        return grad_in_4d.reshape({N, C, in_l});
+    });
+
     // ========================================================================
     // Phase: New Unary Math Operations — Deg2Rad, Rad2Deg, Logit
     // ========================================================================

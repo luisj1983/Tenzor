@@ -676,6 +676,8 @@ enum class OpId : uint16_t {
     MaxUnpool2dBackward,
     MaxUnpool3dForward,
     MaxUnpool3dBackward,
+    MaxUnpool1dForward,
+    MaxUnpool1dBackward,
 
     // =========================================================================
     // NaN-ignoring statistics (Phase: gap fixes)

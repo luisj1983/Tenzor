@@ -2168,6 +2168,70 @@ auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indic
     return grad_input;
 }
 
+
+// =====================================================================
+// Phase A.1 — MaxUnpool1d. Reuses the 2D impl with width=1, since the
+// scatter pattern is identical: read input[n, c, i] and write to
+// output[n, c, idx[i]] where idx is the linear-spatial position saved
+// by the matching MaxPool1d forward.
+// =====================================================================
+
+auto max_unpool1d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                 int64_t out_l) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], in_l = shape[2];
+
+    auto output = Tensor::empty_uninitialized({N, C, out_l}, input.dtype(), input.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        max_unpool2d_impl<float>(input.data<float>(), idx_data, output.data<float>(),
+                                  N, C, in_l, /*in_w=*/1, out_l, /*out_w=*/1);
+    } else if (input.dtype() == DType::Float64) {
+        max_unpool2d_impl<double>(input.data<double>(), idx_data, output.data<double>(),
+                                   N, C, in_l, 1, out_l, 1);
+    } else if (input.dtype() == DType::Float16) {
+        max_unpool2d_impl<Float16>(input.data<Float16>(), idx_data, output.data<Float16>(),
+                                    N, C, in_l, 1, out_l, 1);
+    } else if (input.dtype() == DType::BFloat16) {
+        max_unpool2d_impl<BFloat16>(input.data<BFloat16>(), idx_data, output.data<BFloat16>(),
+                                     N, C, in_l, 1, out_l, 1);
+    } else {
+        throw std::runtime_error("Unsupported dtype for max_unpool1d_forward");
+    }
+
+    return output;
+}
+
+auto max_unpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                  const std::vector<int64_t>& input_shape) -> Tensor {
+    auto grad_shape = grad_output.shape();
+    int64_t N = input_shape[0], C = input_shape[1];
+    int64_t in_l = input_shape[2];
+    int64_t out_l = grad_shape[2];
+
+    auto grad_input = Tensor::empty_uninitialized(input_shape, grad_output.dtype(), grad_output.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (grad_output.dtype() == DType::Float32) {
+        max_unpool2d_backward_impl<float>(grad_output.data<float>(), idx_data,
+            grad_input.data<float>(), N, C, in_l, /*in_w=*/1, out_l, /*out_w=*/1);
+    } else if (grad_output.dtype() == DType::Float64) {
+        max_unpool2d_backward_impl<double>(grad_output.data<double>(), idx_data,
+            grad_input.data<double>(), N, C, in_l, 1, out_l, 1);
+    } else if (grad_output.dtype() == DType::Float16) {
+        max_unpool2d_backward_impl<Float16>(grad_output.data<Float16>(), idx_data,
+            grad_input.data<Float16>(), N, C, in_l, 1, out_l, 1);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        max_unpool2d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), idx_data,
+            grad_input.data<BFloat16>(), N, C, in_l, 1, out_l, 1);
+    } else {
+        throw std::runtime_error("Unsupported dtype for max_unpool1d_backward");
+    }
+
+    return grad_input;
+}
+
 // ============================================================================
 // Phase 9: Max Unpool 3D
 // ============================================================================

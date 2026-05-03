@@ -13,9 +13,11 @@
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/nn/layers/attention.hpp"
 #include "tenzor/nn/layers/gqa_attention.hpp"
+#include "tenzor/core/generator.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "../grad_flow_helpers.hpp"
+#include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -191,6 +193,100 @@ TEST_F(AttentionAutogradTest, MultiheadAttentionRejectsCausalPlusMask) {
     EXPECT_TRUE(threw)
         << "MultiheadAttention must reject is_causal=true && attn_mask "
            "simultaneously per attention-contract.md (audit M1).";
+}
+
+// ====================================================================
+// Phase E.1 — Philox-replay determinism: same seed must produce the
+// same dropout pattern on repeated forward calls. This is the
+// invariant the backward path's host_philox_uniform replay relies on.
+// ====================================================================
+
+TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
+    int64_t B = 1, H = 2, S = 4, D = 8;
+    auto qt = tenzor::randn({B, H, S, D}) * 0.3f;
+    auto kt = tenzor::randn({B, H, S, D}) * 0.3f;
+    auto vt = tenzor::randn({B, H, S, D}) * 0.3f;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    // Pin the default CPU generator's seed; flash_attention's dropout
+    // path derives its Philox seed from this. Same seed → same mask →
+    // same output.
+    tenzor::default_generator(tenzor::Device::cpu()).manual_seed(42);
+    auto Q1 = tenzor::Variable(qt, true);
+    auto K1 = tenzor::Variable(kt, false);
+    auto V1 = tenzor::Variable(vt, false);
+    auto out1 = tenzor::flash_attention(Q1, K1, V1, scale,
+        /*causal=*/false, /*dropout_p=*/0.5f, /*is_training=*/true);
+    auto o1_cpu = out1.tensor().to(tenzor::Device::cpu()).to(tenzor::DType::Float32).contiguous();
+
+    tenzor::default_generator(tenzor::Device::cpu()).manual_seed(42);
+    auto Q2 = tenzor::Variable(qt, true);
+    auto K2 = tenzor::Variable(kt, false);
+    auto V2 = tenzor::Variable(vt, false);
+    auto out2 = tenzor::flash_attention(Q2, K2, V2, scale,
+        /*causal=*/false, /*dropout_p=*/0.5f, /*is_training=*/true);
+    auto o2_cpu = out2.tensor().to(tenzor::Device::cpu()).to(tenzor::DType::Float32).contiguous();
+
+    // Outputs must match across re-seeded forward passes.
+    auto* p1 = o1_cpu.data<float>();
+    auto* p2 = o2_cpu.data<float>();
+    for (int64_t i = 0; i < o1_cpu.numel(); ++i) {
+        EXPECT_FLOAT_EQ(p1[i], p2[i])
+            << "FlashAttention forward is non-deterministic at element " << i;
+    }
+
+    // Backward should run cleanly on the (re-)seeded forward.
+    auto loss = tenzor::sum(out2);
+    loss.backward();
+    EXPECT_GRAD_FLOWS(Q2);
+}
+
+// ====================================================================
+// Phase E.2 — Fused-vs-composed equivalence: flash_attention with
+// dropout_p=0 should produce a working forward + grad_fn regardless of
+// which path the dispatcher selects. Force the composed-ops fallback
+// by using a head_dim outside the fused-kernel allowed set
+// ({32, 64, 128}).
+// ====================================================================
+
+TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedFallback) {
+    int64_t B = 1, H = 2, S = 4;
+    // Fused-eligible head_dim path.
+    int64_t D_fused = 64;
+    float scale_f = 1.0f / std::sqrt(static_cast<float>(D_fused));
+    auto qf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, true);
+    auto kf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, false);
+    auto vf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, false);
+    auto out_fused = tenzor::flash_attention(qf, kf, vf, scale_f,
+        /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
+
+    // Composed-ops fallback head_dim path.
+    int64_t D_comp = 33;
+    float scale_c = 1.0f / std::sqrt(static_cast<float>(D_comp));
+    auto qc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, true);
+    auto kc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, false);
+    auto vc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, false);
+    auto out_comp = tenzor::flash_attention(qc, kc, vc, scale_c,
+        /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
+
+    // Both paths produce finite outputs.
+    auto of_cpu = out_fused.tensor().to(tenzor::Device::cpu()).to(tenzor::DType::Float32).contiguous();
+    auto oc_cpu = out_comp.tensor().to(tenzor::Device::cpu()).to(tenzor::DType::Float32).contiguous();
+    auto* pf = of_cpu.data<float>();
+    auto* pc = oc_cpu.data<float>();
+    for (int64_t i = 0; i < of_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(pf[i]))
+            << "Fused FlashAttention produced non-finite output at " << i;
+    }
+    for (int64_t i = 0; i < oc_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(pc[i]))
+            << "Composed-ops FlashAttention produced non-finite output at " << i;
+    }
+    // Both must attach a grad_fn (the structural property the audit
+    // M9 gate enforces — neither path may silently strip the autograd
+    // chain).
+    EXPECT_NE(out_fused.grad_fn(), nullptr);
+    EXPECT_NE(out_comp.grad_fn(), nullptr);
 }
 
 }  // anonymous namespace

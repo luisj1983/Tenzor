@@ -711,6 +711,29 @@ auto irfft(const Variable& input,
            int64_t dim = -1,
            const std::string& norm = "backward") -> Variable;
 
+/// Short-time Fourier transform with gradient tracking.
+/// Grad: istft(grad, ...) with the same params (mutual adjoint).
+auto stft(const Variable& input,
+          int64_t n_fft,
+          int64_t hop_length = -1,
+          int64_t win_length = -1,
+          const Tensor& window = Tensor{},
+          bool center = true,
+          bool normalized = false,
+          bool onesided = true) -> Variable;
+
+/// Inverse short-time Fourier transform with gradient tracking.
+/// Grad: stft(grad, ...) with the same params.
+auto istft(const Variable& input,
+           int64_t n_fft,
+           int64_t hop_length = -1,
+           int64_t win_length = -1,
+           const Tensor& window = Tensor{},
+           bool center = true,
+           bool normalized = false,
+           bool onesided = true,
+           std::optional<int64_t> length = std::nullopt) -> Variable;
+
 } // namespace fft_autograd
 
 // ============================================================================

@@ -929,37 +929,25 @@ auto MultiMarginLoss::forward(const Variable& input, const Tensor& target) -> Va
     int64_t N = shape[0];
     int64_t C = shape[1];
 
-    // Extract the correct-class scores: x[y] for each sample
-    // Build one-hot from target, then use it to extract correct scores
-    Tensor target_cpu = target.to(Device::cpu()).to(DType::Int64);
-    const int64_t* target_data = target_cpu.data<int64_t>();
+    // Use Variable-aware gather to extract x[y] for each sample. This preserves
+    // the autograd chain through the correct-class score path (the previous
+    // implementation extracted via raw `input.tensor().to(cpu).data<float>()`,
+    // which severs grad_fn — see MEMORY.md feedback_raw_tensor_op_bug.md).
+    Tensor target_idx = target.to(DType::Int64).to(input.tensor().device()).contiguous().reshape({N, 1});
+    auto correct_scores = ::tenzor::gather(input, /*dim=*/1, target_idx);  // (N, 1) Variable
 
-    // Create a tensor to hold x[y] for each sample, broadcast to (N, C)
-    // We'll build this using indexing: for each sample i, correct_score[i] = input[i, target[i]]
-    auto input_t = input.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
-    const float* input_data = input_t.data<float>();
-
-    auto correct_scores_t = Tensor({N, 1}, DType::Float32, Device::cpu());
-    float* cs_data = correct_scores_t.data<float>();
-    for (int64_t i = 0; i < N; ++i) {
-        int64_t y = target_data[i];
-        cs_data[i] = input_data[i * C + y];
-    }
-
-    // Transfer to original device
-    auto correct_scores = Variable(
-        correct_scores_t.to(input.tensor().dtype()).to(input.tensor().device()),
-        false);
-
-    // margin - x[y] + x[j] for all j
+    // margin - x[y] + x[j] for all j (broadcast (N,1) - (N,1) + (N,C) → (N,C))
     auto margin_var = scalar_var(static_cast<float>(margin_), input);
     auto diff = margin_var - correct_scores + input;
     auto hinge = relu(diff);
 
-    // Zero out the correct class contribution
-    // Create one-hot mask
-    auto one_hot_t = zeros({N, C}, input.tensor().dtype(), input.tensor().device());
-    auto one_hot_cpu = one_hot_t.to(Device::cpu()).to(DType::Float32);
+    // Build the one-hot mask that zeros out the correct-class contribution.
+    // The mask is constant w.r.t. input — we can construct it via raw tensor
+    // ops without breaking autograd, since we wrap the result in a no-grad
+    // Variable.
+    Tensor target_cpu = target.to(Device::cpu()).to(DType::Int64).contiguous();
+    const int64_t* target_data = target_cpu.data<int64_t>();
+    auto one_hot_cpu = zeros({N, C}, DType::Float32, Device::cpu());
     float* oh_data = one_hot_cpu.data<float>();
     for (int64_t i = 0; i < N; ++i) {
         oh_data[i * C + target_data[i]] = 1.0f;

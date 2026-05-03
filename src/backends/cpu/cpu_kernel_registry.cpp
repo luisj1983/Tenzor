@@ -372,6 +372,8 @@ namespace cpu {
     auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
     auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor;
     auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+    auto max_unpool1d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_l) -> Tensor;
+    auto max_unpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
 
     // Fused operations
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -3962,6 +3964,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cpu::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape);
+    });
+
+    // =========================================================================
+    // Phase A.1: Max Unpool 1D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_l = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cpu::max_unpool1d_forward_kernel(inputs[0], inputs[1], out_l);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cpu::max_unpool1d_backward_kernel(inputs[0], inputs[1], input_shape);
     });
 
     // =========================================================================

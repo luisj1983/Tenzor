@@ -1578,6 +1578,54 @@ auto max_unpool2d(const Variable& input, const Tensor& indices,
     return out;
 }
 
+
+
+// =====================================================================
+// Phase A.1 — Functional max_unpool1d.
+// =====================================================================
+
+auto max_unpool1d(const Variable& input, const Tensor& indices,
+                  int64_t kernel_size,
+                  int64_t stride,
+                  int64_t padding,
+                  std::optional<int64_t> output_size) -> Variable {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "F::max_unpool1d expects 3D input [N, C, L_pool]");
+    }
+
+    if (stride < 0) stride = kernel_size;
+
+    int64_t out_l;
+    if (output_size.has_value()) {
+        out_l = *output_size;
+    } else {
+        auto shape = input.shape();
+        out_l = (shape[2] - 1) * stride - 2 * padding + kernel_size;
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
+    // Reuse OutputSizeW for the 1-D output length (avoids a new AttrKey).
+    attrs.set(AttrKey::OutputSizeW, out_l);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), indices};
+    auto result = dispatch_to_device(OpId::MaxUnpool1dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    Variable out(result[0], input.requires_grad());
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::MaxUnpool1dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return out;
+}
+
 auto max_unpool3d(const Variable& input, const Tensor& indices,
                   std::tuple<int64_t, int64_t, int64_t> kernel_size,
                   std::tuple<int64_t, int64_t, int64_t> stride,

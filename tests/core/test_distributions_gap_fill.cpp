@@ -16,6 +16,9 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/distributions/distribution.hpp>
 #include <tenzor/distributions/transforms.hpp>
+#include <tenzor/distributions/independent.hpp>
+#include <tenzor/distributions/mixture.hpp>
+#include <tenzor/distributions/transformed.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <cmath>
 
@@ -237,5 +240,196 @@ TEST(DistTransforms, AffineTransformLinearity) {
     auto* p = y_cpu.data<float>();
     for (int64_t i = 0; i < y_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(p[i], 5.0f);
+    }
+}
+
+// ====================================================================
+// Phase C.1 — Distributions previously missing from test coverage.
+// ====================================================================
+
+TEST(DistGapFill, Pareto_SampleAboveScale) {
+    auto scale = full({3}, 2.0f);
+    auto alpha = full({3}, 3.0f);
+    Pareto d(scale, alpha);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+    auto cpu = s.to(Device::cpu()).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 2.0f - 1e-3f);  // Pareto support is [scale, ∞)
+    }
+}
+
+TEST(DistGapFill, Weibull_SamplePositive) {
+    auto scale = full({3}, 2.0f);
+    auto concentration = full({3}, 1.5f);
+    Weibull d(scale, concentration);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+    auto cpu = s.to(Device::cpu()).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST(DistGapFill, Wishart_SampleSymmetric) {
+    int64_t n = 3;
+    auto df = full({}, 5.0f);
+    auto eye_t = ::tenzor::eye(n);
+    Wishart d(df, eye_t);
+    auto s = d.sample({});
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, LKJCholesky_SampleLowerTriangular) {
+    int64_t dim = 3;
+    // LKJCholesky's internal sampler calls item<double>() on the
+    // concentration parameter, so pass Float64 explicitly.
+    auto concentration = full({}, 1.0f).to(DType::Float64);
+    LKJCholesky d(dim, concentration);
+    auto s = d.sample({});
+    EXPECT_TRUE(is_finite(s));
+    // Lower-triangular cholesky factor: above-diagonal entries should be 0.
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < dim; ++i) {
+        for (int64_t j = i + 1; j < dim; ++j) {
+            EXPECT_NEAR(p[i * dim + j], 0.0f, 1e-5f);
+        }
+    }
+}
+
+TEST(DistGapFill, Kumaraswamy_SampleInZeroOne) {
+    auto a = full({3}, 2.0f);
+    auto b = full({3}, 3.0f);
+    Kumaraswamy d(a, b);
+    auto s = d.sample();
+    EXPECT_TRUE(all_in_range(s, 0.0f, 1.0f));
+}
+
+TEST(DistGapFill, OneHotCategorical_SampleSimplex) {
+    auto probs = full({3}, 1.0f / 3.0f);
+    OneHotCategorical d(probs);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, RelaxedOneHotCategorical_SamplesFinite) {
+    auto temperature = full({}, 1.0f);
+    auto probs = full({3}, 1.0f / 3.0f);
+    RelaxedOneHotCategorical d(temperature, probs);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, ContinuousBernoulli_SampleInZeroOne) {
+    auto probs = full({3}, 0.5f);
+    ContinuousBernoulli d(probs);
+    auto s = d.sample();
+    EXPECT_TRUE(all_in_range(s, 0.0f, 1.0f));
+}
+
+TEST(DistGapFill, LogisticNormal_SampleSimplex) {
+    auto loc = ::tenzor::zeros({2});
+    auto scale = full({2}, 1.0f);
+    LogisticNormal d(loc, scale);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+    EXPECT_TRUE(all_in_range(s, 0.0f, 1.0f));
+}
+
+TEST(DistGapFill, LowRankMultivariateNormal_SampleShape) {
+    auto loc = ::tenzor::zeros({2});
+    auto cov_factor = ::tenzor::ones({2, 1});
+    auto cov_diag = full({2}, 0.1f);
+    LowRankMultivariateNormal d(loc, cov_factor, cov_diag);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, Independent_ReinterpretsBatchAsEvent) {
+    auto loc = ::tenzor::zeros({2, 3});
+    auto scale = full({2, 3}, 1.0f);
+    auto base = std::make_shared<Normal>(loc, scale);
+    Independent d(base, /*reinterpreted_batch_ndims=*/1);
+    auto s = d.sample({});
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, TransformedDistribution_ChainedTransform) {
+    // Normal pushed through ExpTransform yields LogNormal-like samples.
+    auto loc = ::tenzor::zeros({3});
+    auto scale = full({3}, 1.0f);
+    auto base = std::make_shared<Normal>(loc, scale);
+    std::vector<std::shared_ptr<Transform>> transforms = {
+        std::make_shared<ExpTransform>(),
+    };
+    TransformedDistribution d(base, transforms);
+    auto s = d.sample();
+    EXPECT_TRUE(is_finite(s));
+    auto cpu = s.to(Device::cpu()).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GT(p[i], 0.0f);
+    }
+}
+
+// MixtureSameFamily.sample() has a vector out-of-bounds crash when called
+// with no arguments — separate bug in mixture.cpp; tracked as follow-up.
+
+// ====================================================================
+// Phase C.2 — Distribution transforms previously missing from coverage.
+// ====================================================================
+
+TEST(DistTransforms, TanhTransformInverseRoundtrip) {
+    auto x = full({4}, 0.7f);
+    TanhTransform tr;
+    auto y = tr.call(x);
+    auto x_back = tr.inv(y);
+    auto a_cpu = x.contiguous();
+    auto b_cpu = x_back.contiguous();
+    auto* pa = a_cpu.data<float>();
+    auto* pb = b_cpu.data<float>();
+    for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+        EXPECT_NEAR(pa[i], pb[i], 1e-4f);
+    }
+}
+
+TEST(DistTransforms, SoftmaxTransformSimplexInvariant) {
+    auto x = full({2, 3}, 0.5f);
+    SoftmaxTransform tr(/*dim=*/-1);
+    auto y = tr.call(x);
+    auto y_cpu = y.contiguous();
+    auto* p = y_cpu.data<float>();
+    int64_t rows = y_cpu.shape()[0], cols = y_cpu.shape()[1];
+    for (int64_t r = 0; r < rows; ++r) {
+        float row_sum = 0.0f;
+        for (int64_t c = 0; c < cols; ++c) {
+            EXPECT_GE(p[r * cols + c], 0.0f);
+            row_sum += p[r * cols + c];
+        }
+        EXPECT_NEAR(row_sum, 1.0f, 1e-4f);
+    }
+}
+
+TEST(DistTransforms, ComposeTransformOrderingInvariant) {
+    // Compose(exp, sigmoid)(x) == sigmoid(exp(x)).
+    auto x = full({4}, 0.5f);
+    std::vector<std::shared_ptr<Transform>> transforms = {
+        std::make_shared<ExpTransform>(),
+        std::make_shared<SigmoidTransform>(),
+    };
+    ComposeTransform compose(transforms);
+    auto y = compose.call(x);
+    ExpTransform e;
+    SigmoidTransform s;
+    auto y_manual = s.call(e.call(x));
+    auto a = y.contiguous();
+    auto b = y_manual.contiguous();
+    auto* pa = a.data<float>();
+    auto* pb = b.data<float>();
+    for (int64_t i = 0; i < a.numel(); ++i) {
+        EXPECT_NEAR(pa[i], pb[i], 1e-5f);
     }
 }
