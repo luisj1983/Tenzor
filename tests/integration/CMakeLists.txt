@@ -63,6 +63,18 @@ target_link_libraries(test_attention_autograd PRIVATE
 
 gtest_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
 
+# Phase 13b — Per-backend Philox seed-determinism TEST_P harness.
+add_executable(test_attention_philox_multibackend
+    test_attention_philox_multibackend.cpp
+)
+
+target_link_libraries(test_attention_philox_multibackend PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_attention_philox_multibackend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
 # Cross-backend FlashAttention/FusedAttention parity sweep (M9 — verifies
 # every enabled backend matches the CPU reference within F32 tolerance
 # across {causal, GQA, contiguous/permuted} axes per the contract).

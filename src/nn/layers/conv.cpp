@@ -2164,4 +2164,16 @@ auto DeformableConv2d::reset_parameters() -> void {
     }
 }
 
+namespace internal {
+auto make_conv_transpose3d_backward(int64_t stride, int64_t padding,
+                                    int64_t output_padding, int64_t dilation,
+                                    int64_t groups,
+                                    std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<ConvTranspose3dBackward>(
+        stride, padding, output_padding, dilation, groups,
+        std::move(tensors_to_save));
+}
+} // namespace internal
+
 } // namespace tenzor::nn

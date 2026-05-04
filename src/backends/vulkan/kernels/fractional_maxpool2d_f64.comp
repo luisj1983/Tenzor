@@ -1,0 +1,75 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// FractionalMaxPool2d Forward Float64 — preserves precision through autograd.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input   { double input_data[]; };
+layout(binding = 1) writeonly buffer Output  { double output_data[]; };
+layout(binding = 2) writeonly buffer Indices { int    indices_data[]; };
+layout(binding = 3) readonly buffer Samples  { float  samples_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint C;
+    uint H;
+    uint W;
+    uint out_h;
+    uint out_w;
+    uint total_output;
+    uint has_samples;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_output) return;
+
+    uint ow = idx % params.out_w;
+    uint tmp = idx / params.out_w;
+    uint oh = tmp % params.out_h;
+    tmp = tmp / params.out_h;
+    uint c = tmp % params.C;
+    uint n = tmp / params.C;
+
+    float sample_h = 0.5;
+    float sample_w = 0.5;
+    if (params.has_samples != 0) {
+        uint sample_idx = (n * params.C + c) * 2;
+        sample_h = samples_data[sample_idx];
+        sample_w = samples_data[sample_idx + 1];
+    }
+
+    float h_ratio = float(params.H) / float(params.out_h);
+    float w_ratio = float(params.W) / float(params.out_w);
+
+    int h_start = int(floor((float(oh) + sample_h) * h_ratio - sample_h));
+    int h_end   = int(floor((float(oh + 1) + sample_h) * h_ratio - sample_h));
+    int w_start = int(floor((float(ow) + sample_w) * w_ratio - sample_w));
+    int w_end   = int(floor((float(ow + 1) + sample_w) * w_ratio - sample_w));
+
+    h_start = max(h_start, 0);
+    h_end   = min(h_end, int(params.H));
+    w_start = max(w_start, 0);
+    w_end   = min(w_end, int(params.W));
+    if (h_end <= h_start) h_end = h_start + 1;
+    if (w_end <= w_start) w_end = w_start + 1;
+    h_end = min(h_end, int(params.H));
+    w_end = min(w_end, int(params.W));
+
+    double max_val = -1.0lf / 0.0lf;  // -inf as double
+    int max_idx = h_start * int(params.W) + w_start;
+
+    uint base = (n * params.C + c) * params.H * params.W;
+    for (int h = h_start; h < h_end; h++) {
+        for (int w = w_start; w < w_end; w++) {
+            double val = input_data[base + uint(h) * params.W + uint(w)];
+            if (val > max_val) {
+                max_val = val;
+                max_idx = h * int(params.W) + w;
+            }
+        }
+    }
+
+    output_data[idx]  = max_val;
+    indices_data[idx] = max_idx;
+}

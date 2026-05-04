@@ -826,6 +826,11 @@ add_executable(test_training_metrics test_metrics.cpp)
 target_link_libraries(test_training_metrics PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_training_metrics LABELS "unit" DISCOVERY_TIMEOUT 60)
 
+# Training metrics multi-backend × multi-dtype (audit-2026-05-03 N1)
+add_executable(test_metrics_multidtype test_metrics_multidtype.cpp)
+target_link_libraries(test_metrics_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_metrics_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Image I/O (stb_image wrapper) — CPU-only, commit ca264523
 add_executable(test_image_io test_image_io.cpp)
 target_link_libraries(test_image_io PRIVATE tenzor_core GTest::gtest_main)

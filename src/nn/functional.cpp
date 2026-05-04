@@ -418,7 +418,33 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
 
     bool requires_grad = input.requires_grad() || weight.requires_grad() ||
                          (bias.has_value() && bias->requires_grad());
-    return Variable(result[0], requires_grad);
+    Variable output(result[0], requires_grad);
+
+    // audit-2026-05-03 — wire autograd grad_fn so backward through F::
+    // conv_transpose3d propagates gradients (previously this returned a
+    // Variable with no grad_fn → silent zero gradients).
+    if (requires_grad && ::tenzor::is_grad_enabled()) {
+        if (sd != sh || sd != sw || pd != ph || pd != pw || dd != dh || dd != dw) {
+            throw std::runtime_error(
+                "F::conv_transpose3d autograd currently requires isotropic "
+                "stride/padding/dilation (got asymmetric values).");
+        }
+        auto [opd, oph, opw] = output_padding;
+        std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
+        if (bias.has_value()) tensors_to_save.push_back(bias->tensor());
+        auto grad_fn = internal::make_conv_transpose3d_backward(
+            sd, pd, /*output_padding=*/opd, dd, groups, std::move(tensors_to_save));
+        std::vector<Variable> input_vars = {input, weight};
+        if (bias.has_value()) input_vars.push_back(*bias);
+        grad_fn->set_input_variables(input_vars);
+        std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());
+        next_funcs.push_back(weight.grad_fn());
+        if (bias.has_value()) next_funcs.push_back(bias->grad_fn());
+        grad_fn->set_next_functions(std::move(next_funcs));
+        output.set_grad_fn(std::move(grad_fn));
+    }
+    return output;
 }
 
 // ============================================================================

@@ -237,8 +237,8 @@ def test_sequential_variadic():
     output = model.forward(input_data)
     assert output is not None, "Sequential forward failed"
 
-    # Check output shape
-    output_shape = output.data.shape()
+    # Check output shape (Tensor.shape is a property, not a method)
+    output_shape = output.data.shape
     assert output_shape[0] == 1, f"Wrong batch size: {output_shape[0]}"
     assert output_shape[1] == 5, f"Wrong output size: {output_shape[1]}"
 

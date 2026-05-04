@@ -2641,33 +2641,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // Per docs/internals/attention-contract.md the canonical backward
-            // input order is [grad_output, input, weight, mean, rstd]. The
-            // OneAPI kernel signature expects (go, in, mean, inv_std, weight)
-            // — remap here. Previously the dispatcher passed inputs in raw
-            // order, leaving OneAPI in a divergent contract from CPU/CUDA/
-            // ROCm/Vulkan (audit M14 OneAPI).
+            // Canonical autograd backward input order is
+            // [grad_output, input, mean, inv_std, weight]
+            // (see src/nn/layers/normalization.cpp LayerNormBackward::backward).
+            // The OneAPI kernel signature expects (go, in, mean, inv_std,
+            // weight) directly — pass through.
             auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
             const Tensor& grad_output = inputs[0];
             const Tensor& input       = inputs[1];
-            const Tensor& weight      = inputs[2];
-            const Tensor& mean        = inputs[3];
-            const Tensor& inv_std     = inputs[4];
+            const Tensor& mean        = inputs[2];
+            const Tensor& inv_std     = inputs[3];
+            const Tensor& weight      = inputs[4];
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
                 grad_output, input, mean, inv_std, weight, normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};
         });
 
     // Per the contract, FusedLayerNormBackward shares the same canonical
-    // input order as LayerNormBackward: [grad_output, input, weight, mean, rstd].
+    // input order as LayerNormBackward: [grad_output, input, mean, inv_std, weight].
     table.register_kernel(OpId::FusedLayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
             const Tensor& grad_output = inputs[0];
             const Tensor& input       = inputs[1];
-            const Tensor& weight      = inputs[2];
-            const Tensor& mean        = inputs[3];
-            const Tensor& inv_std     = inputs[4];
+            const Tensor& mean        = inputs[2];
+            const Tensor& inv_std     = inputs[3];
+            const Tensor& weight      = inputs[4];
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
                 grad_output, input, mean, inv_std, weight, normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};

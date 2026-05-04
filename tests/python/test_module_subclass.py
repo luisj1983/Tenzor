@@ -9,8 +9,10 @@ tz.nn.Module and overriding forward_impl().
 import sys
 import os
 
-# Add the build directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../python'))
+# Add the build directory to path (where the C++ tenzor_core extension lives).
+# The source-side python/ directory has tenzor/__init__.py but not the .so,
+# so importing from there fails with "No module named 'tenzor.tenzor_core'".
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../build/python'))
 
 import tenzor as tz
 

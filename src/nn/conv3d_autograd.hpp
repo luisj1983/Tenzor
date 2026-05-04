@@ -35,4 +35,10 @@ auto make_conv_transpose2d_backward(int64_t stride, int64_t padding,
                                     std::vector<::tenzor::Tensor> tensors_to_save)
     -> std::shared_ptr<::tenzor::Function>;
 
+auto make_conv_transpose3d_backward(int64_t stride, int64_t padding,
+                                    int64_t output_padding, int64_t dilation,
+                                    int64_t groups,
+                                    std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+
 } // namespace tenzor::nn::internal

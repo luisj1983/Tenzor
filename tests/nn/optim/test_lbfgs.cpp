@@ -13,6 +13,8 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
 
+#include "../../grad_flow_helpers.hpp"
+
 #include <cmath>
 
 namespace tenzor {
@@ -68,6 +70,14 @@ TEST_F(LBFGSTest, StrongWolfeRosenbrockConverges) {
         loss.backward();
         return loss;
     };
+
+    // One-shot grad-flow check before entering the optimizer loop
+    // (audit-2026-05-03 N1.d). Catches grad_fn severance / closure regressions
+    // that would otherwise be invisible when the optimizer happens to converge
+    // anyway (e.g. via numerical line search).
+    closure();
+    EXPECT_GRAD_FLOWS(*x);
+    EXPECT_GRAD_FLOWS(*y);
 
     optim::LBFGS opt({x, y}, /*lr=*/1.0, /*max_iter=*/20, /*max_eval=*/-1,
                      /*tolerance_grad=*/1e-7, /*tolerance_change=*/1e-9,

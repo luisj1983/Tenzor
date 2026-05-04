@@ -1481,14 +1481,184 @@ auto solve(const Variable& A, const Variable& B) -> Variable {
     next_funcs.push_back(B.grad_fn());
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (A.requires_grad()) input_vars.push_back(A);
-    if (B.requires_grad()) input_vars.push_back(B);
-    grad_fn->set_input_variables(input_vars);
+    // audit-2026-05-03 bug #1: backward returns {grad_A, grad_B} in input
+    // order. The autograd engine zips these against `input_vars` by index,
+    // so we must always push BOTH A and B — even when only one
+    // requires_grad — otherwise grad_A would be assigned to B (and vice
+    // versa), and finite-diff fails for whichever side is "off-by-one".
+    grad_fn->set_input_variables({A, B});
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
     return output;
+}
+
+// ============================================================================
+// audit-2026-05-03 Phase 8 — new linalg Variable wrappers.
+// ============================================================================
+
+auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
+              const Variable& B) -> Variable {
+    if (!B.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::lu_solve(LU_data, pivots, B.tensor()), false);
+    }
+
+    // Compute X = lu_solve(LU, pivots, B) AND reconstruct A so backward can
+    // call solve(A^T, dL/dX). Reconstruction: A = P^T @ L @ U.
+    auto X_tensor = tenzor::linalg::lu_solve(LU_data, pivots, B.tensor());
+    // Reconstruct A by applying lu_solve to identity then inverting:
+    // simpler — use solve(I, B_via_lu) trick. Here we just save LU and
+    // reconstruct on demand. For simplicity compute A via factor extraction.
+    // Pragmatic shortcut: save (LU_data, pivots) directly; backward does
+    // a lu_solve on the transposed system instead of needing A explicitly.
+    // PyTorch uses lu_solve_(transpose=True) for this; we approximate by
+    // reconstructing via lu_solve(LU, pivots, eye()) which gives A^{-1},
+    // then inverting again. Cheaper: derive A by composing tril(LU,-1) +
+    // I + triu(LU, 0) = L + U... but the packed factor layout may differ.
+    //
+    // For correctness, just reconstruct A symbolically via a separate
+    // lu_solve call: A = solve_for_A_st_(LU, pivots).
+    // Since reconstructing is a one-time cost, do it via lu_solve(LU, pivots, eye)
+    // to get A^{-1}, then inv() to get A.
+    auto N = LU_data.shape()[LU_data.ndim() - 1];
+    auto eye_t = tenzor::eye(N, std::nullopt, LU_data.dtype(), LU_data.device());
+    auto A_inv = tenzor::linalg::lu_solve(LU_data, pivots, eye_t);
+    auto A = tenzor::linalg::inv(A_inv);
+
+    auto grad_fn = std::make_shared<LUSolveBackward>();
+    grad_fn->save_for_backward({A, X_tensor});
+    grad_fn->set_next_functions({B.grad_fn()});
+    grad_fn->set_input_variables({B});
+
+    Variable output(X_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto lu(const Variable& A) -> std::tuple<Variable, Variable, Variable> {
+    if (!A.requires_grad() || !is_grad_enabled()) {
+        auto [L, U, pivots] = tenzor::linalg::lu(A.tensor());
+        return {Variable(L, false), Variable(U, false), Variable(pivots, false)};
+    }
+
+    auto [L_t, U_t, pivots_t] = tenzor::linalg::lu(A.tensor());
+
+    // audit-2026-05-03 — separate backward instances for L and U so the
+    // per-output gradients accumulate at distinct engine slots. Pivots are
+    // non-differentiable; pivots_var has requires_grad=false.
+    auto grad_fn_L = std::make_shared<LUBackward>(/*output_slot=*/0);
+    grad_fn_L->save_for_backward({L_t, U_t, pivots_t});
+    grad_fn_L->set_next_functions({A.grad_fn()});
+    grad_fn_L->set_input_variables({A});
+
+    auto grad_fn_U = std::make_shared<LUBackward>(/*output_slot=*/1);
+    grad_fn_U->save_for_backward({L_t, U_t, pivots_t});
+    grad_fn_U->set_next_functions({A.grad_fn()});
+    grad_fn_U->set_input_variables({A});
+
+    Variable L_var(L_t, true);
+    Variable U_var(U_t, true);
+    Variable pivots_var(pivots_t, false);
+
+    L_var.set_grad_fn(grad_fn_L);
+    U_var.set_grad_fn(grad_fn_U);
+
+    return {L_var, U_var, pivots_var};
+}
+
+auto eig(const Variable& A) -> std::tuple<Variable, Variable, Variable> {
+    if (!A.requires_grad() || !is_grad_enabled()) {
+        auto [W_re, W_im, V] = tenzor::linalg::eig(A.tensor());
+        return {Variable(W_re, false), Variable(W_im, false), Variable(V, false)};
+    }
+
+    auto [W_re_t, W_im_t, V_t] = tenzor::linalg::eig(A.tensor());
+
+    auto grad_fn = std::make_shared<EigBackward>();
+    grad_fn->save_for_backward({W_re_t, V_t});
+    grad_fn->set_next_functions({A.grad_fn()});
+    grad_fn->set_input_variables({A});
+
+    Variable W_re_var(W_re_t, true);
+    Variable W_im_var(W_im_t, true);
+    Variable V_var(V_t, true);
+
+    W_re_var.set_grad_fn(grad_fn);
+    W_im_var.set_grad_fn(grad_fn);
+    V_var.set_grad_fn(grad_fn);
+
+    return {W_re_var, W_im_var, V_var};
+}
+
+// ============================================================================
+// audit-2026-05-03 Phase 11 — N-D FFT Variable wrappers via composition.
+// ============================================================================
+
+auto fft2(const Variable& input,
+          std::optional<std::vector<int64_t>> s,
+          std::vector<int64_t> dim,
+          const std::string& norm) -> Variable {
+    auto out = input;
+    for (size_t i = 0; i < dim.size(); ++i) {
+        std::optional<int64_t> n_i;
+        if (s.has_value()) n_i = s.value()[i];
+        out = ::tenzor::fft_autograd::fft(out, n_i, dim[i], norm);
+    }
+    return out;
+}
+
+auto ifft2(const Variable& input,
+           std::optional<std::vector<int64_t>> s,
+           std::vector<int64_t> dim,
+           const std::string& norm) -> Variable {
+    auto out = input;
+    for (size_t i = 0; i < dim.size(); ++i) {
+        std::optional<int64_t> n_i;
+        if (s.has_value()) n_i = s.value()[i];
+        out = ::tenzor::fft_autograd::ifft(out, n_i, dim[i], norm);
+    }
+    return out;
+}
+
+auto fftn(const Variable& input,
+          std::optional<std::vector<int64_t>> s,
+          std::optional<std::vector<int64_t>> dim,
+          const std::string& norm) -> Variable {
+    std::vector<int64_t> dims;
+    if (dim.has_value()) {
+        dims = dim.value();
+    } else {
+        // Default: all dimensions.
+        const auto ndim = static_cast<int64_t>(input.shape().size());
+        for (int64_t d = 0; d < ndim; ++d) dims.push_back(d);
+    }
+    auto out = input;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        std::optional<int64_t> n_i;
+        if (s.has_value()) n_i = s.value()[i];
+        out = ::tenzor::fft_autograd::fft(out, n_i, dims[i], norm);
+    }
+    return out;
+}
+
+auto ifftn(const Variable& input,
+           std::optional<std::vector<int64_t>> s,
+           std::optional<std::vector<int64_t>> dim,
+           const std::string& norm) -> Variable {
+    std::vector<int64_t> dims;
+    if (dim.has_value()) {
+        dims = dim.value();
+    } else {
+        const auto ndim = static_cast<int64_t>(input.shape().size());
+        for (int64_t d = 0; d < ndim; ++d) dims.push_back(d);
+    }
+    auto out = input;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        std::optional<int64_t> n_i;
+        if (s.has_value()) n_i = s.value()[i];
+        out = ::tenzor::fft_autograd::ifft(out, n_i, dims[i], norm);
+    }
+    return out;
 }
 
 auto cholesky_solve(const Variable& B, const Variable& L, bool upper) -> Variable {
@@ -1506,10 +1676,9 @@ auto cholesky_solve(const Variable& B, const Variable& L, bool upper) -> Variabl
     next_funcs.push_back(L.grad_fn());
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (B.requires_grad()) input_vars.push_back(B);
-    if (L.requires_grad()) input_vars.push_back(L);
-    grad_fn->set_input_variables(input_vars);
+    // Same fix as solve(): always push both inputs in declared order so the
+    // engine's grad-zip lines up with backward's {grad_B, grad_L} return.
+    grad_fn->set_input_variables({B, L});
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -1541,18 +1710,23 @@ auto svd(const Variable& input, bool full_matrices) -> std::tuple<Variable, Vari
 
     auto [U_tensor, S_tensor, Vh_tensor] = tenzor::linalg::svd(input.tensor(), full_matrices);
 
-    auto grad_fn = std::make_shared<SvdBackward>(full_matrices);
-    grad_fn->save_for_backward({U_tensor, S_tensor, Vh_tensor});
-    grad_fn->set_next_functions({input.grad_fn()});
-    grad_fn->set_input_variables({input});
+    // audit-2026-05-03 — per-output Function instances so the engine doesn't
+    // collapse the U / S / Vh gradients into a single accumulator entry.
+    auto make_grad_fn = [&](int slot) {
+        auto fn = std::make_shared<SvdBackward>(full_matrices, slot);
+        fn->save_for_backward({U_tensor, S_tensor, Vh_tensor});
+        fn->set_next_functions({input.grad_fn()});
+        fn->set_input_variables({input});
+        return fn;
+    };
 
     Variable U_var(U_tensor, true);
     Variable S_var(S_tensor, true);
     Variable Vh_var(Vh_tensor, true);
 
-    U_var.set_grad_fn(grad_fn);
-    S_var.set_grad_fn(grad_fn);
-    Vh_var.set_grad_fn(grad_fn);
+    U_var.set_grad_fn(make_grad_fn(0));
+    S_var.set_grad_fn(make_grad_fn(1));
+    Vh_var.set_grad_fn(make_grad_fn(2));
 
     return {U_var, S_var, Vh_var};
 }
@@ -2167,6 +2341,54 @@ auto spherical_bessel_j0(const Variable& input) -> Variable {
         [](const Tensor& t) { return tenzor::spherical_bessel_j0(t); });
 }
 
+// Phase 12 — Bessel J0/J1/Y0/Y1 and Zeta autograd wrappers.
+auto bessel_j0(const Variable& input) -> Variable {
+    return unary_autograd<BesselJ0Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_j0(t); });
+}
+auto bessel_j1(const Variable& input) -> Variable {
+    return unary_autograd<BesselJ1Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_j1(t); });
+}
+auto bessel_y0(const Variable& input) -> Variable {
+    return unary_autograd<BesselY0Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_y0(t); });
+}
+auto bessel_y1(const Variable& input) -> Variable {
+    return unary_autograd<BesselY1Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_y1(t); });
+}
+
+// zeta(s, q) — only q gets a non-trivial gradient (-s * zeta(s+1, q)).
+auto zeta(const Variable& s, const Variable& q) -> Variable {
+    if ((!s.requires_grad() && !q.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::zeta(s.tensor(), q.tensor()), false);
+    }
+    auto result = tenzor::zeta(s.tensor(), q.tensor());
+    auto grad_fn = std::make_shared<ZetaBackward>();
+    grad_fn->save_for_backward({s.tensor(), q.tensor()});
+    grad_fn->set_next_functions({s.grad_fn(), q.grad_fn()});
+    grad_fn->set_input_variables({s, q});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// betainc(a, b, x) — only x gets a non-trivial gradient.
+auto betainc(const Variable& a, const Variable& b, const Variable& x) -> Variable {
+    if ((!a.requires_grad() && !b.requires_grad() && !x.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::betainc(a.tensor(), b.tensor(), x.tensor()), false);
+    }
+    auto result = tenzor::betainc(a.tensor(), b.tensor(), x.tensor());
+    auto grad_fn = std::make_shared<BetaIncBackward>();
+    grad_fn->save_for_backward({a.tensor(), b.tensor(), x.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn(), x.grad_fn()});
+    grad_fn->set_input_variables({a, b, x});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 auto ndtr(const Variable& input) -> Variable {
     return unary_autograd<NdtrBackward>(input,
         [](const Tensor& t) { return tenzor::ndtr(t); });
@@ -2266,7 +2488,9 @@ auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable> {
     }
 
     auto grad_fn = std::make_shared<LinalgLDLFactorBackward>();
-    grad_fn->save_for_backward({input.tensor()});
+    // audit-2026-05-03 Phase 12 — save A and LD so backward can run the
+    // structural-symmetric backprop derived from A = L D L^T.
+    grad_fn->save_for_backward({input.tensor(), LD_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 

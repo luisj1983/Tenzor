@@ -782,6 +782,55 @@ auto inv(const Variable& input) -> Variable;
 auto solve(const Variable& A, const Variable& B) -> Variable;
 
 /**
+ * @brief Solve A @ X = B using pre-computed LU factors (audit-2026-05-03 Phase 8).
+ * LU and pivots are non-Variable inputs (typically not differentiated).
+ * Differentiates only w.r.t. B.
+ */
+auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
+              const Variable& B) -> Variable;
+
+/**
+ * @brief LU decomposition with pivots (audit-2026-05-03 Phase 8).
+ * Returns (L, U, pivots) Variables. pivots is integer non-differentiable.
+ */
+auto lu(const Variable& A) -> std::tuple<Variable, Variable, Variable>;
+
+/**
+ * @brief Non-symmetric eigendecomposition (audit-2026-05-03 Phase 8).
+ * Returns (W_real, W_imag, V) Variables. Backward only supports the
+ * real-eigenvalue path (eigenvector grad is ill-posed for finite-diff).
+ */
+auto eig(const Variable& A) -> std::tuple<Variable, Variable, Variable>;
+
+/**
+ * @brief 2-D complex FFT (audit-2026-05-03 Phase 11).
+ * Composed from fft along each of the two dimensions.
+ */
+auto fft2(const Variable& input,
+          std::optional<std::vector<int64_t>> s = std::nullopt,
+          std::vector<int64_t> dim = {-2, -1},
+          const std::string& norm = "backward") -> Variable;
+
+auto ifft2(const Variable& input,
+           std::optional<std::vector<int64_t>> s = std::nullopt,
+           std::vector<int64_t> dim = {-2, -1},
+           const std::string& norm = "backward") -> Variable;
+
+/**
+ * @brief N-D complex FFT (audit-2026-05-03 Phase 11).
+ * Composed from fft along each dim in turn.
+ */
+auto fftn(const Variable& input,
+          std::optional<std::vector<int64_t>> s = std::nullopt,
+          std::optional<std::vector<int64_t>> dim = std::nullopt,
+          const std::string& norm = "backward") -> Variable;
+
+auto ifftn(const Variable& input,
+           std::optional<std::vector<int64_t>> s = std::nullopt,
+           std::optional<std::vector<int64_t>> dim = std::nullopt,
+           const std::string& norm = "backward") -> Variable;
+
+/**
  * @brief Cholesky decomposition with gradient tracking.
  *
  * Computes lower-triangular L such that A = L @ L^T.
@@ -980,6 +1029,16 @@ auto entr(const Variable& input) -> Variable;
 
 /// Spherical Bessel j0: sin(x)/x. Grad: cos(x)/x - sin(x)/x^2
 auto spherical_bessel_j0(const Variable& input) -> Variable;
+
+
+// Phase 12 (audit-2026-05-03) — Bessel J/Y and Zeta autograd wrappers.
+auto bessel_j0(const Variable& input) -> Variable;
+auto bessel_j1(const Variable& input) -> Variable;
+auto bessel_y0(const Variable& input) -> Variable;
+auto bessel_y1(const Variable& input) -> Variable;
+auto zeta(const Variable& s, const Variable& q) -> Variable;
+
+auto betainc(const Variable& a, const Variable& b, const Variable& x) -> Variable;
 
 /// Normal CDF. Grad: standard normal PDF
 auto ndtr(const Variable& input) -> Variable;

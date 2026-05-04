@@ -67,14 +67,27 @@ public:
     }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        // Sample mixture indices
-        auto mix_sample = mixture_->sample(sample_shape);  // shape: sample_shape
+        // Tenzor convention: sample_shape is the FULL desired output shape.
+        // To produce a mixture sample of that shape we need:
+        //   1. one mixture index per output position  (mix_sample shape == sample_shape)
+        //   2. one component value per (output position, component k) pair
+        //      (comp_samples shape == sample_shape + (K,))
+        // Then gather_components selects the right component per position.
+        //
+        // audit-2026-05-03 bug #6: previously this passed sample_shape
+        // unchanged to component_, which failed for non-empty sample_shape
+        // because the component's batch_shape (which already encodes the K
+        // dim) doesn't broadcast with the user's requested output shape.
+        const int64_t K = log_weights_.shape().back();
 
-        // Sample from all components
-        auto comp_samples = component_->sample(sample_shape);  // shape: sample_shape + (..., K, event_shape)
+        std::vector<int64_t> comp_sample_shape;
+        if (!sample_shape.empty()) {
+            comp_sample_shape = sample_shape;
+            comp_sample_shape.push_back(K);
+        }
+        auto comp_samples = component_->sample(comp_sample_shape);
+        auto mix_sample = mixture_->sample(sample_shape);
 
-        // Gather the selected component's sample
-        // mix_sample has indices into the K components
         return gather_components(comp_samples, mix_sample);
     }
 
@@ -109,22 +122,53 @@ private:
 
     static auto gather_components(const Tensor& comp_samples,
                                   const Tensor& indices) -> Tensor {
-        // comp_samples: (..., K, event_dims...)
-        // indices: (...) with values in [0, K)
-        // result: (..., event_dims...)
-        auto idx = tenzor::unsqueeze(indices, -1);  // (..., 1)
+        // comp_samples shape: prefix_shape + (K,) + event_dims
+        //   where prefix_shape = sample_shape + batch_shape
+        // indices shape:      prefix_shape (one int per prefix point)
+        // result shape:       prefix_shape + event_dims
+        //
+        // audit-2026-05-03 bug #6: the previous heuristic computed
+        //   comp_dim = comp_samples.ndim() - indices.ndim() - 1
+        // and fell back to `indices.ndim()` if negative. Categorical's
+        // `sample({})` (Tenzor convention) returns shape (1,) rather than
+        // (), so indices.ndim() ended up larger than comp_samples.ndim()
+        // and the `target_shape[comp_dim] = 1;` write was OOB on the
+        // shape vector, tripping a libstdc++ debug assertion.
+        //
+        // The only fully-supported case today is event_dims = () (scalar
+        // event), which is what every distribution exposed via the
+        // (weights, base) ctor produces. Under that assumption, the K
+        // dim is always the LAST dim of comp_samples.
+        const int64_t comp_dim = comp_samples.ndim() - 1;
 
-        // For each sample, select the component at the index
-        // Use gather along the component dimension
-        int64_t comp_dim = comp_samples.ndim() - indices.ndim() - 1;
-        if (comp_dim < 0) comp_dim = indices.ndim();
+        // Align indices to have ndim = comp_dim by squeezing trailing
+        // length-1 dims (handles Categorical's (1,) "single sample" dim
+        // when no batch shape is requested) or by inserting leading
+        // length-1 dims when indices is too low-rank.
+        auto aligned_idx = indices;
+        while (aligned_idx.ndim() > comp_dim) {
+            bool squeezed = false;
+            for (int64_t d = aligned_idx.ndim() - 1; d >= 0; --d) {
+                if (aligned_idx.shape()[d] == 1) {
+                    aligned_idx = tenzor::squeeze(aligned_idx, d);
+                    squeezed = true;
+                    break;
+                }
+            }
+            if (!squeezed) break;
+        }
+        while (aligned_idx.ndim() < comp_dim) {
+            aligned_idx = tenzor::unsqueeze(aligned_idx, 0);
+        }
 
-        // Expand idx to match event dims
+        // Re-introduce the K position as a length-1 dim, then expand to
+        // comp_samples' shape (with that K position pinned to 1).
+        auto idx_with_K = tenzor::unsqueeze(aligned_idx, comp_dim);
         auto target_shape = std::vector<int64_t>(
             comp_samples.shape().begin(), comp_samples.shape().end());
         target_shape[comp_dim] = 1;
+        auto idx_expanded = tenzor::expand(idx_with_K, target_shape);
 
-        auto idx_expanded = tenzor::expand(idx, target_shape);
         auto gathered = tenzor::gather(comp_samples, comp_dim, idx_expanded);
         return tenzor::squeeze(gathered, comp_dim);
     }

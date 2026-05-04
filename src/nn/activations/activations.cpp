@@ -549,8 +549,15 @@ auto Softsign::forward_impl(const Variable& input) -> Variable {
 
 auto softsign(const Variable& input) -> Variable {
     // x / (1 + |x|). abs() is non-differentiable at 0 but subgradient is 0.
-    auto abs_input = tenzor::abs(input.tensor());
-    auto denom = Variable(abs_input + 1.0, false);
+    // audit-2026-05-03 — must compute |x| on the Variable (not the raw
+    // tensor) so the backward through abs propagates. Previously the
+    // denominator was wrapped as `Variable(t, requires_grad=false)`, which
+    // treats it as a constant; backward then returns 1/(1+|x|) instead of
+    // the correct 1/(1+|x|)^2.
+    auto abs_input = tenzor::abs(input);
+    auto denom = abs_input + Variable(::tenzor::ones(
+        std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+        input.dtype(), input.device()), false);
     return input / denom;
 }
 

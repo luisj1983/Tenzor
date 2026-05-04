@@ -39,9 +39,13 @@ static auto update_confusion_counts(
     const Tensor& pred_classes, const Tensor& target_classes,
     [[maybe_unused]] int64_t num_classes) -> void
 {
-    // Flatten to 1D
-    auto p = pred_classes.reshape({-1}).to(DType::Int64);
-    auto t = target_classes.reshape({-1}).to(DType::Int64);
+    // audit-2026-05-03 N1: bring inputs to CPU before raw-pointer access.
+    // Otherwise CUDA / Vulkan / OneAPI inputs would yield device pointers
+    // that the host loop below dereferences directly (hang / segv).
+    auto p = pred_classes.reshape({-1}).to(DType::Int64)
+                 .to(Device::cpu()).contiguous();
+    auto t = target_classes.reshape({-1}).to(DType::Int64)
+                 .to(Device::cpu()).contiguous();
     auto n = p.numel();
 
     // Access raw data for counting
@@ -72,8 +76,11 @@ Accuracy::Accuracy(int64_t num_classes)
 
 auto Accuracy::update(const Tensor& preds, const Tensor& targets) -> void {
     auto pred_classes = to_class_indices(preds, num_classes_);
-    auto target_flat = targets.reshape({-1}).to(DType::Int64);
-    auto pred_flat = pred_classes.reshape({-1}).to(DType::Int64);
+    // audit-2026-05-03 N1: move to CPU before raw-pointer iteration.
+    auto target_flat = targets.reshape({-1}).to(DType::Int64)
+                          .to(Device::cpu()).contiguous();
+    auto pred_flat = pred_classes.reshape({-1}).to(DType::Int64)
+                          .to(Device::cpu()).contiguous();
 
     auto n = pred_flat.numel();
     auto* p_data = pred_flat.data<int64_t>();
@@ -262,9 +269,12 @@ auto F1Score::reset() -> void {
 // ============================================================================
 
 auto AUROC::update(const Tensor& preds, const Tensor& targets) -> void {
-    // Store flattened copies
-    all_preds_.push_back(preds.reshape({-1}).to(DType::Float32));
-    all_targets_.push_back(targets.reshape({-1}).to(DType::Float32));
+    // Store flattened copies on CPU so compute() can iterate via raw
+    // pointers regardless of input device (audit-2026-05-03 N1).
+    all_preds_.push_back(preds.reshape({-1}).to(DType::Float32)
+                              .to(Device::cpu()).contiguous());
+    all_targets_.push_back(targets.reshape({-1}).to(DType::Float32)
+                                .to(Device::cpu()).contiguous());
 }
 
 auto AUROC::compute() -> Tensor {
@@ -281,6 +291,12 @@ auto AUROC::compute() -> Tensor {
 
     // Sort by prediction scores in descending order
     auto [sorted_scores, sort_indices] = sort(all_p, /*dim=*/0, /*descending=*/true);
+
+    // sort() may produce results on the source device; force CPU layout
+    // so the subsequent host-side trapezoidal walk sees valid pointers.
+    sort_indices = sort_indices.to(Device::cpu()).contiguous();
+    sorted_scores = sorted_scores.to(Device::cpu()).contiguous();
+    all_t = all_t.to(Device::cpu()).contiguous();
 
     // Gather targets in sorted order
     auto* idx_data = sort_indices.data<int64_t>();
@@ -349,8 +365,11 @@ ConfusionMatrix::ConfusionMatrix(int64_t num_classes)
     , matrix_(zeros({num_classes, num_classes})) {}
 
 auto ConfusionMatrix::update(const Tensor& preds, const Tensor& targets) -> void {
-    auto pred_classes = to_class_indices(preds, num_classes_).reshape({-1}).to(DType::Int64);
-    auto target_flat = targets.reshape({-1}).to(DType::Int64);
+    // audit-2026-05-03 N1: bring inputs to CPU before raw-pointer access.
+    auto pred_classes = to_class_indices(preds, num_classes_).reshape({-1})
+                            .to(DType::Int64).to(Device::cpu()).contiguous();
+    auto target_flat = targets.reshape({-1}).to(DType::Int64)
+                          .to(Device::cpu()).contiguous();
 
     auto n = pred_classes.numel();
     auto* p_data = pred_classes.data<int64_t>();
@@ -380,7 +399,9 @@ auto MeanAbsoluteError::update(const Tensor& preds, const Tensor& targets) -> vo
     auto diff = preds - targets;
     auto abs_diff = abs(diff);
     auto batch_sum = sum(abs_diff);
-    sum_abs_error_ += batch_sum.item<float>();
+    // audit-2026-05-03 N1: item<float>() requires CPU + Float32 dtype.
+    // Cast first so GPU / Float64 / half-precision inputs work.
+    sum_abs_error_ += batch_sum.to(Device::cpu()).to(DType::Float32).item<float>();
     total_ += preds.numel();
 }
 
@@ -402,7 +423,8 @@ auto MeanSquaredError::update(const Tensor& preds, const Tensor& targets) -> voi
     auto diff = preds - targets;
     auto sq_diff = diff * diff;
     auto batch_sum = sum(sq_diff);
-    sum_sq_error_ += batch_sum.item<float>();
+    // audit-2026-05-03 N1: see MAE comment.
+    sum_sq_error_ += batch_sum.to(Device::cpu()).to(DType::Float32).item<float>();
     total_ += preds.numel();
 }
 

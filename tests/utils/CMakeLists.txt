@@ -47,3 +47,11 @@ set_target_properties(test_utils_tensorboard PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
 )
 gtest_discover_tests(test_utils_tensorboard DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
+
+# Autograd profiler (audit-2026-05-03 N4)
+add_executable(test_autograd_profiler test_autograd_profiler.cpp)
+target_link_libraries(test_autograd_profiler PRIVATE tenzor_core GTest::gtest_main)
+set_target_properties(test_autograd_profiler PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+)
+gtest_discover_tests(test_autograd_profiler DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})

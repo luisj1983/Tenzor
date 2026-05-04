@@ -250,8 +250,13 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     return output;
 }
 
-auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tensor& indices,
-                                    const Tensor& values, int64_t reduction) -> Tensor {
+auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const Tensor& indices_raw,
+                                    const Tensor& values_raw, int64_t reduction) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure all inputs are contiguous before
+    // SSBO upload. Non-contiguous slice/expand views skip logical elements.
+    auto input = input_raw.contiguous();
+    auto indices = indices_raw.contiguous();
+    auto values = values_raw.contiguous();
     auto input_shape = input.shape();
 
     // Handle empty tensors - no GPU work needed

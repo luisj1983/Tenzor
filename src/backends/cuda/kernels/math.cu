@@ -2,6 +2,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
+#include "tenzor/ops/creation.hpp"     // For tenzor::get_global_seed
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include "launch_config.cuh"
@@ -3500,17 +3501,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
     auto* d_states = static_cast<curandState*>(d_states_guard.get());
 
-    // Thread-safe seed generation with better entropy
-    // Mix: high-res time + thread ID + random_device + atomicincrement counter
-    static std::atomic<uint64_t> seed_counter{0};
-    static std::random_device rd;
-    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    auto random_bits = rd();
-    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
-
-    // Mix all entropy sources with XOR and rotation
-    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
@@ -3563,17 +3555,11 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
     auto* d_states = static_cast<curandState*>(d_states_guard.get());
 
-    // Thread-safe seed generation with better entropy
-    // Mix: high-res time + thread ID + random_device + atomic counter
-    static std::atomic<uint64_t> seed_counter{0};
-    static std::random_device rd;
-    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    auto random_bits = rd();
-    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
-
-    // Mix all entropy sources with XOR and rotation
-    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+    // Honor `tenzor::manual_seed` for reproducibility. When the user has not
+    // set a manual seed, `get_global_seed` returns a time-based value, so
+    // we keep the existing entropy mix on top of that to preserve the
+    // previous "random per call" behavior in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
@@ -3645,14 +3631,8 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
     auto* d_states = static_cast<curandState*>(d_states_guard.get());
 
-    // Thread-safe seed generation
-    static std::atomic<uint64_t> seed_counter{0};
-    static std::random_device rd;
-    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    auto random_bits = rd();
-    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
-    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());

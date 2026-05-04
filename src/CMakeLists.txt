@@ -235,6 +235,7 @@ set(TENZOR_CORE_SOURCES
     distributed/rpc/rref.cpp
     distributed/rpc/rpc.cpp
     serving/server.cpp
+    serving/worker_pool.cpp
     lite/runtime.cpp
     lite/lite_graph.cpp
     lite/model_format.cpp

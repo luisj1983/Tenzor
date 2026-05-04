@@ -559,14 +559,18 @@ public:
      * legal until the entire `DescriptorPool` is destroyed.
      */
     void grow() {
+        // Phase 8.3 originally clamped at MAX_DESCRIPTOR_POOL_SETS and
+        // refused to grow further, but the active pool would then be
+        // saturated and subsequent vkAllocateDescriptorSets calls would
+        // silently fail (or land in a fragment-of-the-pool that produced
+        // wrong-binding descriptor sets, e.g. IFFTNRoundTrip Vulkan F64
+        // failing only when run after a long FFT-test sequence). Now we
+        // keep growing: each new pool is at most MAX_DESCRIPTOR_POOL_SETS
+        // sets large, and old pools stay alive in frozen_pools_ until
+        // backend teardown.
         uint32_t new_max = max_sets_ * 2;
         if (new_max > MAX_DESCRIPTOR_POOL_SETS) {
             new_max = MAX_DESCRIPTOR_POOL_SETS;
-            if (max_sets_ >= MAX_DESCRIPTOR_POOL_SETS) {
-                std::cerr << "[Vulkan WARNING] Descriptor pool reached maximum capacity ("
-                          << MAX_DESCRIPTOR_POOL_SETS << " sets)\n";
-                return;
-            }
         }
         std::cerr << "[Vulkan INFO] Descriptor pool free-list grow (was "
                   << max_sets_ << ", new " << new_max << ", frozen pools="

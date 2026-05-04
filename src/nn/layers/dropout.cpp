@@ -68,8 +68,12 @@ private:
 
 // Element-wise Dropout
 Dropout::Dropout(double p) : p_(p) {
-    if (p < 0.0 || p > 1.0) {
-        throw std::invalid_argument("Dropout probability must be in [0, 1]");
+    // p == 1.0 is rejected because the inverted-dropout scaling factor
+    // 1/(1-p) would divide by zero. PyTorch silently allows this and the
+    // forward returns NaN; we reject up front to surface the bug at
+    // construction time.
+    if (p < 0.0 || p >= 1.0) {
+        throw std::invalid_argument("Dropout probability must be in [0, 1)");
     }
 }
 

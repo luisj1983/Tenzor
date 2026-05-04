@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../../grad_flow_helpers.hpp"
 #include <tenzor/nn/optim/zero_optimizer.hpp>
 #include <tenzor/nn/optim/adam.hpp>
 #include <tenzor/nn/optim/sgd.hpp>
@@ -97,6 +98,22 @@ protected:
 
             // Backward pass
             loss.backward();
+
+            // audit-2026-05-03 N1.d: pin grad-flow on first iteration so
+            // future regressions surface immediately rather than only
+            // through downstream loss-decrease checks. Inlined check (the
+            // EXPECT_GRAD_FLOWS macro uses ASSERT_TRUE which can't appear
+            // in a non-void function).
+            if (step == 0) {
+                auto p = model.parameters();
+                EXPECT_FALSE(p.empty());
+                if (!p.empty() && (*p[0]).grad().has_value()) {
+                    auto g = (*p[0]).grad().value().cpu().to(DType::Float64);
+                    auto gmax = ::tenzor::max(::tenzor::abs(g)).item<double>();
+                    EXPECT_GT(gmax, 0.0)
+                        << "Grad flow severed for first parameter at step 0";
+                }
+            }
 
             // Optimizer step
             optimizer.step();

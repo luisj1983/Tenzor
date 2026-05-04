@@ -401,7 +401,11 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 
 // Forward: 1 / (1 + exp(-x))
 // SIMD + OpenMP optimized using fast_math sigmoid approximation
-auto sigmoid_kernel(const Tensor& input) -> Tensor {
+auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input. Same root
+    // cause as the sum_kernel fix — flat-pointer iteration over a
+    // non-contiguous slice/expand view reads the wrong logical elements.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -619,7 +623,9 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
 // ============================================================================
 
 // Forward: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) - OpenMP + SIMD optimized
-auto tanh_kernel(const Tensor& input) -> Tensor {
+auto tanh_kernel(const Tensor& input_raw) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {

@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// MaxUnpool2d Backward Float64.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer GradOutput { double grad_out_data[]; };
+layout(binding = 1) readonly buffer Indices    { int    indices_data[]; };
+layout(binding = 2) writeonly buffer GradInput { double grad_in_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_input;
+    uint in_spatial;
+    uint out_spatial;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_input) return;
+
+    uint channel_idx = idx / params.in_spatial;
+    uint base_out = channel_idx * params.out_spatial;
+
+    int unpool_idx = indices_data[idx];
+    grad_in_data[idx] = grad_out_data[base_out + uint(unpool_idx)];
+}

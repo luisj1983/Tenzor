@@ -10,6 +10,10 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
+#include <random>
+#include <algorithm>
+#include <cstring>
 #include "cuda_common.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1497,10 +1501,57 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 
     int64_t batch_size = input.shape()[0];
     int64_t num_categories = input.shape()[1];
+
+    if (!replacement && num_samples > num_categories) {
+        throw std::runtime_error("multinomial: cannot sample more than "
+                                  "num_categories without replacement");
+    }
+
+    // Without replacement: do the sampling on the host (sizes here are
+    // typically tiny — categories ≤ a few thousand, samples ≤ categories).
+    // The on-device kernel ignores `replacement` and would emit duplicates
+    // for the without-replacement case (audit follow-up).
+    if (!replacement) {
+        auto host_input = input.to(Device::cpu());
+        const float* p_data = host_input.data<float>();
+        std::vector<int64_t> out_host(batch_size * num_samples);
+        std::mt19937_64 rng(::tenzor::get_global_seed());
+        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            std::vector<float> weights(p_data + b * num_categories,
+                                       p_data + (b + 1) * num_categories);
+            for (int64_t s = 0; s < num_samples; ++s) {
+                std::vector<float> cs(num_categories);
+                cs[0] = weights[0];
+                for (int64_t i = 1; i < num_categories; ++i) {
+                    cs[i] = cs[i - 1] + weights[i];
+                }
+                float total = cs[num_categories - 1];
+                if (total <= 0.0f) {
+                    throw std::runtime_error(
+                        "multinomial: ran out of positive-weight categories");
+                }
+                float u = uniform(rng) * total;
+                int64_t idx = static_cast<int64_t>(
+                    std::lower_bound(cs.begin(), cs.end(), u) - cs.begin());
+                if (idx >= num_categories) idx = num_categories - 1;
+                out_host[b * num_samples + s] = idx;
+                weights[idx] = 0.0f;
+            }
+        }
+        auto out_cpu = Tensor({batch_size, num_samples}, DType::Int64,
+                              Device::cpu());
+        std::memcpy(out_cpu.data<int64_t>(), out_host.data(),
+                    out_host.size() * sizeof(int64_t));
+        auto result_dev = out_cpu.to(probs.device());
+        if (was_1d) result_dev = result_dev.reshape({num_samples});
+        return result_dev;
+    }
+
     auto result = Tensor({batch_size, num_samples}, DType::Int64, input.device());
     auto cdf_buf = Tensor({batch_size, num_categories}, DType::Float32, input.device());
 
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* prob_ptr = input.data<float>() + b * num_categories;

@@ -599,36 +599,33 @@ auto fused_layer_norm_backward_kernel(
         return std::min(p, static_cast<int64_t>(256));
     };
 
-    // Lambda to dispatch the backward pass for any dtype.
-    // All dtypes compute in float32 internally; the template handles load/store casts.
-    // KernelGradWB and KernelGradIn are SYCL kernel name classes.
-    // load_fn: device pointer index -> float
-    // store_gw_fn, store_gb_fn, store_gi_fn: float -> device write
-    auto dispatch_backward = [&]<typename GradWBKernel, typename GradInKernel>(
+    // audit-2026-05-03 — Compute parameter generalises the previously
+    // hardcoded `float` accumulator. For Float64 input we compute in
+    // double end-to-end (was casting through float, dropping ~30 mantissa
+    // bits and breaking gradcheck).
+    auto dispatch_backward = [&]<typename Compute, typename GradWBKernel, typename GradInKernel>(
         auto load_go, auto load_in, auto load_mean, auto load_inv_std, auto load_weight,
         auto store_gw, auto store_gb, auto store_gi,
         GradWBKernel /*tag*/, GradInKernel /*tag2*/) {
 
-        // Kernel A: grad_weight and grad_bias reduction (one work-group per feature)
-        // Each work-group reduces over all batches for one feature index.
         int64_t wg_wb = round_up_pow2(batch_size);
         queue.submit([&](sycl::handler& cgh) {
-            sycl::local_accessor<float, 1> local_gw(sycl::range<1>(wg_wb), cgh);
-            sycl::local_accessor<float, 1> local_gb(sycl::range<1>(wg_wb), cgh);
+            sycl::local_accessor<Compute, 1> local_gw(sycl::range<1>(wg_wb), cgh);
+            sycl::local_accessor<Compute, 1> local_gb(sycl::range<1>(wg_wb), cgh);
             cgh.parallel_for<GradWBKernel>(
                 sycl::nd_range<1>(norm_size * wg_wb, wg_wb),
                 [=](sycl::nd_item<1> item) {
-                    int64_t f = item.get_group(0);      // feature index [0, norm_size)
+                    int64_t f = item.get_group(0);
                     int64_t lid = item.get_local_id(0);
                     int64_t lsize = item.get_local_range(0);
 
-                    float acc_gw = 0.0f, acc_gb = 0.0f;
+                    Compute acc_gw = Compute(0), acc_gb = Compute(0);
                     for (int64_t b = lid; b < batch_size; b += lsize) {
-                        float go = load_go(b * norm_size + f);
-                        float inp = load_in(b * norm_size + f);
-                        float m = load_mean(b);
-                        float rstd = load_inv_std(b);
-                        float normalized = (inp - m) * rstd;
+                        Compute go = load_go(b * norm_size + f);
+                        Compute inp = load_in(b * norm_size + f);
+                        Compute m = load_mean(b);
+                        Compute rstd = load_inv_std(b);
+                        Compute normalized = (inp - m) * rstd;
                         acc_gw += go * normalized;
                         acc_gb += go;
                     }
@@ -652,27 +649,23 @@ auto fused_layer_norm_backward_kernel(
                 });
         });
 
-        // Kernel B: grad_input (one work-group per batch)
-        // Phase 1: compute dot products ds, db via local memory reduction
-        // Phase 2: compute per-element grad_input with full correction formula
         int64_t wg_in = round_up_pow2(norm_size);
         queue.submit([&](sycl::handler& cgh) {
-            sycl::local_accessor<float, 1> local_ds(sycl::range<1>(wg_in), cgh);
-            sycl::local_accessor<float, 1> local_db(sycl::range<1>(wg_in), cgh);
+            sycl::local_accessor<Compute, 1> local_ds(sycl::range<1>(wg_in), cgh);
+            sycl::local_accessor<Compute, 1> local_db(sycl::range<1>(wg_in), cgh);
             cgh.parallel_for<GradInKernel>(
                 sycl::nd_range<1>(batch_size * wg_in, wg_in),
                 [=](sycl::nd_item<1> item) {
-                    int64_t b = item.get_group(0);       // batch index
+                    int64_t b = item.get_group(0);
                     int64_t lid = item.get_local_id(0);
                     int64_t lsize = item.get_local_range(0);
-                    float m = load_mean(b);
-                    float rstd = load_inv_std(b);
+                    Compute m = load_mean(b);
+                    Compute rstd = load_inv_std(b);
 
-                    // Phase 1: compute ds and db dot products
-                    float thread_ds = 0.0f, thread_db = 0.0f;
+                    Compute thread_ds = Compute(0), thread_db = Compute(0);
                     for (int64_t i = lid; i < norm_size; i += lsize) {
-                        float normalized = (load_in(b * norm_size + i) - m) * rstd;
-                        float go_w = load_go(b * norm_size + i) * load_weight(i);
+                        Compute normalized = (Compute(load_in(b * norm_size + i)) - m) * rstd;
+                        Compute go_w = Compute(load_go(b * norm_size + i)) * Compute(load_weight(i));
                         thread_ds += go_w * normalized;
                         thread_db += go_w;
                     }
@@ -689,17 +682,16 @@ auto fused_layer_norm_backward_kernel(
                         item.barrier(sycl::access::fence_space::local_space);
                     }
 
-                    float ds = local_ds[0];
-                    float db = local_db[0];
-                    float inv_n = 1.0f / static_cast<float>(norm_size);
+                    Compute ds = local_ds[0];
+                    Compute db = local_db[0];
+                    Compute inv_n = Compute(1) / Compute(norm_size);
                     item.barrier(sycl::access::fence_space::local_space);
 
-                    // Phase 2: compute grad_input per element
                     for (int64_t i = lid; i < norm_size; i += lsize) {
-                        float normalized = (load_in(b * norm_size + i) - m) * rstd;
-                        float go = load_go(b * norm_size + i);
-                        float w = load_weight(i);
-                        float gi = rstd * w * (go - inv_n * (db + normalized * ds));
+                        Compute normalized = (Compute(load_in(b * norm_size + i)) - m) * rstd;
+                        Compute go = load_go(b * norm_size + i);
+                        Compute w = load_weight(i);
+                        Compute gi = rstd * w * (go - inv_n * (db + normalized * ds));
                         store_gi(b * norm_size + i, gi);
                     }
                 });
@@ -718,7 +710,7 @@ auto fused_layer_norm_backward_kernel(
         float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
         float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
 
-        dispatch_backward(
+        dispatch_backward.template operator()<float>(
             [=](int64_t i) { return grad_out_ptr[i]; },
             [=](int64_t i) { return in_ptr[i]; },
             [=](int64_t i) { return mean_ptr[i]; },
@@ -739,15 +731,17 @@ auto fused_layer_norm_backward_kernel(
         double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
         double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
 
-        dispatch_backward(
-            [=](int64_t i) { return static_cast<float>(grad_out_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(in_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(mean_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(inv_std_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(weight_ptr[i]); },
-            [=](int64_t i, float v) { grad_weight_ptr[i] = static_cast<double>(v); },
-            [=](int64_t i, float v) { grad_bias_ptr[i] = static_cast<double>(v); },
-            [=](int64_t i, float v) { grad_in_ptr[i] = static_cast<double>(v); },
+        // audit-2026-05-03 — compute end-to-end in double (was casting
+        // through float).
+        dispatch_backward.template operator()<double>(
+            [=](int64_t i) { return grad_out_ptr[i]; },
+            [=](int64_t i) { return in_ptr[i]; },
+            [=](int64_t i) { return mean_ptr[i]; },
+            [=](int64_t i) { return inv_std_ptr[i]; },
+            [=](int64_t i) { return weight_ptr[i]; },
+            [=](int64_t i, double v) { grad_weight_ptr[i] = v; },
+            [=](int64_t i, double v) { grad_bias_ptr[i] = v; },
+            [=](int64_t i, double v) { grad_in_ptr[i] = v; },
             LayerNormBwdGradWB_F64{}, LayerNormBwdGradIn_F64{});
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -760,7 +754,7 @@ auto fused_layer_norm_backward_kernel(
         uint16_t* grad_weight_ptr = get_data_ptr<uint16_t>(grad_weight);
         uint16_t* grad_bias_ptr = get_data_ptr<uint16_t>(grad_bias);
 
-        dispatch_backward(
+        dispatch_backward.template operator()<float>(
             [=](int64_t i) { return bf16_to_f32(grad_out_ptr[i]); },
             [=](int64_t i) { return bf16_to_f32(in_ptr[i]); },
             [=](int64_t i) { return bf16_to_f32(mean_ptr[i]); },
@@ -781,7 +775,7 @@ auto fused_layer_norm_backward_kernel(
         sycl::half* grad_weight_ptr = get_data_ptr<sycl::half>(grad_weight);
         sycl::half* grad_bias_ptr = get_data_ptr<sycl::half>(grad_bias);
 
-        dispatch_backward(
+        dispatch_backward.template operator()<float>(
             [=](int64_t i) { return static_cast<float>(grad_out_ptr[i]); },
             [=](int64_t i) { return static_cast<float>(in_ptr[i]); },
             [=](int64_t i) { return static_cast<float>(mean_ptr[i]); },

@@ -100,6 +100,7 @@ add_subdirectory(backend_parity)
 add_subdirectory(utils)
 add_subdirectory(examples)
 add_subdirectory(nested)
+add_subdirectory(sparse)
 
 # ============================================================================
 # Combined unit test executable
@@ -162,6 +163,10 @@ target_link_libraries(tenzor_simd_benchmark PRIVATE
 add_executable(test_cuda_scalar_debug test_cuda_scalar_debug.cpp)
 target_link_libraries(test_cuda_scalar_debug PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 60)
+
+
+
+
 
 # Legacy integration tests (kept for compatibility).
 # integration/test_nn.cpp moved out into the dedicated test_nn_smoke

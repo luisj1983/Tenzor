@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// FractionalMaxPool3d Backward Float64.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer GradOutput { float64_t grad_out_data[]; };
+layout(binding = 1) readonly buffer Indices    { int       indices_data[]; };
+layout(binding = 2)          buffer GradInput  { uint64_t  grad_in_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_output;
+    uint D_H_W;
+    uint out_spatial;
+} params;
+
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = grad_in_data[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_in_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_in_data[idx] = new_bits;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_output) return;
+
+    uint channel_idx = idx / params.out_spatial;
+    uint base_in = channel_idx * params.D_H_W;
+    int max_idx = indices_data[idx];
+    uint target = base_in + uint(max_idx);
+    float64_t grad_val = grad_out_data[idx];
+    atomicAddF64(target, grad_val);
+}

@@ -25,3 +25,14 @@ tenzor_discover_tests(test_dynamic_batcher LABELS "serving" DISCOVERY_TIMEOUT 60
 add_executable(test_metrics test_metrics.cpp)
 target_link_libraries(test_metrics PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_metrics LABELS "serving" DISCOVERY_TIMEOUT 60)
+
+
+# Server lifecycle (audit-2026-05-03 N4)
+add_executable(test_server_lifecycle test_server_lifecycle.cpp)
+target_link_libraries(test_server_lifecycle PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_server_lifecycle LABELS "serving" DISCOVERY_TIMEOUT 60)
+
+# Worker pool concurrency (audit-2026-05-03 N4)
+add_executable(test_worker_pool_concurrency test_worker_pool_concurrency.cpp)
+target_link_libraries(test_worker_pool_concurrency PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_worker_pool_concurrency LABELS "serving" DISCOVERY_TIMEOUT 60)

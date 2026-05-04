@@ -865,7 +865,17 @@ void sum_along_dim(const T* input_data,
     }
 }
 
-auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // audit-2026-05-03 bug #2 root cause: this kernel reads input.data<T>()[i]
+    // assuming contiguous layout. For a non-contiguous view (e.g. slice with
+    // non-zero offset, expand with stride 0), that flat-pointer iteration
+    // skips logical elements and reads off the end of the view's footprint.
+    // Symptom: sum(slice(x, dim=last, start=2, end=6)) on shape {2,8} returns
+    // 44 instead of 60 — it sums positions [2..9] of the underlying storage
+    // instead of [2..5, 10..13]. Materializing once at the entry point fixes
+    // every dtype/dim path inside this kernel without per-branch changes.
+    auto input = input_raw.contiguous();
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();

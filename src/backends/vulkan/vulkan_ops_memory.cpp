@@ -1118,9 +1118,11 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
  * Operations: 0=relu, 1=sigmoid, 2=tanh, 3=gelu, 4=leaky_relu, 5=swish
  */
 auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_name,
-                                        const Tensor& input,
+                                        const Tensor& input_raw,
                                         uint32_t opcode,
                                         float param) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     // Handle empty tensors - no GPU work needed
     if (input.numel() == 0) {
         auto input_shape = input.shape();
@@ -1243,10 +1245,13 @@ auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_na
  * Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu
  */
 auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::string& op_name,
-                                                const Tensor& grad_output,
-                                                const Tensor& input_or_output,
+                                                const Tensor& grad_output_raw,
+                                                const Tensor& input_or_output_raw,
                                                 uint32_t opcode,
                                                 float param) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input_or_output = input_or_output_raw.contiguous();
     int32_t device_id = grad_output.device().index;
 
     // Select correct pipeline based on dtype

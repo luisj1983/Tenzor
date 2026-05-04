@@ -290,7 +290,7 @@ TEST(MaxPool2dTest, GradientCheckSmall) {
 
     auto numerical_grad = numerical_gradient(loss_fn, input, 1e-3f);
     auto loss = loss_fn(input);
-    loss.backward(ones({1}));
+    loss.backward();
 
     if (input.grad().has_value()) {
         EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
@@ -477,7 +477,7 @@ TEST(AvgPool2dTest, GradientCheckSmall) {
 
     auto numerical_grad = numerical_gradient(loss_fn, input, 1e-3f);
     auto loss = loss_fn(input);
-    loss.backward(ones({1}));
+    loss.backward();
 
     if (input.grad().has_value()) {
         EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
@@ -605,7 +605,7 @@ TEST(AdaptiveAvgPool2dTest, GradientCheckSmall) {
 
     auto numerical_grad = numerical_gradient(loss_fn, input, 1e-3f);
     auto loss = loss_fn(input);
-    loss.backward(ones({1}));
+    loss.backward();
 
     if (input.grad().has_value()) {
         EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));

@@ -1429,7 +1429,11 @@ static void launch_dim_reduction_min_bf16(
 // Public API
 // ============================================================================
 
-auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #2: ensure contiguous input — same root cause as
+    // the CPU sum_kernel fix. Non-contiguous slice/expand views were being
+    // read via a flat pointer, skipping logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -1642,15 +1646,25 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
     }
 
-    // Compute sum first
+    // Normalize negative dim (INT64_MIN sentinel means full reduction).
+    // audit-2026-05-03 bug #5 (CUDA-side): previously treated all negative
+    // dims as "reduce all", scaling by numel() instead of shape[ndim+dim] —
+    // gave wrong gradients on dim=-1 / -2 calls. Mirrors the max_kernel
+    // pattern below.
+    int64_t dim_norm = dim;
+    if (dim_norm < 0 && dim_norm != INT64_MIN) {
+        dim_norm += input.ndim();
+    }
+
+    // Compute sum first (sum_kernel already normalizes negative dim correctly).
     auto sum_result = sum_kernel(input, dim, keepdim, stream);
 
     // Compute count
     int64_t count;
-    if (dim < 0) {
+    if (dim_norm == INT64_MIN || dim == INT64_MIN) {
         count = input.numel();
     } else {
-        count = input.shape()[dim];
+        count = input.shape()[dim_norm];
     }
 
     if (count == 0) {
@@ -3838,8 +3852,12 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     const auto& device = input.device();
     const auto& input_shape = input.shape();
 
-    // INT64_MIN is the sentinel for "reduce all dimensions"
-    if (dim != INT64_MIN && dim != -1) {
+    // INT64_MIN is the sentinel for "reduce all dimensions". Negative dims
+    // (incl. -1) refer to the last dim and must hit the per-dim path —
+    // previously `-1` was misinterpreted as the all-dims sentinel, which
+    // produced a scalar where the autograd backward expected a per-dim
+    // result and broke `var(v, dim=-1)` gradcheck on CUDA.
+    if (dim != INT64_MIN) {
         // Per-dimension variance reduction
         auto strides_span = input.strides();
         int64_t ndim = static_cast<int64_t>(input_shape.size());
@@ -3997,8 +4015,9 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
 
     // Per-dim reduction: reuse var_kernel (which supports it) and take sqrt.
     // CPU/ROCm/OneAPI/Vulkan all implement std this way; CUDA was missing the
-    // path which stopped StdBackward from flowing gradients.
-    if (dim != INT64_MIN && dim != -1) {
+    // path which stopped StdBackward from flowing gradients. Negative dims
+    // (incl. -1) refer to the last dim and must hit the per-dim path.
+    if (dim != INT64_MIN) {
         auto var_result = var_kernel(input, dim, keepdim, correction, stream);
         // sqrt element-wise into a new tensor
         auto out_shape_vec = std::vector<int64_t>(var_result.shape().begin(), var_result.shape().end());
@@ -4261,8 +4280,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
-    // INT64_MIN is the sentinel for "reduce all dimensions"
-    if (dim != INT64_MIN && dim != -1) {
+    // INT64_MIN is the sentinel for "reduce all dimensions". Negative
+    // dims (incl. -1) refer to the last dim and must hit the per-dim path.
+    if (dim != INT64_MIN) {
         // Per-dimension norm reduction
         auto shape_span = input.shape();
         auto strides_span = input.strides();

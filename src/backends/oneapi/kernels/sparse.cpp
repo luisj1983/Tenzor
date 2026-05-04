@@ -898,9 +898,12 @@ auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
 
     auto X = tenzor::zeros({N, K}, dtype, L.values().device());
 
-    // Solve column-by-column
+    // Solve column-by-column. The trsv kernel reads `b.data<T>()` with
+    // contiguous indexing (b_ptr[row]), so a strided slice view of a
+    // {N,K} row-major B would be read at wrong offsets. Materialize each
+    // column as a contiguous 1D tensor.
     for (int64_t k = 0; k < K; ++k) {
-        auto b_col = B.slice(1, k, k + 1).squeeze(1);
+        auto b_col = B.slice(1, k, k + 1).squeeze(1).contiguous();
         auto x_col = sparse_trsv_kernel(L, b_col, upper, queue);
 
         // Copy x_col into X[:, k]

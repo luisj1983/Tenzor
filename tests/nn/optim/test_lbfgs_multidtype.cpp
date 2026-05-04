@@ -11,6 +11,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -50,6 +51,10 @@ TEST_P(LBFGSMultiDTypeTest, StrongWolfeQuadraticExact) {
         loss.backward();
         return loss;
     };
+
+    // audit-2026-05-03 N1.d: one-shot grad-flow check before optimizer loop.
+    closure();
+    EXPECT_GRAD_FLOWS(*x);
 
     optim::LBFGS opt({x}, 1.0, 20, -1, 1e-12, 1e-14, 10,
                      optim::LBFGSLineSearch::StrongWolfe);

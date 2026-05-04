@@ -502,11 +502,13 @@ auto maxpool2d_forward_hip(
 ) -> std::pair<Tensor, Tensor> {
 
 #ifdef USE_MIOPEN
-    // Prefer MIOpen, fall back to HIP kernel if MIOpen JIT fails (see
-    // avgpool2d_forward_hip for the same pattern). On parts where MIOpen JIT
-    // is known to hang the GPU (gfx1150/gfx1151), is_miopen_available() short-
-    // circuits before the MIOpen call so the catch fallback never runs.
-    if (rocm::is_miopen_available() &&
+    // audit-2026-05-03 — MIOpen does not expose argmax indices in a
+    // workspace-stable format we can extract. Routing through MIOpen when
+    // return_indices is true returned uninitialised int64 indices, which
+    // poisoned the backward gradient. Skip MIOpen entirely when indices
+    // are required (the test is the autograd backward path); fall through
+    // to the native HIP kernel which writes both output and indices.
+    if (rocm::is_miopen_available() && !return_indices &&
         (input.dtype() == DType::Float32 ||
          input.dtype() == DType::Float16 ||
          input.dtype() == DType::BFloat16)) {
@@ -634,6 +636,15 @@ auto maxpool2d_backward_hip(
 ) -> Tensor {
 
     Tensor grad_input = Tensor(input_shape, grad_output.dtype(), grad_output.device());
+
+    // audit-2026-05-03 — zero-initialise grad_input. atomicAdd accumulates
+    // onto whatever was there, so uninitialised memory poisons the gradient
+    // at non-argmax positions. Float64 happened to start at zero on most
+    // ROCm allocations; Float32 surfaced the bug via gradcheck failures.
+    int64_t input_numel = 1;
+    for (auto s : input_shape) input_numel *= s;
+    HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0,
+        input_numel * grad_input.dtype_size(), stream));
 
     int64_t total_elements = grad_output.numel();
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
@@ -3548,6 +3559,59 @@ __global__ void fractional_maxpool2d_forward_kernel_f32(
     }
 }
 
+__global__ void fractional_maxpool2d_forward_kernel_f64(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    int64_t* __restrict__ indices,
+    const float* __restrict__ samples,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t c  = (idx / (out_w * out_h)) % C;
+        int64_t n  = idx / (out_w * out_h * C);
+
+        float sample_h = samples ? samples[(n * C + c) * 2 + 0] : 0.5f;
+        float sample_w = samples ? samples[(n * C + c) * 2 + 1] : 0.5f;
+
+        int64_t h_start = static_cast<int64_t>(floorf(
+            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t h_end = static_cast<int64_t>(floorf(
+            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t w_start = static_cast<int64_t>(floorf(
+            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+        int64_t w_end = static_cast<int64_t>(floorf(
+            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+
+        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
+        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
+        if (h_end <= h_start) h_end = h_start + 1;
+        if (w_end <= w_start) w_end = w_start + 1;
+        h_end = min(h_end, H);
+        w_end = min(w_end, W);
+
+        double max_val = -1e308;
+        int64_t max_idx = h_start * W + w_start;
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                double val = input[in_idx];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = h * W + w;
+                }
+            }
+        }
+
+        output[idx] = max_val;
+        indices[idx] = max_idx;
+    }
+}
+
 auto fractional_maxpool2d_forward_hip(
     const Tensor& input,
     int64_t out_h, int64_t out_w,
@@ -3576,9 +3640,11 @@ auto fractional_maxpool2d_forward_hip(
             samples_ptr, N, C, H, W, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
-        return {out_f32.to(DType::Float64), idx};
+        hipLaunchKernelGGL(fractional_maxpool2d_forward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), output.data<double>(), indices.data<int64_t>(),
+            samples_ptr, N, C, H, W, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
@@ -3602,6 +3668,32 @@ __global__ void fractional_maxpool2d_backward_kernel_f32(
     const float* __restrict__ grad_output,
     const int64_t* __restrict__ indices,
     float* __restrict__ grad_input,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_h * out_w;
+    int64_t in_spatial = H * W;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t c  = (idx / (out_w * out_h)) % C;
+        int64_t n  = idx / (out_w * out_h * C);
+
+        int64_t base_in = (n * C + c) * in_spatial;
+        int64_t base_out = (n * C + c) * out_spatial;
+        int64_t out_idx = base_out + oh * out_w + ow;
+
+        int64_t max_idx = indices[out_idx];
+        atomicAdd(&grad_input[base_in + max_idx], grad_output[out_idx]);
+    }
+}
+
+__global__ void fractional_maxpool2d_backward_kernel_f64(
+    const double* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t out_h, int64_t out_w
 ) {
@@ -3650,9 +3742,13 @@ auto fractional_maxpool2d_backward_hip(
             grad_input.data<float>(), N, C, H, W, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
-        auto grad_f32 = grad_output.to(DType::Float32);
-        auto result_f32 = fractional_maxpool2d_backward_hip(grad_f32, indices, input_shape, stream);
-        return result_f32.to(DType::Float64);
+        int64_t input_numel = N * C * H * W;
+        HIP_CHECK(hipMemsetAsync(grad_input.data<double>(), 0, input_numel * sizeof(double), stream));
+        hipLaunchKernelGGL(fractional_maxpool2d_backward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), indices.data<int64_t>(),
+            grad_input.data<double>(), N, C, H, W, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = fractional_maxpool2d_backward_hip(grad_f32, indices, input_shape, stream);
@@ -3671,6 +3767,70 @@ auto fractional_maxpool2d_backward_hip(
 // ============================================================================
 // Fractional Max Pool 3D Forward
 // ============================================================================
+
+__global__ void fractional_maxpool3d_forward_kernel_f64(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    int64_t* __restrict__ indices,
+    const float* __restrict__ samples,
+    int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_d * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t od = (idx / (out_w * out_h)) % out_d;
+        int64_t c  = (idx / (out_w * out_h * out_d)) % C;
+        int64_t n  = idx / (out_w * out_h * out_d * C);
+
+        float sample_d = samples ? samples[(n * C + c) * 3 + 0] : 0.5f;
+        float sample_h = samples ? samples[(n * C + c) * 3 + 1] : 0.5f;
+        float sample_w = samples ? samples[(n * C + c) * 3 + 2] : 0.5f;
+
+        int64_t d_start = static_cast<int64_t>(floorf(
+            (od + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
+        int64_t d_end = static_cast<int64_t>(floorf(
+            (od + 1 + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
+        int64_t h_start = static_cast<int64_t>(floorf(
+            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t h_end = static_cast<int64_t>(floorf(
+            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t w_start = static_cast<int64_t>(floorf(
+            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+        int64_t w_end = static_cast<int64_t>(floorf(
+            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+
+        d_start = max(d_start, int64_t{0}); d_end = min(d_end, D);
+        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
+        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
+        if (d_end <= d_start) d_end = d_start + 1;
+        if (h_end <= h_start) h_end = h_start + 1;
+        if (w_end <= w_start) w_end = w_start + 1;
+        d_end = min(d_end, D);
+        h_end = min(h_end, H);
+        w_end = min(w_end, W);
+
+        double max_val = -1e308;
+        int64_t max_idx = (d_start * H + h_start) * W + w_start;
+
+        for (int64_t d = d_start; d < d_end; ++d) {
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
+                    double val = input[in_idx];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = (d * H + h) * W + w;
+                    }
+                }
+            }
+        }
+
+        output[idx] = max_val;
+        indices[idx] = max_idx;
+    }
+}
 
 __global__ void fractional_maxpool3d_forward_kernel_f32(
     const float* __restrict__ input,
@@ -3764,9 +3924,11 @@ auto fractional_maxpool3d_forward_hip(
             samples_ptr, N, C, D, H, W, out_d, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
-        return {out_f32.to(DType::Float64), idx};
+        hipLaunchKernelGGL(fractional_maxpool3d_forward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), output.data<double>(), indices.data<int64_t>(),
+            samples_ptr, N, C, D, H, W, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
@@ -3790,6 +3952,30 @@ __global__ void fractional_maxpool3d_backward_kernel_f32(
     const float* __restrict__ grad_output,
     const int64_t* __restrict__ indices,
     float* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t D, int64_t H, int64_t W,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_d * out_h * out_w;
+    int64_t in_spatial = D * H * W;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % out_spatial;
+        int64_t nc = idx / out_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_out + local_idx];
+        atomicAdd(&grad_input[base_in + max_idx], grad_output[base_out + local_idx]);
+    }
+}
+
+__global__ void fractional_maxpool3d_backward_kernel_f64(
+    const double* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ grad_input,
     int64_t N, int64_t C,
     int64_t D, int64_t H, int64_t W,
     int64_t out_d, int64_t out_h, int64_t out_w
@@ -3836,9 +4022,13 @@ auto fractional_maxpool3d_backward_hip(
             grad_input.data<float>(), N, C, D, H, W, out_d, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
-        auto grad_f32 = grad_output.to(DType::Float32);
-        auto result_f32 = fractional_maxpool3d_backward_hip(grad_f32, indices, input_shape, stream);
-        return result_f32.to(DType::Float64);
+        int64_t input_numel = N * C * D * H * W;
+        HIP_CHECK(hipMemsetAsync(grad_input.data<double>(), 0, input_numel * sizeof(double), stream));
+        hipLaunchKernelGGL(fractional_maxpool3d_backward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), indices.data<int64_t>(),
+            grad_input.data<double>(), N, C, D, H, W, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = fractional_maxpool3d_backward_hip(grad_f32, indices, input_shape, stream);
@@ -3862,6 +4052,34 @@ __global__ void max_unpool2d_forward_kernel_f32(
     const float* __restrict__ input,
     const int64_t* __restrict__ indices,
     float* __restrict__ output,
+    int64_t N, int64_t C,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_h * in_w;
+    int64_t in_spatial = in_h * in_w;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            output[base_out + max_idx] = input[base_in + local_idx];
+        }
+    }
+}
+
+// audit-2026-05-03 — Float64 native unpool kernel; the previous f32-cast
+// detour dropped Float64 precision and broke autograd gradcheck.
+__global__ void max_unpool2d_forward_kernel_f64(
+    const double* __restrict__ input,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ output,
     int64_t N, int64_t C,
     int64_t in_h, int64_t in_w,
     int64_t out_h, int64_t out_w
@@ -3908,9 +4126,12 @@ auto max_unpool2d_forward_hip(
             output.data<float>(), N, C, in_h, in_w, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        auto input_f32 = input.to(DType::Float32);
-        auto result_f32 = max_unpool2d_forward_hip(input_f32, indices, out_h, out_w, stream);
-        return result_f32.to(DType::Float64);
+        HIP_CHECK(hipMemsetAsync(output.data<double>(), 0, output_numel * sizeof(double), stream));
+        hipLaunchKernelGGL(max_unpool2d_forward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), indices.data<int64_t>(),
+            output.data<double>(), N, C, in_h, in_w, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto result_f32 = max_unpool2d_forward_hip(input_f32, indices, out_h, out_w, stream);
@@ -3958,6 +4179,34 @@ __global__ void max_unpool2d_backward_kernel_f32(
     }
 }
 
+__global__ void max_unpool2d_backward_kernel_f64(
+    const double* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_h * in_w;
+    int64_t in_spatial = in_h * in_w;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            grad_input[base_in + local_idx] = grad_output[base_out + max_idx];
+        } else {
+            grad_input[base_in + local_idx] = 0.0;
+        }
+    }
+}
+
 auto max_unpool2d_backward_hip(
     const Tensor& grad_output,
     const Tensor& indices,
@@ -3982,9 +4231,11 @@ auto max_unpool2d_backward_hip(
             grad_input.data<float>(), N, C, in_h, in_w, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
-        auto grad_f32 = grad_output.to(DType::Float32);
-        auto result_f32 = max_unpool2d_backward_hip(grad_f32, indices, input_shape, stream);
-        return result_f32.to(DType::Float64);
+        hipLaunchKernelGGL(max_unpool2d_backward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), indices.data<int64_t>(),
+            grad_input.data<double>(), N, C, in_h, in_w, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = max_unpool2d_backward_hip(grad_f32, indices, input_shape, stream);
@@ -4008,6 +4259,32 @@ __global__ void max_unpool3d_forward_kernel_f32(
     const float* __restrict__ input,
     const int64_t* __restrict__ indices,
     float* __restrict__ output,
+    int64_t N, int64_t C,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_d * in_h * in_w;
+    int64_t in_spatial = in_d * in_h * in_w;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            output[base_out + max_idx] = input[base_in + local_idx];
+        }
+    }
+}
+
+__global__ void max_unpool3d_forward_kernel_f64(
+    const double* __restrict__ input,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ output,
     int64_t N, int64_t C,
     int64_t in_d, int64_t in_h, int64_t in_w,
     int64_t out_d, int64_t out_h, int64_t out_w
@@ -4054,9 +4331,12 @@ auto max_unpool3d_forward_hip(
             output.data<float>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        auto input_f32 = input.to(DType::Float32);
-        auto result_f32 = max_unpool3d_forward_hip(input_f32, indices, out_d, out_h, out_w, stream);
-        return result_f32.to(DType::Float64);
+        HIP_CHECK(hipMemsetAsync(output.data<double>(), 0, output_numel * sizeof(double), stream));
+        hipLaunchKernelGGL(max_unpool3d_forward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), indices.data<int64_t>(),
+            output.data<double>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto result_f32 = max_unpool3d_forward_hip(input_f32, indices, out_d, out_h, out_w, stream);
@@ -4104,6 +4384,34 @@ __global__ void max_unpool3d_backward_kernel_f32(
     }
 }
 
+__global__ void max_unpool3d_backward_kernel_f64(
+    const double* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    double* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_d * in_h * in_w;
+    int64_t in_spatial = in_d * in_h * in_w;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            grad_input[base_in + local_idx] = grad_output[base_out + max_idx];
+        } else {
+            grad_input[base_in + local_idx] = 0.0;
+        }
+    }
+}
+
 auto max_unpool3d_backward_hip(
     const Tensor& grad_output,
     const Tensor& indices,
@@ -4128,9 +4436,11 @@ auto max_unpool3d_backward_hip(
             grad_input.data<float>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
-        auto grad_f32 = grad_output.to(DType::Float32);
-        auto result_f32 = max_unpool3d_backward_hip(grad_f32, indices, input_shape, stream);
-        return result_f32.to(DType::Float64);
+        hipLaunchKernelGGL(max_unpool3d_backward_kernel_f64,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), indices.data<int64_t>(),
+            grad_input.data<double>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = max_unpool3d_backward_hip(grad_f32, indices, input_shape, stream);

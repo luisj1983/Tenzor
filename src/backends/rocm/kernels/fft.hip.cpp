@@ -431,13 +431,21 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     istride[0] = static_cast<size_t>(inner_size);
     ostride[0] = static_cast<size_t>(inner_size);
 
-    if (dim == ndim - 1) {
+    bool last_dim = (dim == ndim - 1);
+    if (last_dim) {
+        istride[0] = 1;
+        ostride[0] = 1;
         idist = static_cast<size_t>(N_out);
         odist = static_cast<size_t>(N_out);
         batch = outer_size;
     } else {
         idist = 1;
         odist = 1;
+        // audit-2026-05-03 — for non-last dim with both outer + inner > 1,
+        // a single rocFFT plan with idist=1 cannot encode the layout
+        // (inter-batch offsets jump by N_out*inner_size at outer-block
+        // boundaries, not by 1). Loop per outer block instead.
+        batch = inner_size;
     }
 
     // Create or fetch cached plan
@@ -445,8 +453,17 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                                        /*is_forward=*/true, is_float32,
                                        istride, idist, ostride, odist);
 
-    // Execute in-place
-    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
+    if (last_dim) {
+        execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
+    } else {
+        size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
+        size_t elem_size = dtype_size(out_dtype);
+        for (int64_t b = 0; b < outer_size; ++b) {
+            void* base = static_cast<char*>(output.data_ptr())
+                + b * outer_stride_elems * elem_size;
+            execute_plan(cached_plan->handle, base, base, stream);
+        }
+    }
 
     // Apply normalization
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/true);
@@ -494,20 +511,34 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     size_t ostride[1] = { static_cast<size_t>(inner_size) };
     size_t idist, odist;
 
-    if (dim == ndim - 1) {
+    bool last_dim = (dim == ndim - 1);
+    if (last_dim) {
+        istride[0] = 1;
+        ostride[0] = 1;
         idist = static_cast<size_t>(N_out);
         odist = static_cast<size_t>(N_out);
         batch = outer_size;
     } else {
         idist = 1;
         odist = 1;
+        batch = inner_size;
     }
 
     auto cached_plan = create_c2c_plan(1, lengths, static_cast<size_t>(batch),
                                        /*is_forward=*/false, is_float32,
                                        istride, idist, ostride, odist);
 
-    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
+    if (last_dim) {
+        execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
+    } else {
+        size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
+        size_t elem_size = dtype_size(out_dtype);
+        for (int64_t b = 0; b < outer_size; ++b) {
+            void* base = static_cast<char*>(output.data_ptr())
+                + b * outer_stride_elems * elem_size;
+            execute_plan(cached_plan->handle, base, base, stream);
+        }
+    }
 
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/false);
     apply_normalization_complex(output, scale, is_float32, stream);

@@ -41,8 +41,9 @@ namespace tenzor::nn {
 // BatchNorm2d autograd function
 class BatchNorm2dBackward : public Function {
 public:
-    BatchNorm2dBackward(bool affine, double eps, std::vector<Tensor> tensors_to_save)
-        : affine_(affine), eps_(eps) {
+    BatchNorm2dBackward(bool affine, double eps, bool training,
+                        std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps), training_(training) {
         // Save tensors in constructor (protected member access is allowed here)
         save_for_backward(std::move(tensors_to_save));
     }
@@ -70,6 +71,46 @@ public:
         int64_t W = shape[3];
         int64_t spatial_size = H * W;
         int64_t batch_size = N * spatial_size;
+
+        // audit-2026-05-03 bug #3 — eval-mode backward.
+        //
+        // In eval mode the running mean/var are constants (not functions of
+        // the input), so the chain-rule correction terms `mean_grad` and
+        // `mean_grad_norm` that the train-mode kernel formula folds in are
+        // ZERO and must NOT be applied. The simplified formula:
+        //
+        //   grad_input  = grad_output * weight * invstd                  (broadcast over N, H, W)
+        //   grad_weight = sum_{N,H,W}( grad_output * normalized )         per channel
+        //   grad_bias   = sum_{N,H,W}( grad_output )                       per channel
+        //
+        // Implementing this at the autograd layer (using element-wise tensor
+        // ops) gives every backend a correct eval-mode backward without
+        // requiring kernel changes on each.
+        if (!training_) {
+            // Reshape per-channel constants for broadcasting: (C,) → (1, C, 1, 1)
+            auto reshape_chan = [&](const Tensor& t) {
+                return t.reshape({1, C, 1, 1});
+            };
+            auto inv_b = reshape_chan(invstd);
+            auto mean_b = reshape_chan(mean);
+            auto weight_b = reshape_chan(weight);
+
+            auto normalized = (input - mean_b) * inv_b;
+            auto grad_input = grad_output * weight_b * inv_b;
+
+            // Per-channel reductions across N, H, W (dims 0, 2, 3).
+            auto grad_weight_full = grad_output * normalized;
+            auto grad_weight = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
+                grad_weight_full, /*dim=*/3, /*keepdim=*/false),
+                /*dim=*/2, /*keepdim=*/false),
+                /*dim=*/0, /*keepdim=*/false);
+            auto grad_bias = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
+                grad_output, /*dim=*/3, /*keepdim=*/false),
+                /*dim=*/2, /*keepdim=*/false),
+                /*dim=*/0, /*keepdim=*/false);
+
+            return {grad_input, grad_weight, grad_bias};
+        }
 
         // ================================================================
         // FAST GPU PATH: Use dedicated backward kernel (single kernel launch)
@@ -247,6 +288,7 @@ public:
 private:
     bool affine_;
     double eps_;
+    bool training_;
 };
 
 BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
@@ -501,7 +543,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
                     weight.contiguous()
                 };
                 auto grad_fn = std::make_shared<BatchNorm2dBackward>(
-                    affine_, eps_, std::move(tensors_to_save)
+                    affine_, eps_, training_, std::move(tensors_to_save)
                 );
 
                 // Save Variables for higher-order gradients when create_graph is active
@@ -703,7 +745,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
 
         // Create backward function with saved tensors
         auto grad_fn = std::make_shared<BatchNorm2dBackward>(
-            affine_, eps_, std::move(tensors_to_save)
+            affine_, eps_, training_, std::move(tensors_to_save)
         );
 
         // Save Variables for higher-order gradients when create_graph is active
@@ -776,8 +818,9 @@ auto BatchNorm2d::reset_parameters() -> void {
 // BatchNorm1d autograd function
 class BatchNorm1dBackward : public Function {
 public:
-    BatchNorm1dBackward(bool affine, double eps, std::vector<Tensor> tensors_to_save)
-        : affine_(affine), eps_(eps) {
+    BatchNorm1dBackward(bool affine, double eps, bool training,
+                        std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps), training_(training) {
         save_for_backward(std::move(tensors_to_save));
     }
 
@@ -867,9 +910,15 @@ public:
             invstd_expanded = invstd.unsqueeze(0).contiguous();
         }
 
-        auto term1 = (sum_grad / static_cast<float>(batch_size)).contiguous();
-        auto term2 = (normalized_reshaped * sum_grad_x_norm / static_cast<float>(batch_size)).contiguous();
-        auto grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
+        // audit-2026-05-03 bug #3 — eval-mode drops the term1/term2 corrections.
+        Tensor grad_input;
+        if (training_) {
+            auto term1 = (sum_grad / static_cast<float>(batch_size)).contiguous();
+            auto term2 = (normalized_reshaped * sum_grad_x_norm / static_cast<float>(batch_size)).contiguous();
+            grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
+        } else {
+            grad_input = (grad_input_normalized * invstd_expanded).contiguous();
+        }
 
         if (shape.size() == 3) {
             grad_input = grad_input.reshape({N, C, L}).contiguous();
@@ -971,6 +1020,7 @@ public:
 private:
     bool affine_;
     double eps_;
+    bool training_;
 };
 
 BatchNorm1d::BatchNorm1d(int64_t num_features, double eps, double momentum,
@@ -1170,7 +1220,7 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         };
 
         auto grad_fn = std::make_shared<BatchNorm1dBackward>(
-            affine_, eps_, std::move(tensors_to_save)
+            affine_, eps_, training_, std::move(tensors_to_save)
         );
 
         result.set_grad_fn(grad_fn);

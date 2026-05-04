@@ -55,3 +55,8 @@ tenzor_discover_tests(test_control_flow_hook_integration LABELS "jit" DISCOVERY_
 add_executable(test_jit_backend_parity test_jit_backend_parity.cpp)
 target_link_libraries(test_jit_backend_parity PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jit_backend_parity LABELS "jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Graph-viz DOT schema validation (audit-2026-05-03 N4)
+add_executable(test_graph_viz_schema test_graph_viz_schema.cpp)
+target_link_libraries(test_graph_viz_schema PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_graph_viz_schema LABELS "jit" DISCOVERY_TIMEOUT 60)

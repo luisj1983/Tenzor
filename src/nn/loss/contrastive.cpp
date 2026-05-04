@@ -153,18 +153,26 @@ auto NTXentLoss::forward(const Variable& z_i, const Variable& z_j) -> Variable {
     // labels = [N, N+1, ..., 2N-1, 0, 1, ..., N-1]
     int64_t total = 2 * batch_size;
 
-    // Create the diagonal mask: fill diagonal with -inf.
+    // Create the diagonal mask: fill diagonal with a large finite negative
+    // value. We deliberately do NOT use `-inf` here because softmax /
+    // cross-entropy backward on some backends (notably Vulkan, audit-2026-05-03)
+    // surface as `0 / 0 = NaN` gradients at masked positions; the standard
+    // numerically-safe trick used by PyTorch's MultiheadAttention etc. is to
+    // mask with a large finite negative whose `exp(.)` rounds to 0 in the
+    // forward direction but produces well-defined zero gradient. -1e4 is
+    // small enough to fit in Float16 (`max ≈ 65504`) and large enough that
+    // `exp(-1e4)` underflows to 0 in Float32+.
     //
     // Previously this path hardcoded `mask.data<float>()`, which throws a
-    // "type mismatch: requested type does not match tensor dtype" error
-    // whenever z_i has any non-Float32 dtype (e.g. Float64, BFloat16).
-    // Build the mask in Float32 on CPU, then cast/transfer to the target
-    // dtype and device — correct for every floating dtype we support.
+    // "type mismatch" error whenever z_i has any non-Float32 dtype. Build
+    // the mask in Float32 on CPU, then cast/transfer to the target dtype
+    // and device — correct for every floating dtype we support.
+    constexpr float kMaskNeg = -1e4f;
     Tensor cpu_mask_f32 = zeros({total, total}, DType::Float32, Device::cpu());
     {
         float* mask_data = cpu_mask_f32.data<float>();
         for (int64_t i = 0; i < total; ++i) {
-            mask_data[i * total + i] = -std::numeric_limits<float>::infinity();
+            mask_data[i * total + i] = kMaskNeg;
         }
     }
     Tensor mask = cpu_mask_f32.to(z_i.dtype()).to(z_i.device());

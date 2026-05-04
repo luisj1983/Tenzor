@@ -1,70 +1,130 @@
 {
-  "tests": 10,
+  "tests": 20,
   "name": "AllTests",
   "testsuites": [
     {
-      "name": "AllBackends\/LazyTensorBackwardTest",
-      "tests": 10,
+      "name": "AllBackends\/LazyTensorTest",
+      "tests": 20,
       "testsuite": [
         {
-          "name": "MatchesEagerGradient_AddMatMul\/cpu",
+          "name": "FromTensorRoundTrip\/cpu",
           "value_param": "\"cpu\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 39
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 28
         },
         {
-          "name": "MatchesEagerGradient_AddMatMul\/cuda",
+          "name": "FromTensorRoundTrip\/cuda",
           "value_param": "\"cuda\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 39
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 28
         },
         {
-          "name": "MatchesEagerGradient_AddMatMul\/vulkan",
+          "name": "FromTensorRoundTrip\/vulkan",
           "value_param": "\"vulkan\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 39
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 28
         },
         {
-          "name": "MatchesEagerGradient_AddMatMul\/oneapi",
+          "name": "FromTensorRoundTrip\/oneapi",
           "value_param": "\"oneapi\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 39
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 28
         },
         {
-          "name": "MatchesEagerGradient_AddMatMul\/rocm",
+          "name": "FromTensorRoundTrip\/rocm",
           "value_param": "\"rocm\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 39
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 28
         },
         {
-          "name": "MaterializeIsStableAcrossEagerBackward\/cpu",
+          "name": "AddMulCompose\/cpu",
           "value_param": "\"cpu\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 102
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 56
         },
         {
-          "name": "MaterializeIsStableAcrossEagerBackward\/cuda",
+          "name": "AddMulCompose\/cuda",
           "value_param": "\"cuda\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 102
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 56
         },
         {
-          "name": "MaterializeIsStableAcrossEagerBackward\/vulkan",
+          "name": "AddMulCompose\/vulkan",
           "value_param": "\"vulkan\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 102
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 56
         },
         {
-          "name": "MaterializeIsStableAcrossEagerBackward\/oneapi",
+          "name": "AddMulCompose\/oneapi",
           "value_param": "\"oneapi\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 102
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 56
         },
         {
-          "name": "MaterializeIsStableAcrossEagerBackward\/rocm",
+          "name": "AddMulCompose\/rocm",
           "value_param": "\"rocm\"",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor_backward.cpp",
-          "line": 102
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 56
+        },
+        {
+          "name": "MaterializeIsCached\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 87
+        },
+        {
+          "name": "MaterializeIsCached\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 87
+        },
+        {
+          "name": "MaterializeIsCached\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 87
+        },
+        {
+          "name": "MaterializeIsCached\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 87
+        },
+        {
+          "name": "MaterializeIsCached\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 87
+        },
+        {
+          "name": "ShapeWithoutMaterialize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 110
+        },
+        {
+          "name": "ShapeWithoutMaterialize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 110
+        },
+        {
+          "name": "ShapeWithoutMaterialize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 110
+        },
+        {
+          "name": "ShapeWithoutMaterialize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 110
+        },
+        {
+          "name": "ShapeWithoutMaterialize\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_lazy_tensor.cpp",
+          "line": 110
         }
       ]
     }

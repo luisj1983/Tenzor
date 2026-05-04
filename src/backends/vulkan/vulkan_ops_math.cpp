@@ -4,7 +4,13 @@
 namespace tenzor {
 
 auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
-                                     const Tensor& a, const Tensor& b) -> Tensor {
+                                     const Tensor& a_raw, const Tensor& b_raw) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure inputs are contiguous so that
+    // the SSBO uploads see logically-contiguous data. Non-contiguous slice
+    // views would otherwise produce wrong values (same root cause as the
+    // CPU/CUDA/ROCm sum/sigmoid/tanh kernel fixes).
+    auto a = a_raw.contiguous();
+    auto b = b_raw.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -907,7 +913,13 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
 }
 
 auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
-                                          const Tensor& input) -> Tensor {
+                                          const Tensor& input_raw) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: the shader iterates over input as a
+    // contiguous element stream — non-contiguous slice/view inputs would
+    // produce only the first contiguous run correctly and garbage afterwards
+    // (LSTM `tanh(slice(gates))` was the failing path).
+    auto input = input_raw.contiguous();
+
     // Map operation name to opcode (see hyperbolic.comp shader)
     // 0=sinh, 1=cosh, 2=tanh
     uint32_t opcode = 0;
@@ -1461,7 +1473,10 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
 // isSimpleTranspose2D is defined in vulkan_helpers.hpp
 
-auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
+auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs.
+    auto a = a_raw.contiguous();
+    auto b = b_raw.contiguous();
     // Optimized matmul with proper buffer binding and tiled execution
 
     // Float16: upcast to Float32 for numerical stability

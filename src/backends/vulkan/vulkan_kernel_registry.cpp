@@ -314,20 +314,34 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
+    // Vulkan reduction kernels use `dim < 0` as the "full reduction"
+    // sentinel — that conflicts with valid negative dims (-1, -2…) which
+    // refer to axes from the back. Default to INT64_MIN (the project-wide
+    // "all dims" sentinel) and normalize user-specified negative dims to
+    // positive. Pass -1 to dispatchProd/Variance/Std for full reduction.
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(inputs[0].ndim());
+        if (dim == INT64_MIN) dim = -1;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchProd(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            dim, attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(inputs[0].ndim());
+        if (dim == INT64_MIN) dim = -1;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchVariance(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Unbiased, true),
+            dim, attrs.get_bool(AttrKey::Unbiased, true),
             attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(inputs[0].ndim());
+        if (dim == INT64_MIN) dim = -1;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchStd(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Unbiased, true),
+            dim, attrs.get_bool(AttrKey::Unbiased, true),
             attrs.get_bool(AttrKey::Keepdim, false))};
     });
 

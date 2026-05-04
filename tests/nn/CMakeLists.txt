@@ -278,6 +278,11 @@ add_executable(test_distributions_multidtype test_distributions_multidtype.cpp)
 target_link_libraries(test_distributions_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_distributions_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Contrastive losses multi-backend tests (audit-2026-05-03 N3)
+add_executable(test_contrastive_losses_multidtype test_contrastive_losses_multidtype.cpp)
+target_link_libraries(test_contrastive_losses_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_contrastive_losses_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Weight initialization multi-backend tests
 add_executable(test_init_multidtype test_init_multidtype.cpp)
 target_link_libraries(test_init_multidtype PRIVATE tenzor_core GTest::gtest_main)
@@ -663,3 +668,18 @@ tenzor_discover_tests(test_zero_stage3_integration_multidtype LABELS "nn" DISCOV
 add_executable(test_zero_profiling_multidtype optim/test_zero_profiling_multidtype.cpp)
 target_link_libraries(test_zero_profiling_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_zero_profiling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Lazy layer tests (audit-2026-05-03 N2)
+add_executable(test_lazy_layers_multidtype layers/test_lazy_layers_multidtype.cpp)
+target_link_libraries(test_lazy_layers_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_layers_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# TransformerEncoder/Decoder container tests (audit-2026-05-03 N2)
+add_executable(test_transformer_containers_multidtype layers/test_transformer_containers_multidtype.cpp)
+target_link_libraries(test_transformer_containers_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_transformer_containers_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Optimizer grad-flow regression tests (audit-2026-05-03 N1.d)
+add_executable(test_optim_grad_flow optim/test_optim_grad_flow.cpp)
+target_link_libraries(test_optim_grad_flow PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_optim_grad_flow LABELS "nn" DISCOVERY_TIMEOUT 60)

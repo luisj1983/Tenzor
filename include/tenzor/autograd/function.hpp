@@ -2020,6 +2020,28 @@ public:
 };
 
 /**
+ * @brief LU-solve gradient function (audit-2026-05-03 Phase 8).
+ * Treats LU and pivots as fixed; differentiates only w.r.t. B.
+ */
+class LUSolveBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LUSolveBackward"; }
+};
+
+/**
+ * @brief Non-symmetric eigendecomposition gradient (audit-2026-05-03 Phase 8).
+ * Backward only supports the real-eigenvalue path.
+ */
+class EigBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "EigBackward"; }
+};
+
+/**
  * @brief Cholesky decomposition gradient function.
  *
  * Forward: L = cholesky(A) where A = L @ L^T
@@ -2070,12 +2092,21 @@ private:
  */
 class LUBackward : public Function {
 public:
+    // audit-2026-05-03 — output_slot identifies which of {L=0, U=1} this
+    // backward instance accumulates a gradient for. tenzor's autograd engine
+    // collapses all per-output gradients of a multi-output function into a
+    // single accumulator entry; with L and U sharing the (N, N) shape that
+    // collapse erases per-output information. Using one Function instance
+    // per output means each accumulator slot stays distinct.
+    explicit LUBackward(int output_slot = -1) : output_slot_(output_slot) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "LUBackward"; }
-};
+private:
+    int output_slot_;  // 0=L, 1=U; -1 = legacy combined (kept for compat)
+};;
 
 /**
  * @brief SVD gradient function.
@@ -2087,7 +2118,12 @@ public:
  */
 class SvdBackward : public Function {
 public:
-    SvdBackward(bool full_matrices = true) : full_matrices_(full_matrices) {}
+    // audit-2026-05-03 — output_slot identifies which of {U=0, S=1, Vh=2}
+    // this backward instance handles. The engine collapses per-output
+    // accumulator entries, mixing U/S/Vh contributions; per-output Function
+    // instances keep them distinct.
+    SvdBackward(bool full_matrices = true, int output_slot = -1)
+        : full_matrices_(full_matrices), output_slot_(output_slot) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -2095,6 +2131,7 @@ public:
     auto name() const -> std::string override { return "SvdBackward"; }
 private:
     bool full_matrices_;
+    int output_slot_;
 };
 
 /**
@@ -2484,6 +2521,67 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SphericalBesselJ0Backward"; }
+};
+
+
+// Phase 12 (audit-2026-05-03) — Bessel J0/J1/Y0/Y1 and Zeta backwards.
+// These add Variable-level autograd to ops that previously had Tensor-only forward.
+class BesselJ0Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "BesselJ0Backward"; }
+};
+
+class BesselJ1Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "BesselJ1Backward"; }
+};
+
+class BesselY0Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "BesselY0Backward"; }
+};
+
+class BesselY1Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "BesselY1Backward"; }
+};
+
+// Zeta(s, q): differentiable wrt q via d/dq zeta(s,q) = -s * zeta(s+1, q).
+// s is treated as a non-differentiable parameter (its derivative requires
+// the digamma-zeta identity which has no closed form).
+class ZetaBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ZetaBackward"; }
+};
+
+
+// BetaInc(a, b, x) = I_x(a, b) regularised incomplete beta function.
+// Differentiable wrt x: dI/dx = x^(a-1) (1-x)^(b-1) / B(a, b).
+// a, b receive zero gradients (their derivatives need digamma/polylog terms
+// which are out of scope here and a, b are usually fixed parameters).
+class BetaIncBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BetaIncBackward"; }
 };
 
 // --- Statistical/special ops ---

@@ -54,6 +54,23 @@ add_library(tenzor_backend_cuda SHARED ${CUDA_BACKEND_SOURCES})
 # Define CUDA availability macro for fused ops
 target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_CUDA_AVAILABLE TENZOR_INTERNAL)
 
+# Workaround for libstdc++ from gcc >= 14 using C++23 features (deducing-this,
+# __builtin_is_virtual_base_of) inside its C++20 headers when nvcc is the
+# parser. nvcc 13.x only supports up to -std=c++20 and its EDG-based frontend
+# can't parse these constructs even when they're notionally gated on C++23.
+# - _GLIBCXX_CLANG=1 disables the libstdc++ "deducing-this as GCC extension"
+#   path in <functional>, <ranges>, <bits/binders.h>.
+# - _GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS=1 forces libstdc++ to fall back from
+#   GCC builtins like __builtin_is_virtual_base_of (used in <memory>) to the
+#   library implementations nvcc can parse.
+# Scoped to CUDA so the host C++23 build of tenzor_core is unaffected.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+    target_compile_definitions(tenzor_backend_cuda PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:_GLIBCXX_CLANG=1>
+        $<$<COMPILE_LANGUAGE:CUDA>:_GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS=1>
+    )
+endif()
+
 # Set CUDA properties
 set_target_properties(tenzor_backend_cuda PROPERTIES
     VERSION ${PROJECT_VERSION}

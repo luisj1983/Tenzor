@@ -7,6 +7,7 @@
  */
 
 #include "vulkan_ops_common.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 
 namespace tenzor {
 // ============================================================================
@@ -487,8 +488,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Generate seed from hardware random
-    static std::random_device rd;
+    // Honor `tenzor::manual_seed`; falls back to time-based when unset.
     static std::atomic<uint32_t> offset_counter{0};
 
     struct PushConstants {
@@ -499,7 +499,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = rd();
+    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
     push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
     push_constants.distribution = 0;  // uniform
 
@@ -558,8 +558,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Generate seed from hardware random
-    static std::random_device rd;
+    // Honor `tenzor::manual_seed`; falls back to time-based when unset.
     static std::atomic<uint32_t> offset_counter{0};
 
     struct PushConstants {
@@ -570,7 +569,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = rd();
+    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
     push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
     push_constants.distribution = 1;  // normal
 
@@ -628,8 +627,7 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Generate seed from hardware random
-    static std::random_device rd;
+    // Honor `tenzor::manual_seed`; falls back to time-based when unset.
     static std::atomic<uint32_t> offset_counter{0};
 
     struct RandintPC {
@@ -643,7 +641,7 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
     push_constants.n = static_cast<uint32_t>(numel);
     push_constants.low = static_cast<int32_t>(low);
     push_constants.high = static_cast<int32_t>(high);
-    push_constants.seed = rd();
+    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
     push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -5160,16 +5158,19 @@ auto VulkanBackend::dispatchSegmentReduce(const Tensor& data, const Tensor& offs
 
 auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,
                                                         const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    auto shape = input_f32.shape();
+    bool is_f64 = (input.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor input_compute = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
+    auto shape = input_compute.shape();
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
     int64_t total = N * C * out_h * out_w;
     bool has_samples = (random_samples && random_samples->numel() > 0);
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("fractional_maxpool2d", device_id);
+    auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool2d_f64" : "fractional_maxpool2d", device_id);
 
-    Tensor output({N, C, out_h, out_w}, DType::Float32, input.device());
+    Tensor output({N, C, out_h, out_w}, compute_dtype, input.device());
     Tensor indices({N, C, out_h, out_w}, DType::Int32, input.device());
     Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
 
@@ -5179,11 +5180,11 @@ auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int6
     pc.total = total; pc.has_samples = has_samples ? 1 : 0;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, input_f32.data_ptr()}, {1, output.data_ptr()},
+        {0, input_compute.data_ptr()}, {1, output.data_ptr()},
         {2, indices.data_ptr()}, {3, samples_buf.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(input_f32.numel() * sizeof(float)), size_t(total * sizeof(float)),
+        size_t(input_compute.numel() * elem_size), size_t(total * elem_size),
         size_t(total * sizeof(int32_t)), size_t(samples_buf.numel() * sizeof(float))
     };
 
@@ -5197,22 +5198,27 @@ auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int6
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    Tensor out_final = (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    Tensor out_final = (input.dtype() != compute_dtype) ? output.to(input.dtype()) : output;
     return {out_final, indices.to(DType::Int64)};
 }
 
 auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
                                                          const std::vector<int64_t>& input_shape) -> Tensor {
-    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    bool is_f64 = (grad_output.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor go = (grad_output.dtype() != compute_dtype) ? grad_output.to(compute_dtype) : grad_output;
     Tensor idx = indices.to(DType::Int32);
     auto grad_shape = go.shape();
     int64_t N = input_shape[0], C = input_shape[1], H = input_shape[2], W = input_shape[3];
     int64_t out_h = grad_shape[2], out_w = grad_shape[3];
     int64_t total = N * C * out_h * out_w;
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
-    auto* pipeline = getPipeline("fractional_maxpool2d_backward", device_id);
-    Tensor grad_input = dispatchFull(input_shape, 0.0f, DType::Float32);
+    auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool2d_backward_f64" : "fractional_maxpool2d_backward", device_id);
+    Tensor grad_input = is_f64
+        ? dispatchFull(input_shape, 0.0, DType::Float64)
+        : dispatchFull(input_shape, 0.0f, DType::Float32);
 
     struct { uint32_t N, C, H_W, out_spatial, total; } pc;
     pc.N = N; pc.C = C; pc.H_W = H * W; pc.out_spatial = out_h * out_w; pc.total = total;
@@ -5221,8 +5227,8 @@ auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_outpu
         {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(total * sizeof(float)), size_t(total * sizeof(int32_t)),
-        size_t(N * C * H * W * sizeof(float))
+        size_t(total * elem_size), size_t(total * sizeof(int32_t)),
+        size_t(N * C * H * W * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5235,21 +5241,24 @@ auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_outpu
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+    return (grad_output.dtype() != compute_dtype) ? grad_input.to(grad_output.dtype()) : grad_input;
 }
 
 auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
                                                         const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    auto shape = input_f32.shape();
+    bool is_f64 = (input.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor input_compute = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
+    auto shape = input_compute.shape();
     int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
     int64_t total = N * C * out_d * out_h * out_w;
     bool has_samples = (random_samples && random_samples->numel() > 0);
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("fractional_maxpool3d", device_id);
+    auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool3d_f64" : "fractional_maxpool3d", device_id);
 
-    Tensor output({N, C, out_d, out_h, out_w}, DType::Float32, input.device());
+    Tensor output({N, C, out_d, out_h, out_w}, compute_dtype, input.device());
     Tensor indices({N, C, out_d, out_h, out_w}, DType::Int32, input.device());
     Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
 
@@ -5259,11 +5268,11 @@ auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int6
     pc.total = total; pc.has_samples = has_samples ? 1 : 0;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, input_f32.data_ptr()}, {1, output.data_ptr()},
+        {0, input_compute.data_ptr()}, {1, output.data_ptr()},
         {2, indices.data_ptr()}, {3, samples_buf.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(input_f32.numel() * sizeof(float)), size_t(total * sizeof(float)),
+        size_t(input_compute.numel() * elem_size), size_t(total * elem_size),
         size_t(total * sizeof(int32_t)), size_t(samples_buf.numel() * sizeof(float))
     };
 
@@ -5277,22 +5286,27 @@ auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int6
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    Tensor out_final = (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    Tensor out_final = (input.dtype() != compute_dtype) ? output.to(input.dtype()) : output;
     return {out_final, indices.to(DType::Int64)};
 }
 
 auto VulkanBackend::dispatchFractionalMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
                                                          const std::vector<int64_t>& input_shape) -> Tensor {
-    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    bool is_f64 = (grad_output.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor go = (grad_output.dtype() != compute_dtype) ? grad_output.to(compute_dtype) : grad_output;
     Tensor idx = indices.to(DType::Int32);
     auto grad_shape = go.shape();
     int64_t N = input_shape[0], C = input_shape[1], D = input_shape[2], H = input_shape[3], W = input_shape[4];
     int64_t out_d = grad_shape[2], out_h = grad_shape[3], out_w = grad_shape[4];
     int64_t total = N * C * out_d * out_h * out_w;
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
-    auto* pipeline = getPipeline("fractional_maxpool3d_backward", device_id);
-    Tensor grad_input = dispatchFull(input_shape, 0.0f, DType::Float32);
+    auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool3d_backward_f64" : "fractional_maxpool3d_backward", device_id);
+    Tensor grad_input = is_f64
+        ? dispatchFull(input_shape, 0.0, DType::Float64)
+        : dispatchFull(input_shape, 0.0f, DType::Float32);
 
     struct { uint32_t total, D_H_W, out_spatial; } pc;
     pc.total = total; pc.D_H_W = D * H * W; pc.out_spatial = out_d * out_h * out_w;
@@ -5301,8 +5315,8 @@ auto VulkanBackend::dispatchFractionalMaxPool3dBackward(const Tensor& grad_outpu
         {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(total * sizeof(float)), size_t(total * sizeof(int32_t)),
-        size_t(N * C * D * H * W * sizeof(float))
+        size_t(total * elem_size), size_t(total * sizeof(int32_t)),
+        size_t(N * C * D * H * W * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5315,32 +5329,41 @@ auto VulkanBackend::dispatchFractionalMaxPool3dBackward(const Tensor& grad_outpu
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+    return (grad_output.dtype() != compute_dtype) ? grad_input.to(grad_output.dtype()) : grad_input;
 }
 
 auto VulkanBackend::dispatchMaxUnpool2dForward(const Tensor& input, const Tensor& indices,
                                                 int64_t out_h, int64_t out_w) -> Tensor {
-    Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    // audit-2026-05-03 — Float64 input previously detoured through Float32,
+    // dropping ~30 mantissa bits and breaking gradcheck. Native Float64 path
+    // uses max_unpool2d_f64.comp (which requires
+    // GL_EXT_shader_explicit_arithmetic_types_float64).
+    bool is_f64 = (input.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor in_compute = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
     Tensor idx = indices.to(DType::Int32);
-    auto shape = in_f32.shape();
+    auto shape = in_compute.shape();
     int64_t N = shape[0], C = shape[1];
     int64_t in_spatial = shape[2] * shape[3];
     int64_t out_spatial = out_h * out_w;
-    int64_t total_input = in_f32.numel();
+    int64_t total_input = in_compute.numel();
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("max_unpool2d", device_id);
-    Tensor output = dispatchFull({N, C, out_h, out_w}, 0.0f, DType::Float32);
+    auto* pipeline = getPipeline(is_f64 ? "max_unpool2d_f64" : "max_unpool2d", device_id);
+    Tensor output = is_f64
+        ? dispatchFull({N, C, out_h, out_w}, 0.0, DType::Float64)
+        : dispatchFull({N, C, out_h, out_w}, 0.0f, DType::Float32);
 
     struct { uint32_t total_input, in_spatial, out_spatial; } pc;
     pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, in_f32.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
+        {0, in_compute.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(total_input * sizeof(float)), size_t(total_input * sizeof(int32_t)),
-        size_t(N * C * out_spatial * sizeof(float))
+        size_t(total_input * elem_size), size_t(total_input * sizeof(int32_t)),
+        size_t(N * C * out_spatial * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5353,22 +5376,25 @@ auto VulkanBackend::dispatchMaxUnpool2dForward(const Tensor& input, const Tensor
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    return (input.dtype() != compute_dtype) ? output.to(input.dtype()) : output;
 }
 
 auto VulkanBackend::dispatchMaxUnpool2dBackward(const Tensor& grad_output, const Tensor& indices,
                                                  const std::vector<int64_t>& input_shape) -> Tensor {
-    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    bool is_f64 = (grad_output.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor go = (grad_output.dtype() != compute_dtype) ? grad_output.to(compute_dtype) : grad_output;
     Tensor idx = indices.to(DType::Int32);
     int64_t in_spatial = input_shape[2] * input_shape[3];
     auto go_shape = go.shape();
     int64_t out_spatial = go_shape[2] * go_shape[3];
     int64_t total_input = 1;
     for (auto d : input_shape) total_input *= d;
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
-    auto* pipeline = getPipeline("max_unpool2d_backward", device_id);
-    Tensor grad_input(input_shape, DType::Float32, go.device());
+    auto* pipeline = getPipeline(is_f64 ? "max_unpool2d_backward_f64" : "max_unpool2d_backward", device_id);
+    Tensor grad_input(input_shape, compute_dtype, go.device());
 
     struct { uint32_t total_input, in_spatial, out_spatial; } pc;
     pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
@@ -5377,8 +5403,8 @@ auto VulkanBackend::dispatchMaxUnpool2dBackward(const Tensor& grad_output, const
         {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(go.numel() * sizeof(float)), size_t(total_input * sizeof(int32_t)),
-        size_t(total_input * sizeof(float))
+        size_t(go.numel() * elem_size), size_t(total_input * sizeof(int32_t)),
+        size_t(total_input * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5391,32 +5417,37 @@ auto VulkanBackend::dispatchMaxUnpool2dBackward(const Tensor& grad_output, const
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+    return (grad_output.dtype() != compute_dtype) ? grad_input.to(grad_output.dtype()) : grad_input;
 }
 
 auto VulkanBackend::dispatchMaxUnpool3dForward(const Tensor& input, const Tensor& indices,
                                                 int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor {
-    Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    bool is_f64 = (input.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor in_compute = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
     Tensor idx = indices.to(DType::Int32);
-    auto shape = in_f32.shape();
+    auto shape = in_compute.shape();
     int64_t N = shape[0], C = shape[1];
     int64_t in_spatial = shape[2] * shape[3] * shape[4];
     int64_t out_spatial = out_d * out_h * out_w;
-    int64_t total_input = in_f32.numel();
+    int64_t total_input = in_compute.numel();
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("max_unpool3d", device_id);
-    Tensor output = dispatchFull({N, C, out_d, out_h, out_w}, 0.0f, DType::Float32);
+    auto* pipeline = getPipeline(is_f64 ? "max_unpool3d_f64" : "max_unpool3d", device_id);
+    Tensor output = is_f64
+        ? dispatchFull({N, C, out_d, out_h, out_w}, 0.0, DType::Float64)
+        : dispatchFull({N, C, out_d, out_h, out_w}, 0.0f, DType::Float32);
 
     struct { uint32_t total_input, in_spatial, out_spatial; } pc;
     pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, in_f32.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
+        {0, in_compute.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(total_input * sizeof(float)), size_t(total_input * sizeof(int32_t)),
-        size_t(N * C * out_spatial * sizeof(float))
+        size_t(total_input * elem_size), size_t(total_input * sizeof(int32_t)),
+        size_t(N * C * out_spatial * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5429,22 +5460,25 @@ auto VulkanBackend::dispatchMaxUnpool3dForward(const Tensor& input, const Tensor
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    return (input.dtype() != compute_dtype) ? output.to(input.dtype()) : output;
 }
 
 auto VulkanBackend::dispatchMaxUnpool3dBackward(const Tensor& grad_output, const Tensor& indices,
                                                  const std::vector<int64_t>& input_shape) -> Tensor {
-    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    bool is_f64 = (grad_output.dtype() == DType::Float64);
+    DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    Tensor go = (grad_output.dtype() != compute_dtype) ? grad_output.to(compute_dtype) : grad_output;
     Tensor idx = indices.to(DType::Int32);
     int64_t in_spatial = input_shape[2] * input_shape[3] * input_shape[4];
     auto go_shape = go.shape();
     int64_t out_spatial = go_shape[2] * go_shape[3] * go_shape[4];
     int64_t total_input = 1;
     for (auto d : input_shape) total_input *= d;
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
-    auto* pipeline = getPipeline("max_unpool3d_backward", device_id);
-    Tensor grad_input(input_shape, DType::Float32, go.device());
+    auto* pipeline = getPipeline(is_f64 ? "max_unpool3d_backward_f64" : "max_unpool3d_backward", device_id);
+    Tensor grad_input(input_shape, compute_dtype, go.device());
 
     struct { uint32_t total_input, in_spatial, out_spatial; } pc;
     pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
@@ -5453,8 +5487,8 @@ auto VulkanBackend::dispatchMaxUnpool3dBackward(const Tensor& grad_output, const
         {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        size_t(go.numel() * sizeof(float)), size_t(total_input * sizeof(int32_t)),
-        size_t(total_input * sizeof(float))
+        size_t(go.numel() * elem_size), size_t(total_input * sizeof(int32_t)),
+        size_t(total_input * elem_size)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -5467,7 +5501,7 @@ auto VulkanBackend::dispatchMaxUnpool3dBackward(const Tensor& grad_output, const
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+    return (grad_output.dtype() != compute_dtype) ? grad_input.to(grad_output.dtype()) : grad_input;
 }
 
 // ============================================================================

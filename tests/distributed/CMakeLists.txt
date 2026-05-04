@@ -55,3 +55,13 @@ tenzor_discover_tests(test_mpi_backend_smoke LABELS "distributed" DISCOVERY_TIME
 add_executable(test_nccl_backend_smoke test_nccl_backend_smoke.cpp)
 target_link_libraries(test_nccl_backend_smoke PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_nccl_backend_smoke LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# Distributed launch helpers (audit-2026-05-03 N4)
+add_executable(test_launch test_launch.cpp)
+target_link_libraries(test_launch PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_launch LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# SequenceParallel C++ test (audit-2026-05-03 N4)
+add_executable(test_sequence_parallel_cpp test_sequence_parallel.cpp)
+target_link_libraries(test_sequence_parallel_cpp PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sequence_parallel_cpp LABELS "distributed" DISCOVERY_TIMEOUT 60)

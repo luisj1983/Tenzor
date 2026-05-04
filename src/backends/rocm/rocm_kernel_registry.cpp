@@ -1894,9 +1894,38 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             rng_seed = static_cast<uint32_t>(seed64);
             if (rng_seed == 0) rng_seed = 1u;
         }
+        // fused_attention_hip expects 3D `(batch_heads, seq_len, head_dim)`.
+        // The autograd-side dispatch passes Q/K/V 4D `(B, H, S, D)`; collapse
+        // leading dims for the kernel call and restore on output.
+        bool is_4d = (inputs[0].shape().size() == 4);
+        Tensor Qi = inputs[0], Ki = inputs[1], Vi = inputs[2];
+        std::vector<int64_t> orig_q_shape;
+        if (is_4d) {
+            orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
+            int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+            int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+            int64_t sk = inputs[1].shape()[2];
+            int64_t dv = inputs[2].shape()[3];
+            Qi = tenzor::reshape(inputs[0].contiguous(), std::vector<int64_t>{b * h, sq, d});
+            Ki = tenzor::reshape(inputs[1].contiguous(), std::vector<int64_t>{b * h, sk, d});
+            Vi = tenzor::reshape(inputs[2].contiguous(), std::vector<int64_t>{b * h, sk, dv});
+        }
+
         auto [output, lse] = rocm::fused_attention_hip(
-            inputs[0], inputs[1], inputs[2], scale, causal,
+            Qi, Ki, Vi, scale, causal,
             apply_dropout ? dropout_p : 0.0f, rng_seed);
+
+        if (is_4d) {
+            int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+            int64_t sq = orig_q_shape[2], dv = inputs[2].shape()[3];
+            if (output.is_valid()) {
+                output = tenzor::reshape(output, std::vector<int64_t>{b, h, sq, dv});
+            }
+            if (lse.is_valid() && lse.numel() > 0) {
+                lse = tenzor::reshape(lse, std::vector<int64_t>{b, h, sq});
+            }
+        }
+
         Tensor seed_t, offset_t;
         if (apply_dropout) {
             seed_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
@@ -1935,9 +1964,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal);
             }
 
-            // Composed-ops fallback for unsupported head_dim or missing L
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
+            // Composed-ops fallback for unsupported head_dim or missing L.
+            // ROCm bmm expects 3D inputs; collapse leading B,H dims and
+            // restore on output, mirroring the forward dispatch path.
+            bool is_4d_bw = Q.is_valid() && (Q.shape().size() == 4);
+            std::vector<int64_t> q_shape4d, k_shape4d, v_shape4d;
+            Tensor Q3 = Q, K3 = K, V3 = V, dO3 = dO;
+            if (is_4d_bw) {
+                q_shape4d.assign(Q.shape().begin(), Q.shape().end());
+                k_shape4d.assign(K.shape().begin(), K.shape().end());
+                v_shape4d.assign(V.shape().begin(), V.shape().end());
+                int64_t b = q_shape4d[0], h = q_shape4d[1];
+                int64_t sq = q_shape4d[2], dq = q_shape4d[3];
+                int64_t sk = k_shape4d[2], dk = k_shape4d[3];
+                int64_t dv = v_shape4d[3];
+                Q3 = tenzor::reshape(Q.contiguous(), std::vector<int64_t>{b * h, sq, dq});
+                K3 = tenzor::reshape(K.contiguous(), std::vector<int64_t>{b * h, sk, dk});
+                V3 = tenzor::reshape(V.contiguous(), std::vector<int64_t>{b * h, sk, dv});
+                dO3 = tenzor::reshape(dO.contiguous(), std::vector<int64_t>{b * h, sq, dv});
+            }
+
+            Tensor Kt = tenzor::transpose(K3, -1, -2);
+            Tensor scores = tenzor::bmm(Q3, Kt);
 
             auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
             Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
@@ -1966,10 +2014,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor attn_weights = tenzor::dispatch(OpId::Softmax, sm_inputs, sm_attrs)[0];
 
             Tensor attn_t = tenzor::transpose(attn_weights, -1, -2);
-            Tensor dV = tenzor::bmm(attn_t, dO);
+            Tensor dV = tenzor::bmm(attn_t, dO3);
 
-            Tensor Vt = tenzor::transpose(V, -1, -2);
-            Tensor dAttn = tenzor::bmm(dO, Vt);
+            Tensor Vt = tenzor::transpose(V3, -1, -2);
+            Tensor dAttn = tenzor::bmm(dO3, Vt);
 
             Tensor attn_dAttn = tenzor::mul(attn_weights, dAttn);
             NewOpAttributes sum_attrs;
@@ -1984,9 +2032,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 static_cast<double>(scale), dScores.dtype(), dScores.device());
             dScores = tenzor::mul(dScores, scale_t2);
 
-            Tensor dQ = tenzor::bmm(dScores, K);
+            Tensor dQ = tenzor::bmm(dScores, K3);
             Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-            Tensor dK = tenzor::bmm(dScores_t, Q);
+            Tensor dK = tenzor::bmm(dScores_t, Q3);
+
+            if (is_4d_bw) {
+                dQ = tenzor::reshape(dQ, q_shape4d);
+                dK = tenzor::reshape(dK, k_shape4d);
+                dV = tenzor::reshape(dV, v_shape4d);
+            }
 
             return {dQ, dK, dV};
         });

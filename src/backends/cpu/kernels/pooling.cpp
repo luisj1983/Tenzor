@@ -158,6 +158,7 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                              int64_t N, int64_t C, int64_t H, int64_t W,
                              int64_t H_out, int64_t W_out,
                              int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -166,7 +167,7 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                     int64_t h_start = oh * stride - padding;
                     int64_t w_start = ow * stride - padding;
 
-                    float max_val = -std::numeric_limits<float>::infinity();
+                    Compute max_val = -std::numeric_limits<Compute>::infinity();
                     int64_t max_idx = 0;
 
                     for (int64_t kh = 0; kh < kernel_size; ++kh) {
@@ -176,7 +177,7 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 int64_t in_idx = ((n * C + c) * H + h) * W + w;
-                                float val = static_cast<float>(in_data[in_idx]);
+                                Compute val = static_cast<Compute>(in_data[in_idx]);
                                 if (val > max_val) {
                                     max_val = val;
                                     max_idx = h * W + w;
@@ -295,6 +296,7 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
                              int64_t N, int64_t C, int64_t H, int64_t W,
                              int64_t H_out, int64_t W_out,
                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -303,7 +305,7 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
                     int64_t h_start = oh * stride - padding;
                     int64_t w_start = ow * stride - padding;
 
-                    float sum = 0.0f;
+                    Compute sum = Compute(0);
                     int64_t count = 0;
 
                     for (int64_t kh = 0; kh < kernel_size; ++kh) {
@@ -312,7 +314,7 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
                             int64_t w = w_start + kw;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
-                                sum += static_cast<float>(in_data[((n * C + c) * H + h) * W + w]);
+                                sum += static_cast<Compute>(in_data[((n * C + c) * H + h) * W + w]);
                                 count++;
                             }
                         }
@@ -450,6 +452,7 @@ template<typename T>
 void adaptive_avgpool2d_impl(const T* in_data, T* out_data,
                               int64_t N, int64_t C, int64_t H, int64_t W,
                               int64_t output_h, int64_t output_w) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -460,12 +463,12 @@ void adaptive_avgpool2d_impl(const T* in_data, T* out_data,
                     int64_t w_start = (ow * W) / output_w;
                     int64_t w_end = ((ow + 1) * W) / output_w;
 
-                    float sum = 0.0f;
+                    Compute sum = Compute(0);
                     int64_t count = 0;
 
                     for (int64_t h = h_start; h < h_end; ++h) {
                         for (int64_t w = w_start; w < w_end; ++w) {
-                            sum += static_cast<float>(in_data[((n * C + c) * H + h) * W + w]);
+                            sum += static_cast<Compute>(in_data[((n * C + c) * H + h) * W + w]);
                             count++;
                         }
                     }
@@ -574,6 +577,7 @@ template<typename T>
 void adaptive_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                               int64_t N, int64_t C, int64_t H, int64_t W,
                               int64_t output_h, int64_t output_w) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -584,13 +588,13 @@ void adaptive_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                     int64_t w_start = (ow * W) / output_w;
                     int64_t w_end = ((ow + 1) * W) / output_w;
 
-                    float max_val = -std::numeric_limits<float>::infinity();
+                    Compute max_val = -std::numeric_limits<Compute>::infinity();
                     int64_t max_idx = 0;
 
                     for (int64_t h = h_start; h < h_end; ++h) {
                         for (int64_t w = w_start; w < w_end; ++w) {
                             int64_t in_idx = ((n * C + c) * H + h) * W + w;
-                            float val = static_cast<float>(in_data[in_idx]);
+                            Compute val = static_cast<Compute>(in_data[in_idx]);
                             if (val > max_val) {
                                 max_val = val;
                                 max_idx = h * W + w;
@@ -702,20 +706,21 @@ void maxpool1d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                              int64_t N, int64_t C, int64_t L,
                              int64_t L_out,
                              int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(3)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = ol * stride - padding;
 
-                float max_val = -std::numeric_limits<float>::infinity();
+                Compute max_val = -std::numeric_limits<Compute>::infinity();
                 int64_t max_idx = 0;
 
                 for (int64_t k = 0; k < kernel_size; ++k) {
                     int64_t l = l_start + k * dilation;
                     if (l >= 0 && l < L) {
                         int64_t in_idx = (n * C + c) * L + l;
-                        float val = static_cast<float>(in_data[in_idx]);
+                        Compute val = static_cast<Compute>(in_data[in_idx]);
                         if (val > max_val) {
                             max_val = val;
                             max_idx = l;
@@ -818,19 +823,20 @@ void avgpool1d_forward_impl(const T* in_data, T* out_data,
                              int64_t N, int64_t C, int64_t L,
                              int64_t L_out,
                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(3)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = ol * stride - padding;
 
-                float sum = 0.0f;
+                Compute sum = Compute(0);
                 int64_t count = 0;
 
                 for (int64_t k = 0; k < kernel_size; ++k) {
                     int64_t l = l_start + k;
                     if (l >= 0 && l < L) {
-                        sum += static_cast<float>(in_data[(n * C + c) * L + l]);
+                        sum += static_cast<Compute>(in_data[(n * C + c) * L + l]);
                         count++;
                     }
                 }
@@ -943,6 +949,7 @@ template<typename T>
 void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
                               int64_t N, int64_t C, int64_t L,
                               int64_t L_out) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(3)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -950,11 +957,11 @@ void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
                 int64_t l_start = (ol * L) / L_out;
                 int64_t l_end = ((ol + 1) * L) / L_out;
 
-                float sum = 0.0f;
+                Compute sum = Compute(0);
                 int64_t count = l_end - l_start;
 
                 for (int64_t l = l_start; l < l_end; ++l) {
-                    sum += static_cast<float>(in_data[(n * C + c) * L + l]);
+                    sum += static_cast<Compute>(in_data[(n * C + c) * L + l]);
                 }
 
                 out_data[(n * C + c) * L_out + ol] = static_cast<T>(sum / count);
@@ -1044,6 +1051,7 @@ template<typename T>
 void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                               int64_t N, int64_t C, int64_t L,
                               int64_t L_out) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(3)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1051,12 +1059,12 @@ void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                 int64_t l_start = (ol * L) / L_out;
                 int64_t l_end = ((ol + 1) * L) / L_out;
 
-                float max_val = -std::numeric_limits<float>::infinity();
+                Compute max_val = -std::numeric_limits<Compute>::infinity();
                 int64_t max_idx = 0;
 
                 for (int64_t l = l_start; l < l_end; ++l) {
                     int64_t in_idx = (n * C + c) * L + l;
-                    float val = static_cast<float>(in_data[in_idx]);
+                    Compute val = static_cast<Compute>(in_data[in_idx]);
                     if (val > max_val) {
                         max_val = val;
                         max_idx = l;
@@ -1160,6 +1168,7 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                              int64_t D, int64_t H, int64_t W,
                              int64_t D_out, int64_t H_out, int64_t W_out,
                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1170,7 +1179,7 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                         int64_t h_start = oh * stride - padding;
                         int64_t w_start = ow * stride - padding;
 
-                        float max_val = -std::numeric_limits<float>::infinity();
+                        Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = 0;
 
                         for (int64_t kd = 0; kd < kernel_size; ++kd) {
@@ -1181,7 +1190,7 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                     int64_t w = w_start + kw;
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
-                                        float val = static_cast<float>(in_data[in_idx]);
+                                        Compute val = static_cast<Compute>(in_data[in_idx]);
                                         if (val > max_val) {
                                             max_val = val;
                                             max_idx = d * H * W + h * W + w;
@@ -1303,6 +1312,11 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                              int64_t D, int64_t H, int64_t W,
                              int64_t D_out, int64_t H_out, int64_t W_out,
                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    // audit-2026-05-03 — accumulate at native precision when T is Float64,
+    // otherwise widen Float16/BFloat16 to Float32. Always-float accumulator
+    // dropped Float64 forward precision (which then poisoned the autograd
+    // numerical-vs-analytical comparison).
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1313,7 +1327,7 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                         int64_t h_start = oh * stride - padding;
                         int64_t w_start = ow * stride - padding;
 
-                        float sum = 0.0f;
+                        Compute sum = Compute(0);
                         int64_t count = 0;
 
                         for (int64_t kd = 0; kd < kernel_size; ++kd) {
@@ -1323,7 +1337,7 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                                     int64_t h = h_start + kh;
                                     int64_t w = w_start + kw;
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
-                                        sum += static_cast<float>(in_data[((n * C + c) * D + d) * H * W + h * W + w]);
+                                        sum += static_cast<Compute>(in_data[((n * C + c) * D + d) * H * W + h * W + w]);
                                         count++;
                                     }
                                 }
@@ -1331,7 +1345,7 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                         }
 
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
-                        out_data[out_idx] = static_cast<T>(count > 0 ? sum / count : 0.0f);
+                        out_data[out_idx] = static_cast<T>(count > 0 ? sum / static_cast<Compute>(count) : Compute(0));
                     }
                 }
             }
@@ -1379,6 +1393,10 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t D, int64_t H, int64_t W,
                               int64_t D_out, int64_t H_out, int64_t W_out,
                               int64_t kernel_size, int64_t stride, int64_t padding) {
+    // audit-2026-05-03 — accumulate at native precision when T is Float64,
+    // otherwise widen Float16/BFloat16 to Float32. Previous always-float
+    // accumulator dropped Float64 gradient precision and broke gradcheck.
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1402,7 +1420,7 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                         }
 
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
-                        float grad_val = static_cast<float>(grad_out_data[out_idx]) / count;
+                        Compute grad_val = static_cast<Compute>(grad_out_data[out_idx]) / static_cast<Compute>(count);
 
                         for (int64_t kd = 0; kd < kernel_size; ++kd) {
                             for (int64_t kh = 0; kh < kernel_size; ++kh) {
@@ -1412,7 +1430,7 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                                     int64_t w = w_start + kw;
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                                         int64_t idx = ((n * C + c) * D + d) * H * W + h * W + w;
-                                        float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                                        Compute val = static_cast<Compute>(grad_in_data[idx]) + grad_val;
                                         grad_in_data[idx] = static_cast<T>(val);
                                     }
                                 }
@@ -1470,6 +1488,7 @@ void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                               int64_t N, int64_t C,
                               int64_t D, int64_t H, int64_t W,
                               int64_t D_out, int64_t H_out, int64_t W_out) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1483,14 +1502,14 @@ void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                         int64_t w_start = (ow * W) / W_out;
                         int64_t w_end = ((ow + 1) * W) / W_out;
 
-                        float max_val = -std::numeric_limits<float>::infinity();
+                        Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = 0;
 
                         for (int64_t di = d_start; di < d_end; ++di) {
                             for (int64_t hi = h_start; hi < h_end; ++hi) {
                                 for (int64_t wi = w_start; wi < w_end; ++wi) {
                                     int64_t in_idx = ((n * C + c) * D + di) * H * W + hi * W + wi;
-                                    float val = static_cast<float>(in_data[in_idx]);
+                                    Compute val = static_cast<Compute>(in_data[in_idx]);
                                     if (val > max_val) {
                                         max_val = val;
                                         max_idx = di * H * W + hi * W + wi;
@@ -1605,6 +1624,7 @@ void adaptive_avgpool3d_impl(const T* in_data, T* out_data,
                               int64_t N, int64_t C,
                               int64_t D, int64_t H, int64_t W,
                               int64_t D_out, int64_t H_out, int64_t W_out) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1618,13 +1638,13 @@ void adaptive_avgpool3d_impl(const T* in_data, T* out_data,
                         int64_t w_start = (ow * W) / W_out;
                         int64_t w_end = ((ow + 1) * W) / W_out;
 
-                        float sum = 0.0f;
+                        Compute sum = Compute(0);
                         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
 
                         for (int64_t di = d_start; di < d_end; ++di) {
                             for (int64_t hi = h_start; hi < h_end; ++hi) {
                                 for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                    sum += static_cast<float>(in_data[((n * C + c) * D + di) * H * W + hi * W + wi]);
+                                    sum += static_cast<Compute>(in_data[((n * C + c) * D + di) * H * W + hi * W + wi]);
                                 }
                             }
                         }
@@ -1749,6 +1769,7 @@ void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                int64_t N, int64_t C, int64_t H, int64_t W,
                                int64_t out_h, int64_t out_w,
                                const float* samples) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     // samples layout: [N, C, 2] — fractional values in (0,1) for h and w axes
     #pragma omp parallel for collapse(2)
     for (int64_t n = 0; n < N; ++n) {
@@ -1781,13 +1802,13 @@ void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                     h_end = std::min(h_end, H);
                     w_end = std::min(w_end, W);
 
-                    float max_val = -std::numeric_limits<float>::infinity();
+                    Compute max_val = -std::numeric_limits<Compute>::infinity();
                     int64_t max_idx = h_start * W + w_start;
 
                     for (int64_t h = h_start; h < h_end; ++h) {
                         for (int64_t w = w_start; w < w_end; ++w) {
                             int64_t in_idx = ((n * C + c) * H + h) * W + w;
-                            float val = static_cast<float>(in_data[in_idx]);
+                            Compute val = static_cast<Compute>(in_data[in_idx]);
                             if (val > max_val) {
                                 max_val = val;
                                 max_idx = h * W + w;
@@ -1908,6 +1929,7 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
                                int64_t out_d, int64_t out_h, int64_t out_w,
                                const float* samples) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -1941,14 +1963,14 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                         h_end = std::min(h_end, H);
                         w_end = std::min(w_end, W);
 
-                        float max_val = -std::numeric_limits<float>::infinity();
+                        Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = d_start * H * W + h_start * W + w_start;
 
                         for (int64_t d = d_start; d < d_end; ++d) {
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
                                     int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
-                                    float val = static_cast<float>(in_data[in_idx]);
+                                    Compute val = static_cast<Compute>(in_data[in_idx]);
                                     if (val > max_val) {
                                         max_val = val;
                                         max_idx = (d * H + h) * W + w;

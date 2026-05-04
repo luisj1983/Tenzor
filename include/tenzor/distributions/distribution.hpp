@@ -2580,7 +2580,10 @@ public:
                                     concentration_.shape().end())
             : sample_shape;
 
-        auto df = 2.0 * concentration_.item<double>() + dim_ - 1.0;
+        // audit-2026-05-03 bug #7: item<double>() on a Float32 concentration
+        // tensor throws a dtype-mismatch error. Dispatch on the actual dtype
+        // before reading the scalar.
+        auto df = 2.0 * concentration_as_double() + dim_ - 1.0;
         auto eye_mat = tenzor::eye(dim_, std::nullopt, dtype, device);
         auto wishart = Wishart(tenzor::full({1}, df, dtype, device), eye_mat);
         auto W = wishart.sample(batch_shape);
@@ -2599,15 +2602,41 @@ public:
         auto diag_vals = tenzor::diag(value);
         auto log_diag = tenzor::log(tenzor::abs(diag_vals));
 
-        auto eta = concentration_.item<double>();
+        auto eta = concentration_as_double();
         // Build weight tensor: weight[k] = (d - k - 1 + 2*eta - 2) for k = 1..d-1
-        auto weights = tenzor::Tensor({dim_}, diag_vals.dtype(), diag_vals.device());
-        auto w_ptr = weights.data<float>();
+        // The weight buffer is built on CPU Float32 (the math fits comfortably
+        // in Float32) and cast/transferred to the diag_vals dtype/device — same
+        // pattern used elsewhere in the file for backend-agnostic mask buffers.
+        auto cpu_w = tenzor::Tensor({dim_}, DType::Float32, Device::cpu());
+        auto* w_ptr = cpu_w.data<float>();
         w_ptr[0] = 0.0f;  // First diagonal excluded
         for (int64_t k = 1; k < dim_; ++k) {
             w_ptr[k] = static_cast<float>(dim_ - k - 1.0 + 2.0 * eta - 2.0);
         }
+        auto weights = cpu_w.to(diag_vals.dtype()).to(diag_vals.device());
         return tenzor::sum(weights * log_diag, -1);
+    }
+
+private:
+    // Read concentration as a double, regardless of its tensor dtype.
+    // item<T>() requires the requested type match the tensor dtype exactly,
+    // so we must dispatch.
+    auto concentration_as_double() const -> double {
+        switch (concentration_.dtype()) {
+            case DType::Float32:
+                return static_cast<double>(concentration_.item<float>());
+            case DType::Float64:
+                return concentration_.item<double>();
+            case DType::Float16:
+            case DType::BFloat16:
+                // Half-precision: convert to a Float32 scalar tensor first,
+                // then read via item<float>(). cpu() ensures item<> works.
+                return static_cast<double>(
+                    concentration_.cpu().to(DType::Float32).item<float>());
+            default:
+                throw std::runtime_error(
+                    "LKJCholesky: unsupported concentration dtype");
+        }
     }
 
 private:

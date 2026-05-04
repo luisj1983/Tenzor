@@ -20,6 +20,7 @@
 #include <mutex>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/cuda_config.hpp"
 #include "kernels/cuda_common.cuh"
 #include "cublas_handle_pool.hpp"
 
@@ -732,7 +733,7 @@ auto linear_kernel(
             output.data<float>(),    // C: output [batch_size, out_features]
             CUDA_R_32F,
             out_features,   // ldc: leading dimension of output
-            CUBLAS_COMPUTE_32F_FAST_TF32,  // Use TF32 Tensor Cores
+            (::tenzor::cuda::matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F),
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 
@@ -983,7 +984,7 @@ auto linear_backward_kernel(
             grad_input.data<float>(),
             CUDA_R_32F,
             in_features,
-            CUBLAS_COMPUTE_32F_FAST_TF32,
+            (::tenzor::cuda::matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F),
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 
@@ -1007,7 +1008,7 @@ auto linear_backward_kernel(
             grad_weight.data<float>(),
             CUDA_R_32F,
             in_features,
-            CUBLAS_COMPUTE_32F_FAST_TF32,
+            (::tenzor::cuda::matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F),
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 

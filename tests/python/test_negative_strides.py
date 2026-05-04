@@ -41,9 +41,10 @@ class TestNegativeStrides(unittest.TestCase):
         """Flipped 2D tensor preserves correct data ordering."""
         t = tz.zeros([3, 4], tz.dtype.float32, tz.Device.cpu())
         data = t.numpy()
+        # `data` has shape (3, 4); use 2D indexing.
         for i in range(3):
             for j in range(4):
-                data[i * 4 + j] = float(i * 4 + j)
+                data[i, j] = float(i * 4 + j)
 
         # Flip along axis 0
         flipped = tz.flip(t, [0])

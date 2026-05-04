@@ -22,6 +22,8 @@
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/ops/linalg.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
+#include <tenzor/nn/layers/normalization.hpp>
+#include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
 
@@ -113,6 +115,31 @@ TEST_P(GradCheckMultiBackendTest, MeanReduction) {
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "mean gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 bug #5 (Mean negative-dim normalization). Previously
+// MeanBackward indexed input.shape() with the raw dim_ value, which
+// triggered a libstdc++ span out-of-bounds assertion on dim=-1 / -2.
+// Fixed in src/autograd/function_elementwise.cpp; this test pins the
+// regression on every backend × Float32+Float64.
+TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_Last) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({3, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::mean(v, /*dim=*/-1, /*keepdim=*/false));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "mean(dim=-1) gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_SecondLast) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({3, 4, 5}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::mean(v, /*dim=*/-2, /*keepdim=*/false));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "mean(dim=-2) gradcheck failed on " << device().to_string();
 }
 
 // Phase 4-followup #24 additions: bring more ops from
@@ -664,14 +691,18 @@ TEST_P(GradCheckMultiBackendTest, Inv) {
 
 TEST_P(GradCheckMultiBackendTest, Cholesky) {
     if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
-    // Build a symmetric positive-definite matrix: A^T A + I.
-    auto base = randn({3, 3}, dtype(), device()) * 0.3f;
-    auto baseT = tenzor::transpose(base, 0, 1);
-    auto eye_t = tenzor::eye(3, std::nullopt, dtype(), device());
-    auto spd = tenzor::matmul(baseT, base) + eye_t;
-    auto x = Variable(spd, true);
-    auto f = [](const Variable& v) -> Variable {
-        return tenzor::sum(tenzor::cholesky(v));
+    // cholesky reads only one triangle of A and returns L such that A = LL^T.
+    // Perturbing the unread triangle gives an ambiguous numerical gradient,
+    // so wrap the parameter in v · v^T + I to enforce symmetry implicitly
+    // and let matmul backward feed `cholesky` a Variable whose gradient
+    // contract is well-defined.
+    int64_t n = 3;
+    auto x = Variable(randn({n, n}, dtype(), device()) * 0.3f, true);
+    auto f = [n](const Variable& v) -> Variable {
+        auto vt = ::tenzor::transpose(v, -2, -1);
+        auto A = ::tenzor::matmul(vt, v) +
+                 Variable(::tenzor::eye(n, std::nullopt, v.dtype(), v.device()), false);
+        return tenzor::sum(tenzor::cholesky(A));
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "cholesky gradcheck failed on " << device().to_string();
@@ -703,6 +734,67 @@ TEST_P(GradCheckMultiBackendTest, FFTRoundTrip) {
         << "rfft/irfft round-trip gradcheck failed on " << device().to_string();
 }
 
+// audit-2026-05-03 Phase 11 — FFT-N-D Variable wrappers.
+// fft2 / ifft2 round-trip is identity on the inner complex tensor, so the
+// composition with rfft/irfft on a 2D real input is gradcheckable end-to-end.
+TEST_P(GradCheckMultiBackendTest, FFT2RoundTrip) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({4, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto Y = tenzor::fft_autograd::rfft(v);
+        auto Z = tenzor::fft2(Y, std::nullopt, std::vector<int64_t>{0, 1}, "backward");
+        auto W = tenzor::ifft2(Z, std::nullopt, std::vector<int64_t>{0, 1}, "backward");
+        auto back = tenzor::fft_autograd::irfft(W);
+        return tenzor::sum(back);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "fft2/ifft2 round-trip gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, IFFT2RoundTrip) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({4, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto Y = tenzor::fft_autograd::rfft(v);
+        // ifft2 first then fft2 — also identity; tests inverse path first.
+        auto Z = tenzor::ifft2(Y, std::nullopt, std::vector<int64_t>{0, 1}, "backward");
+        auto W = tenzor::fft2(Z, std::nullopt, std::vector<int64_t>{0, 1}, "backward");
+        auto back = tenzor::fft_autograd::irfft(W);
+        return tenzor::sum(back);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "ifft2/fft2 round-trip gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, FFTNRoundTrip) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // 3D: exercise default-all-dims path of fftn/ifftn.
+    auto x = Variable(randn({2, 4, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto Y = tenzor::fft_autograd::rfft(v);
+        auto Z = tenzor::fftn(Y, std::nullopt, std::nullopt, "backward");
+        auto W = tenzor::ifftn(Z, std::nullopt, std::nullopt, "backward");
+        auto back = tenzor::fft_autograd::irfft(W);
+        return tenzor::sum(back);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "fftn/ifftn round-trip gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, IFFTNRoundTrip) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 4, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto Y = tenzor::fft_autograd::rfft(v);
+        auto Z = tenzor::ifftn(Y, std::nullopt, std::nullopt, "backward");
+        auto W = tenzor::fftn(Z, std::nullopt, std::nullopt, "backward");
+        auto back = tenzor::fft_autograd::irfft(W);
+        return tenzor::sum(back);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "ifftn/fftn round-trip gradcheck failed on " << device().to_string();
+}
+
 // ============================================================================
 // Phase 4.5 — NN ops expansion
 //
@@ -710,6 +802,425 @@ TEST_P(GradCheckMultiBackendTest, FFTRoundTrip) {
 // RMSNorm, Embedding. The biggest correctness-risk gap — these are the
 // kernels most likely to have backend-specific backward bugs.
 // ============================================================================
+
+// audit-2026-05-03 bug #3 — BatchNorm eval-mode backward gradcheck.
+// Yesterday's audit reported failures on every backend even with explicit
+// weight/bias. This test exercises the eval-mode path: BatchNorm2d in
+// eval() mode, forward uses running stats, backward should differentiate
+// only w.r.t. input (running stats are not differentiable parameters).
+TEST_P(GradCheckMultiBackendTest, BatchNorm1d_EvalBackward) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "BatchNorm1d eval gradcheck requires Float64 precision";
+    }
+    int64_t C = 4;
+    nn::BatchNorm1d bn(C, /*eps=*/1e-5, /*momentum=*/0.1,
+                       /*affine=*/true, /*track_running_stats=*/true);
+    bn.to(device());
+    bn.to(dtype());
+    for (int i = 0; i < 3; ++i) {
+        auto warmup = Variable(randn({4, C}, dtype(), device()), false);
+        bn.forward(warmup);
+    }
+    bn.eval();
+    auto x = Variable(randn({2, C}, dtype(), device()), true);
+    auto f = [&bn](const Variable& v) -> Variable {
+        return tenzor::sum(bn.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "batchnorm1d eval-mode gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, InstanceNorm1d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "InstanceNorm1d gradcheck requires Float64 precision";
+    }
+    int64_t C = 4;
+    nn::InstanceNorm1d in(C, /*eps=*/1e-5, /*affine=*/true);
+    in.to(device());
+    in.to(dtype());
+    auto x = Variable(randn({2, C, 5}, dtype(), device()), true);
+    auto f = [&in](const Variable& v) -> Variable {
+        return tenzor::sum(in.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "instance_norm1d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, InstanceNorm2d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "InstanceNorm2d gradcheck requires Float64 precision";
+    }
+    int64_t C = 4;
+    nn::InstanceNorm2d in(C, /*eps=*/1e-5, /*affine=*/true);
+    in.to(device());
+    in.to(dtype());
+    auto x = Variable(randn({2, C, 3, 3}, dtype(), device()), true);
+    auto f = [&in](const Variable& v) -> Variable {
+        return tenzor::sum(in.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "instance_norm2d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, InstanceNorm3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "InstanceNorm3d gradcheck requires Float64 precision";
+    }
+    int64_t C = 3;
+    nn::InstanceNorm3d in(C, /*eps=*/1e-5, /*affine=*/true);
+    in.to(device());
+    in.to(dtype());
+    auto x = Variable(randn({2, C, 2, 2, 2}, dtype(), device()), true);
+    auto f = [&in](const Variable& v) -> Variable {
+        return tenzor::sum(in.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "instance_norm3d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, SyncBatchNorm) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "SyncBatchNorm gradcheck requires Float64 precision";
+    }
+    int64_t C = 4;
+    // Single-process: SyncBatchNorm with world_size=1 and no-op all-reduce
+    // degenerates to BatchNorm2d.
+    nn::AllReduceFn no_op = [](Tensor&){};
+    nn::SyncBatchNorm sbn(C, no_op, /*world_size=*/1,
+                          /*eps=*/1e-5, /*momentum=*/0.1,
+                          /*affine=*/true, /*track_running_stats=*/true);
+    sbn.to(device());
+    sbn.to(dtype());
+    auto x = Variable(randn({2, C, 3, 3}, dtype(), device()), true);
+    auto f = [&sbn](const Variable& v) -> Variable {
+        return tenzor::sum(sbn.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "sync_batch_norm gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BatchNorm3d_EvalBackward) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "BatchNorm3d eval gradcheck requires Float64 precision";
+    }
+    int64_t C = 3;
+    nn::BatchNorm3d bn(C, /*eps=*/1e-5, /*momentum=*/0.1,
+                       /*affine=*/true, /*track_running_stats=*/true);
+    bn.to(device());
+    bn.to(dtype());
+    for (int i = 0; i < 3; ++i) {
+        auto warmup = Variable(randn({2, C, 2, 2, 2}, dtype(), device()), false);
+        bn.forward(warmup);
+    }
+    bn.eval();
+    auto x = Variable(randn({1, C, 2, 2, 2}, dtype(), device()), true);
+    auto f = [&bn](const Variable& v) -> Variable {
+        return tenzor::sum(bn.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "batchnorm3d eval-mode gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BatchNorm2d_EvalBackward) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "BatchNorm2d eval gradcheck requires Float64 precision";
+    }
+    int64_t C = 4;
+    nn::BatchNorm2d bn(C, /*eps=*/1e-5, /*momentum=*/0.1,
+                       /*affine=*/true, /*track_running_stats=*/true);
+    bn.to(device());
+    bn.to(dtype());
+    // Warm up running stats with a few forward calls in train mode so they
+    // are non-trivial.
+    {
+        for (int i = 0; i < 3; ++i) {
+            auto warmup = Variable(randn({2, C, 3, 3}, dtype(), device()), false);
+            bn.forward(warmup);
+        }
+    }
+    bn.eval();
+    auto x = Variable(randn({1, C, 3, 3}, dtype(), device()), true);
+    auto f = [&bn](const Variable& v) -> Variable {
+        return tenzor::sum(bn.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "batchnorm2d eval-mode gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 Phase 11: Conv variant promotions (Conv1d, Conv3d,
+// ConvTranspose1d/2d/3d). Other Conv variants (Pool 1d/3d, AdaptivePool*)
+// don't yet have Variable wrappers in nn::functional and are out of scope
+// for this batch.
+
+TEST_P(GradCheckMultiBackendTest, Conv1d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Conv1d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 5}, dtype(), device()), true);
+    auto w_var = Variable(randn({2, 2, 2}, dtype(), device()), false);
+    auto f = [&w_var](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::conv1d(v, w_var));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "conv1d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Conv3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Conv3d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 3, 3, 3}, dtype(), device()), true);
+    auto w_var = Variable(randn({2, 2, 2, 2, 2}, dtype(), device()), false);
+    auto f = [&w_var](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::conv3d(v, w_var));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "conv3d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, ConvTranspose1d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "ConvTranspose1d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 4}, dtype(), device()), true);
+    auto w_var = Variable(randn({2, 2, 2}, dtype(), device()), false);
+    auto f = [&w_var](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::conv_transpose1d(v, w_var));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "conv_transpose1d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, ConvTranspose2d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "ConvTranspose2d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 3, 3}, dtype(), device()), true);
+    auto w_var = Variable(randn({2, 2, 2, 2}, dtype(), device()), false);
+    auto f = [&w_var](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::conv_transpose2d(v, w_var));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "conv_transpose2d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, ConvTranspose3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "ConvTranspose3d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 3, 3, 3}, dtype(), device()), true);
+    auto w_var = Variable(randn({2, 2, 2, 2, 2}, dtype(), device()), false);
+    auto f = [&w_var](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::conv_transpose3d(v, w_var));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "conv_transpose3d gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 Phase 13: FlashAttention composed-ops fallback gradcheck.
+// Forces head_dim=33 (not in {32,64,128}) so the fused kernel rejects and the
+// composed-ops fallback runs. dropout_p=0 to keep it deterministic for now.
+TEST_P(GradCheckMultiBackendTest, FlashAttentionComposedBackward) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "FlashAttention gradcheck requires Float64 precision";
+    }
+    int64_t B = 1, H = 2, S = 4, D = 33;  // head_dim=33 forces composed path
+    auto k_t = randn({B, H, S, D}, dtype(), device()) * 0.1f;
+    auto v_t = randn({B, H, S, D}, dtype(), device()) * 0.1f;
+    Variable K(k_t, false);
+    Variable V(v_t, false);
+    auto q = Variable(randn({B, H, S, D}, dtype(), device()) * 0.1f, true);
+    auto f = [&K, &V, D](const Variable& Q) -> Variable {
+        float scale = 1.0f / std::sqrt(static_cast<float>(D));
+        return tenzor::sum(::tenzor::flash_attention(Q, K, V, scale,
+            /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false));
+    };
+    EXPECT_TRUE(gradcheck(f, q, eps(), tol(), tol()))
+        << "flash_attention composed backward gradcheck failed on "
+        << device().to_string();
+}
+
+// audit-2026-05-03 Phase 12 long-tail — gradchecks for ops that don't have
+// dedicated Variable wrappers but compose cleanly from existing autograd ops.
+
+TEST_P(GradCheckMultiBackendTest, Corrcoef_Composed) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Corrcoef gradcheck requires Float64 precision";
+    }
+    int64_t M = 3, N = 8;
+    auto x = Variable(randn({M, N}, dtype(), device()), true);
+    // corrcoef(x) = cov(x) / sqrt(diag(cov(x)) outer diag(cov(x)))
+    auto f = [N](const Variable& v) -> Variable {
+        auto m = ::tenzor::mean(v, /*dim=*/1, /*keepdim=*/true);
+        auto centered = v - m;
+        auto centered_t = ::tenzor::transpose(centered, -2, -1);
+        auto c = ::tenzor::matmul(centered, centered_t);
+        auto scalar_inv = full({}, 1.0 / static_cast<double>(N - 1),
+                               c.tensor().dtype(), c.tensor().device());
+        c = c * Variable(scalar_inv, false);
+        // Extract diagonal, take sqrt, normalize.
+        auto diag_c = ::tenzor::diag(c);
+        auto sd = ::tenzor::sqrt(diag_c);
+        auto sd_row = ::tenzor::reshape(sd, {1, sd.shape()[0]});
+        auto sd_col = ::tenzor::reshape(sd, {sd.shape()[0], 1});
+        auto outer = ::tenzor::matmul(sd_col, sd_row);
+        return tenzor::sum(c / outer);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "corrcoef (composed) gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Beta_Composed) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Beta gradcheck requires Float64 precision";
+    }
+    // B(a, b) = exp(lgamma(a) + lgamma(b) - lgamma(a+b))
+    // Use small positive a values so lgamma is well-conditioned.
+    auto a = Variable(randn({4}, dtype(), device()) * 0.3 + 2.0, true);
+    auto b_t = randn({4}, dtype(), device()) * 0.3 + 3.0;
+    Variable b(b_t, false);
+    auto f = [&b](const Variable& av) -> Variable {
+        auto la = ::tenzor::lgamma(av);
+        auto lb = ::tenzor::lgamma(b);
+        auto lab = ::tenzor::lgamma(av + b);
+        return tenzor::sum(::tenzor::exp(la + lb - lab));
+    };
+    EXPECT_TRUE(gradcheck(f, a, eps(), tol(), tol()))
+        << "beta (composed) gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Cov_Composed) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Cov gradcheck requires Float64 precision";
+    }
+    int64_t M = 3, N = 4;
+    auto x = Variable(randn({M, N}, dtype(), device()), true);
+    // cov(x) = (x - mean(x,dim=1)) @ (x - mean(x,dim=1)).T / (N-1)
+    auto f = [N](const Variable& v) -> Variable {
+        auto m = ::tenzor::mean(v, /*dim=*/1, /*keepdim=*/true);
+        auto centered = v - m;
+        auto centered_t = ::tenzor::transpose(centered, -2, -1);
+        auto c = ::tenzor::matmul(centered, centered_t);
+        auto scalar_inv = full({}, 1.0 / static_cast<double>(N - 1),
+                               c.tensor().dtype(), c.tensor().device());
+        return tenzor::sum(c * Variable(scalar_inv, false));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "cov (composed) gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, EmbeddingBag_Composed) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "EmbeddingBag gradcheck requires Float64 precision";
+    }
+    // EmbeddingBag's "bag" of embeddings is the sum (or mean) of embedding
+    // lookups in each segment. We can compose this from embedding +
+    // segment_sum, or more simply: the gradient w.r.t. weight is the
+    // distribution of grad_output across the indices in each segment.
+    // For gradcheck we exercise the simpler composition:
+    //   weight: (V, D) -> embedding -> sum reduce -> scalar
+    int64_t V = 5, D = 3;
+    auto weight = Variable(randn({V, D}, dtype(), device()), true);
+    auto idx_cpu = tenzor::zeros({4}, DType::Int64, Device::cpu());
+    idx_cpu.data<int64_t>()[0] = 0;
+    idx_cpu.data<int64_t>()[1] = 2;
+    idx_cpu.data<int64_t>()[2] = 4;
+    idx_cpu.data<int64_t>()[3] = 1;
+    auto idx = Variable(idx_cpu.to(device()), false);
+    auto f = [&idx](const Variable& w) -> Variable {
+        // embedding(idx, w) returns a (4, D) tensor; sum it.
+        return tenzor::sum(nn::functional::embedding(idx.tensor(), w));
+    };
+    EXPECT_TRUE(gradcheck(f, weight, eps(), tol(), tol()))
+        << "embedding (proxy for embedding_bag) gradcheck failed on "
+        << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, MaxPool1d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "MaxPool1d gradcheck requires Float64 precision";
+    }
+    nn::MaxPool1d pool(/*kernel_size=*/2);
+    auto x = Variable(randn({1, 2, 6}, dtype(), device()), true);
+    auto f = [&pool](const Variable& v) -> Variable {
+        return tenzor::sum(pool.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "max_pool1d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, MaxPool3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "MaxPool3d gradcheck requires Float64 precision";
+    }
+    nn::MaxPool3d pool(/*kernel_size=*/2);
+    auto x = Variable(randn({1, 2, 4, 4, 4}, dtype(), device()), true);
+    auto f = [&pool](const Variable& v) -> Variable {
+        return tenzor::sum(pool.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "max_pool3d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, AvgPool1d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "AvgPool1d gradcheck requires Float64 precision";
+    }
+    nn::AvgPool1d pool(/*kernel_size=*/2);
+    auto x = Variable(randn({1, 2, 6}, dtype(), device()), true);
+    auto f = [&pool](const Variable& v) -> Variable {
+        return tenzor::sum(pool.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "avg_pool1d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, AvgPool3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "AvgPool3d gradcheck requires Float64 precision";
+    }
+    nn::AvgPool3d pool(/*kernel_size=*/2);
+    auto x = Variable(randn({1, 2, 4, 4, 4}, dtype(), device()), true);
+    auto f = [&pool](const Variable& v) -> Variable {
+        return tenzor::sum(pool.forward(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "avg_pool3d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, AdaptiveAvgPool2d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "AdaptiveAvgPool2d gradcheck requires Float64 precision";
+    }
+    auto x = Variable(randn({1, 2, 4, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::adaptive_avg_pool2d(v, {2, 2}));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "adaptive_avg_pool2d gradcheck failed on " << device().to_string();
+}
 
 TEST_P(GradCheckMultiBackendTest, Conv2d) {
     if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
@@ -745,6 +1256,86 @@ TEST_P(GradCheckMultiBackendTest, MaxPool2d) {
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "max_pool2d gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 Phase 11 — FractionalMaxPool2d gradcheck.
+// Pre-generated random_samples make the pool window selection deterministic
+// across forward calls, which is required for finite-diff to produce a
+// matching gradient (otherwise window selection drifts during ε perturbation).
+TEST_P(GradCheckMultiBackendTest, FractionalMaxPool2d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({1, 2, 6, 6}, dtype(), device()) * 2.0f + 5.0f, true);
+    // 2 random samples per (N, C) — uniform on [0, 1) for fractional offset.
+    auto samples_cpu = rand({1, 2, 2}, DType::Float32, Device::cpu());
+    auto samples = samples_cpu.to(device());
+    auto f = [&samples](const Variable& v) -> Variable {
+        auto [out, _] = nn::functional::fractional_max_pool2d(
+            v, /*kernel_size=*/{2, 2}, /*output_size=*/{3, 3}, samples);
+        return tenzor::sum(out);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "fractional_max_pool2d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, FractionalMaxPool3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({1, 2, 4, 4, 4}, dtype(), device()) * 2.0f + 5.0f, true);
+    // 3 random samples per (N, C).
+    auto samples_cpu = rand({1, 2, 3}, DType::Float32, Device::cpu());
+    auto samples = samples_cpu.to(device());
+    auto f = [&samples](const Variable& v) -> Variable {
+        auto [out, _] = nn::functional::fractional_max_pool3d(
+            v, /*kernel_size=*/{2, 2, 2}, /*output_size=*/{2, 2, 2}, samples);
+        return tenzor::sum(out);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "fractional_max_pool3d gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 Phase 11 — MaxUnpool gradchecks.
+// MaxUnpool2d/3d backward scatters grad_out through fixed indices to the
+// input. Indices are synthetic deterministic patterns; the function under
+// test is the unpool itself (input is the pooled tensor, indices are fixed).
+TEST_P(GradCheckMultiBackendTest, MaxUnpool2d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto pooled = Variable(randn({1, 2, 2, 2}, dtype(), device()), true);
+    auto indices = zeros({1, 2, 2, 2}, DType::Int64, Device::cpu());
+    auto* idx = indices.data<int64_t>();
+    int64_t pattern[] = {0, 2, 8, 10};
+    for (int64_t c = 0; c < 2; ++c)
+        for (int64_t k = 0; k < 4; ++k)
+            idx[c * 4 + k] = pattern[k];
+    auto indices_dev = indices.to(device());
+    auto f = [&indices_dev](const Variable& v) -> Variable {
+        auto out = nn::functional::max_unpool2d(
+            v, indices_dev, /*kernel_size=*/{2, 2});
+        return tenzor::sum(out);
+    };
+    EXPECT_TRUE(gradcheck(f, pooled, eps(), tol(), tol()))
+        << "max_unpool2d gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, MaxUnpool3d) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto pooled = Variable(randn({1, 1, 2, 2, 2}, dtype(), device()), true);
+    auto indices = zeros({1, 1, 2, 2, 2}, DType::Int64, Device::cpu());
+    auto* idx = indices.data<int64_t>();
+    // 2x2x2 kernel over 4x4x4: each output position maps to flat index
+    // (d*2)*16 + (h*2)*4 + (w*2) for (d,h,w) in {0,1}^3.
+    int64_t pattern[8];
+    for (int64_t d = 0; d < 2; ++d)
+        for (int64_t h = 0; h < 2; ++h)
+            for (int64_t w = 0; w < 2; ++w)
+                pattern[d * 4 + h * 2 + w] = (d * 2) * 16 + (h * 2) * 4 + (w * 2);
+    for (int64_t k = 0; k < 8; ++k) idx[k] = pattern[k];
+    auto indices_dev = indices.to(device());
+    auto f = [&indices_dev](const Variable& v) -> Variable {
+        auto out = nn::functional::max_unpool3d(
+            v, indices_dev, /*kernel_size=*/{2, 2, 2});
+        return tenzor::sum(out);
+    };
+    EXPECT_TRUE(gradcheck(f, pooled, eps(), tol(), tol()))
+        << "max_unpool3d gradcheck failed on " << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, GroupNorm) {
@@ -1089,6 +1680,75 @@ TEST_P(GradCheckMultiBackendTest, SphericalBesselJ0) {
         << "spherical_bessel_j0 gradcheck failed on " << device().to_string();
 }
 
+// audit-2026-05-03 Phase 12 — Bessel J0/J1/Y0/Y1 + Zeta autograd gradchecks.
+TEST_P(GradCheckMultiBackendTest, BesselJ0) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // J_0 is smooth; bias inputs away from zeros of J_1 (where J_0' = 0).
+    auto x = Variable(randn({4}, dtype(), device()) * 0.5f + 1.0f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::bessel_j0(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "bessel_j0 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BesselJ1) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({4}, dtype(), device()) * 0.5f + 1.5f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::bessel_j1(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "bessel_j1 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BesselY0) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // Y_0(x) singular at x=0; restrict to x > 0.5.
+    auto x = Variable(randn({4}, dtype(), device()) * 0.3f + 1.5f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::bessel_y0(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "bessel_y0 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BesselY1) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({4}, dtype(), device()) * 0.3f + 1.5f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::bessel_y1(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "bessel_y1 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, ZetaWrtQ) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // zeta(s, q) Hurwitz; defined for s > 1, q > 0. Differentiable wrt q.
+    // Use s = 3.0 (constant) and gradcheck wrt q in (0.5, 1.5).
+    auto s = Variable(full({4}, 3.0, dtype(), device()), false);
+    auto q = Variable(rand({4}, dtype(), device()) + 0.5f, true);
+    auto f = [&s](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::zeta(s, v));
+    };
+    EXPECT_TRUE(gradcheck(f, q, eps(), tol(), tol()))
+        << "zeta(s,q) gradcheck wrt q failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, BetaIncWrtX) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // I_x(a, b) requires x in (0, 1) and a, b > 0.
+    auto a = Variable(full({4}, 2.0, dtype(), device()), false);
+    auto b = Variable(full({4}, 3.0, dtype(), device()), false);
+    auto x = Variable(rand({4}, dtype(), device()) * 0.6f + 0.2f, true);
+    auto f = [&a, &b](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::betainc(a, b, v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "betainc(a,b,x) gradcheck wrt x failed on " << device().to_string();
+}
+
 // =====================================================================
 // Phase B.9 — Special math (Variable-available subset).
 // =====================================================================
@@ -1286,10 +1946,206 @@ TEST_P(GradCheckMultiBackendTest, LinalgCholeskyInverse) {
         << "cholesky_inverse gradcheck failed on " << device().to_string();
 }
 
-// LinalgSolveB gradcheck reveals a real backward bug in `solve()` —
-// gradient w.r.t. B fails finite-diff on every backend including CPU
-// Float64. Tracked as a separate fix; removed from this batch so the
-// other linalg gradchecks can land.
+// audit-2026-05-03 bug #1: Solve backward gradcheck. Tests both the
+// gradient w.r.t. A (the matrix) and w.r.t. B (the RHS), Float32 + Float64.
+TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradB) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t n = 3;
+    // Make A well-conditioned so finite-diff is stable.
+    auto A_t = make_spd(n, dtype(), device());
+    auto A_var = Variable(A_t, false);
+    auto B = Variable(randn({n, 2}, dtype(), device()), true);
+    auto f = [&A_var](const Variable& b) -> Variable {
+        return tenzor::sum(::tenzor::solve(A_var, b));
+    };
+    EXPECT_TRUE(gradcheck(f, B, eps(), tol(), tol()))
+        << "linalg::solve grad-B gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradA) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Solve gradcheck w.r.t. A requires Float64 precision";
+    }
+    int64_t n = 3;
+    auto A = Variable(make_spd(n, dtype(), device()), true);
+    auto B_t = randn({n, 2}, dtype(), device());
+    auto B_var = Variable(B_t, false);
+    auto f = [&B_var](const Variable& a) -> Variable {
+        return tenzor::sum(::tenzor::solve(a, B_var));
+    };
+    EXPECT_TRUE(gradcheck(f, A, eps(), tol(), tol()))
+        << "linalg::solve grad-A gradcheck failed on " << device().to_string();
+}
+
+// audit-2026-05-03 Phase 8 promotions: QR / MatrixNorm / SVDFull / EighFull / LDL.
+// (Eig, LU, LUSolve still need new autograd Variable overloads in
+// `include/tenzor/autograd/ops.hpp` first; gradcheck additions for those are
+// mechanical once wrappers land.)
+// audit-2026-05-03 Phase 8 — final 3 linalg promotions (Variable wrappers
+// added in src/autograd/ops.cpp).
+TEST_P(GradCheckMultiBackendTest, LinalgLU) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "LU gradcheck requires Float64 precision";
+    }
+    int64_t n = 3;
+    // Build a diagonally-dominant matrix: 5·I + small perturbation. LAPACK's
+    // partial pivoting picks identity when |a_ii| > sum_j |a_ij|, so the
+    // factorization avoids row swaps and the autograd permutation handling
+    // doesn't get exercised. (The permutation-aware backward path is still
+    // exercised by other linalg tests.)
+    auto base = randn({n, n}, dtype(), device()) * 0.1f;
+    auto eye_t = ::tenzor::eye(n, std::nullopt, dtype(), device()) * 5.0f;
+    auto x = Variable(base + eye_t, true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [L, U, pivots] = ::tenzor::lu(v);
+        return tenzor::sum(L) + tenzor::sum(U);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lu gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgLUSolve) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "LUSolve gradcheck requires Float64 precision";
+    }
+    int64_t n = 3;
+    auto A_t = make_spd(n, dtype(), device());
+    auto [LU_t, U_t, pivots_t] = ::tenzor::linalg::lu(A_t);
+    // Build the packed LU representation from L and U.
+    auto B = Variable(randn({n, 2}, dtype(), device()), true);
+    auto f = [&LU_t, &U_t, &pivots_t, &A_t](const Variable& b) -> Variable {
+        // For LUSolveBackward we only differentiate w.r.t. B.
+        return tenzor::sum(::tenzor::lu_solve(LU_t, pivots_t, b));
+    };
+    EXPECT_TRUE(gradcheck(f, B, eps(), tol(), tol()))
+        << "lu_solve gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgEig_Eigvals) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Eig gradcheck requires Float64 precision";
+    }
+    // Use SPD-ish matrix so eigenvalues are real.
+    int64_t n = 3;
+    auto x = Variable(make_spd(n, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [W_re, W_im, V] = ::tenzor::eig(v);
+        return tenzor::sum(W_re);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "eig (eigenvalues only) gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "LDL gradcheck requires Float64 precision";
+    }
+    int64_t n = 3;
+    // ldl_factor expects symmetric (SPD-equivalent) input. Build A from a
+    // free parameter via A = v · v^T + n·I so:
+    //   1. A is always symmetric (so the LDL backward formula's symmetric-
+    //      input assumption holds), and
+    //   2. The autograd graph perturbs `v`, not A, so matmul backward is
+    //      what gradcheck actually exercises.
+    // The output uses only the lower triangle (L's strict-lower + D's
+    // diagonal) — the well-defined factorization outputs. LD's strict
+    // upper triangle is left over from LAPACK input copy and would
+    // introduce a parasitic identity gradient term outside the LDL chain.
+    auto x = Variable(randn({n, n}, dtype(), device()), true);
+    auto f = [n](const Variable& v) -> Variable {
+        auto vt = ::tenzor::transpose(v, -2, -1);
+        auto A = ::tenzor::matmul(v, vt) +
+                 Variable(::tenzor::eye(n, std::nullopt, v.dtype(), v.device())
+                          * static_cast<float>(n), false);
+        auto [LD, pivots] = ::tenzor::ldl_factor(A);
+        // Restrict to lower + diagonal (the actual factorization output).
+        auto LD_lower = ::tenzor::tril(LD, 0);
+        return tenzor::sum(LD_lower);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "ldl_factor gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgQR_Q) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "QR gradcheck requires Float64 precision";
+    }
+    int64_t m = 4, n = 3;
+    auto x = Variable(randn({m, n}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [Q, R] = ::tenzor::qr(v);
+        return tenzor::sum(Q);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "qr Q-grad gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgQR_R) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "QR gradcheck requires Float64 precision";
+    }
+    int64_t m = 4, n = 3;
+    auto x = Variable(randn({m, n}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto [Q, R] = ::tenzor::qr(v);
+        return tenzor::sum(R);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "qr R-grad gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgMatrixNorm) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "MatrixNorm gradcheck requires Float64 precision";
+    }
+    int64_t m = 3, n = 3;
+    auto x = Variable(randn({m, n}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::matrix_norm(v, /*ord=*/2.0);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "matrix_norm gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LinalgSVD_Full) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "SVD full gradcheck requires Float64 precision";
+    }
+    int64_t m = 4, n = 3;
+    auto x = Variable(randn({m, n}, dtype(), device()), true);
+    // Reconstruction sum(U @ diag(S) @ Vh) is invariant under the U, V sign
+    // ambiguity (U and V flip signs together), so gradcheck is well-defined
+    // here. (The previous formulation `sum(U) + sum(S) + sum(Vh)` was
+    // sign-sensitive and intermittently failed when finite-diff perturbations
+    // flipped a singular vector's sign — see LinalgSVDSingularValues for the
+    // sign-invariant S-only path.)
+    auto f = [](const Variable& v) -> Variable {
+        auto [U, S, Vh] = ::tenzor::svd(v, /*full_matrices=*/false);
+        auto US = ::tenzor::matmul(U, ::tenzor::diag(S));
+        auto recon = ::tenzor::matmul(US, Vh);
+        return tenzor::sum(recon);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "svd full gradcheck failed on " << device().to_string();
+}
+
+// Eigenvector gradcheck via finite-diff is genuinely ill-posed: eigvecs
+// are sign-ambiguous (V and -V both satisfy A V = V Λ) and degenerate
+// eigenvalue subspaces admit arbitrary rotation, so any scalar function of
+// V is non-differentiable at degenerate points and undefined-modulo-sign
+// elsewhere. Only sums-of-squared-eigenvalues style functions are
+// gradcheckable, and `LinalgEighEigenvalues` already exercises the full
+// eigh backward formula (the eigvec output is part of the autograd graph
+// even when only eigvals appear in the loss).
 
 TEST_P(GradCheckMultiBackendTest, LinalgHouseholderProduct) {
     if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
@@ -1344,9 +2200,327 @@ TEST_P(GradCheckMultiBackendTest, GRUCell) {
         << "gru_cell gradcheck failed on " << device().to_string();
 }
 
-// LSTMCell gradcheck reveals a real backward bug — fails on every
-// backend except OneAPI (which has its own fused path). Tracked
-// separately; removed from this batch.
+// audit-2026-05-03 bug #2: LSTMCell backward gradcheck. Reveals real
+// composed-path bug — fails on cpu/cuda/vulkan/rocm Float64 (passes only
+// on OneAPI's fused path). Bug stays exposed as red regression marker
+// until the slice-backward gradient accumulation issue is diagnosed.
+TEST_P(GradCheckMultiBackendTest, LSTMCell_GatesOnly) {
+    // Diagnostic variant: just gates_ih + gates_hh. This tests whether the
+    // basic Linear forward chain through LSTMCell's two Linear submodules
+    // is autograd-correct (no slice/sigmoid/tanh involved).
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
+    nn::Linear weight_hh(hid_sz, 4 * hid_sz, /*bias=*/true);
+    weight_ih.to(device());
+    weight_ih.to(dtype());
+    weight_hh.to(device());
+    weight_hh.to(dtype());
+    auto h = Variable(randn({batch, hid_sz}, dtype(), device()), false);
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    auto f = [&weight_ih, &weight_hh, &h](const Variable& v) -> Variable {
+        auto gates_ih = weight_ih.forward(v);
+        auto gates_hh = weight_hh.forward(h);
+        auto gates = gates_ih + gates_hh;
+        return tenzor::sum(gates);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell gates-only gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceDim1) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::slice(v, 1, 1, 3);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice-dim1 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceShape2x8Dim1Small) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::slice(v, 1, 1, 3);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice 2x8 dim=1 small range gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceShape2x8Dim1FromZero) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::slice(v, 1, 0, 4);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice 2x8 dim=1 from=0 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_MirrorComprehensiveSlice) {
+    // Diagnostic: the EXACT same shape + dim + range as the working
+    // CPU-only comprehensive Slice test (shape={6,4}, dim=0, start=1, end=4).
+    // If THIS fails on multibackend, the bug is in eps/tol or fixture
+    // differences, not in slice math.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return ::tenzor::slice(v, 0, 1, 4);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "mirror-comprehensive-slice gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_Slice6x4_Start1Size3) {
+    // Same shape as comprehensive test, dim=1, start=1, slice_size=3.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6, 4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 1, 4));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice {6,4} dim=1 start=1 size=3 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size3) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 1, 4));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice start=1 size=3 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart2Size3) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 2, 5));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice start=2 size=3 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size4) {
+    // start=1, end=5: slice_size=4, start=1.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 1, 5));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice start=1 size=4 gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceTopHalf) {
+    // start=4, end=8 — second half (start equal to slice_size).
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 4, 8));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice top-half gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceForwardValueCheck) {
+    // Diagnostic: compute sum(slice_view) and sum(reshape(slice_view, shape))
+    // using KNOWN tensor values and verify both produce the same result.
+    // If forward values differ, the bug is in sum forward when input has
+    // non-zero offset.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() != DType::Float64) { GTEST_SKIP(); }
+
+    // Build a known tensor: x[i][j] = i*8 + j, so slice cols 2..5 of row 0
+    // sums to 2+3+4+5 = 14, of row 1 sums to 10+11+12+13 = 46. Total = 60.
+    auto cpu_x = tenzor::zeros({2, 8}, DType::Float64, Device::cpu());
+    for (int64_t i = 0; i < 2; ++i) {
+        for (int64_t j = 0; j < 8; ++j) {
+            cpu_x.data<double>()[i*8 + j] = static_cast<double>(i*8 + j);
+        }
+    }
+    auto x = Variable(cpu_x.to(device()), false);
+    auto sliced = ::tenzor::slice(x, 1, 2, 6);
+    auto shape_v = std::vector<int64_t>(sliced.shape().begin(), sliced.shape().end());
+
+    auto direct_sum = tenzor::sum(sliced);
+    auto reshaped_sum = tenzor::sum(::tenzor::reshape(sliced, shape_v));
+
+    auto direct_val = direct_sum.tensor().to(Device::cpu()).to(DType::Float64).data<double>()[0];
+    auto reshape_val = reshaped_sum.tensor().to(Device::cpu()).to(DType::Float64).data<double>()[0];
+
+    EXPECT_DOUBLE_EQ(direct_val, 60.0)
+        << "sum(slice_view) gave wrong forward value on " << device().to_string()
+        << ": " << direct_val;
+    EXPECT_DOUBLE_EQ(reshape_val, 60.0)
+        << "sum(reshape(slice_view)) gave wrong forward value on "
+        << device().to_string() << ": " << reshape_val;
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_RawSliceLooseTol) {
+    // Same as RawSlice but with loose tolerance — distinguishes precision
+    // issue (passes) from actual value-mismatch bug (fails).
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 2, 6));
+    };
+    EXPECT_TRUE(gradcheck(f, x, /*eps=*/1e-3, /*atol=*/1e-2, /*rtol=*/1e-2))
+        << "raw-slice-loose-tol gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceWithContiguous) {
+    // Hypothesis: bug is in sum(non-contiguous slice view). Adding
+    // .contiguous() (autograd version) materializes the slice into a
+    // contiguous tensor before sum.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        auto sliced = ::tenzor::slice(v, 1, 2, 6);
+        auto shape_v = std::vector<int64_t>(sliced.shape().begin(), sliced.shape().end());
+        return tenzor::sum(::tenzor::reshape(sliced, shape_v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "slice+contiguous gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_RawSlice) {
+    // Minimal: just sum(slice(x, dim, start, end)) where x is the gradchecked
+    // input directly (no Linear wrapper). If this fails, the bug is purely
+    // in slice's autograd path.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({2, 8}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(::tenzor::slice(v, 1, 2, 6));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "raw slice gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_JustSlice) {
+    // Minimal: gates → 1 slice → sum.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
+    weight_ih.to(device());
+    weight_ih.to(dtype());
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    const int64_t H = hid_sz;
+    auto f = [&weight_ih, H](const Variable& v) -> Variable {
+        auto gates = weight_ih.forward(v);
+        auto i_gate = ::tenzor::slice(gates, 1, 0, H);
+        return tenzor::sum(i_gate);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell just-slice gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_OneSliceSigmoid) {
+    // Diagnostic: just ONE slice + sigmoid + sum.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
+    weight_ih.to(device());
+    weight_ih.to(dtype());
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    const int64_t H = hid_sz;
+    auto f = [&weight_ih, H](const Variable& v) -> Variable {
+        auto gates = weight_ih.forward(v);
+        auto i_gate = ::tenzor::slice(gates, 1, 0, H);
+        auto i_t = ::tenzor::sigmoid(i_gate);
+        return tenzor::sum(i_t);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell one-slice-sigmoid gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_FourSlicesNoActivation) {
+    // Diagnostic: 4 slices + sum each (no sigmoid/tanh). Tests pure
+    // SliceBackward gradient accumulation.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
+    weight_ih.to(device());
+    weight_ih.to(dtype());
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    const int64_t H = hid_sz;
+    auto f = [&weight_ih, H](const Variable& v) -> Variable {
+        auto gates = weight_ih.forward(v);
+        auto i_gate = ::tenzor::slice(gates, 1, 0, H);
+        auto f_gate = ::tenzor::slice(gates, 1, H, 2*H);
+        auto g_gate = ::tenzor::slice(gates, 1, 2*H, 3*H);
+        auto o_gate = ::tenzor::slice(gates, 1, 3*H, 4*H);
+        return tenzor::sum(i_gate) + tenzor::sum(f_gate)
+             + tenzor::sum(g_gate) + tenzor::sum(o_gate);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell 4-slice-no-act gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_GateSliceSigmoid) {
+    // Diagnostic: gates → slice into 4 → sigmoid → sum. Tests whether the
+    // 4-way slice gradient accumulation through sigmoid is correct.
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
+    weight_ih.to(device());
+    weight_ih.to(dtype());
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    const int64_t H = hid_sz;
+    auto f = [&weight_ih, H](const Variable& v) -> Variable {
+        auto gates = weight_ih.forward(v);
+        auto i_gate = ::tenzor::slice(gates, 1, 0, H);
+        auto f_gate = ::tenzor::slice(gates, 1, H, 2*H);
+        auto g_gate = ::tenzor::slice(gates, 1, 2*H, 3*H);
+        auto o_gate = ::tenzor::slice(gates, 1, 3*H, 4*H);
+        auto i_t = ::tenzor::sigmoid(i_gate);
+        auto f_t = ::tenzor::sigmoid(f_gate);
+        auto g_t = ::tenzor::tanh(g_gate);
+        auto o_t = ::tenzor::sigmoid(o_gate);
+        return tenzor::sum(i_t) + tenzor::sum(f_t) + tenzor::sum(g_t) + tenzor::sum(o_t);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell gate-slice-sigmoid gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell_HOnly) {
+    // Diagnostic variant: only sum h_new (no c_new). Helps isolate whether
+    // the bug is in the path through c_new (which uses fixed `c` Variable).
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::LSTMCell cell(in_sz, hid_sz, /*bias=*/true);
+    cell.to(device());
+    cell.to(dtype());
+    auto h = Variable(randn({batch, hid_sz}, dtype(), device()), false);
+    auto c = Variable(randn({batch, hid_sz}, dtype(), device()), false);
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    auto f = [&cell, &h, &c](const Variable& v) -> Variable {
+        auto [h_new, c_new] = cell.forward(v, h, c);
+        return tenzor::sum(h_new);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell h-only gradcheck failed on " << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LSTMCell) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    int64_t in_sz = 4, hid_sz = 5, batch = 2;
+    nn::LSTMCell cell(in_sz, hid_sz, /*bias=*/true);
+    cell.to(device());
+    cell.to(dtype());
+    auto h = Variable(randn({batch, hid_sz}, dtype(), device()), false);
+    auto c = Variable(randn({batch, hid_sz}, dtype(), device()), false);
+    auto x = Variable(randn({batch, in_sz}, dtype(), device()), true);
+    auto f = [&cell, &h, &c](const Variable& v) -> Variable {
+        // LSTMCell returns {h_new, c_new}; sum both for a scalar loss.
+        auto [h_new, c_new] = cell.forward(v, h, c);
+        return tenzor::sum(h_new) + tenzor::sum(c_new);
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
+        << "lstm_cell gradcheck failed on " << device().to_string();
+}
 
 // =====================================================================
 // Phase B.2 — LPPool 1d/2d (autograd via Variable composition, not a

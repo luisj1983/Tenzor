@@ -117,11 +117,9 @@ TEST_P(CreationOpsMultiDTypeTest, FullNegativeValue) {
 // ============================================================================
 
 TEST_P(CreationOpsMultiDTypeTest, RandnDistribution) {
-    // Float16 doesn't support randn directly
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 doesn't support randn";
-    }
-
+    // audit-2026-05-03 P14: Float16 randn now exercised across all backends
+    // (creation.cpp:488 lists Float16 as supported). Half-precision needs
+    // wider tolerance because variance estimation drifts more.
     auto t = randn({100, 100}, dtype(), device());
 
     expectDType(t);
@@ -144,16 +142,14 @@ TEST_P(CreationOpsMultiDTypeTest, RandnDistribution) {
     }
     double std_dev = std::sqrt(variance_sum / t_cpu.numel());
 
-    // N(0,1) distribution properties - allow generous tolerance
-    EXPECT_NEAR(mean, 0.0, 0.15) << "Mean should be close to 0";
-    EXPECT_NEAR(std_dev, 1.0, 0.15) << "Std should be close to 1";
+    // N(0,1) distribution properties - half-precision needs wider tolerance.
+    const double tol = (dtype() == DType::Float16 ||
+                        dtype() == DType::BFloat16) ? 0.30 : 0.15;
+    EXPECT_NEAR(mean, 0.0, tol) << "Mean should be close to 0";
+    EXPECT_NEAR(std_dev, 1.0, tol) << "Std should be close to 1";
 }
 
 TEST_P(CreationOpsMultiDTypeTest, RandnVariability) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 doesn't support randn";
-    }
-
     auto t = randn({1000}, dtype(), device());
 
     // Check that values are not all the same

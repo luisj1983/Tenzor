@@ -3,458 +3,458 @@
   "name": "AllTests",
   "testsuites": [
     {
-      "name": "MultiBackendDType\/ZeROProfilingMultiDTypeTest",
+      "name": "MultiBackendDType\/TransformerContainerMultiDTypeTest",
       "tests": 75,
       "testsuite": [
         {
-          "name": "EnableDisableProfiling\/Cpu_Float32",
+          "name": "TransformerEncoder_ForwardShape\/Cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Cpu_Float64",
+          "name": "TransformerEncoder_ForwardShape\/Cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Cpu_Float16",
+          "name": "TransformerEncoder_ForwardShape\/Cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Cuda0_Float32",
+          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Cuda0_Float64",
+          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Cuda0_Float16",
+          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Vulkan0_Float32",
+          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Vulkan0_Float64",
+          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Vulkan0_Float16",
+          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Oneapi0_Float32",
+          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Oneapi0_Float64",
+          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Oneapi0_Float16",
+          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Rocm0_Float32",
+          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Rocm0_Float64",
+          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "EnableDisableProfiling\/Rocm0_Float16",
+          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 55
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 38
         },
         {
-          "name": "StepWithProfilingEnabled\/Cpu_Float32",
+          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Cpu_Float64",
+          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Cpu_Float16",
+          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Cuda0_Float32",
+          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Cuda0_Float64",
+          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Cuda0_Float16",
+          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Vulkan0_Float32",
+          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Vulkan0_Float64",
+          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Vulkan0_Float16",
+          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Oneapi0_Float32",
+          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Oneapi0_Float64",
+          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Oneapi0_Float16",
+          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Rocm0_Float32",
+          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Rocm0_Float64",
+          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "StepWithProfilingEnabled\/Rocm0_Float16",
+          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 73
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 57
         },
         {
-          "name": "ProfilingReport\/Cpu_Float32",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Cpu_Float64",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Cpu_Float16",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Cuda0_Float32",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Cuda0_Float64",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Cuda0_Float16",
+          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Vulkan0_Float32",
+          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Vulkan0_Float64",
+          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Vulkan0_Float16",
+          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Oneapi0_Float32",
+          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Oneapi0_Float64",
+          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Oneapi0_Float16",
+          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Rocm0_Float32",
+          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Rocm0_Float64",
+          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ProfilingReport\/Rocm0_Float16",
+          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 88
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 72
         },
         {
-          "name": "ResetProfiling\/Cpu_Float32",
+          "name": "TransformerDecoder_ForwardShape\/Cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Cpu_Float64",
+          "name": "TransformerDecoder_ForwardShape\/Cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Cpu_Float16",
+          "name": "TransformerDecoder_ForwardShape\/Cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Cuda0_Float32",
+          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Cuda0_Float64",
+          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Cuda0_Float16",
+          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Vulkan0_Float32",
+          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Vulkan0_Float64",
+          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Vulkan0_Float16",
+          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Oneapi0_Float32",
+          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Oneapi0_Float64",
+          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Oneapi0_Float16",
+          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Rocm0_Float32",
+          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Rocm0_Float64",
+          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "ResetProfiling\/Rocm0_Float16",
+          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 106
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 96
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cpu_Float32",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cpu_Float64",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cpu_Float16",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cuda0_Float32",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cuda0_Float64",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Cuda0_Float16",
+          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Vulkan0_Float32",
+          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Vulkan0_Float64",
+          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Vulkan0_Float16",
+          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Oneapi0_Float32",
+          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Oneapi0_Float64",
+          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Oneapi0_Float16",
+          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Rocm0_Float32",
+          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Rocm0_Float64",
+          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         },
         {
-          "name": "MultipleStepsWithProfiling\/Rocm0_Float16",
+          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_profiling_multidtype.cpp",
-          "line": 122
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
+          "line": 116
         }
       ]
     }

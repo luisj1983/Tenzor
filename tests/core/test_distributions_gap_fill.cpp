@@ -284,9 +284,9 @@ TEST(DistGapFill, Wishart_SampleSymmetric) {
 
 TEST(DistGapFill, LKJCholesky_SampleLowerTriangular) {
     int64_t dim = 3;
-    // LKJCholesky's internal sampler calls item<double>() on the
-    // concentration parameter, so pass Float64 explicitly.
-    auto concentration = full({}, 1.0f).to(DType::Float64);
+    // audit-2026-05-03 bug #7 fixed: concentration_as_double() helper now
+    // dispatches on dtype, so Float32 concentration works directly.
+    auto concentration = full({}, 1.0f);
     LKJCholesky d(dim, concentration);
     auto s = d.sample({});
     EXPECT_TRUE(is_finite(s));
@@ -298,6 +298,16 @@ TEST(DistGapFill, LKJCholesky_SampleLowerTriangular) {
             EXPECT_NEAR(p[i * dim + j], 0.0f, 1e-5f);
         }
     }
+}
+
+TEST(DistGapFill, LKJCholesky_SampleFloat64Concentration) {
+    // Regression test: explicit Float64 concentration must still work after
+    // bug #7 fix.
+    int64_t dim = 3;
+    auto concentration = full({}, 1.0).to(DType::Float64);
+    LKJCholesky d(dim, concentration);
+    auto s = d.sample({});
+    EXPECT_TRUE(is_finite(s));
 }
 
 TEST(DistGapFill, Kumaraswamy_SampleInZeroOne) {
@@ -375,8 +385,40 @@ TEST(DistGapFill, TransformedDistribution_ChainedTransform) {
     }
 }
 
-// MixtureSameFamily.sample() has a vector out-of-bounds crash when called
-// with no arguments — separate bug in mixture.cpp; tracked as follow-up.
+// audit-2026-05-03 bug #6 fixed: gather_components rewritten to align
+// indices to comp_samples-minus-K dimensionality before gather, eliminating
+// the libstdc++ vector OOB on default args.
+namespace {
+auto make_2vec(float a, float b) -> Tensor {
+    auto t = full({2}, 0.0f);
+    auto cpu = t.to(Device::cpu()).contiguous();
+    auto* p = cpu.data<float>();
+    p[0] = a;
+    p[1] = b;
+    return cpu;
+}
+} // anonymous
+
+TEST(DistGapFill, MixtureSameFamily_SampleDefaultArgs) {
+    auto weights = make_2vec(0.5f, 0.5f);
+    auto loc = make_2vec(0.0f, 5.0f);
+    auto scale = make_2vec(1.0f, 1.0f);
+    auto base = std::make_shared<Normal>(loc, scale);
+    MixtureSameFamily msf(weights, base);
+    auto s = msf.sample({});
+    EXPECT_TRUE(is_finite(s));
+}
+
+TEST(DistGapFill, MixtureSameFamily_SampleNonTrivialShape) {
+    auto weights = make_2vec(0.3f, 0.7f);
+    auto loc = make_2vec(0.0f, 10.0f);
+    auto scale = make_2vec(1.0f, 1.0f);
+    auto base = std::make_shared<Normal>(loc, scale);
+    MixtureSameFamily msf(weights, base);
+    auto s = msf.sample({4});
+    EXPECT_TRUE(is_finite(s));
+    EXPECT_EQ(s.numel(), 4);
+}
 
 // ====================================================================
 // Phase C.2 — Distribution transforms previously missing from coverage.

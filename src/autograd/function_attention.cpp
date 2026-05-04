@@ -440,6 +440,35 @@ auto flash_attention(const Variable& Q,
                      float dropout_p,
                      bool is_training) -> Variable {
     bool any_grad = Q.requires_grad() || K.requires_grad() || V.requires_grad();
+
+    // audit-2026-05-03 — Float64 path: backend FlashAttention kernels all
+    // upcast Float64→Float32 internally before computing (per
+    // attention-contract.md). For autograd gradcheck the dispatched
+    // kernel's Float32-precision output disagrees with the composed-ops
+    // backward, breaking Float64 gradcheck on every backend that doesn't
+    // have a true Float64 attention kernel. Route Float64 through pure
+    // Variable-level ops so forward and backward (and numerical-vs-
+    // analytical) all use the same double-precision math.
+    if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f) {
+        auto Kt = transpose(K, -1, -2);
+        auto S = matmul(Q, Kt);
+        auto S_shape = S.shape();
+        Variable scale_var(::tenzor::full({1}, static_cast<double>(scale),
+            S.tensor().dtype(), S.tensor().device()), false);
+        S = S * scale_var;
+        if (causal) {
+            int64_t S_q = S_shape[S_shape.size() - 2];
+            int64_t S_k = S_shape[S_shape.size() - 1];
+            auto mask_t = ::tenzor::triu(::tenzor::ones({S_q, S_k},
+                S.tensor().dtype(), S.tensor().device()), 1 + (S_k - S_q));
+            auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
+                S.tensor().dtype(), S.tensor().device());
+            S = S + Variable(mask_t * neg_inf_t, false);
+        }
+        auto P = softmax(S, -1);
+        return matmul(P, V);
+    }
+
     if (!any_grad || !is_grad_enabled()) {
         // No autograd path needed — call dispatch raw.
         auto outs = run_flash_dispatch(Q.tensor(), K.tensor(), V.tensor(),

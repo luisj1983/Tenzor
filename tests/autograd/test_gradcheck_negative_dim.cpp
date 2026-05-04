@@ -123,15 +123,9 @@ TEST_P(GradCheckNegativeDimTest, Sum_Dim_Both) {
 }
 
 TEST_P(GradCheckNegativeDimTest, Mean_Dim_Both) {
-    // Pre-existing: tenzor::mean(Variable, dim) on a 2D input crashes
-    // with a libstdc++ span out-of-bounds assertion when dim=1 — looks
-    // like the dispatched MeanBackward kernel reads shape via std::span
-    // without normalising dim or with an off-by-one slice. Skipped to
-    // keep the suite green; bug itself is tracked under
-    // "negative-dim normalization gaps" in the audit.
-    GTEST_SKIP() << "Mean dim gradcheck crashes on 2D — pre-existing "
-                    "MeanBackward span out-of-bounds";
-
+    // audit-2026-05-03 bug #5 fixed: MeanBackward now normalizes negative
+    // dim before indexing into shape, removing the libstdc++ span
+    // out-of-bounds crash that previously gated this test.
     auto x_t = randn({4, 5}, DType::Float64, Device::cpu());
     Variable x(x_t.to(device), true);
     EXPECT_DIM_INVARIANT_2D(x, 1,

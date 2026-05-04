@@ -265,42 +265,68 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int n_int = static_cast<int>(N_out);
     int inembed[] = {n_int};
     int onembed[] = {n_int};
-    int istride = static_cast<int>(inner_size);
-    int ostride = static_cast<int>(inner_size);
-    int idist, odist;
 
-    if (dim == ndim - 1) {
-        // FFT along last dimension: contiguous, batch = outer_size
-        idist = n_int;
-        odist = n_int;
-        batch = outer_size;
-    } else {
-        // FFT along non-last dimension: strided access
-        // Each "batch" element is separated by 1 in memory (inner_size batches
-        // per outer block), and outer blocks are separated by N_out * inner_size.
-        idist = 1;
-        odist = 1;
-        // We process inner_size batches per outer block, total = outer_size * inner_size
-    }
-
+    // audit-2026-05-03 — for FFT along a non-last dim with both outer
+    // and inner extent > 1, cufftPlanMany cannot encode the layout
+    // (stride between batches differs between within-outer-block and
+    // across-outer-block). The previous code passed batch =
+    // outer_size * inner_size with idist=1, which silently produced
+    // wrong values for batches whose start offsets weren't consecutive.
+    // Loop per outer block instead.
+    bool last_dim = (dim == ndim - 1);
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
-                              inembed, istride, idist,
-                              onembed, ostride, odist,
-                              fft_type, static_cast<int>(batch)));
-    CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
-    // Execute in-place
-    if (is_float32) {
-        CUFFT_CHECK(cufftExecC2C(plan,
-            reinterpret_cast<cufftComplex*>(output.data_ptr()),
-            reinterpret_cast<cufftComplex*>(output.data_ptr()),
-            CUFFT_FORWARD));
+    if (last_dim) {
+        int istride = 1;
+        int ostride = 1;
+        int idist = n_int;
+        int odist = n_int;
+        int plan_batch = static_cast<int>(outer_size);
+        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+                                  inembed, istride, idist,
+                                  onembed, ostride, odist,
+                                  fft_type, plan_batch));
+        CUFFT_CHECK(cufftSetStream(plan.handle, stream));
+
+        if (is_float32) {
+            CUFFT_CHECK(cufftExecC2C(plan,
+                reinterpret_cast<cufftComplex*>(output.data_ptr()),
+                reinterpret_cast<cufftComplex*>(output.data_ptr()),
+                CUFFT_FORWARD));
+        } else {
+            CUFFT_CHECK(cufftExecZ2Z(plan,
+                reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
+                reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
+                CUFFT_FORWARD));
+        }
     } else {
-        CUFFT_CHECK(cufftExecZ2Z(plan,
-            reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
-            reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
-            CUFFT_FORWARD));
+        int istride = static_cast<int>(inner_size);
+        int ostride = static_cast<int>(inner_size);
+        int idist = 1;
+        int odist = 1;
+        int plan_batch = static_cast<int>(inner_size);  // batches per outer block
+        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+                                  inembed, istride, idist,
+                                  onembed, ostride, odist,
+                                  fft_type, plan_batch));
+        CUFFT_CHECK(cufftSetStream(plan.handle, stream));
+
+        size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
+        for (int64_t b = 0; b < outer_size; ++b) {
+            void* base = static_cast<char*>(output.data_ptr())
+                + b * outer_stride_elems * dtype_size(out_dtype);
+            if (is_float32) {
+                CUFFT_CHECK(cufftExecC2C(plan,
+                    reinterpret_cast<cufftComplex*>(base),
+                    reinterpret_cast<cufftComplex*>(base),
+                    CUFFT_FORWARD));
+            } else {
+                CUFFT_CHECK(cufftExecZ2Z(plan,
+                    reinterpret_cast<cufftDoubleComplex*>(base),
+                    reinterpret_cast<cufftDoubleComplex*>(base),
+                    CUFFT_FORWARD));
+            }
+        }
     }
 
     // Apply normalization
@@ -370,36 +396,61 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int n_int = static_cast<int>(N_out);
     int inembed[] = {n_int};
     int onembed[] = {n_int};
-    int istride = static_cast<int>(inner_size);
-    int ostride = static_cast<int>(inner_size);
-    int idist, odist;
-
-    if (dim == ndim - 1) {
-        idist = n_int;
-        odist = n_int;
-        batch = outer_size;
-    } else {
-        idist = 1;
-        odist = 1;
-    }
-
+    bool last_dim = (dim == ndim - 1);
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
-                              inembed, istride, idist,
-                              onembed, ostride, odist,
-                              fft_type, static_cast<int>(batch)));
-    CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
-    if (is_float32) {
-        CUFFT_CHECK(cufftExecC2C(plan,
-            reinterpret_cast<cufftComplex*>(output.data_ptr()),
-            reinterpret_cast<cufftComplex*>(output.data_ptr()),
-            CUFFT_INVERSE));
+    if (last_dim) {
+        int istride = 1;
+        int ostride = 1;
+        int idist = n_int;
+        int odist = n_int;
+        int plan_batch = static_cast<int>(outer_size);
+        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+                                  inembed, istride, idist,
+                                  onembed, ostride, odist,
+                                  fft_type, plan_batch));
+        CUFFT_CHECK(cufftSetStream(plan.handle, stream));
+
+        if (is_float32) {
+            CUFFT_CHECK(cufftExecC2C(plan,
+                reinterpret_cast<cufftComplex*>(output.data_ptr()),
+                reinterpret_cast<cufftComplex*>(output.data_ptr()),
+                CUFFT_INVERSE));
+        } else {
+            CUFFT_CHECK(cufftExecZ2Z(plan,
+                reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
+                reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
+                CUFFT_INVERSE));
+        }
     } else {
-        CUFFT_CHECK(cufftExecZ2Z(plan,
-            reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
-            reinterpret_cast<cufftDoubleComplex*>(output.data_ptr()),
-            CUFFT_INVERSE));
+        // audit-2026-05-03 — same outer-block loop fix as cuda_fft_kernel.
+        int istride = static_cast<int>(inner_size);
+        int ostride = static_cast<int>(inner_size);
+        int idist = 1;
+        int odist = 1;
+        int plan_batch = static_cast<int>(inner_size);
+        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+                                  inembed, istride, idist,
+                                  onembed, ostride, odist,
+                                  fft_type, plan_batch));
+        CUFFT_CHECK(cufftSetStream(plan.handle, stream));
+
+        size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
+        for (int64_t b = 0; b < outer_size; ++b) {
+            void* base = static_cast<char*>(output.data_ptr())
+                + b * outer_stride_elems * dtype_size(out_dtype);
+            if (is_float32) {
+                CUFFT_CHECK(cufftExecC2C(plan,
+                    reinterpret_cast<cufftComplex*>(base),
+                    reinterpret_cast<cufftComplex*>(base),
+                    CUFFT_INVERSE));
+            } else {
+                CUFFT_CHECK(cufftExecZ2Z(plan,
+                    reinterpret_cast<cufftDoubleComplex*>(base),
+                    reinterpret_cast<cufftDoubleComplex*>(base),
+                    CUFFT_INVERSE));
+            }
+        }
     }
 
     // cuFFT inverse does NOT divide by N. Default "backward" norm = divide by N.

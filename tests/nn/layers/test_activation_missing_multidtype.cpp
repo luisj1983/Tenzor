@@ -89,17 +89,19 @@ TEST_P(ActivationMissingMultiDTypeTest, Softmin_ForwardShape) {
 }
 
 TEST_P(ActivationMissingMultiDTypeTest, Softmin_SumsToOne) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Half precision too imprecise for sum-to-one check";
-    }
     Softmin act(/*dim=*/-1);
     auto input = Variable(createRandn({2, 5}), false);
     auto output = act.forward(input).tensor();
-    // Each row should sum to 1
+    // Each row should sum to 1. Half-precision dtypes have larger
+    // accumulation drift (~5e-3 across 5 values), so tolerance is dtype-aware
+    // rather than skipping the assertion (per the no-skip testing rule).
     auto sums = tenzor::sum(output, /*dim=*/-1).to(Device::cpu()).to(DType::Float32);
     auto* s = sums.data<float>();
+    const float tol = (dtype() == DType::Float16 || dtype() == DType::BFloat16)
+                          ? 5e-3f
+                          : 1e-4f;
     for (int64_t i = 0; i < sums.numel(); ++i) {
-        EXPECT_NEAR(s[i], 1.0f, 1e-4f) << "Row " << i << " does not sum to 1";
+        EXPECT_NEAR(s[i], 1.0f, tol) << "Row " << i << " does not sum to 1";
     }
 }
 
@@ -210,7 +212,7 @@ TEST_P(ActivationMissingMultiDTypeTest, Softshrink_Backward) {
     auto output = act.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape().size(), 1u);
     // Gradient should be 1 outside dead zone
     auto grad_cpu = input.grad().value().to(Device::cpu()).to(DType::Float32);

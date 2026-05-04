@@ -2089,7 +2089,9 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // Sigmoid wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto sigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2384,7 +2386,9 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaS
 }
 
 // Tanh wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto tanh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());

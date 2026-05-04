@@ -1149,7 +1149,9 @@ static void launch_dim_prod(
  * @param stream HIP stream
  * @return Output tensor with sum
  */
-auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #2: ensure contiguous input (mirror of CPU/CUDA fix).
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1497,6 +1499,13 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+
+    // Normalize user-specified negative dims (e.g. -1 = last) to positive
+    // while leaving INT64_MIN alone — that's the project-wide "reduce all
+    // dims" sentinel which the rest of this kernel detects via dim < 0.
+    if (dim != INT64_MIN && dim < 0) {
+        dim += static_cast<int64_t>(input_shape.size());
+    }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -2233,6 +2242,13 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     const auto& input_shape = input.shape();
     int64_t n = input.numel();
 
+    // Normalize user-specified negative dims (e.g. -1 = last) to positive
+    // while leaving INT64_MIN alone — that's the project-wide "reduce all
+    // dims" sentinel which the rest of this kernel detects via dim < 0.
+    if (dim != INT64_MIN && dim < 0) {
+        dim += static_cast<int64_t>(input_shape.size());
+    }
+
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
         dim, keepdim);
@@ -2378,6 +2394,13 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
     const auto dtype = input.dtype();
     const auto& device = input.device();
     int64_t n = input.numel();
+
+    // Normalize user-specified negative dims (e.g. -1 = last) to positive
+    // while leaving INT64_MIN alone — that's the project-wide "reduce all
+    // dims" sentinel which the rest of this kernel detects via dim < 0.
+    if (dim != INT64_MIN && dim < 0) {
+        dim += static_cast<int64_t>(input.shape().size());
+    }
 
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("var: only Float32, Float64, Float16, and BFloat16 are supported");

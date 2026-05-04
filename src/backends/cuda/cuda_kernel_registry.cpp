@@ -1760,9 +1760,35 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             if (rng_seed == 0) rng_seed = 1u;  // 0 disables in-kernel; force non-zero.
         }
 
+        // fused_attention_cuda expects 3D `(batch_heads, seq_len, head_dim)`.
+        // The autograd-side dispatch passes Q/K/V 4D `(B, H, S, D)` — collapse
+        // the leading two dims for the kernel call and restore on output.
+        bool is_4d = (inputs[0].shape().size() == 4);
+        Tensor Qi = inputs[0], Ki = inputs[1], Vi = inputs[2];
+        std::vector<int64_t> orig_q_shape;
+        if (is_4d) {
+            orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
+            int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+            int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+            int64_t sk = inputs[1].shape()[2];
+            int64_t dv = inputs[2].shape()[3];
+            Qi = tenzor::reshape(inputs[0], std::vector<int64_t>{b * h, sq, d});
+            Ki = tenzor::reshape(inputs[1], std::vector<int64_t>{b * h, sk, d});
+            Vi = tenzor::reshape(inputs[2], std::vector<int64_t>{b * h, sk, dv});
+        }
+
         auto [output, lse] = cuda::fused_attention_cuda(
-            inputs[0], inputs[1], inputs[2], scale, causal,
+            Qi, Ki, Vi, scale, causal,
             apply_dropout ? dropout_p : 0.0f, rng_seed);
+
+        if (is_4d) {
+            int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+            int64_t sq = orig_q_shape[2], dv = inputs[2].shape()[3];
+            output = tenzor::reshape(output,
+                std::vector<int64_t>{b, h, sq, dv});
+            // lse is (batch_heads, seq_len_q) → (B, H, sq)
+            lse = tenzor::reshape(lse, std::vector<int64_t>{b, h, sq});
+        }
 
         Tensor seed_t, offset_t;
         if (apply_dropout) {

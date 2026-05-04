@@ -22,9 +22,19 @@ sys.path.insert(0, build_python_dir)
 import pytest
 import tenzor.tenzor_core as tz
 
-hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import given, settings, assume, HealthCheck
-from hypothesis import strategies as st
+# `hypothesis` is the property-based testing library this file uses; skip
+# the entire test if it isn't installed. When pytest invokes the file the
+# importorskip() call raises Skipped which pytest catches, but when the
+# CTest runner invokes `python <file>` directly the exception propagates
+# and exits non-zero. Convert to a graceful sys.exit(0) for that path.
+try:
+    hypothesis = pytest.importorskip("hypothesis")
+    from hypothesis import given, settings, assume, HealthCheck
+    from hypothesis import strategies as st
+except (pytest.skip.Exception, ImportError, ModuleNotFoundError):
+    if __name__ == "__main__":
+        sys.exit(0)
+    raise
 
 
 # ---------------------------------------------------------------------------

@@ -63,7 +63,9 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
  * @return Tensor Standard deviation tensor
  */
 auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
+    // negative dim as a back-from-end axis (e.g. -1 = last dim).
+    int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
     int64_t correction = attrs.get_int(AttrKey::Correction, 1);
 
@@ -71,11 +73,9 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(shape.size());
 
-    // Normalize negative dim (but keep -1 as "all dimensions")
-    if (dim != -1 && dim < 0) dim += ndim;
+    if (dim != INT64_MIN && dim < 0) dim += ndim;
 
-    // Check if this is a full reduction (dim==-1) or last-dim reduction
-    bool full_reduction = (dim == -1 || ndim == 1);
+    bool full_reduction = (dim == INT64_MIN || ndim == 1);
 
     if (full_reduction) {
         // Compute total number of elements
@@ -285,7 +285,12 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Variance tensor
  */
 auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    // INT64_MIN is the project-wide "all dims" sentinel. The legacy
+    // OneAPI convention also accepted -1 as full reduction; that
+    // ambiguates `var(v, dim=-1)` (last dim) with full reduction. Treat
+    // INT64_MIN as full reduction and normalize any other negative dim to
+    // positive.
+    int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
     int64_t correction = attrs.get_int(AttrKey::Correction, 1);
 
@@ -293,10 +298,9 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(shape.size());
 
-    // Normalize negative dim (but keep -1 as "all dimensions")
-    if (dim != -1 && dim < 0) dim += ndim;
+    if (dim != INT64_MIN && dim < 0) dim += ndim;
 
-    bool full_reduction = (dim == -1 || ndim == 1);
+    bool full_reduction = (dim == INT64_MIN || ndim == 1);
 
     if (full_reduction) {
         int64_t total_size = 1;
@@ -504,7 +508,9 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Product tensor
  */
 auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
+    // negative dim as a back-from-end axis.
+    int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
 
     auto shape_span = input.shape();
@@ -512,9 +518,11 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
     auto strides_span = input.strides();
     std::vector<int64_t> strides(strides_span.begin(), strides_span.end());
 
+    if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(shape.size());
+
     // Compute output shape
     std::vector<int64_t> out_shape;
-    if (dim == -1) {
+    if (dim == INT64_MIN) {
         // Full reduction — scalar (shape {}) without keepdim, matches
         // CPU backend and PyTorch conventions.
         out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{};
@@ -555,7 +563,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         Tensor output(out_shape, input.dtype(), input.device());
         float* out_ptr = get_data_ptr<float>(output);
 
-        if (dim == -1) {
+        if (dim == INT64_MIN) {
             // Full reduction on device
             constexpr int64_t WG_SIZE = 256;
             int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
@@ -635,7 +643,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         Tensor output(out_shape, input.dtype(), input.device());
         double* out_ptr = get_data_ptr<double>(output);
 
-        if (dim == -1) {
+        if (dim == INT64_MIN) {
             // Full reduction on device
             constexpr int64_t WG_SIZE = 256;
             int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
@@ -713,7 +721,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         Tensor output(out_shape, DType::Int64, input.device());
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
-        if (dim == -1) {
+        if (dim == INT64_MIN) {
             // Full reduction — use shared memory for int64 accumulator
             auto prod_buf = sycl::malloc_shared<int64_t>(1, queue);
             SyclDeviceGuard prod_guard(prod_buf, queue);
@@ -772,7 +780,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         Tensor output(out_shape, DType::Int64, input.device());
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
-        if (dim == -1) {
+        if (dim == INT64_MIN) {
             // Full reduction using shared accumulator
             auto prod_buf = sycl::malloc_shared<int64_t>(1, queue);
             SyclDeviceGuard prod_guard(prod_buf, queue);
@@ -839,17 +847,18 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
     }
 
     float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
-    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
+    // negative dim as a back-from-end axis.
+    int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(shape.size());
 
-    // Normalize negative dim (but keep -1 as "all dimensions")
-    if (dim != -1 && dim < 0) dim += ndim;
+    if (dim != INT64_MIN && dim < 0) dim += ndim;
 
-    bool full_reduction = (dim == -1 || ndim == 1);
+    bool full_reduction = (dim == INT64_MIN || ndim == 1);
 
     if (full_reduction) {
         // Compute output shape

@@ -1932,13 +1932,14 @@ auto fused_attention_hip(
         // ops would collide with HIP device sqrt/exp in this TU).
         // Path: BMM(Q, K^T) * scale → softmax → BMM(P, V).
         NewOpAttributes empty;
-        // K^T via Permute on last two dims.
-        NewOpAttributes perm_attrs;
-        // Build perm string "0,1,3,2" for 4D or "0,2,1" for 3D — but K is 3D
-        // here (batch_heads, seq, dim). Use Transpose with Dim/Dim2 attrs.
+        // K^T via Transpose on last two dims. ROCm Transpose dispatch reads
+        // AttrKey::Dim0/Dim1 (not Dim/Dim2) — using the wrong key silently
+        // defaulted to (0,1) and produced an incorrectly-permuted K_T,
+        // breaking subsequent bmm with "Inner dimensions 8 != 2".
         NewOpAttributes tr_attrs;
-        tr_attrs.set(AttrKey::Dim,  static_cast<int64_t>(-1));
-        tr_attrs.set(AttrKey::Dim2, static_cast<int64_t>(-2));
+        int64_t k_ndim = static_cast<int64_t>(K.shape().size());
+        tr_attrs.set(AttrKey::Dim0, k_ndim - 2);
+        tr_attrs.set(AttrKey::Dim1, k_ndim - 1);
         std::vector<Tensor> tr_in = {K};
         Tensor Kt = tenzor::dispatch(OpId::Transpose, tr_in, tr_attrs)[0];
         std::vector<Tensor> bmm_in = {Q, Kt};

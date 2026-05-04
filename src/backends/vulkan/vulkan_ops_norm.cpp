@@ -741,12 +741,18 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     bool has_affine = (gamma != nullptr && beta != nullptr);
 
     // Create output tensors
+    // audit-2026-05-03 — stats dtype must match shader binding type. The F64
+    // shader declares `double mean_out[]`; allocating Float32 here meant the
+    // shader wrote 8 bytes per element into a buffer sized for 4 bytes,
+    // corrupting adjacent memory.
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
-    Tensor mean_out({N, num_groups}, DType::Float32, input.device());
-    Tensor inv_std_out({N, num_groups}, DType::Float32, input.device());
+    DType stats_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor mean_out({N, num_groups}, stats_dtype, input.device());
+    Tensor inv_std_out({N, num_groups}, stats_dtype, input.device());
 
     size_t elem_size = input.dtype_size();
+    size_t stats_elem_size = (stats_dtype == DType::Float64) ? sizeof(double) : sizeof(float);
 
     // Get VkBuffer handles
     const void* buf_input = input.data_ptr();
@@ -758,7 +764,7 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     // For F16: packed uint32 words, 4-byte aligned
     size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
     size_t output_buf_size = is_float16 ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
-    size_t stats_buf_size = N * num_groups * sizeof(float);
+    size_t stats_buf_size = N * num_groups * stats_elem_size;
 
     // Bindings: input(0), output(1), gamma(2), beta(3), mean(4), inv_std(5)
     std::vector<std::pair<uint32_t, const void*>> bindings = {

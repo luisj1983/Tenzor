@@ -43,10 +43,17 @@
  */
 template<typename Op>
 auto binary_pointwise_kernel(
-    const Tensor& a, const Tensor& b,
+    const Tensor& a_raw, const Tensor& b_raw,
     Tensor (*fp8_emulate)(const Tensor&, const Tensor&) = nullptr) -> Tensor
 {
     // Validation is done by the caller (validate_elementwise in math.cpp)
+
+    // audit-2026-05-03 bug #15 mirror: ensure both inputs are contiguous.
+    // The same-shape fast path below reads via flat pointer; for non-contiguous
+    // slice/expand views this would skip logical elements (the same root cause
+    // as the sum/sigmoid/tanh kernel fixes).
+    auto a = a_raw.contiguous();
+    auto b = b_raw.contiguous();
 
     // FP8 emulation
     if (fp8_emulate && is_fp8(a.dtype()) && is_fp8(b.dtype())) {

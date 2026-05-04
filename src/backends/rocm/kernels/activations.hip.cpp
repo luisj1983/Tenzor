@@ -1513,7 +1513,9 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 }
 
 // Sigmoid wrapper
-auto sigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto sigmoid_kernel(const Tensor& input_raw, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1593,7 +1595,9 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hip
 }
 
 // Tanh wrapper
-auto tanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto tanh_kernel(const Tensor& input_raw, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());

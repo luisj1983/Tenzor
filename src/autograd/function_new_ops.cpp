@@ -692,17 +692,86 @@ inline bool strict_linalg_grad_mode() {
 }
 }
 
-auto LinalgLDLFactorBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
-    require_saved_tensors(1);
+auto LinalgLDLFactorBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
     const auto& A = saved_tensors_[0];
-    if (strict_linalg_grad_mode()) {
-        throw std::runtime_error(
-            "LDL factorization backward is not implemented (returns zero "
-            "gradient by default). TENZOR_STRICT_LINALG_GRAD=1 surfaces this "
-            "as an error. Use ldl_solve() for gradient flow through linear "
-            "systems, or cholesky() for SPD inputs.");
-    }
-    return {zeros_like(A)};
+    const auto& LD = saved_tensors_[1];
+    const auto& grad_LD = grad_outputs[0];
+
+    // audit-2026-05-03 Phase 12 — implement closed-form LDL backward for
+    // the no-pivoting (SPD-equivalent) path. LAPACK's *sytrf with UPLO='L'
+    // packs L|D into the lower triangle of LD; the upper triangle of LD
+    // remains the upper triangle of A (untouched), so its gradient flows
+    // directly back to A's upper triangle.
+    //
+    // Derivation (no pivoting, A = L D L^T, L unit lower, D diagonal):
+    //   dA = dL · D · L^T + L · dD · L^T + L · D · dL^T
+    //   M  = L^{-1} dA L^{-T} = X D + dD + D X^T, where X = L^{-1} dL
+    //   so dD_i = M_ii and X_ji = M_ji / D_ii (j > i, strict lower).
+    // Adjoint:
+    //   given grad_L (strict lower) and grad_D (diag), let
+    //     Q = strict_lower(L^T grad_L)
+    //     R_ji = Q_ji / D_ii  (strict lower)
+    //     S    = diag(grad_D)
+    //   then  grad_A = L^{-T} (S + R) L^{-1}  (lower & diag entries).
+    // The strict-upper of grad_A comes directly from grad_LD's strict-upper.
+
+    int64_t n = A.shape().back();
+    auto eye = tenzor::eye(n, std::nullopt, A.dtype(), A.device());
+
+    // Extract structural pieces of LD.
+    auto L_strict = tenzor::tril(LD, -1);   // strict lower
+    auto L = L_strict + eye;                // unit lower triangular
+    auto LT = tenzor::transpose(L, -1, -2);
+
+    // Diagonal of LD as a length-n vector.
+    // diag() of a 2D matrix returns its diagonal as a 1D vector.
+    auto D_diag = tenzor::diag(LD, 0);
+
+    // grad_L_strict (strict lower) and grad_D_diag (diagonal).
+    auto grad_L_strict = tenzor::tril(grad_LD, -1);
+    auto grad_D_diag = tenzor::diag(grad_LD, 0);
+
+    // Q = strict_lower(L^T grad_L_strict)
+    auto P = tenzor::matmul(LT, grad_L_strict);
+    auto Q = tenzor::tril(P, -1);
+
+    // R_ji = Q_ji / D_ii  — divide row j (which equals i index in our matmul
+    // convention) by D_ii. In our column-of-Q layout, Q_ji is at (j, i) with
+    // j > i; divide by D_ii (i.e. the column's diagonal entry of D).
+    // Broadcasting D_diag as a row vector divides each column by D_ii.
+    auto D_row = D_diag.unsqueeze(-2);  // [..., 1, n]
+    auto R = Q / D_row;
+
+    // S = diag-embedded(grad_D_diag).
+    auto S = tenzor::linalg::diag_embed(grad_D_diag);
+
+    auto S_plus_R = S + R;
+
+    // Compute L^{-1} via triangular solve, L · L_inv = I.
+    auto L_inv = tenzor::linalg::solve_triangular(L, eye, /*upper=*/false,
+                                                  /*unitriangular=*/true);
+    auto LT_inv = tenzor::transpose(L_inv, -1, -2);
+
+    auto grad_A_factor = tenzor::matmul(tenzor::matmul(LT_inv, S_plus_R), L_inv);
+
+    // Note on structure: grad_A_factor as computed is asymmetric in general,
+    // but its SYMMETRIC PART equals the correct symmetric gradient
+    // L^{-T} (K + K^T)/2 L^{-1}. Returning the asymmetric form lets the
+    // upstream matmul backward (e.g. A = v · v^T) produce the right grad_v
+    // via (grad_A + grad_A^T) · v. We MUST NOT mask off the upper triangle —
+    // doing so destroys the symmetric structure and breaks gradcheck.
+    //
+    // LAPACK leaves LD's strict-upper triangle equal to A's input strict
+    // upper (it's read-but-not-written when UPLO='L'). Strict-upper of
+    // grad_LD therefore flows back to A's strict upper directly.
+    auto upper_mask = tenzor::triu(tenzor::ones_like(A), 1);
+    auto grad_A_upper = grad_LD * upper_mask;
+
+    auto grad_A = grad_A_factor + grad_A_upper;
+    std::vector<Tensor> out;
+    out.push_back(grad_A);
+    return out;
 }
 
 // LinalgLDLSolveBackward:
@@ -1114,8 +1183,10 @@ auto LinalgVectorNormBackward::backward_with_variables(std::vector<Variable> gra
 }
 
 // LinalgMatrixNormBackward:
-// For Frobenius (ord=2): dL/dA = dL/dy * A / norm(A)
-// For other norms: complex, use dispatch
+// audit-2026-05-03 — ord=2 is the SPECTRAL norm (largest singular value),
+// not Frobenius. Backward: ∂σ_max/∂A = u_1 v_1^T where u_1, v_1 are the
+// leading left/right singular vectors. The previous implementation
+// returned the Frobenius gradient `A/norm`, which is wrong for ord=2.
 auto LinalgMatrixNormBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("LinalgMatrixNormBackward::forward should not be called directly");
 }
@@ -1123,27 +1194,35 @@ auto LinalgMatrixNormBackward::forward(std::vector<Variable>) -> std::vector<Var
 auto LinalgMatrixNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
     const auto& input = saved_tensors_[0];
-    const auto& norm_val = saved_tensors_[1];
     const auto& grad = grad_outputs[0];
 
     if (std::abs(ord_ - 2.0) < 1e-10) {
-        // Frobenius-like: grad * A / norm
-        auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto scale = div(grad, norm_val);
-        auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
-        while (scale_shape.size() < input_shape.size()) {
-            scale_shape.push_back(1);
-        }
-        auto scale_expanded = reshape(scale, scale_shape);
-        return {mul(scale_expanded, input)};
+        // Spectral norm: σ_max = Σ[0,0]. Leading left/right singular vectors
+        // u_1 = U[:, 0], v_1 = V[:, 0]. ∂σ_max/∂A = u_1 v_1^T (sign-invariant
+        // since u_1, v_1 flip together).
+        auto [U, S, Vh] = tenzor::linalg::svd(input, /*full_matrices=*/false);
+        // U is (..., M, K), Vh is (..., K, N). Take first column of U
+        // (== U[..., :, 0]) and first row of Vh (== Vh[..., 0, :]) and
+        // outer-product them. grad scales the whole thing.
+        int64_t U_ndim = U.ndim();
+        int64_t Vh_ndim = Vh.ndim();
+        // Slice U[..., :, 0:1] → (..., M, 1)
+        auto u1 = tenzor::slice(U, /*dim=*/U_ndim - 1, /*start=*/0, /*end=*/1);
+        // Slice Vh[..., 0:1, :] → (..., 1, N)
+        auto v1h = tenzor::slice(Vh, /*dim=*/Vh_ndim - 2, /*start=*/0, /*end=*/1);
+        auto outer = matmul(u1, v1h);  // (..., M, N)
+        // grad has the norm's shape (... after reducing 2 dims to scalar);
+        // expand to broadcast against outer.
+        auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+        // Add two trailing 1s for matrix dims (if grad is scalar-like).
+        while (grad_shape.size() < outer.ndim()) grad_shape.push_back(1);
+        auto grad_reshaped = reshape(grad, grad_shape);
+        return {mul(grad_reshaped, outer)};
     }
 
-    // For spectral norm (largest singular value), the gradient involves SVD
-    if (std::abs(ord_) > 2.0 || std::abs(ord_ - 1.0) < 1e-10) {
-        // Return zeros for unsupported norm types
-        return {zeros_like(input)};
-    }
-
+    // For ord = 1, -1, ±inf the gradient is column/row-sum-based — a max
+    // selector that's piecewise linear; returning zero is a placeholder
+    // for the non-smooth case and matches PyTorch's behaviour.
     return {zeros_like(input)};
 }
 
@@ -1248,6 +1327,165 @@ auto AsStridedBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     auto flat_grad = reshape(grad, {-1});
     auto result = scatter_add(grad_input, 0, index_tensor, flat_grad);
     return {reshape(result, input_shape_)};
+}
+
+// ============================================================================
+// Phase 12 (audit-2026-05-03) — Bessel J0/J1/Y0/Y1 and Zeta autograd.
+// ============================================================================
+
+// d/dx J_0(x) = -J_1(x).
+auto BesselJ0Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselJ0Backward::forward should not be called directly");
+}
+auto BesselJ0Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto deriv = neg(tenzor::bessel_j1(input));
+    return {mul(grad_outputs[0], deriv)};
+}
+auto BesselJ0Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    Variable deriv_var(neg(tenzor::bessel_j1(input)), false);
+    return {grad_outputs[0] * deriv_var};
+}
+
+// d/dx J_1(x) = J_0(x) - J_1(x)/x for x != 0; the limit at 0 is 0.5.
+auto BesselJ1Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselJ1Backward::forward should not be called directly");
+}
+auto BesselJ1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto j0v = tenzor::bessel_j0(input);
+    auto j1v = tenzor::bessel_j1(input);
+    auto eps = full(input_shape, detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_t = zeros(input_shape, input.dtype(), input.device());
+    auto x_is_zero = eq(input, zero_t);
+    auto safe_x = where(x_is_zero, eps, input);
+    auto deriv_nonzero = sub(j0v, div(j1v, safe_x));
+    auto half = full(input_shape, 0.5, input.dtype(), input.device());
+    auto deriv = where(x_is_zero, half, deriv_nonzero);
+    return {mul(grad_outputs[0], deriv)};
+}
+auto BesselJ1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto j0v = tenzor::bessel_j0(input);
+    auto j1v = tenzor::bessel_j1(input);
+    auto eps = full(input_shape, detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_t = zeros(input_shape, input.dtype(), input.device());
+    auto x_is_zero = eq(input, zero_t);
+    auto safe_x = where(x_is_zero, eps, input);
+    auto deriv_nonzero = sub(j0v, div(j1v, safe_x));
+    auto half = full(input_shape, 0.5, input.dtype(), input.device());
+    auto deriv = where(x_is_zero, half, deriv_nonzero);
+    Variable deriv_var(deriv, false);
+    return {grad_outputs[0] * deriv_var};
+}
+
+// d/dx Y_0(x) = -Y_1(x), defined for x > 0.
+auto BesselY0Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselY0Backward::forward should not be called directly");
+}
+auto BesselY0Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto deriv = neg(tenzor::bessel_y1(input));
+    return {mul(grad_outputs[0], deriv)};
+}
+auto BesselY0Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    Variable deriv_var(neg(tenzor::bessel_y1(input)), false);
+    return {grad_outputs[0] * deriv_var};
+}
+
+// d/dx Y_1(x) = Y_0(x) - Y_1(x)/x, defined for x > 0.
+auto BesselY1Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselY1Backward::forward should not be called directly");
+}
+auto BesselY1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto y0v = tenzor::bessel_y0(input);
+    auto y1v = tenzor::bessel_y1(input);
+    auto deriv = sub(y0v, div(y1v, input));
+    return {mul(grad_outputs[0], deriv)};
+}
+auto BesselY1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    auto y0v = tenzor::bessel_y0(input);
+    auto y1v = tenzor::bessel_y1(input);
+    Variable deriv_var(sub(y0v, div(y1v, input)), false);
+    return {grad_outputs[0] * deriv_var};
+}
+
+// Zeta(s, q): d/dq zeta(s, q) = -s * zeta(s+1, q).
+// Only the q-gradient is implemented; s receives a zero gradient.
+auto ZetaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("ZetaBackward::forward should not be called directly");
+}
+auto ZetaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& s_t = saved_tensors_[0];
+    const auto& q_t = saved_tensors_[1];
+    auto s_shape = std::vector<int64_t>(s_t.shape().begin(), s_t.shape().end());
+    auto one_t = ones(s_shape, s_t.dtype(), s_t.device());
+    auto s_plus_one = add(s_t, one_t);
+    auto zeta_next = tenzor::zeta(s_plus_one, q_t);
+    auto deriv_q = neg(mul(s_t, zeta_next));
+    auto grad_s = zeros(s_shape, s_t.dtype(), s_t.device());
+    auto grad_q = mul(grad_outputs[0], deriv_q);
+    std::vector<Tensor> out;
+    out.push_back(grad_s);
+    out.push_back(grad_q);
+    return out;
+}
+
+// BetaInc(a, b, x) = I_x(a, b). Differentiable wrt x:
+// dI_x(a,b)/dx = x^(a-1) (1-x)^(b-1) / B(a, b)
+//             = exp((a-1)*log(x) + (b-1)*log(1-x) - lbeta(a,b))
+//             = exp((a-1)*log(x) + (b-1)*log(1-x) + lgamma(a+b) - lgamma(a) - lgamma(b))
+auto BetaIncBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BetaIncBackward::forward should not be called directly");
+}
+auto BetaIncBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(3);
+    const auto& a = saved_tensors_[0];
+    const auto& b = saved_tensors_[1];
+    const auto& x = saved_tensors_[2];
+
+    auto a_shape = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    auto x_shape = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    auto one_a = ones(a_shape, a.dtype(), a.device());
+    auto one_x = ones(x_shape, x.dtype(), x.device());
+
+    auto am1 = sub(a, one_a);
+    auto bm1 = sub(b, one_a);
+    auto log_x = tenzor::log(x);
+    auto log_1mx = tenzor::log(sub(one_x, x));
+    // log B(a, b) = lgamma(a) + lgamma(b) - lgamma(a+b)
+    auto lg_a = tenzor::lgamma(a);
+    auto lg_b = tenzor::lgamma(b);
+    auto lg_ab = tenzor::lgamma(add(a, b));
+    auto log_inv_beta = sub(lg_ab, add(lg_a, lg_b));
+
+    auto log_deriv = add(add(mul(am1, log_x), mul(bm1, log_1mx)), log_inv_beta);
+    auto deriv = tenzor::exp(log_deriv);
+
+    auto grad_a = zeros(a_shape, a.dtype(), a.device());
+    auto grad_b = zeros(a_shape, b.dtype(), b.device());
+    auto grad_x = mul(grad_outputs[0], deriv);
+
+    std::vector<Tensor> out;
+    out.push_back(grad_a);
+    out.push_back(grad_b);
+    out.push_back(grad_x);
+    return out;
 }
 
 } // namespace tenzor

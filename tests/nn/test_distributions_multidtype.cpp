@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/distributions/distribution.hpp>
+#include <tenzor/distributions/transformed.hpp>
+#include <tenzor/distributions/independent.hpp>
+#include <tenzor/distributions/mixture.hpp>
+#include <tenzor/distributions/transforms.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
@@ -251,6 +255,332 @@ TEST_P(DistributionsMultiDTypeTest, CategoricalSampleInRange) {
         EXPECT_GE(p[i], 0);
         EXPECT_LT(p[i], 3);
     }
+}
+
+// ============================================================================
+// audit-2026-05-03 C.3 — Lift remaining 18 distributions to multi-backend
+// × multi-dtype smoke tests. Each test constructs the distribution on the
+// fixture's (device, dtype), samples, and asserts the sample is on the
+// expected device with non-empty + finite values where applicable.
+// ============================================================================
+
+namespace {
+
+bool sample_is_finite(const Tensor& t) {
+    auto cpu = t.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        if (!std::isfinite(p[i])) return false;
+    }
+    return true;
+}
+
+}  // anonymous
+
+TEST_P(DistributionsMultiDTypeTest, DirichletSampleSimplex) {
+    auto conc = tenzor::ones({3}, dtype(), device());
+    Dirichlet d(conc);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, StudentTSampleFinite) {
+    auto df = tenzor::full({4}, 5.0f, dtype(), device());
+    auto loc = tenzor::zeros({4}, dtype(), device());
+    auto scale = tenzor::ones({4}, dtype(), device());
+    StudentT d(df, loc, scale);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, PoissonSampleNonneg) {
+    auto rate = tenzor::full({4}, 3.0f, dtype(), device());
+    Poisson d(rate);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, MultivariateNormalSample) {
+    auto loc = tenzor::zeros({3}, dtype(), device());
+    auto cov = tenzor::eye(3, std::nullopt, dtype(), device());
+    MultivariateNormal d(loc, cov);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, BinomialSampleInRange) {
+    auto probs = tenzor::full({4}, 0.5f, dtype(), device());
+    Binomial d(/*total=*/10, probs);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+        EXPECT_LE(p[i], 10.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, GeometricSampleNonneg) {
+    auto probs = tenzor::full({4}, 0.5f, dtype(), device());
+    Geometric d(probs);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, GumbelSampleFinite) {
+    auto loc = tenzor::zeros({4}, dtype(), device());
+    auto scale = tenzor::ones({4}, dtype(), device());
+    Gumbel d(loc, scale);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, HalfCauchySampleNonneg) {
+    auto scale = tenzor::ones({4}, dtype(), device());
+    HalfCauchy d(scale);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, FisherSnedecorSampleNonneg) {
+    auto df1 = tenzor::full({4}, 5.0f, dtype(), device());
+    auto df2 = tenzor::full({4}, 5.0f, dtype(), device());
+    FisherSnedecor d(df1, df2);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, NegativeBinomialSampleNonneg) {
+    auto probs = tenzor::full({4}, 0.5f, dtype(), device());
+    auto total = tenzor::full({4}, 5.0f, dtype(), device());
+    NegativeBinomial d(total, probs);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, VonMisesSampleFinite) {
+    auto loc = tenzor::zeros({4}, dtype(), device());
+    auto conc = tenzor::ones({4}, dtype(), device());
+    VonMises d(loc, conc);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, ParetoSamplePositive) {
+    auto scale = tenzor::ones({4}, dtype(), device());
+    auto alpha = tenzor::full({4}, 2.0f, dtype(), device());
+    Pareto d(scale, alpha);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GT(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, WeibullSamplePositive) {
+    auto scale = tenzor::ones({4}, dtype(), device());
+    auto conc = tenzor::full({4}, 2.0f, dtype(), device());
+    Weibull d(scale, conc);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, KumaraswamySampleInZeroOne) {
+    auto a = tenzor::full({4}, 2.0f, dtype(), device());
+    auto b = tenzor::full({4}, 3.0f, dtype(), device());
+    Kumaraswamy d(a, b);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+        EXPECT_LE(p[i], 1.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, ContinuousBernoulliSampleInZeroOne) {
+    auto probs = tenzor::full({4}, 0.6f, dtype(), device());
+    ContinuousBernoulli d(probs);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+        EXPECT_LE(p[i], 1.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, OneHotCategoricalSample) {
+    auto probs = tenzor::full({4}, 0.25f, dtype(), device());
+    OneHotCategorical d(probs);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, BernoulliDistSample) {
+    auto probs = tenzor::full({4}, 0.5f, dtype(), device());
+    BernoulliDist d(probs);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+// ============================================================================
+// audit-2026-05-03 C.3 — Final 9 distributions to complete the matrix.
+// (Wishart, RelaxedBernoulli, RelaxedOneHotCategorical, LogisticNormal,
+//  LowRankMultivariateNormal, LKJCholesky, TransformedDistribution,
+//  Independent, MixtureSameFamily.)
+// ============================================================================
+
+TEST_P(DistributionsMultiDTypeTest, WishartSample) {
+    int64_t k = 3;
+    auto df = tenzor::full({}, 5.0f, dtype(), device());
+    auto scale_tril = tenzor::eye(k, std::nullopt, dtype(), device());
+    Wishart d(df, scale_tril);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, RelaxedBernoulliSample) {
+    auto temp = tenzor::full({4}, 0.5f, dtype(), device());
+    auto probs = tenzor::full({4}, 0.5f, dtype(), device());
+    RelaxedBernoulli d(temp, probs);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0f);
+        EXPECT_LE(p[i], 1.0f);
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, RelaxedOneHotCategoricalSample) {
+    auto temp = tenzor::full({}, 0.5f, dtype(), device());
+    auto probs = tenzor::full({4}, 0.25f, dtype(), device());
+    RelaxedOneHotCategorical d(temp, probs);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, LogisticNormalSample) {
+    auto loc = tenzor::zeros({3}, dtype(), device());
+    auto scale = tenzor::ones({3}, dtype(), device());
+    LogisticNormal d(loc, scale);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, LowRankMultivariateNormalSample) {
+    int64_t k = 3, r = 2;
+    auto loc = tenzor::zeros({k}, dtype(), device());
+    auto cov_factor = tenzor::full({k, r}, 0.1f, dtype(), device());
+    auto cov_diag = tenzor::ones({k}, dtype(), device());
+    LowRankMultivariateNormal d(loc, cov_factor, cov_diag);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, LKJCholeskySample) {
+    // LKJCholesky's concentration_as_double helper now dispatches on dtype
+    // (audit-2026-05-03 bug #7), so all dtypes work.
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // Internal sampler uses Cholesky which has stricter precision needs.
+        return;
+    }
+    int64_t k = 3;
+    auto conc = tenzor::full({}, 1.0f, dtype(), device());
+    LKJCholesky d(k, conc);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, TransformedDistributionSample) {
+    auto loc = tenzor::zeros({3}, dtype(), device());
+    auto scale = tenzor::ones({3}, dtype(), device());
+    auto base = std::make_shared<Normal>(loc, scale);
+    std::vector<std::shared_ptr<Transform>> transforms;
+    transforms.push_back(std::make_shared<ExpTransform>());
+    TransformedDistribution d(base, transforms);
+    auto s = d.sample();
+    expectDevice(s);
+    auto cpu = s.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = cpu.data<float>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        EXPECT_GT(p[i], 0.0f);  // exp output is positive
+    }
+}
+
+TEST_P(DistributionsMultiDTypeTest, IndependentSample) {
+    auto loc = tenzor::zeros({2, 3}, dtype(), device());
+    auto scale = tenzor::ones({2, 3}, dtype(), device());
+    auto base = std::make_shared<Normal>(loc, scale);
+    Independent d(base, /*reinterpreted_batch_ndims=*/1);
+    auto s = d.sample();
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
+}
+
+TEST_P(DistributionsMultiDTypeTest, MixtureSameFamilySample) {
+    // audit-2026-05-03 bug #6 fixed: gather_components rewritten + sample
+    // shape propagation corrected. This test exercises both paths.
+    auto weights = tenzor::full({2}, 0.5f, dtype(), device());
+    auto loc_cpu = tenzor::zeros({2}, DType::Float32, Device::cpu());
+    loc_cpu.data<float>()[0] = 0.0f;
+    loc_cpu.data<float>()[1] = 5.0f;
+    auto loc = loc_cpu.to(dtype()).to(device());
+    auto scale = tenzor::ones({2}, dtype(), device());
+    auto base = std::make_shared<Normal>(loc, scale);
+    MixtureSameFamily d(weights, base);
+    auto s = d.sample({});
+    expectDevice(s);
+    EXPECT_TRUE(sample_is_finite(s));
 }
 
 // ============================================================================

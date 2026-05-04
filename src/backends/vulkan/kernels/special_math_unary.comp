@@ -314,18 +314,58 @@ float spherical_bessel_j0_impl(float x) {
 }
 
 // ----- Polygamma -----
+// ψ^(n)(x) = (-1)^(n+1) [n! Σ 1/(x+k)^(n+1)]. The straight series
+// converges as 1/k for n=1 (trigamma): 100 terms leaves a ~1/100 tail
+// (~0.01 abs error), which is enough to fail Float32 gradcheck.
+// Use the recurrence ψ^(n)(x) = ψ^(n)(x+1) + (-1)^(n+1) n! / x^(n+1) to
+// shift x above a threshold, then use the asymptotic Bernoulli series.
+//   ψ'(x) ~ 1/x + 1/(2x²) + B_2/x³ + B_4/x⁵ + …
+// For n ≥ 2, differentiate term-wise:
+//   ψ^(n)(x) ~ (-1)^(n+1) [(n-1)!/x^n + n!/(2 x^(n+1))
+//                            + Σ B_{2k} (2k+n-1)! / ((2k)! x^(2k+n))]
 float polygamma_impl(int n, float x) {
     if (n == 0) return digamma_impl(x);
+
     float fact_n = 1.0f;
     for (int k = 1; k <= n; ++k) fact_n *= float(k);
     float sgn = ((n + 1) % 2 == 0) ? 1.0f : -1.0f;
-    float sum = 0.0f;
-    for (int k = 0; k < 100; ++k) {
-        float term = pow(x + float(k), -float(n + 1));
-        sum += term;
-        if (term < 1.0e-12f * abs(sum)) break;
+
+    // Recurrence: shift x up so the asymptotic series converges quickly.
+    const float kShiftTarget = 12.0f;
+    float shifted = 0.0f;
+    for (int i = 0; i < 64; ++i) {
+        if (x >= kShiftTarget) break;
+        shifted += pow(x, -float(n + 1));
+        x += 1.0f;
     }
-    return sgn * fact_n * sum;
+
+    // Asymptotic expansion at the shifted x.
+    float inv_x = 1.0f / x;
+    float inv_x_n = pow(inv_x, float(n));
+    float fact_nm1 = fact_n / float(n);  // (n-1)!
+
+    float sum_asym = fact_nm1 * inv_x_n + 0.5f * fact_n * inv_x_n * inv_x;
+
+    // Bernoulli correction terms B_{2k}/(2k)!:
+    //   k=1: 1/12      k=2: -1/720      k=3: 1/30240
+    //   k=4: -1/1209600  k=5: 5/479001600
+    const float B_over_fact[5] = float[5](
+        1.0f/12.0f,
+        -1.0f/720.0f,
+        1.0f/30240.0f,
+        -1.0f/1209600.0f,
+        1.0f/47900160.0f
+    );
+    float inv_x2 = inv_x * inv_x;
+    float power = inv_x_n * inv_x;
+    float rising = 1.0f;
+    for (int k = 1; k <= 5; ++k) {
+        rising *= float(n + 2*k - 1) * float(n + 2*k - 2);
+        power *= inv_x2;
+        sum_asym += B_over_fact[k-1] * rising * power;
+    }
+
+    return sgn * (fact_n * shifted + sum_asym);
 }
 
 void main() {

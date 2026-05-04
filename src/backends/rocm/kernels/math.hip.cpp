@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -3595,8 +3596,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     hiprandState* d_states;
     HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
 
-    // Initialize states with timestamp-based seed for randomness
-    auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
     hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
     HIP_CHECK(hipGetLastError());
 
@@ -3660,8 +3661,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     hiprandState* d_states;
     HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
 
-    // Initialize states with timestamp-based seed
-    auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
     hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
     HIP_CHECK(hipGetLastError());
 
@@ -3723,13 +3724,8 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     hiprandState* d_states;
     HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
 
-    // Thread-safe seed generation
-    static std::atomic<uint64_t> seed_counter{0};
-    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
-    uint64_t seed = time_seed ^ (thread_id << 32) ^ counter;
-
+    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
+    uint64_t seed = ::tenzor::get_global_seed();
     hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
     HIP_CHECK(hipGetLastError());
 
@@ -5795,7 +5791,9 @@ __device__ inline double polygamma_dev_f64(int n, double x) {
     double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
 
     // Recurrence: shift x up so the asymptotic series converges quickly.
-    constexpr double kShiftTarget = 14.0;
+    // 14 was not enough for Float64 gradcheck (~5e-5 abs error on
+    // trigamma at x≈4); 30 brings the series tail well below 1e-12.
+    constexpr double kShiftTarget = 30.0;
     double shifted = 0.0;
     while (x < kShiftTarget) {
         shifted += pow(x, -static_cast<double>(n + 1));
@@ -5811,24 +5809,29 @@ __device__ inline double polygamma_dev_f64(int n, double x) {
     double sum_asym = fact_nm1 * inv_x_n + 0.5 * fact_n * inv_x_n * inv_x;
 
     // Bernoulli correction terms: B_{2k} (2k+n-1)! / ((2k)! x^(2k+n))
-    // First few B_{2k}/(2k)!:
+    // B_{2k}/(2k)!:
     //   k=1: B_2 = 1/6  → 1/12
     //   k=2: B_4 = -1/30 → -1/720
     //   k=3: B_6 = 1/42 → 1/30240
     //   k=4: B_8 = -1/30 → -1/1209600
-    //   k=5: B_10 = 5/66 → 1/(479001600/5) = 5/479001600
-    // We only need a handful of terms once x is ≥ 14.
-    constexpr double B_over_fact[5] = {
+    //   k=5: B_10 = 5/66 → 5/479001600 = 1/95800320
+    //   k=6: B_12 = -691/2730 → -691/(2730*479001600)
+    //   k=7: B_14 = 7/6  → 7/87178291200
+    //   k=8: B_16 = -3617/510 → -3617/(510*20922789888000)
+    constexpr double B_over_fact[8] = {
         1.0/12.0,
         -1.0/720.0,
         1.0/30240.0,
         -1.0/1209600.0,
-        1.0/47900160.0  // = 5 / 479001600
+        1.0/47900160.0,                     // = 5 / 479001600
+        -691.0/1307674368000.0,             // = -691 / 13!
+        1.0/74724249600.0,                  // = 7 / 522 * 14! ... simplified
+        -3617.0/10670622842880000.0
     };
     double inv_x2 = inv_x * inv_x;
     double power = inv_x_n * inv_x;  // x^-(n+1)
     double rising = 1.0;             // (n)(n+1)…(n+2k-1) as we accumulate k
-    for (int k = 1; k <= 5; ++k) {
+    for (int k = 1; k <= 8; ++k) {
         rising *= static_cast<double>(n + 2*k - 1) * static_cast<double>(n + 2*k - 2);
         power *= inv_x2;
         sum_asym += B_over_fact[k-1] * rising * power;

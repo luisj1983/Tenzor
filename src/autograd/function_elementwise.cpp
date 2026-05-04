@@ -116,10 +116,16 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     const auto& input = saved_tensors_[0];
     const auto& grad_output = grad_outputs[0];
 
-    // Calculate the number of elements that were averaged
+    // Calculate the number of elements that were averaged.
+    // Normalize negative dim before indexing into shape — the dim-specific
+    // branch below already does this (line ~157), but the n_elements compute
+    // previously read raw `dim_.value()` and tripped a libstdc++ span
+    // out-of-bounds assertion when dim < 0. (audit-2026-05-03 bug #5)
     int64_t n_elements = 1;
     if (dim_.has_value()) {
-        n_elements = input.shape()[dim_.value()];
+        int64_t dim_pos = dim_.value();
+        if (dim_pos < 0) dim_pos += static_cast<int64_t>(input.shape().size());
+        n_elements = input.shape()[dim_pos];
     } else {
         n_elements = input.numel();
     }
@@ -180,9 +186,12 @@ auto MeanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // for higher-order gradient support.
     const auto& input = saved_tensors_[0];
 
+    // Normalize negative dim before indexing into shape (audit-2026-05-03 bug #5).
     int64_t n_elements = 1;
     if (dim_.has_value()) {
-        n_elements = input.shape()[dim_.value()];
+        int64_t dim_pos = dim_.value();
+        if (dim_pos < 0) dim_pos += static_cast<int64_t>(input.shape().size());
+        n_elements = input.shape()[dim_pos];
     } else {
         n_elements = input.numel();
     }

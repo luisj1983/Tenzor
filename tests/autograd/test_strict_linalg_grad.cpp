@@ -47,7 +47,16 @@ protected:
     }
 };
 
-TEST_F(StrictLinalgGradTest, LDLFactor_ZeroGradByDefault) {
+// audit-2026-05-03 Phase 12: LDL backward now uses the closed-form
+// structural-symmetric backprop derived from A = L D L^T (see
+// `LinalgLDLFactorBackward::backward` in `function_new_ops.cpp`). The old
+// "zero-gradient stub gated by TENZOR_STRICT_LINALG_GRAD" contract is no
+// longer applicable — these tests now verify the meaningful gradient is
+// produced and that the strict env var is a no-op for the LDL path
+// (it stays in source as a structural marker for *other* linalg ops that
+// still use the zero-grad stub: `householder_product`).
+
+TEST_F(StrictLinalgGradTest, LDLFactor_ProducesMeaningfulGradient) {
     unsetenv("TENZOR_STRICT_LINALG_GRAD");
 
     Variable A(make_spd(4), /*requires_grad=*/true);
@@ -58,42 +67,42 @@ TEST_F(StrictLinalgGradTest, LDLFactor_ZeroGradByDefault) {
     ASSERT_TRUE(A.has_grad());
     auto g = A.grad().value().to(DType::Float64).contiguous();
     const double* gp = g.data<double>();
+    bool any_nonzero = false;
     for (int64_t i = 0; i < g.numel(); ++i) {
-        EXPECT_EQ(gp[i], 0.0)
-            << "LDL backward default mode should return zero gradient";
+        if (gp[i] != 0.0) { any_nonzero = true; break; }
     }
+    EXPECT_TRUE(any_nonzero)
+        << "LDL backward should now produce a real (non-zero) gradient";
 }
 
-TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeThrows) {
+TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeIsNoopForLDL) {
     setenv("TENZOR_STRICT_LINALG_GRAD", "1", /*overwrite=*/1);
 
     Variable A(make_spd(4), /*requires_grad=*/true);
     auto [LD, pivots] = ldl_factor(A);
     auto loss = tenzor::sum(LD);
-    EXPECT_THROW(loss.backward(), std::runtime_error)
-        << "With TENZOR_STRICT_LINALG_GRAD=1, LDL backward must throw";
+    // LDL has a real backward; strict mode no longer throws for it.
+    EXPECT_NO_THROW(loss.backward());
 }
 
-TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseStillPermissive) {
+TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
     setenv("TENZOR_STRICT_LINALG_GRAD", "0", /*overwrite=*/1);
 
     Variable A(make_spd(4), /*requires_grad=*/true);
     auto [LD, pivots] = ldl_factor(A);
     auto loss = tenzor::sum(LD);
-    EXPECT_NO_THROW(loss.backward())
-        << "TENZOR_STRICT_LINALG_GRAD=0 should behave like unset";
+    EXPECT_NO_THROW(loss.backward());
 
-    // Same observable behavior as default (zero-gradient stub). Matches the
-    // assertion in LDLFactor_ZeroGradByDefault — without it, EXPECT_NO_THROW
-    // alone could pass even if the strict=0 path silently diverged.
     ASSERT_TRUE(A.has_grad());
     auto g = A.grad().value().to(DType::Float64).contiguous();
     const double* gp = g.data<double>();
+    bool any_nonzero = false;
     for (int64_t i = 0; i < g.numel(); ++i) {
-        EXPECT_EQ(gp[i], 0.0)
-            << "TENZOR_STRICT_LINALG_GRAD=0 must produce the same zero "
-               "gradient as the unset default mode";
+        if (gp[i] != 0.0) { any_nonzero = true; break; }
     }
+    EXPECT_TRUE(any_nonzero)
+        << "TENZOR_STRICT_LINALG_GRAD=0 should produce the same real "
+           "gradient as the unset default";
 }
 
 }  // namespace

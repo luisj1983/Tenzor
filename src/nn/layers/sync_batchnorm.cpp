@@ -281,18 +281,22 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
     if (is_training()) {
         int64_t local_count = N * H * W;
 
-        // Compute in FP32 for numerical stability
-        auto x_fp32 = (x.dtype() != DType::Float32) ? x.to(DType::Float32) : x;
+        // audit-2026-05-03 Phase 10 — only cast UP, never DOWN. Casting
+        // Float64 to Float32 for "numerical stability" actually destroyed
+        // ~30 mantissa bits and broke Float64 SyncBatchNorm gradcheck on
+        // every backend. Float16/BFloat16 still upcast to Float32.
+        DType compute_dtype = (x.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+        auto x_compute = (x.dtype() != compute_dtype) ? x.to(compute_dtype) : x;
 
         // Per-channel local sum: reduce over N, H, W -> [C]
-        auto local_sum = sum(sum(sum(x_fp32, 3, false), 2, false), 0, false);
+        auto local_sum = sum(sum(sum(x_compute, 3, false), 2, false), 0, false);
 
         // Per-channel local sum of squares
-        auto x_sq = x_fp32 * x_fp32;
+        auto x_sq = x_compute * x_compute;
         auto local_sum_sq = sum(sum(sum(x_sq, 3, false), 2, false), 0, false);
 
         // Pack [local_sum, local_sum_sq, count] for a single all-reduce
-        auto count_tensor = full({1}, static_cast<float>(local_count), DType::Float32).to(x.device());
+        auto count_tensor = full({1}, static_cast<double>(local_count), compute_dtype).to(x.device());
         auto packed = cat({local_sum, local_sum_sq, count_tensor}, 0);
 
         // All-reduce across ranks (SUM)
@@ -304,14 +308,21 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         auto global_sum = packed.slice(0, 0, C);
         auto global_sum_sq = packed.slice(0, C, 2 * C);
         auto global_count_t = packed.slice(0, 2 * C, 2 * C + 1);
-        // Move to CPU to read the scalar value (tensor may be on GPU)
-        float global_count_f = global_count_t.to(Device::cpu()).data<float>()[0];
-        global_count = static_cast<int64_t>(global_count_f);
-        float inv_count = 1.0f / global_count_f;
+        // Move to CPU to read the scalar value (tensor may be on GPU). Read
+        // at the compute dtype so Float64 doesn't truncate via float.
+        double global_count_d;
+        if (compute_dtype == DType::Float64) {
+            global_count_d = global_count_t.to(Device::cpu()).data<double>()[0];
+        } else {
+            global_count_d = static_cast<double>(global_count_t.to(Device::cpu()).data<float>()[0]);
+        }
+        global_count = static_cast<int64_t>(global_count_d);
+        // inv_count materialised as a tensor so it adopts compute_dtype.
+        auto inv_count_t = full({1}, 1.0 / global_count_d, compute_dtype).to(x.device());
 
-        batch_mean = global_sum * inv_count;
+        batch_mean = global_sum * inv_count_t;
         // Var = E[X^2] - E[X]^2
-        batch_var = global_sum_sq * inv_count - batch_mean * batch_mean;
+        batch_var = global_sum_sq * inv_count_t - batch_mean * batch_mean;
 
         // Update running statistics
         if (track_running_stats_) {

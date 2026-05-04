@@ -65,10 +65,20 @@ inline auto pad_tuple_grad_outputs(
             }
             return true;
         };
+        // Prefer the default slot when its prototype matches the grad's
+        // shape — important for ops like Slogdet where multiple output
+        // slots have the same shape (sign and logabsdet are both scalars
+        // of identical layout). The previous "first matching slot" search
+        // misrouted the grad to slot 0 (sign, mathematically zero-grad)
+        // and wiped the real gradient on slot 1 (logabsdet).
         size_t slot = default_slot;
         bool found = false;
-        for (size_t i = 0; i < expected; ++i) {
-            if (matches(slot_prototypes[i])) { slot = i; found = true; break; }
+        if (default_slot < expected && matches(slot_prototypes[default_slot])) {
+            found = true;
+        } else {
+            for (size_t i = 0; i < expected; ++i) {
+                if (matches(slot_prototypes[i])) { slot = i; found = true; break; }
+            }
         }
         if (!found && g.numel() != slot_prototypes[slot].numel()) {
             // Mismatched shape and no prototype matches — fall through with
@@ -325,10 +335,33 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& U = saved_tensors_[0];        // U, (..., M, K)
     const auto& S = saved_tensors_[1];        // S, (..., K)
     const auto& Vh = saved_tensors_[2];       // Vh, (..., K, N)
-    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {U, S, Vh});
-    const auto& grad_U = grad_outputs[0];     // dL/dU, (..., M, K)
-    const auto& grad_S = grad_outputs[1];     // dL/dS, (..., K)
-    const auto& grad_Vh = grad_outputs[2];    // dL/dVh, (..., K, N)
+
+    // audit-2026-05-03 — when output_slot_ is set, only one of {U, S, Vh}
+    // received an upstream gradient (engine collapse safe). Re-route the
+    // single grad to its proper slot.
+    Tensor grad_U_t, grad_S_t, grad_Vh_t;
+    if (output_slot_ == 0) {
+        grad_U_t = grad_outputs[0];
+        grad_S_t = zeros_like(S);
+        grad_Vh_t = zeros_like(Vh);
+    } else if (output_slot_ == 1) {
+        grad_U_t = zeros_like(U);
+        grad_S_t = grad_outputs[0];
+        grad_Vh_t = zeros_like(Vh);
+    } else if (output_slot_ == 2) {
+        grad_U_t = zeros_like(U);
+        grad_S_t = zeros_like(S);
+        grad_Vh_t = grad_outputs[0];
+    } else {
+        // Legacy combined path.
+        grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {U, S, Vh});
+        grad_U_t = grad_outputs[0];
+        grad_S_t = grad_outputs[1];
+        grad_Vh_t = grad_outputs[2];
+    }
+    const auto& grad_U = grad_U_t;
+    const auto& grad_S = grad_S_t;
+    const auto& grad_Vh = grad_Vh_t;
 
     auto ndim = U.ndim();
     auto K = S.shape()[S.ndim() - 1];
@@ -406,16 +439,55 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // The correct formula from Ionescu et al. 2015:
     // dA = U @ (diag(grad_S) + (F * (Ut@gU)) @ S + S @ (F * (gVh@V))) @ Vh
 
-    auto F_UtgU = mul(F, UtgU);
-    auto F_gVhV = mul(F, gVhV);
+    // audit-2026-05-03 — corrected SVD backward formula. The U-derivative
+    // and V-derivative contributions go through the ANTISYMMETRIC part of
+    // U^T grad_U and grad_Vh V (the symmetric parts are absorbed by the
+    // U^T U = I and V^T V = I constraints). The previous formulation used
+    // F ⊙ (U^T grad_U) directly, which mixed the symmetric (constrained)
+    // component into the gradient and broke gradcheck.
+    // Antisymmetric components:
+    //   skew_U = U^T grad_U - (U^T grad_U)^T
+    //   skew_V = V^T grad_V - (V^T grad_V)^T = (grad_Vh V)^T - (grad_Vh V) = gVhVt - gVhV
+    // (Because Vh = V^T, grad_V = grad_Vh^T, so V^T grad_V = (grad_Vh V)^T.)
+    auto UtgU_t = transpose(UtgU, UtgU.ndim() - 2, UtgU.ndim() - 1);
+    auto skew_U = sub(UtgU, UtgU_t);
+    auto skew_V = sub(gVhVt, gVhV);
+
+    auto F_UtgU = mul(F, skew_U);
+    auto F_gVhV = mul(F, skew_V);
 
     auto term1 = diag(grad_S);             // diag(grad_S), (K, K)
-    auto term2 = matmul(F_UtgU, S_diag);   // F*(Ut@gU) @ S
-    auto term3 = matmul(S_diag, F_gVhV);   // S @ F*(gVh@V)
+    auto term2 = matmul(F_UtgU, S_diag);   // F*(skew_U) @ S
+    auto term3 = matmul(S_diag, F_gVhV);   // S @ F*(skew_V)
 
     auto middle = add(add(term1, term2), term3);  // (K, K)
 
     auto grad_A = matmul(matmul(U, middle), Vh);  // (..., M, N)
+
+    // audit-2026-05-03 — projector terms for non-square U, V (full_matrices
+    // = false with M ≠ N). For tall U (M > K): add (I - U U^T) · grad_U · S^{-1} · V^T.
+    // For wide V (N > K): add U · S^{-1} · grad_Vh · (I - V V^T).
+    int64_t M = U.shape()[ndim - 2];
+    int64_t N = Vh.shape()[Vh.ndim() - 1];
+    auto S_inv = reciprocal(S);
+    auto S_inv_diag = diag(S_inv);
+    if (M > K) {
+        // (I - U U^T) is (M, M)
+        auto eye_M = eye(M, std::nullopt, U.dtype(), U.device());
+        auto UUt = matmul(U, Ut);                    // (M, M)
+        auto proj_M = sub(eye_M, UUt);               // (M, M)
+        // proj_M @ grad_U @ S^{-1} @ Vh
+        auto extra = matmul(matmul(matmul(proj_M, grad_U), S_inv_diag), Vh);
+        grad_A = add(grad_A, extra);
+    }
+    if (N > K) {
+        // (I - V V^T) is (N, N)
+        auto eye_N = eye(N, std::nullopt, U.dtype(), U.device());
+        auto VVt = matmul(V, transpose(V, V.ndim() - 2, V.ndim() - 1));
+        auto proj_N = sub(eye_N, VVt);
+        auto extra = matmul(matmul(matmul(U, S_inv_diag), grad_Vh), proj_N);
+        grad_A = add(grad_A, extra);
+    }
 
     return {grad_A};
 }
@@ -448,9 +520,14 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     auto Rt = transpose(R, ndim - 2, ndim - 1);
     auto Qt = transpose(Q, Q.ndim() - 2, Q.ndim() - 1);
 
-    // M = R @ grad_R^T - grad_Q^T @ Q
+    // audit-2026-05-03 — corrected to PyTorch's convention:
+    //   M = R · grad_R^T - grad_Q^T · Q
+    // Previous code had `matmul(Qt, grad_Q)` = Q^T · grad_Q which is the
+    // TRANSPOSE of grad_Q^T · Q — the formula's copyltu pattern then fired
+    // on the wrong triangle, breaking the QR-Q gradcheck on every backend.
     auto grad_Rt = transpose(grad_R, ndim - 2, ndim - 1);
-    auto M = sub(matmul(R, grad_Rt), matmul(Qt, grad_Q));
+    auto grad_Qt = transpose(grad_Q, grad_Q.ndim() - 2, grad_Q.ndim() - 1);
+    auto M = sub(matmul(R, grad_Rt), matmul(grad_Qt, Q));
 
     // copyltu(M) = tril(M) + tril(M, -1)^T
     auto M_tril = tril(M);
@@ -975,27 +1052,119 @@ auto LUBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad_L = grad_outputs[0];   // (..., N, N)
-    const auto& grad_U = grad_outputs[1];   // (..., N, N)
-    // grad_outputs[2] is for pivots -- ignored (non-differentiable)
+    // audit-2026-05-03 — full closed-form LU backward.
+    //
+    // Forward (with partial pivoting): PA = LU where L is unit lower
+    // triangular and U is upper triangular.
+    // Differential: dA = P^T (dL · U + L · dU).
+    // Adjoint:
+    //   Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
+    //   grad_A = P^T · L^{-T} · Φ · U^{-T}
+    // (Derivation: Walter "Structured Matrix Differentiation" / Giles
+    //  matrix-derivative cookbook. Verified against numerical 2x2.)
+    //
+    // output_slot_ identifies which of {L=0, U=1} this instance handles;
+    // the engine collapses per-output grads otherwise.
+    require_saved_tensors(2);
+    const auto& L = saved_tensors_[0];
+    const auto& U = saved_tensors_[1];
 
-    const auto& L = saved_tensors_[0];      // (..., N, N) unit lower triangular
-    const auto& U = saved_tensors_[1];      // (..., N, N) upper triangular
+    Tensor grad_L, grad_U;
+    if (output_slot_ == 0) {
+        grad_L = grad_outputs[0];
+        grad_U = zeros_like(U);
+    } else if (output_slot_ == 1) {
+        grad_L = zeros_like(L);
+        grad_U = grad_outputs[0];
+    } else {
+        // Legacy combined path (output_slot == -1): pad to 2 entries.
+        while (grad_outputs.size() < 2) {
+            grad_outputs.push_back(zeros_like(saved_tensors_[grad_outputs.size()]));
+        }
+        grad_L = grad_outputs[0];
+        grad_U = grad_outputs[1];
+    }
 
-    // L is unit lower triangular: only the strictly lower part of grad_L contributes
-    auto grad_L_strict = tril(grad_L, -1);
 
-    // U is upper triangular: only the upper part of grad_U contributes
-    auto grad_U_upper = triu(grad_U);
+    int64_t n = L.shape().back();
+    auto eye_n = tenzor::eye(n, std::nullopt, L.dtype(), L.device());
 
-    // grad_A = grad_L_strict @ U + L @ grad_U_upper
-    // (Ignoring permutation P for simplicity -- the gradient flows through P^T
-    //  but P is a constant permutation, so P^T @ grad = reorder rows of grad.
-    //  For the common case where backward() is called after lu() in autograd,
-    //  the permutation is handled by the saved_tensors order.)
-    auto term1 = matmul(grad_L_strict, U);
-    auto term2 = matmul(L, grad_U_upper);
-    auto grad_A = add(term1, term2);
+    // Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
+    auto LT = transpose(L, -1, -2);
+    auto UT = transpose(U, -1, -2);
+    auto phi_lower = tril(matmul(LT, grad_L), -1);
+    auto phi_upper = triu(matmul(grad_U, UT), 0);
+    auto phi = add(phi_lower, phi_upper);
+
+    // L^{-1} and U^{-1} via triangular solves. The Vulkan solve_triangular
+    // shader for unitriangular=true Float64 has a heap-corrupting bug
+    // (audit-2026-05-03 — investigated separately); compute inverses on CPU
+    // and move back when on Vulkan.
+    auto run_solve = [&](const Tensor& T, bool upper, bool uni) {
+        if (T.device().type == Device::Type::Vulkan) {
+            auto T_cpu = T.to(Device::cpu()).contiguous();
+            auto eye_cpu = ::tenzor::eye(n, std::nullopt, T.dtype(), Device::cpu());
+            auto inv_cpu = tenzor::linalg::solve_triangular(T_cpu, eye_cpu, upper, uni);
+            return inv_cpu.to(T.device());
+        }
+        return tenzor::linalg::solve_triangular(T, eye_n, upper, uni);
+    };
+    auto L_inv = run_solve(L, /*upper=*/false, /*unitriangular=*/true);
+    auto LT_inv = transpose(L_inv, -1, -2);
+    auto U_inv = run_solve(U, /*upper=*/true, /*unitriangular=*/false);
+    auto UT_inv = transpose(U_inv, -1, -2);
+
+    auto grad_A = matmul(matmul(LT_inv, phi), UT_inv);
+
+    // Apply P^T if pivots were saved. The pivot encoding differs across
+    // backends: LAPACK / CPU return 1-indexed values in [1..n]; Vulkan's
+    // runBlockedLU writes 0-indexed values in [0..n-1]. Detect by max value
+    // and normalise to 0-based row indices.
+    if (saved_tensors_.size() > 2) {
+        const auto& pivots = saved_tensors_[2];
+        Tensor pivots_cpu = pivots.to(Device::cpu()).contiguous();
+        if (pivots_cpu.ndim() == 1 && pivots_cpu.dtype() == DType::Int32) {
+            const int32_t* piv_data = pivots_cpu.data<int32_t>();
+            int64_t M = pivots_cpu.shape()[0];
+
+            // Detect convention: if any value equals M, it's 1-indexed.
+            bool one_indexed = false;
+            for (int64_t i = 0; i < M; ++i) {
+                if (piv_data[i] >= static_cast<int32_t>(M)) { one_indexed = true; break; }
+                if (piv_data[i] < 0) { one_indexed = true; break; }
+            }
+            std::vector<int32_t> piv0(M);
+            for (int64_t i = 0; i < M; ++i) {
+                piv0[i] = one_indexed ? (piv_data[i] - 1) : piv_data[i];
+            }
+
+            bool identity = true;
+            for (int64_t i = 0; i < M; ++i) {
+                if (piv0[i] != static_cast<int32_t>(i)) { identity = false; break; }
+            }
+            if (!identity) {
+                Tensor g_cpu = grad_A.to(Device::cpu()).contiguous();
+                int64_t Nc = g_cpu.shape().back();
+
+                auto do_swap = [&](auto* mat) {
+                    for (int64_t i = M - 1; i >= 0; --i) {
+                        int64_t target = static_cast<int64_t>(piv0[i]);
+                        if (target != i) {
+                            for (int64_t k = 0; k < Nc; ++k) {
+                                std::swap(mat[i * Nc + k], mat[target * Nc + k]);
+                            }
+                        }
+                    }
+                };
+                if (g_cpu.dtype() == DType::Float64) {
+                    do_swap(g_cpu.data<double>());
+                } else {
+                    do_swap(g_cpu.data<float>());
+                }
+                grad_A = g_cpu.to(L.device());
+            }
+        }
+    }
 
     return {grad_A};
 }
@@ -1068,6 +1237,59 @@ auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
         auto grad_U = neg(triu(grad_U_full));
         return {grad_B, grad_U};
     }
+}
+
+// ============================================================================
+// LUSolveBackward — audit-2026-05-03 Phase 8.
+// Forward: X = lu_solve(LU, pivots, B). Treats LU/pivots as fixed.
+// Backward: dL/dB = solve(A^T, dL/dX) where A = lu_to_dense(LU, pivots).
+// Saves the reconstructed A for backward.
+// ============================================================================
+auto LUSolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("LUSolveBackward::forward should not be called directly");
+}
+
+auto LUSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& A = saved_tensors_[0];
+    auto ndim = A.ndim();
+    auto At = transpose(A, ndim - 2, ndim - 1).contiguous();
+    return {tenzor::linalg::solve(At, grad)};
+}
+
+// ============================================================================
+// EigBackward — audit-2026-05-03 Phase 8 (non-symmetric eigendecomposition).
+// Forward: A → (W_real, W_imag, V).
+// Backward (eigenvalue path only, real eigenvalues):
+//   dA = V^{-T} @ diag(dW_real) @ V^T
+// ============================================================================
+auto EigBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("EigBackward::forward should not be called directly");
+}
+
+auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Pad to 3 grad outputs (W_real, W_imag, V) so we can safely index even
+    // when the engine only fills the first one.
+    if (grad_outputs.size() < 3) {
+        const auto& W = saved_tensors_[0];
+        const auto& V = saved_tensors_[1];
+        if (grad_outputs.size() < 1) {
+            grad_outputs.push_back(zeros_like(W));
+        }
+        while (grad_outputs.size() < 2) {
+            grad_outputs.push_back(zeros_like(W));
+        }
+        while (grad_outputs.size() < 3) {
+            grad_outputs.push_back(zeros_like(V));
+        }
+    }
+    const auto& grad_W_real = grad_outputs[0];
+    const auto& V = saved_tensors_[1];
+    auto ndim = V.ndim();
+    auto diag_dW = diag(grad_W_real);
+    auto Vt = transpose(V, ndim - 2, ndim - 1);
+    auto rhs = matmul(diag_dW, Vt);
+    return {tenzor::linalg::solve(Vt.contiguous(), rhs)};
 }
 
 } // namespace tenzor

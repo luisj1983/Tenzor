@@ -1779,10 +1779,13 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
 // GroupNorm / InstanceNorm with saved stats (for backward pass)
 // ============================================================================
 
-template<typename T>
-void group_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
-                                 float* mean_out, float* inv_std_out,
-                                 int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, float eps) {
+// audit-2026-05-03 — same Stats-precision fix as instance_norm_impl_with_stats.
+// Stats == double when T is Float64 (preserves Float64 gradient precision
+// through the autograd path).
+template<typename T2, typename Stats>
+void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_data, const T2* b_data,
+                                 Stats* mean_out, Stats* inv_std_out,
+                                 int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, double eps) {
     int64_t channels_per_group = C / num_groups;
 
     #pragma omp parallel for collapse(2) if(N * num_groups > 16)
@@ -1791,24 +1794,24 @@ void group_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, 
             int64_t c_start = g * channels_per_group;
             int64_t group_size = channels_per_group * spatial_size;
 
-            float mean = 0.0f;
+            Stats mean = Stats(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                    mean += static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]);
                 }
             }
-            mean /= static_cast<float>(group_size);
+            mean /= static_cast<Stats>(group_size);
 
-            float var = 0.0f;
+            Stats var = Stats(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    Stats diff = static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]) - mean;
                     var += diff * diff;
                 }
             }
-            var /= static_cast<float>(group_size);
+            var /= static_cast<Stats>(group_size);
 
-            float inv_std = 1.0f / std::sqrt(var + eps);
+            Stats inv_std = Stats(1) / std::sqrt(var + static_cast<Stats>(eps));
 
             // Save stats
             mean_out[n * num_groups + g] = mean;
@@ -1817,8 +1820,8 @@ void group_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, 
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
                     int64_t idx = (n * C + c) * spatial_size + s;
-                    float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
-                    out_data[idx] = static_cast<T>(normalized * static_cast<float>(w_data[c]) + static_cast<float>(b_data[c]));
+                    Stats normalized = (static_cast<Stats>(in_data[idx]) - mean) * inv_std;
+                    out_data[idx] = static_cast<T2>(normalized * static_cast<Stats>(w_data[c]) + static_cast<Stats>(b_data[c]));
                 }
             }
         }
@@ -1838,26 +1841,27 @@ auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
-    auto mean = Tensor::empty_uninitialized({N, num_groups}, DType::Float32, input.device());
-    auto inv_std = Tensor::empty_uninitialized({N, num_groups}, DType::Float32, input.device());
+    DType stats_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    auto mean = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
+    auto inv_std = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
-        group_norm_impl_with_stats<float>(input.data<float>(), output.data<float>(),
+        group_norm_impl_with_stats<float, float>(input.data<float>(), output.data<float>(),
                                            weight.data<float>(), bias.data<float>(),
                                            mean.data<float>(), inv_std.data<float>(),
                                            N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float64) {
-        group_norm_impl_with_stats<double>(input.data<double>(), output.data<double>(),
+        group_norm_impl_with_stats<double, double>(input.data<double>(), output.data<double>(),
                                             weight.data<double>(), bias.data<double>(),
-                                            mean.data<float>(), inv_std.data<float>(),
+                                            mean.data<double>(), inv_std.data<double>(),
                                             N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float16) {
-        group_norm_impl_with_stats<Float16>(input.data<Float16>(), output.data<Float16>(),
+        group_norm_impl_with_stats<Float16, float>(input.data<Float16>(), output.data<Float16>(),
                                              weight.data<Float16>(), bias.data<Float16>(),
                                              mean.data<float>(), inv_std.data<float>(),
                                              N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        group_norm_impl_with_stats<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+        group_norm_impl_with_stats<BFloat16, float>(input.data<BFloat16>(), output.data<BFloat16>(),
                                               weight.data<BFloat16>(), bias.data<BFloat16>(),
                                               mean.data<float>(), inv_std.data<float>(),
                                               N, C, spatial_size, num_groups, eps);
@@ -1868,38 +1872,43 @@ auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
     return {output, mean, inv_std};
 }
 
-template<typename T>
+// audit-2026-05-03 Phase 10 — use Stats type for mean/inv_std accumulators.
+// Stats == double when T is Float64, otherwise float. Stats type matches the
+// dtype of the saved mean/rstd tensors, so the backward kernel reads them
+// with the correct precision (previously hardcoded float, dropping Float64
+// precision on the autograd path).
+template<typename T, typename Stats>
 void instance_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
-                                    float* mean_out, float* inv_std_out,
-                                    int64_t N, int64_t C, int64_t spatial_size, float eps) {
+                                    Stats* mean_out, Stats* inv_std_out,
+                                    int64_t N, int64_t C, int64_t spatial_size, double eps) {
     #pragma omp parallel for collapse(2) if(N * C > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
-            float mean = 0.0f;
+            Stats mean = Stats(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                mean += static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]);
             }
-            mean /= static_cast<float>(spatial_size);
+            mean /= static_cast<Stats>(spatial_size);
 
-            float var = 0.0f;
+            Stats var = Stats(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                Stats diff = static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]) - mean;
                 var += diff * diff;
             }
-            var /= static_cast<float>(spatial_size);
+            var /= static_cast<Stats>(spatial_size);
 
-            float inv_std = 1.0f / std::sqrt(var + eps);
+            Stats inv_std = Stats(1) / std::sqrt(var + static_cast<Stats>(eps));
 
             // Save stats
             mean_out[n * C + c] = mean;
             inv_std_out[n * C + c] = inv_std;
 
-            float w = w_data ? static_cast<float>(w_data[c]) : 1.0f;
-            float b = b_data ? static_cast<float>(b_data[c]) : 0.0f;
+            Stats w = w_data ? static_cast<Stats>(w_data[c]) : Stats(1);
+            Stats b = b_data ? static_cast<Stats>(b_data[c]) : Stats(0);
 
             for (int64_t s = 0; s < spatial_size; ++s) {
                 int64_t idx = (n * C + c) * spatial_size + s;
-                float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
+                Stats normalized = (static_cast<Stats>(in_data[idx]) - mean) * inv_std;
                 out_data[idx] = static_cast<T>(normalized * w + b);
             }
         }
@@ -1919,29 +1928,33 @@ auto instance_norm_kernel_with_stats(const Tensor& input, const Tensor& weight,
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
-    auto mean = Tensor::empty_uninitialized({N, C}, DType::Float32, input.device());
-    auto inv_std = Tensor::empty_uninitialized({N, C}, DType::Float32, input.device());
+    // audit-2026-05-03 Phase 10 — store stats at Float64 precision when the
+    // input is Float64; previously hardcoded Float32 dropped ~30 mantissa
+    // bits, breaking Float64 gradcheck on the autograd path.
+    DType stats_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    auto mean = Tensor::empty_uninitialized({N, C}, stats_dtype, input.device());
+    auto inv_std = Tensor::empty_uninitialized({N, C}, stats_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
-        instance_norm_impl_with_stats<float>(input.data<float>(), output.data<float>(),
+        instance_norm_impl_with_stats<float, float>(input.data<float>(), output.data<float>(),
                                               weight.impl() ? weight.data<float>() : nullptr,
                                               bias.impl() ? bias.data<float>() : nullptr,
                                               mean.data<float>(), inv_std.data<float>(),
                                               N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float64) {
-        instance_norm_impl_with_stats<double>(input.data<double>(), output.data<double>(),
+        instance_norm_impl_with_stats<double, double>(input.data<double>(), output.data<double>(),
                                                weight.impl() ? weight.data<double>() : nullptr,
                                                bias.impl() ? bias.data<double>() : nullptr,
-                                               mean.data<float>(), inv_std.data<float>(),
+                                               mean.data<double>(), inv_std.data<double>(),
                                                N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float16) {
-        instance_norm_impl_with_stats<Float16>(input.data<Float16>(), output.data<Float16>(),
+        instance_norm_impl_with_stats<Float16, float>(input.data<Float16>(), output.data<Float16>(),
                                                 weight.impl() ? weight.data<Float16>() : nullptr,
                                                 bias.impl() ? bias.data<Float16>() : nullptr,
                                                 mean.data<float>(), inv_std.data<float>(),
                                                 N, C, spatial_size, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        instance_norm_impl_with_stats<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+        instance_norm_impl_with_stats<BFloat16, float>(input.data<BFloat16>(), output.data<BFloat16>(),
                                                  weight.impl() ? weight.data<BFloat16>() : nullptr,
                                                  bias.impl() ? bias.data<BFloat16>() : nullptr,
                                                  mean.data<float>(), inv_std.data<float>(),
@@ -2225,9 +2238,21 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     auto grad_weight = zeros({C}, weight.dtype(), weight.device());
     auto grad_bias = zeros({C}, weight.dtype(), weight.device());
 
-    // mean and rstd are Float32, shape [N * num_groups]
-    const float* mean_data = mean.data<float>();
-    const float* rstd_data = rstd.data<float>();
+    // audit-2026-05-03 — mean/rstd are stored at input dtype now (was hardcoded
+    // Float32, dropping Float64 precision through the autograd path).
+    const float* mean_data_f32 = nullptr;
+    const float* rstd_data_f32 = nullptr;
+    const double* mean_data_f64 = nullptr;
+    const double* rstd_data_f64 = nullptr;
+    if (mean.dtype() == DType::Float64) {
+        mean_data_f64 = mean.data<double>();
+        rstd_data_f64 = rstd.data<double>();
+    } else {
+        mean_data_f32 = mean.data<float>();
+        rstd_data_f32 = rstd.data<float>();
+    }
+    const float* mean_data = mean_data_f32;
+    const float* rstd_data = rstd_data_f32;
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2316,8 +2341,12 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t g = 0; g < num_groups; ++g) {
                     int64_t c_start = g * channels_per_group;
-                    double m = static_cast<double>(mean_data[n * num_groups + g]);
-                    double r = static_cast<double>(rstd_data[n * num_groups + g]);
+                    double m = mean_data_f64
+                        ? mean_data_f64[n * num_groups + g]
+                        : static_cast<double>(mean_data_f32[n * num_groups + g]);
+                    double r = rstd_data_f64
+                        ? rstd_data_f64[n * num_groups + g]
+                        : static_cast<double>(rstd_data_f32[n * num_groups + g]);
 
                     double ds = 0.0;
                     double db = 0.0;
@@ -2478,9 +2507,23 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     auto grad_weight = zeros({C}, weight.dtype(), weight.device());
     auto grad_bias = zeros({C}, weight.dtype(), weight.device());
 
-    // mean and rstd are Float32, shape [N * C]
-    const float* mean_data = mean.data<float>();
-    const float* rstd_data = rstd.data<float>();
+    // audit-2026-05-03 Phase 10 — mean/rstd dtype now matches input dtype:
+    // Float32 for Float32/Float16/BFloat16, Float64 for Float64. Previously
+    // hardcoded float, dropping Float64 precision through the autograd path.
+    const float* mean_data_f32 = nullptr;
+    const float* rstd_data_f32 = nullptr;
+    const double* mean_data_f64 = nullptr;
+    const double* rstd_data_f64 = nullptr;
+    if (mean.dtype() == DType::Float64) {
+        mean_data_f64 = mean.data<double>();
+        rstd_data_f64 = rstd.data<double>();
+    } else {
+        mean_data_f32 = mean.data<float>();
+        rstd_data_f32 = rstd.data<float>();
+    }
+    // Float32 helpers used by the F32 / F16 / BF16 branches below.
+    const float* mean_data = mean_data_f32;
+    const float* rstd_data = rstd_data_f32;
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2553,8 +2596,14 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             #pragma omp for collapse(2)
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
-                    double m = static_cast<double>(mean_data[n * C + c]);
-                    double r = static_cast<double>(rstd_data[n * C + c]);
+                    // Read at the dtype the forward saved the stats in
+                    // (Float64 when input is Float64).
+                    double m = mean_data_f64
+                        ? mean_data_f64[n * C + c]
+                        : static_cast<double>(mean_data_f32[n * C + c]);
+                    double r = rstd_data_f64
+                        ? rstd_data_f64[n * C + c]
+                        : static_cast<double>(rstd_data_f32[n * C + c]);
                     double w = w_data ? w_data[c] : 1.0;
 
                     double ds = 0.0, db = 0.0;
