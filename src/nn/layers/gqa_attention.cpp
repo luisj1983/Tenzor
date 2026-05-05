@@ -176,12 +176,23 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
     // semantics (indexed an offset chunk of itself rather than the actual
     // KV positions).
     if (is_causal_) {
+        // Use `where` instead of `triu_mask * neg_inf` because the
+        // multiplication produces NaN at the kept positions (0 * -inf =
+        // NaN). The window mask below uses the same pattern; this is
+        // the matching fix for the causal mask.
         int64_t diag_offset = 1 + (seq_len_k - seq_len_q);
         Tensor causal_ones = ones({seq_len_q, seq_len_k}, query.dtype(), query.device());
         Tensor causal_triu = triu(causal_ones, diag_offset);
-        Tensor neg_inf = full({1}, -std::numeric_limits<float>::infinity(),
+        // Boolean tensor: true at masked-off positions (above-diagonal).
+        Tensor masked_off = ne(causal_triu,
+                               zeros({seq_len_q, seq_len_k},
+                                     query.dtype(), query.device()));
+        Tensor neg_inf = full({seq_len_q, seq_len_k},
+                              -std::numeric_limits<float>::infinity(),
                               query.dtype(), query.device());
-        Tensor causal = causal_triu * neg_inf;
+        Tensor zero_mask = zeros({seq_len_q, seq_len_k},
+                                 query.dtype(), query.device());
+        Tensor causal = where(masked_off, neg_inf, zero_mask);
         Variable mask_var(causal, false);
         scores = scores + mask_var;
     }

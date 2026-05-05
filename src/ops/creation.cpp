@@ -635,6 +635,34 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
             }
             break;
         }
+        case DType::UInt8: {
+            uint8_t* ptr = static_cast<uint8_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint8_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<int16_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = BFloat16(static_cast<float>(start + i * step));
+            }
+            break;
+        }
+        case DType::Bool: {
+            bool* ptr = static_cast<bool*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = (start + i * step) != 0.0;
+            }
+            break;
+        }
         case DType::Complex64: {
             auto* ptr = static_cast<std::complex<float>*>(data);
             for (int64_t i = 0; i < numel; ++i) {

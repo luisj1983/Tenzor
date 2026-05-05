@@ -41,7 +41,12 @@ protected:
     void SetUp() override {
         BackendTest::SetUp();
         backend = backend_registry().get_backend(device.type);
-        ASSERT_NE(backend, nullptr) << "Backend not available for device: " << device.to_string();
+        if (backend == nullptr) {
+            // Backend was filtered out (e.g. TENZOR_SKIP_BACKENDS or the
+            // shared lib failed to load). Skip cleanly instead of failing
+            // — there's no caching-allocator behaviour to verify.
+            GTEST_SKIP() << "Backend not available for device: " << device.to_string();
+        }
         allocator = std::make_unique<CachingAllocator>(backend, device);
     }
 

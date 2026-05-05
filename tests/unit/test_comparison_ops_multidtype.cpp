@@ -47,6 +47,17 @@ class ComparisonOpsMultiDTypeTest : public MultiBackendDTypeTest {
 
 protected:
     DType input_dtype;
+
+    void SetUp() override {
+        MultiBackendDTypeTest::SetUp();
+        // Pre-2026-05-04 the body referenced `input_dtype` as if it were
+        // already populated, but nothing ever assigned it — every test
+        // routed through `zeros(shape, input_dtype, ...)` was reading an
+        // uninitialised enum and surfaced as "ne: unsupported dtype" /
+        // similar in production kernels. Mirror the fixture's parameter.
+        input_dtype = dtype();
+    }
+
     // Helper to create tensor with specific value based on dtype()
     template<typename T>
     Tensor createTensorWithValue(const std::vector<int64_t>& shape, T value) {
@@ -74,6 +85,34 @@ protected:
             auto data = tensor_cpu.data<int64_t>();
             for (int64_t i = 0; i < tensor_cpu.numel(); ++i) {
                 data[i] = static_cast<int64_t>(value);
+            }
+        }
+        else if (input_dtype == DType::Int8) {
+            auto data = tensor_cpu.data<int8_t>();
+            for (int64_t i = 0; i < tensor_cpu.numel(); ++i) {
+                data[i] = static_cast<int8_t>(value);
+            }
+        }
+        else if (input_dtype == DType::UInt8) {
+            auto data = tensor_cpu.data<uint8_t>();
+            for (int64_t i = 0; i < tensor_cpu.numel(); ++i) {
+                data[i] = static_cast<uint8_t>(value);
+            }
+        }
+        else if (input_dtype == DType::Int16) {
+            auto data = tensor_cpu.data<int16_t>();
+            for (int64_t i = 0; i < tensor_cpu.numel(); ++i) {
+                data[i] = static_cast<int16_t>(value);
+            }
+        }
+        else if (input_dtype == DType::Bool) {
+            // Map the integer value to a bool with a stable threshold so the
+            // existing test patterns (3=false, 5/7=true) preserve their
+            // ordering / equality semantics.
+            auto data = tensor_cpu.data<bool>();
+            const bool b = (static_cast<long long>(value) > 4);
+            for (int64_t i = 0; i < tensor_cpu.numel(); ++i) {
+                data[i] = b;
             }
         }
 
@@ -182,8 +221,11 @@ TEST_P(ComparisonOpsMultiDTypeTest, LessEqualOperator_Less) {
 }
 
 TEST_P(ComparisonOpsMultiDTypeTest, GreaterThanOperator) {
+    // (7, 3) instead of (7, 5) so the Bool dtype mapping (>4 → true,
+    // ≤4 → false) yields a meaningfully different (T, F) pair. With
+    // (7, 5) both map to true and gt(T, T) is reflexively false.
     auto a = createTensorWithValue({3, 3}, 7);
-    auto b = createTensorWithValue({3, 3}, 5);
+    auto b = createTensorWithValue({3, 3}, 3);
 
     auto result = gt(a, b);
     verifyAllTrue(result, "gt");

@@ -498,7 +498,7 @@ auto selu(const Variable& input) -> Variable;
 auto mish(const Variable& input) -> Variable;
 
 /// Leaky ReLU with negative slope. Grad: x>0 ? 1 : negative_slope
-auto leaky_relu(const Variable& input, float negative_slope = 0.01f) -> Variable;
+auto leaky_relu(const Variable& input, double negative_slope = 0.01) -> Variable;
 
 /// Softplus activation: log(1 + exp(β*x))/β. Grad: σ(β*x)
 auto softplus(const Variable& input, float beta = 1.0f) -> Variable;

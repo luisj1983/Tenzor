@@ -988,9 +988,11 @@ TEST_F(PruningTest, PrunedModelGradients) {
     Tensor input = create_random_tensor({8, 64});
     auto output = linear->forward(Variable(input, true));
 
-    // Should be able to compute gradients
+    // backward() requires either a scalar output or an explicit gradient
+    // tensor; reduce to a scalar via sum() before invoking it.
+    auto loss = sum(output);
     EXPECT_NO_THROW({
-        output.backward();
+        loss.backward();
     });
 }
 

@@ -134,7 +134,7 @@ auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
     // (a real backward_with_variables that threads through Variable-level
     // ops) so higher-order gradients work. Previously this path used the
     // local LeakyReLUBackward stub.
-    return ::tenzor::leaky_relu(input, static_cast<float>(negative_slope));
+    return ::tenzor::leaky_relu(input, negative_slope);
 }
 
 auto gelu(const Variable& input, const std::string& approximate) -> Variable {

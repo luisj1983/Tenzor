@@ -313,8 +313,9 @@ TEST_F(GradScalerTest, Reset) {
     // Reset
     scaler.reset();
 
-    // Verify reset to default initial state
-    EXPECT_FLOAT_EQ(scaler.get_scale(), 65536.0f);
+    // Verify reset to constructor-supplied init_scale (2048.0f), NOT the
+    // class default of 65536.0f — `reset()` restores user-supplied state.
+    EXPECT_FLOAT_EQ(scaler.get_scale(), 2048.0f);
     EXPECT_EQ(scaler.get_growth_tracker(), 0);
     EXPECT_FALSE(scaler.found_inf_nan());
 }

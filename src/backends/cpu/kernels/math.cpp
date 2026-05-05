@@ -3404,6 +3404,13 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             for (size_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
+        } else if (a.dtype() == DType::Bool) {
+            // PyTorch parity: false < true is true; otherwise false.
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] < b_data[i]);
+            }
         } else {
             throw std::runtime_error("Unsupported dtype for lt operation");
         }
@@ -3419,6 +3426,11 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_data = b.data<double>();
             detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](double x, double y) { return x < y; });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x < y; });
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "lt_broadcast", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
@@ -3460,6 +3472,10 @@ auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "le", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
@@ -3479,6 +3495,11 @@ auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_data = b.data<double>();
             detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](double x, double y) { return x <= y; });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x <= y; });
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "le_broadcast", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
@@ -3640,6 +3661,12 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             for (size_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] > b_data[i]);
+            }
         } else {
             throw std::runtime_error("Unsupported dtype for gt operation");
         }
@@ -3675,6 +3702,11 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x > y; });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x > y; });
         } else {
             throw std::runtime_error("Unsupported dtype for gt operation");
         }
@@ -3719,6 +3751,10 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) >= static_cast<float>(b_data[i])); }
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else {
             throw std::runtime_error("Unsupported dtype for ge operation");
         }
@@ -3749,6 +3785,11 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* b_data = b.data<Float16>();
             detail::broadcast_op<Float16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](Float16 x, Float16 y) { return static_cast<float>(x) >= static_cast<float>(y); });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x >= y; });
         } else {
             throw std::runtime_error("Unsupported dtype for ge operation");
         }
@@ -3926,6 +3967,14 @@ auto cos_kernel(const Tensor& input) -> Tensor {
 }
 
 auto tan_kernel(const Tensor& input) -> Tensor {
+    // Widen-narrow Float16/BFloat16 — TENZOR_DISPATCH_FLOATING_TYPES below
+    // only supports Float32/Float64, but distributions like Cauchy /
+    // HalfCauchy sample via tan(uniform * π) and need a float-rendering
+    // path for Float16 inputs.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig = input.dtype();
+        return tan_kernel(input.to(DType::Float32)).to(orig);
+    }
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -4120,6 +4169,10 @@ auto trunc_kernel(const Tensor& input) -> Tensor {
 
 // Reciprocal
 auto reciprocal_kernel(const Tensor& input) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig = input.dtype();
+        return reciprocal_kernel(input.to(DType::Float32)).to(orig);
+    }
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();

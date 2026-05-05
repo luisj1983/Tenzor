@@ -1153,7 +1153,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
 // ============================================================================
 
 // Forward: x if x > 0 else alpha * x
-auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input, double alpha) -> Tensor {
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -1221,7 +1221,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(val > 0.0f ? val : alpha * val);
+            out_data[i] = Float16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
@@ -1231,7 +1231,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            out_data[i] = BFloat16(val > 0.0f ? val : alpha * val);
+            out_data[i] = BFloat16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
     } else {
         throw std::runtime_error("Leaky ReLU only supports Float32, Float64, Float16, and BFloat16");
@@ -1241,7 +1241,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
 }
 
 // Backward: grad_out * (1 if x > 0 else alpha)
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha) -> Tensor {
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -1315,7 +1315,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         for (size_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
-            grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : alpha));
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_val * (in_val > 0.0f ? 1.0f : alpha)));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* grad_out_data = grad_output.data<BFloat16>();
@@ -1327,7 +1327,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         for (size_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
-            grad_in_data[i] = BFloat16(grad_out_val * (in_val > 0.0f ? 1.0f : alpha));
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_val * (in_val > 0.0f ? 1.0f : alpha)));
         }
     } else {
         throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, Float16, and BFloat16");
@@ -2818,7 +2818,7 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
     }
 }
 
-auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
+auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();
@@ -2840,7 +2840,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
-            data[i] = Float16(val > 0.0f ? val : alpha * val);
+            data[i] = Float16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
     } else if (input.dtype() == DType::BFloat16) {
         BFloat16* data = input.data<BFloat16>();
@@ -2848,7 +2848,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
-            data[i] = BFloat16(val > 0.0f ? val : alpha * val);
+            data[i] = BFloat16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
     } else {
         throw std::runtime_error("leaky_relu_inplace: Unsupported dtype");

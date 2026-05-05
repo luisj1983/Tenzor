@@ -231,7 +231,7 @@ namespace cpu {
     auto relu_inplace_kernel(Tensor& input) -> void;
     auto sigmoid_inplace_kernel(Tensor& input) -> void;
     auto tanh_inplace_kernel(Tensor& input) -> void;
-    auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void;
+    auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void;
     auto gelu_inplace_kernel(Tensor& input) -> void;
 
     // Activations
@@ -245,8 +245,8 @@ namespace cpu {
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto swish_kernel(const Tensor& input) -> Tensor;
     auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor;
-    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
+    auto leaky_relu_kernel(const Tensor& input, double alpha) -> Tensor;
+    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha) -> Tensor;
     auto elu_kernel(const Tensor& input, float alpha) -> Tensor;
     auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
     auto selu_kernel(const Tensor& input) -> Tensor;
@@ -747,7 +747,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
         cpu::leaky_relu_inplace_kernel(target, alpha);
         return target;
     });
@@ -1294,12 +1294,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_KERNEL(table, MishBackward, cpu::mish_backward_kernel);
 
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        // alpha kept as double so Float64 inputs preserve precision; the
+        // kernel converts down for Float32/Float16/BFloat16 paths.
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
         return cpu::leaky_relu_kernel(inputs[0], alpha);
     });
 
     table.register_single_output_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
         return cpu::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha);
     });
 
@@ -3119,8 +3121,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return diag(inputs[0], diagonal);
     });
 
-    table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor>, const OpAttributes&) -> Tensor {
-        throw std::runtime_error("trace: CPU dispatch not needed (handled inline)");
+    table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // Forward to the inline tenzor::trace(Tensor) implementation. The
+        // earlier "handled inline" stub broke parity tests that exercise
+        // the dispatch path directly via dispatch<OpId::Trace>.
+        return tenzor::trace(inputs[0]);
     });
 
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

@@ -138,4 +138,13 @@ auto is_parametrized(const Module& module, const std::string& param_name) -> boo
     return mod_it->second.find(param_name) != mod_it->second.end();
 }
 
+// Test/teardown helper: clear the entire registry. Needed because the
+// registry keys on raw Module* — when a Module is destroyed and a new one
+// later gets the same address (typical std::allocator reuse), stale entries
+// cause is_parametrized() to return true for what should be a fresh module.
+// Call between TEST_P iterations.
+void clear_parametrization_registry() {
+    parametrization_registry().clear();
+}
+
 } // namespace tenzor::nn::utils

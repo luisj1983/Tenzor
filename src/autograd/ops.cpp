@@ -880,16 +880,18 @@ auto mish(const Variable& input) -> Variable {
         });
 }
 
-auto leaky_relu(const Variable& input, float negative_slope) -> Variable {
+auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
     return unary_autograd_with_param<LeakyReluBackward>(input, negative_slope,
         [negative_slope](const Tensor& t) {
             std::vector<Tensor> inputs = {t};
             OpAttributes attrs;
             // Every backend kernel reads AttrKey::Alpha; MPS and the JIT
             // tracer read AttrKey::Negative_slope. Set both so the value
-            // isn't silently dropped on either side.
-            attrs.set(AttrKey::Alpha, static_cast<double>(negative_slope));
-            attrs.set(AttrKey::Negative_slope, static_cast<double>(negative_slope));
+            // isn't silently dropped on either side. Stored as double for
+            // Float64-input parity (passing float here loses ~7 mantissa
+            // bits and breaks gradcheck / forward exact-equality).
+            attrs.set(AttrKey::Alpha, negative_slope);
+            attrs.set(AttrKey::Negative_slope, negative_slope);
             return dispatch(OpId::LeakyReLU, inputs, attrs)[0];
         });
 }

@@ -159,6 +159,16 @@ TEST_P(OpsAdditionalMultiDTypeTest, ArgMaxArgMin) {
         for (int i = 0; i < 12; i++) {
             data[i] = i;
         }
+    } else if (dtype() == DType::Float16) {
+        auto data = t_cpu.data<Float16>();
+        for (int i = 0; i < 12; i++) {
+            data[i] = Float16(static_cast<float>(i));
+        }
+    } else if (dtype() == DType::BFloat16) {
+        auto data = t_cpu.data<BFloat16>();
+        for (int i = 0; i < 12; i++) {
+            data[i] = BFloat16(static_cast<float>(i));
+        }
     }
     t = t_cpu.to(device());
 
@@ -480,6 +490,14 @@ TEST_P(OpsAdditionalMultiDTypeTest, EqualityComparison) {
     } else if (dtype() == DType::Int32) {
         auto a_data = a_cpu.data<int32_t>();
         a_data[0] = 1; a_data[1] = 2; a_data[2] = 3; a_data[3] = 4;
+    } else if (dtype() == DType::Float16) {
+        auto a_data = a_cpu.data<Float16>();
+        a_data[0] = Float16(1.0f); a_data[1] = Float16(2.0f);
+        a_data[2] = Float16(3.0f); a_data[3] = Float16(4.0f);
+    } else if (dtype() == DType::BFloat16) {
+        auto a_data = a_cpu.data<BFloat16>();
+        a_data[0] = BFloat16(1.0f); a_data[1] = BFloat16(2.0f);
+        a_data[2] = BFloat16(3.0f); a_data[3] = BFloat16(4.0f);
     }
     a = a_cpu.to(device());
 
@@ -495,6 +513,14 @@ TEST_P(OpsAdditionalMultiDTypeTest, EqualityComparison) {
     } else if (dtype() == DType::Int32) {
         auto b_data = b_cpu.data<int32_t>();
         b_data[0] = 1; b_data[1] = 3; b_data[2] = 3; b_data[3] = 4;
+    } else if (dtype() == DType::Float16) {
+        auto b_data = b_cpu.data<Float16>();
+        b_data[0] = Float16(1.0f); b_data[1] = Float16(2.5f);
+        b_data[2] = Float16(3.0f); b_data[3] = Float16(3.5f);
+    } else if (dtype() == DType::BFloat16) {
+        auto b_data = b_cpu.data<BFloat16>();
+        b_data[0] = BFloat16(1.0f); b_data[1] = BFloat16(2.5f);
+        b_data[2] = BFloat16(3.0f); b_data[3] = BFloat16(3.5f);
     }
     b = b_cpu.to(device());
 
@@ -520,6 +546,14 @@ TEST_P(OpsAdditionalMultiDTypeTest, InequalityComparisons) {
     } else if (dtype() == DType::Int32) {
         auto a_data = a_cpu.data<int32_t>();
         a_data[0] = 1; a_data[1] = 2; a_data[2] = 3; a_data[3] = 4;
+    } else if (dtype() == DType::Float16) {
+        auto a_data = a_cpu.data<Float16>();
+        a_data[0] = Float16(1.0f); a_data[1] = Float16(2.0f);
+        a_data[2] = Float16(3.0f); a_data[3] = Float16(4.0f);
+    } else if (dtype() == DType::BFloat16) {
+        auto a_data = a_cpu.data<BFloat16>();
+        a_data[0] = BFloat16(1.0f); a_data[1] = BFloat16(2.0f);
+        a_data[2] = BFloat16(3.0f); a_data[3] = BFloat16(4.0f);
     }
     a = a_cpu.to(device());
 

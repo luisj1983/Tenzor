@@ -194,6 +194,27 @@ TEST_P(OpsMultiDTypeTest, Arange) {
             }
             break;
         }
+        case DType::UInt8: {
+            const uint8_t* data = t_cpu.data<uint8_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<uint8_t>(i)) << "Failed on " << device().to_string();
+            }
+            break;
+        }
+        case DType::Int16: {
+            const int16_t* data = t_cpu.data<int16_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<int16_t>(i)) << "Failed on " << device().to_string();
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            const BFloat16* data = t_cpu.data<BFloat16>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_NEAR(static_cast<float>(data[i]), static_cast<float>(i), 0.05f) << "Failed on " << device().to_string();
+            }
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype()";
     }
@@ -252,6 +273,27 @@ TEST_P(OpsMultiDTypeTest, ArangeStep) {
             const int8_t* data = t_cpu.data<int8_t>();
             for (int i = 0; i < 5; i++) {
                 EXPECT_EQ(data[i], static_cast<int8_t>(expected[i])) << "Failed on " << device().to_string();
+            }
+            break;
+        }
+        case DType::UInt8: {
+            const uint8_t* data = t_cpu.data<uint8_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<uint8_t>(expected[i])) << "Failed on " << device().to_string();
+            }
+            break;
+        }
+        case DType::Int16: {
+            const int16_t* data = t_cpu.data<int16_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<int16_t>(expected[i])) << "Failed on " << device().to_string();
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            const BFloat16* data = t_cpu.data<BFloat16>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_NEAR(static_cast<float>(data[i]), static_cast<float>(expected[i]), 0.05f) << "Failed on " << device().to_string();
             }
             break;
         }
@@ -417,6 +459,30 @@ TEST_P(OpsMultiDTypeTest, Eye) {
             EXPECT_EQ(data[3], 0) << "Failed on " << device().to_string();
             break;
         }
+        case DType::UInt8: {
+            auto* data = t_cpu.data<uint8_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[4], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[8], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device().to_string();
+            break;
+        }
+        case DType::Int16: {
+            auto* data = t_cpu.data<int16_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[4], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[8], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device().to_string();
+            break;
+        }
+        case DType::BFloat16: {
+            auto* data = t_cpu.data<BFloat16>();
+            EXPECT_NEAR(static_cast<float>(data[0]), 1.0f, 0.01f) << "Failed on " << device().to_string();
+            EXPECT_NEAR(static_cast<float>(data[4]), 1.0f, 0.01f) << "Failed on " << device().to_string();
+            EXPECT_NEAR(static_cast<float>(data[8]), 1.0f, 0.01f) << "Failed on " << device().to_string();
+            EXPECT_NEAR(static_cast<float>(data[1]), 0.0f, 0.01f) << "Failed on " << device().to_string();
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype()";
     }
@@ -482,6 +548,27 @@ TEST_P(OpsMultiDTypeTest, EyeRectangular) {
             EXPECT_EQ(data[5], 1) << "Failed on " << device().to_string();
             EXPECT_EQ(data[1], 0) << "Failed on " << device().to_string();
             EXPECT_EQ(data[2], 0) << "Failed on " << device().to_string();
+            break;
+        }
+        case DType::UInt8: {
+            auto* data = t_cpu.data<uint8_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[5], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device().to_string();
+            break;
+        }
+        case DType::Int16: {
+            auto* data = t_cpu.data<int16_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[5], 1) << "Failed on " << device().to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device().to_string();
+            break;
+        }
+        case DType::BFloat16: {
+            auto* data = t_cpu.data<BFloat16>();
+            EXPECT_NEAR(static_cast<float>(data[0]), 1.0f, 0.01f) << "Failed on " << device().to_string();
+            EXPECT_NEAR(static_cast<float>(data[5]), 1.0f, 0.01f) << "Failed on " << device().to_string();
+            EXPECT_NEAR(static_cast<float>(data[1]), 0.0f, 0.01f) << "Failed on " << device().to_string();
             break;
         }
         default:

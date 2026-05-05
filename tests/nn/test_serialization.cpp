@@ -203,9 +203,10 @@ TEST_F(SerializationTest, PartialStateLoading) {
 
     std::unordered_map<std::string, Tensor> state;
     state["weight"] = ones({2, 3}, DType::Float32) * 5.0f;
-    // Missing bias
+    // Missing bias — pass strict=false so the missing key doesn't throw.
+    // The test asserts the missing param keeps its prior value.
 
-    linear->load_state_dict(state);
+    linear->load_state_dict(state, /*strict=*/false);
 
     auto params = linear->parameters();
     auto weight_data = params[0]->tensor().data<float>();

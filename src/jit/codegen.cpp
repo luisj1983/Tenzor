@@ -7,6 +7,7 @@
 
 #include "tenzor/jit/codegen.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"  // CPU fallback below uses tenzor::{exp,sin,add,...}
 #include "tenzor/core/dtype.hpp"
 #include <sstream>
 #include <stdexcept>

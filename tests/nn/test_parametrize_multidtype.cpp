@@ -27,7 +27,17 @@ public:
     }
 };
 
-class ParametrizeMultiDTypeTest : public MultiBackendDTypeTest {};
+class ParametrizeMultiDTypeTest : public MultiBackendDTypeTest {
+protected:
+    void SetUp() override {
+        MultiBackendDTypeTest::SetUp();
+        // The parametrization registry keys on raw Module* and is global —
+        // a fresh Linear in this test can land on the same address as a
+        // prior test's Linear, inheriting its parametrization state. Clear
+        // the registry so each TEST_P starts clean.
+        ::tenzor::nn::utils::clear_parametrization_registry();
+    }
+};
 
 TEST_P(ParametrizeMultiDTypeTest, RegisterAndCheck) {
     auto linear = std::make_shared<Linear>(4, 2);

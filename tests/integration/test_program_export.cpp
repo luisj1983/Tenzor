@@ -22,6 +22,20 @@ using namespace tenzor;
 
 namespace {
 
+// Ensure backends are registered before any TEST() runs. Without this the
+// gtest_main entrypoint never calls tenzor::initialize() and the first
+// dispatch in export_model() fails with "Backend not available for device:
+// cpu".
+struct TenzorInitEnv : ::testing::Environment {
+    void SetUp() override { tenzor::initialize(); }
+};
+const auto* kTenzorInitEnv =
+    ::testing::AddGlobalTestEnvironment(new TenzorInitEnv);
+
+}  // namespace
+
+namespace {
+
 class TwoLayerMLP : public nn::Module {
 public:
     std::shared_ptr<nn::Linear> fc1;

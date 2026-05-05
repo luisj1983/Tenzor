@@ -148,4 +148,12 @@ void remove_parametrizations(std::shared_ptr<Module> module,
 auto is_parametrized(const Module& module,
                      const std::string& param_name = "") -> bool;
 
+/**
+ * @brief Clear the entire parametrization registry. Test-only helper —
+ *        the registry keys on raw Module* and stale entries can survive
+ *        Module destruction and pollute later modules that reuse the same
+ *        address. Call between test cases.
+ */
+void clear_parametrization_registry();
+
 } // namespace tenzor::nn::utils

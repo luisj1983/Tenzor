@@ -142,8 +142,8 @@ namespace cpu {
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto swish_kernel(const Tensor& input) -> Tensor;
     auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor;
-    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
+    auto leaky_relu_kernel(const Tensor& input, double alpha) -> Tensor;
+    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha) -> Tensor;
     auto elu_kernel(const Tensor& input, float alpha) -> Tensor;
     auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
     auto selu_kernel(const Tensor& input) -> Tensor;
@@ -592,14 +592,14 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("leaky_relu operation requires exactly 1 input");
             }
-            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
             return {cpu::leaky_relu_kernel(inputs[0], alpha)};
         }
         else if (op_name == "leaky_relu_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("leaky_relu_backward operation requires exactly 2 inputs");
             }
-            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
             return {cpu::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha)};
         }
         else if (op_name == "elu") {

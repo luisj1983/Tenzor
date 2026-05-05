@@ -24,6 +24,19 @@ using namespace tenzor::testing;
 class ShapeOpsMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     Tensor createTestTensor(const std::vector<int64_t>& shape) {
+        // randn() rejects integer dtypes; pick a sampler the dtype actually
+        // supports so the shape-op tests run for the full parameter matrix
+        // (Float32/64/16, BFloat16, Int32, Int64, …) without throwing
+        // "Unsupported dtype for randn()".
+        if (dtype() == DType::Int32 || dtype() == DType::Int64 ||
+            dtype() == DType::Int16 || dtype() == DType::Int8 ||
+            dtype() == DType::UInt8 || dtype() == DType::Bool) {
+            int64_t numel = 1;
+            for (auto d : shape) numel *= d;
+            auto flat = tenzor::arange(0.0, static_cast<double>(numel), 1.0,
+                                       dtype(), device());
+            return tenzor::reshape(flat, shape);
+        }
         return tenzor::randn(shape, dtype(), device());
     }
     // Sanity check that a shape op preserved numel and produced a finite-valued

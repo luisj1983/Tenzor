@@ -471,6 +471,18 @@ inline auto sample_poisson_scalar(double lambda) -> int64_t {
 /// concentration and rate are broadcast to the output shape.
 inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
                            std::vector<int64_t> shape) -> Tensor {
+    // Float16/BFloat16: sample in Float32 (FP16 lacks the range/precision
+    // for the Marsaglia+Tsang squeeze-and-trickle; tail Gammas overflow to
+    // inf at scale > 65504). Same widen-narrow pattern used by the CPU
+    // pointwise kernels.
+    if (concentration.dtype() == DType::Float16 || concentration.dtype() == DType::BFloat16) {
+        auto orig = concentration.dtype();
+        auto sampled = fill_gamma_cpu(concentration.to(DType::Float32),
+                                      rate.to(DType::Float32),
+                                      shape);
+        return sampled.to(orig);
+    }
+
     auto out = zeros(shape, concentration.dtype(), Device::cpu());
     int64_t n = out.numel();
 
@@ -752,6 +764,11 @@ public:
             : sample_shape;
 
         auto rate_cpu = rate_.to(Device::cpu()).contiguous();
+        // Widen Float16/BFloat16 to Float32 — sample_poisson_scalar takes
+        // double; Float16 rate has insufficient range for typical λ values.
+        if (rate_cpu.dtype() == DType::Float16 || rate_cpu.dtype() == DType::BFloat16) {
+            rate_cpu = rate_cpu.to(DType::Float32);
+        }
         auto out = zeros(shape, DType::Int64, Device::cpu());
         int64_t n = out.numel();
         const int64_t rate_n = rate_cpu.numel();
@@ -1485,6 +1502,10 @@ public:
 
         // Draw Poisson(rate) counts
         auto rate_cpu = rate_samples.contiguous();
+        // Widen Float16/BFloat16 — sample_poisson_scalar takes double.
+        if (rate_cpu.dtype() == DType::Float16 || rate_cpu.dtype() == DType::BFloat16) {
+            rate_cpu = rate_cpu.to(DType::Float32);
+        }
         auto out = zeros(shape, DType::Int64, Device::cpu());
         int64_t n = out.numel();
         const int64_t rate_n = rate_cpu.numel();
@@ -1567,10 +1588,20 @@ public:
             ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
             : sample_shape;
 
-        // Best & Fisher (1979) rejection sampling on CPU
+        // Best & Fisher (1979) rejection sampling on CPU.
+        // Widen Float16/BFloat16: rejection sampling needs double precision
+        // for the K = 1 + sqrt(1 + 4·kappa²) tau computation; Float16 loses
+        // it in the kappa² overflow at moderate concentration values.
+        auto orig_dtype = loc_.dtype();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
         auto kappa_cpu = concentration_.to(Device::cpu()).contiguous();
         auto loc_cpu = loc_.to(Device::cpu()).contiguous();
-        auto out = zeros(shape, loc_.dtype(), Device::cpu());
+        if (widen_for_f16) {
+            kappa_cpu = kappa_cpu.to(DType::Float32);
+            loc_cpu = loc_cpu.to(DType::Float32);
+        }
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros(shape, out_dtype, Device::cpu());
         int64_t n = out.numel();
         const int64_t kappa_n = kappa_cpu.numel();
         const int64_t loc_n = loc_cpu.numel();
@@ -1600,6 +1631,10 @@ public:
             throw std::runtime_error("VonMises: only Float32 and Float64 supported");
         }
 
+        // Narrow back to original dtype if we widened for Float16/BFloat16.
+        if (widen_for_f16) {
+            out = out.to(orig_dtype);
+        }
         return out.to(loc_.device());
     }
 
@@ -1831,8 +1866,17 @@ public:
     }
 
     auto sample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
-        // Bartlett decomposition on CPU
+        // Bartlett decomposition on CPU.
+        // Widen Float16/BFloat16 to Float32 for the gamma + matmul chain;
+        // narrow back at the end. Float16 lacks the dynamic range for
+        // chi2 samples and propagates corruption through the trsm path.
+        auto orig_dtype = scale_tril_.dtype();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+
         auto df_cpu = df_.to(Device::cpu()).contiguous();
+        if (df_cpu.dtype() == DType::Float16 || df_cpu.dtype() == DType::BFloat16) {
+            df_cpu = df_cpu.to(DType::Float32);
+        }
         double df_val;
         if (df_cpu.dtype() == DType::Float32) {
             df_val = static_cast<double>(df_cpu.data<float>()[0]);
@@ -1840,8 +1884,12 @@ public:
             df_val = df_cpu.data<double>()[0];
         }
 
-        auto dtype = scale_tril_.dtype();
-        auto device = scale_tril_.device();
+        auto orig_device = scale_tril_.device();
+        auto dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto device = orig_device;
+        Tensor scale_tril_widened = widen_for_f16
+            ? scale_tril_.to(DType::Float32)
+            : scale_tril_;
 
         // Build lower-triangular Bartlett factor L on CPU
         auto L = zeros({p_, p_}, dtype, Device::cpu());
@@ -1877,10 +1925,14 @@ public:
         }
 
         L = L.to(device);
-        // A = scale_tril @ L
-        auto A = matmul(scale_tril_, L);
+        // A = scale_tril @ L (use the widened scale_tril if we upcast).
+        auto A = matmul(scale_tril_widened, L);
         // W = A @ A^T
-        return matmul(A, transpose(A, -2, -1));
+        auto W = matmul(A, transpose(A, -2, -1));
+        if (widen_for_f16) {
+            W = W.to(orig_dtype);
+        }
+        return W;
     }
 
     auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
