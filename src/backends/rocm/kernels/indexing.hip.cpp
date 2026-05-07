@@ -2288,6 +2288,65 @@ __global__ void embedding_bag_max_kernel_hip(
     }
 }
 
+// BFloat16 needs an F32-accumulator specialisation because hip_bfloat16's
+// operator overloads aren't comprehensive enough for the templated kernel
+// above (see the F32 round-trip in atomicAddHelper<hip_bfloat16> earlier
+// in this file). Load as BF16, compute in F32, store as BF16.
+__global__ void embedding_bag_sum_kernel_hip_bf16(
+    const hip_bfloat16* embeddings,
+    const int64_t* offsets,
+    hip_bfloat16* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size,
+    bool divide_by_count)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+    int64_t bag_size = end - start;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int64_t i = start; i < end; ++i) {
+            acc += static_cast<float>(embeddings[i * embedding_dim + j]);
+        }
+        if (divide_by_count && bag_size > 0) {
+            acc /= static_cast<float>(bag_size);
+        }
+        output[bag * embedding_dim + j] = hip_bfloat16(acc);
+    }
+}
+
+__global__ void embedding_bag_max_kernel_hip_bf16(
+    const hip_bfloat16* embeddings,
+    const int64_t* offsets,
+    hip_bfloat16* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+    if (start >= end) return;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        float max_val = static_cast<float>(embeddings[start * embedding_dim + j]);
+        for (int64_t i = start + 1; i < end; ++i) {
+            float val = static_cast<float>(embeddings[i * embedding_dim + j]);
+            if (val > max_val) max_val = val;
+        }
+        output[bag * embedding_dim + j] = hip_bfloat16(max_val);
+    }
+}
+
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                    const std::string& mode, int64_t embedding_dim,
                                    bool include_last_offset, hipStream_t stream) -> Tensor {
@@ -2360,6 +2419,25 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     reinterpret_cast<const __half*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size, is_mean);
+                HIP_POST_LAUNCH_CHECK();
+            }
+            break;
+        case DType::BFloat16:
+            if (is_max) {
+                hipLaunchKernelGGL(embedding_bag_max_kernel_hip_bf16,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    reinterpret_cast<const hip_bfloat16*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<hip_bfloat16*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size);
+                HIP_POST_LAUNCH_CHECK();
+            } else {
+                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip_bf16,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    reinterpret_cast<const hip_bfloat16*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<hip_bfloat16*>(output.data_ptr()),
                     num_bags, total_elements, embedding_dim, offsets_size, is_mean);
                 HIP_POST_LAUNCH_CHECK();
             }

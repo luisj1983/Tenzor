@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -1055,85 +1056,58 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tens
     if (r <= 0 || n == 0) {
         return zeros({0, r}, input.dtype(), input.device());
     }
-    // Float16 / BFloat16 aren't in the direct dispatch below. Widen to
-    // Float32 for the index-select copy and narrow back so the returned
-    // tensor keeps the caller's dtype.
+    // Float16 / BFloat16 aren't supported by the gather; widen and narrow.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig = input.dtype();
         return combinations(input.to(DType::Float32), r, with_replacement).to(orig);
     }
 
-    // Generate combinations on CPU
-    auto input_cpu = input.to(Device::cpu()).contiguous();
+    // Combinatorial enumeration is inherently host work — the index list is
+    // metadata about which input positions form each combination. Build the
+    // flat (num_combos * r) Int64 index tensor on CPU, upload to the input's
+    // device, then perform the actual data gather as a registered
+    // index_select kernel on whichever backend the input lives on. This is
+    // the same pattern the rest of the codebase uses for host-built strides
+    // / offsets / topology metadata; the *output* tensor is produced on the
+    // input device by a real GPU kernel.
+    std::vector<int64_t> flat_indices;
+    {
+        std::vector<int64_t> current;
+        current.reserve(static_cast<size_t>(r));
+        std::function<void(int64_t)> generate;
+        generate = [&](int64_t start) {
+            if (static_cast<int64_t>(current.size()) == r) {
+                flat_indices.insert(flat_indices.end(),
+                                    current.begin(), current.end());
+                return;
+            }
+            for (int64_t i = start; i < n; ++i) {
+                current.push_back(i);
+                generate(with_replacement ? i : i + 1);
+                current.pop_back();
+            }
+        };
+        generate(0);
+    }
 
-    // Collect all combinations
-    std::vector<std::vector<int64_t>> combos;
-    std::vector<int64_t> current;
-
-    std::function<void(int64_t)> generate;
-    generate = [&](int64_t start) {
-        if (static_cast<int64_t>(current.size()) == r) {
-            combos.push_back(current);
-            return;
-        }
-        int64_t end = with_replacement ? n : n;
-        for (int64_t i = start; i < end; ++i) {
-            current.push_back(i);
-            generate(with_replacement ? i : i + 1);
-            current.pop_back();
-        }
-    };
-    generate(0);
-
-    if (combos.empty()) {
+    if (flat_indices.empty()) {
         return zeros({0, r}, input.dtype(), input.device());
     }
 
-    int64_t num_combos = static_cast<int64_t>(combos.size());
-    auto result = zeros({num_combos, r}, input.dtype(), input.device());
-    auto result_cpu = result.to(Device::cpu());
+    const int64_t num_indices = static_cast<int64_t>(flat_indices.size());
+    const int64_t num_combos = num_indices / r;
 
-    // Fill using index_select for each combination
-    if (input.dtype() == DType::Float32) {
-        const float* inp = input_cpu.data<float>();
-        float* out = result_cpu.data<float>();
-        for (int64_t i = 0; i < num_combos; ++i) {
-            for (int64_t j = 0; j < r; ++j) {
-                out[i * r + j] = inp[combos[i][j]];
-            }
-        }
-    } else if (input.dtype() == DType::Float64) {
-        const double* inp = input_cpu.data<double>();
-        double* out = result_cpu.data<double>();
-        for (int64_t i = 0; i < num_combos; ++i) {
-            for (int64_t j = 0; j < r; ++j) {
-                out[i * r + j] = inp[combos[i][j]];
-            }
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* inp = input_cpu.data<int64_t>();
-        int64_t* out = result_cpu.data<int64_t>();
-        for (int64_t i = 0; i < num_combos; ++i) {
-            for (int64_t j = 0; j < r; ++j) {
-                out[i * r + j] = inp[combos[i][j]];
-            }
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* inp = input_cpu.data<int32_t>();
-        int32_t* out = result_cpu.data<int32_t>();
-        for (int64_t i = 0; i < num_combos; ++i) {
-            for (int64_t j = 0; j < r; ++j) {
-                out[i * r + j] = inp[combos[i][j]];
-            }
-        }
-    } else {
-        throw std::runtime_error("combinations: unsupported dtype");
-    }
+    // Stage indices on CPU, upload, then gather on input.device().
+    Tensor idx_cpu = zeros({num_indices}, DType::Int64, Device::cpu());
+    std::memcpy(idx_cpu.data<int64_t>(), flat_indices.data(),
+                flat_indices.size() * sizeof(int64_t));
+    Tensor idx_dev = (input.device().type == Device::Type::CPU)
+        ? idx_cpu : idx_cpu.to(input.device());
 
-    if (input.device().type != Device::Type::CPU) {
-        return result_cpu.to(input.device());
-    }
-    return result_cpu;
+    // index_select along the only dim of the 1-D input → flat (num_indices,);
+    // reshape to (num_combos, r). Both ops have per-backend kernels.
+    Tensor gathered = tenzor::index_select(input.contiguous(), /*dim=*/0, idx_dev);
+    return tenzor::reshape(gathered, {num_combos, r});
 }
 
 // ---------------------------------------------------------------------------

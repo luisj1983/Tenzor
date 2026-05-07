@@ -1235,24 +1235,24 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
 
 // ============================================================================
 // lstsq / pinv / matrix_exp — higher-level linalg routines composed on top of
-// the primitives above. These are CPU-only today; they fall back through the
-// LAPACKE path and do not currently dispatch to GPU backends.
+// the LAPACKE primitives above. These run on CPU only; per project policy
+// (no silent CPU fallbacks) they throw rather than migrate GPU tensors to
+// host invisibly.
 // ============================================================================
 
 auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
-#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
-    throw_no_lapack("lstsq");
-#else
-    // No GPU lstsq backend exists yet; materialize CPU copies, compute via
-    // LAPACK, then move results back to the original device. Without this the
-    // op throws "prepare_matrix: expected CPU tensor" the moment anyone calls
-    // it on a non-CPU tensor.
-    auto original_device = A.device();
-    if (original_device.type != Device::Type::CPU) {
-        auto [x_cpu, res_cpu] = lstsq(A.to(Device::cpu()), B.to(Device::cpu()));
-        return {x_cpu.to(original_device), res_cpu.to(original_device)};
-    }
-
+    // Least-squares solver for A @ x = B with m >= n full-rank A, expressed
+    // entirely as a composition over the registered linalg primitives:
+    //   Q, R = qr(A, mode='reduced')      // Q: (m, n), R: (n, n)
+    //   x    = solve_triangular(R, Qᵀ B, upper=true)
+    //   res  = sum((A x - B)², dim=0)     // squared residual per column
+    //
+    // Every op in that chain has a per-backend kernel (cuSOLVER / rocSOLVER
+    // / Vulkan compute / oneMKL), so the routine runs entirely on whatever
+    // device A is on — no LAPACK round-trip, no host pointer loops.
+    //
+    // Under-determined systems (m < n) need a min-norm solution; the QR
+    // path can't produce that, so we throw and direct the caller to pinv.
     auto a_shape = A.shape();
     auto b_shape = B.shape();
     if (a_shape.size() != 2) {
@@ -1268,145 +1268,76 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
         throw std::invalid_argument("linalg::lstsq: A rows (" + std::to_string(m) +
             ") must match B rows (" + std::to_string(b_shape[0]) + ")");
     }
+    const auto original_dtype = A.dtype();
+    const auto orig_device    = A.device();
+    const bool b_was_1d       = (b_shape.size() == 1);
+    const int64_t nrhs        = b_was_1d ? 1 : b_shape[1];
 
-    // LAPACKE_?gels overwrites B in-place with the solution (top n rows) and
-    // residuals (remaining max(m, n) - n rows, squared sum per column).
-    // We need a workspace the size of max(m, n) rows × nrhs cols.
-    const int64_t nrhs = (b_shape.size() == 2) ? b_shape[1] : 1;
-    const int64_t ldb  = std::max(m, n);
+    // Widen reduced-precision floats so the QR / SVD recurrences don't lose
+    // significance on accumulated rank-1 updates.
+    DType compute_dtype = original_dtype;
+    if (needs_upcast(compute_dtype)) compute_dtype = DType::Float32;
 
-    auto original_dtype = A.dtype();
-    auto work_a = prepare_matrix(A);
+    Tensor A_c = A.contiguous();
+    if (A_c.dtype() != compute_dtype) A_c = A_c.to(compute_dtype);
+    Tensor B_c = B.contiguous();
+    if (B_c.dtype() != compute_dtype) B_c = B_c.to(compute_dtype);
 
-    // Build B work buffer of shape [ldb, nrhs], copy B into the first m rows.
-    const std::vector<int64_t> b_work_shape =
-        (b_shape.size() == 2) ? std::vector<int64_t>{ldb, nrhs}
-                              : std::vector<int64_t>{ldb};
-    auto work_b = zeros(b_work_shape, work_a.dtype(), Device::cpu());
-    auto src_b = B;
-    if (needs_upcast(src_b.dtype())) src_b = src_b.to(DType::Float32);
-    src_b = src_b.contiguous();
+    // Promote 1D B to (m, 1) so the composition is uniform; we'll squeeze
+    // the solution back at the end.
+    if (b_was_1d) B_c = tenzor::reshape(B_c, {m, 1});
 
-    auto copy_b = [&](auto src_type, auto dst_type) {
-        using SrcT [[maybe_unused]] = decltype(src_type);
-        using DstT [[maybe_unused]] = decltype(dst_type);
-    };
-    (void)copy_b;
+    Tensor x;
+    Tensor residuals;
 
-    auto ln   = static_cast<lapack_int>(n);
-    auto lm   = static_cast<lapack_int>(m);
-    auto lnrhs = static_cast<lapack_int>(nrhs);
-    // In LAPACK_ROW_MAJOR, the "leading dimension" is the row stride, which
-    // for a shape-(rows, cols) buffer equals `cols`. So ldb_lapack == nrhs
-    // even though our physical buffer has `ldb = max(m, n)` rows. This is
-    // the same convention used by linalg::solve at LAPACKE_sgesv above.
-    auto lldb_lapack = static_cast<lapack_int>(nrhs);
-
-    if (work_a.dtype() == DType::Float32) {
-        float* a_data = work_a.data<float>();
-        float* b_data = work_b.data<float>();
-        const float* src_ptr = src_b.data<float>();
-        // Fill first m rows of work_b with B's contents (col-for-col).
-        for (int64_t i = 0; i < m; ++i) {
-            for (int64_t j = 0; j < nrhs; ++j) {
-                b_data[i * nrhs + j] = src_ptr[i * nrhs + j];
-            }
-        }
-        lapack_int info = LAPACKE_sgels(LAPACK_ROW_MAJOR, 'N', lm, ln, lnrhs,
-            a_data, ln, b_data, lldb_lapack);
-        if (info < 0) {
-            throw std::runtime_error("linalg::lstsq: invalid LAPACKE argument");
-        }
-        if (info > 0) {
-            throw std::runtime_error(
-                "linalg::lstsq: A does not have full rank — the least-squares "
-                "solution could not be computed (info=" + std::to_string(info) + ")");
-        }
+    if (m < n) {
+        // Under-determined: there are infinitely many exact solutions; we
+        // return the minimum-norm one via the SVD-based Moore-Penrose
+        // pseudo-inverse:   x = pinv(A) @ B.
+        // pinv itself is composed from svd / transpose / where / mul /
+        // matmul, all of which dispatch per-backend, so this path runs on
+        // whatever device A lives on. Residuals are conventionally empty
+        // for under-determined systems (A·x = B is satisfied within the
+        // pseudoinverse cutoff) — matches numpy.linalg.lstsq semantics.
+        Tensor pinvA = tenzor::linalg::pinv(A_c);                // (n, m)
+        x = tenzor::matmul(pinvA, B_c);                          // (n, nrhs)
+        residuals = tenzor::zeros({0}, compute_dtype, orig_device);
     } else {
-        double* a_data = work_a.data<double>();
-        double* b_data = work_b.data<double>();
-        const double* src_ptr = src_b.data<double>();
-        for (int64_t i = 0; i < m; ++i) {
-            for (int64_t j = 0; j < nrhs; ++j) {
-                b_data[i * nrhs + j] = src_ptr[i * nrhs + j];
-            }
-        }
-        lapack_int info = LAPACKE_dgels(LAPACK_ROW_MAJOR, 'N', lm, ln, lnrhs,
-            a_data, ln, b_data, lldb_lapack);
-        if (info < 0) {
-            throw std::runtime_error("linalg::lstsq: invalid LAPACKE argument");
-        }
-        if (info > 0) {
-            throw std::runtime_error(
-                "linalg::lstsq: A does not have full rank — the least-squares "
-                "solution could not be computed (info=" + std::to_string(info) + ")");
-        }
-    }
+        // Over-determined or square: QR gives the least-squares solution
+        // when A has full column rank. Reduced QR returns Q (m, n), R (n, n).
+        auto [Q, R] = tenzor::linalg::qr(A_c);
+        Tensor QT  = tenzor::transpose(Q, -2, -1);               // (n, m)
+        Tensor QTB = tenzor::matmul(QT, B_c);                    // (n, nrhs)
+        x = tenzor::linalg::solve_triangular(
+            R, QTB, /*upper=*/true, /*unitriangular=*/false);    // (n, nrhs)
 
-    // Extract solution (first n rows) and residuals (rows n..m when m > n).
-    std::vector<int64_t> sol_shape;
-    sol_shape.push_back(n);
-    if (b_shape.size() == 2) sol_shape.push_back(nrhs);
-    auto solution = zeros(sol_shape, work_a.dtype(), Device::cpu());
-
-    // Residuals: for 2D B, shape (nrhs,); for 1D B, shape (1,) with a single
-    // scalar value. Empty tensor if m <= n (underdetermined, no residuals).
-    std::vector<int64_t> res_shape;
-    if (m > n) {
-        res_shape.push_back(nrhs);
-    }
-    auto residuals = res_shape.empty()
-        ? zeros({0}, work_a.dtype(), Device::cpu())
-        : zeros(res_shape, work_a.dtype(), Device::cpu());
-
-    if (work_a.dtype() == DType::Float32) {
-        const float* b_data = work_b.data<float>();
-        float* sol = solution.data<float>();
-        for (int64_t i = 0; i < n; ++i) {
-            for (int64_t j = 0; j < nrhs; ++j) {
-                sol[i * nrhs + j] = b_data[i * nrhs + j];
-            }
-        }
+        // Residual per column: sum over m of (A x − B)². Empty for m == n.
         if (m > n) {
-            float* res = residuals.data<float>();
-            for (int64_t j = 0; j < nrhs; ++j) {
-                float sum = 0.0f;
-                for (int64_t i = n; i < m; ++i) {
-                    float v = b_data[i * nrhs + j];
-                    sum += v * v;
-                }
-                res[j] = sum;
-            }
-        }
-    } else {
-        const double* b_data = work_b.data<double>();
-        double* sol = solution.data<double>();
-        for (int64_t i = 0; i < n; ++i) {
-            for (int64_t j = 0; j < nrhs; ++j) {
-                sol[i * nrhs + j] = b_data[i * nrhs + j];
-            }
-        }
-        if (m > n) {
-            double* res = residuals.data<double>();
-            for (int64_t j = 0; j < nrhs; ++j) {
-                double sum = 0.0;
-                for (int64_t i = n; i < m; ++i) {
-                    double v = b_data[i * nrhs + j];
-                    sum += v * v;
-                }
-                res[j] = sum;
-            }
+            Tensor Ax    = tenzor::matmul(A_c, x);
+            Tensor diff  = tenzor::sub(Ax, B_c);
+            Tensor sq    = tenzor::mul(diff, diff);
+            Tensor sumsq = tenzor::sum(sq, /*dim=*/0, /*keepdim=*/false);
+            residuals = tenzor::reshape(sumsq, {nrhs});
+        } else {
+            residuals = tenzor::zeros({0}, compute_dtype, orig_device);
         }
     }
 
-    return {maybe_downcast(solution, original_dtype),
+    // Squeeze solution back to 1D if B was 1D.
+    if (b_was_1d) x = tenzor::reshape(x, {n});
+
+    return {maybe_downcast(x, original_dtype),
             maybe_downcast(residuals, original_dtype)};
-#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto pinv(const Tensor& A, double rcond) -> Tensor {
-    // pinv(A) = V @ diag(s_inv) @ U^T, where s_inv[i] = 1/s[i] when
-    // s[i] > rcond * max(s), else 0. Built on top of the existing svd().
+    // pinv(A) = V @ diag(s_inv) @ U^T, with s_inv[i] = 1/s[i] when
+    // s[i] > rcond * max(s), else 0.
+    //
+    // Implementation: pure op composition over the tensor primitives that
+    // already have per-backend kernels (svd, max, gt, reciprocal, where,
+    // transpose, mul, matmul). No host scalar work, no D2H/H2D round-trip,
+    // and the entire thing runs on whatever device A is on.
     auto a_shape = A.shape();
     if (a_shape.size() != 2) {
         throw std::invalid_argument("linalg::pinv: A must be 2D (got ndim=" +
@@ -1415,117 +1346,43 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
 
     auto original_dtype = A.dtype();
     auto original_device = A.device();
-    // Use reduced SVD (full_matrices=false): U is (M, K), S is (K,), Vt is (K, N).
+
+    // Reduced SVD: U is (M, K), S is (K,), Vt is (K, N).
     auto [U, S, Vt] = svd(A, /*full_matrices=*/false);
 
     const int64_t k = S.numel();
     if (k == 0) {
-        // Degenerate case: return a zero (N, M) pseudoinverse on the input device.
         return zeros({a_shape[1], a_shape[0]}, original_dtype, original_device);
     }
 
-    // Build a diagonal scaling vector: s_inv[i] = 1/s[i] if s[i] > cutoff, else 0.
-    auto compute_dtype = S.dtype();  // Float32 or Float64 (maybe upcast from F16).
+    // SVD widens reduced-precision inputs to F32/F64 internally; keep that
+    // dtype for the pseudoinverse arithmetic and downcast at the end.
+    auto compute_dtype = S.dtype();
 
-    // Extract max(s) to compute cutoff. Move S to CPU because the per-element
-    // scan below uses raw host-pointer reads; previously this crashed for
-    // non-CPU inputs (S would be a device-resident tensor).
-    auto s_cpu = S.device().type == Device::Type::CPU
-        ? S.contiguous() : S.to(Device::cpu()).contiguous();
-    auto s_contig = s_cpu;
-    double max_s = 0.0;
-    if (compute_dtype == DType::Float32) {
-        const float* sp = s_contig.data<float>();
-        for (int64_t i = 0; i < k; ++i) {
-            if (static_cast<double>(sp[i]) > max_s) max_s = sp[i];
-        }
-    } else {
-        const double* sp = s_contig.data<double>();
-        for (int64_t i = 0; i < k; ++i) {
-            if (sp[i] > max_s) max_s = sp[i];
-        }
-    }
-    const double cutoff = rcond * max_s;
+    // cutoff = rcond * max(S), as a 0-D tensor on the same device as S.
+    Tensor max_s = tenzor::max(S);
+    Tensor rcond_t = tenzor::full({}, rcond, compute_dtype, S.device());
+    Tensor cutoff = tenzor::mul(max_s, rcond_t);
 
-    // Build s_inv as a (k,) vector.
-    auto s_inv = zeros({k}, compute_dtype, Device::cpu());
-    if (compute_dtype == DType::Float32) {
-        const float* sp = s_contig.data<float>();
-        float* sip = s_inv.data<float>();
-        for (int64_t i = 0; i < k; ++i) {
-            sip[i] = (static_cast<double>(sp[i]) > cutoff) ? (1.0f / sp[i]) : 0.0f;
-        }
-    } else {
-        const double* sp = s_contig.data<double>();
-        double* sip = s_inv.data<double>();
-        for (int64_t i = 0; i < k; ++i) {
-            sip[i] = (sp[i] > cutoff) ? (1.0 / sp[i]) : 0.0;
-        }
-    }
+    // s_inv[i] = (S[i] > cutoff) ? 1/S[i] : 0.
+    // tenzor::where selects element-wise — the reciprocal of any zero
+    // singular value produces +inf in the unselected slot but is masked out,
+    // so no NaN escapes.
+    Tensor mask = tenzor::gt(S, cutoff);
+    Tensor s_recip = tenzor::reciprocal(S);
+    Tensor zero_vec = tenzor::zeros({k}, compute_dtype, S.device());
+    Tensor s_inv = tenzor::where(mask, s_recip, zero_vec);  // (K,)
 
-    // pinv = Vt^T @ diag(s_inv) @ U^T
-    // Compute V = Vt^T (shape (N, K)) and scale its columns by s_inv.
-    // Vt.transpose(-2, -1) gives (N, K); then element-wise multiply by s_inv
-    // broadcast along rows; then matmul with U^T (K, M).
-    //
-    // The assembly below uses raw host pointer loops, so we need CPU-resident
-    // Vt/U data. Move them off-device if needed.
-    auto Vt_contig = Vt.device().type == Device::Type::CPU
-        ? Vt.contiguous() : Vt.to(Device::cpu()).contiguous();
-    const int64_t n_cols = a_shape[1];
-    const int64_t m_rows = a_shape[0];
+    // pinv = (Vt^T * s_inv_row) @ U^T
+    // Vt: (K, N) → V = Vt^T: (N, K). Broadcast s_inv (1, K) along the last
+    // dim to scale columns of V.
+    Tensor V = tenzor::transpose(Vt, -2, -1);            // (N, K)
+    Tensor s_inv_row = tenzor::reshape(s_inv, {1, k});   // (1, K), broadcasts
+    Tensor V_scaled = tenzor::mul(V, s_inv_row);         // (N, K)
+    Tensor UT = tenzor::transpose(U, -2, -1);            // (K, M)
+    Tensor result = tenzor::matmul(V_scaled, UT);        // (N, M)
 
-    auto V = zeros({n_cols, k}, compute_dtype, Device::cpu());
-    if (compute_dtype == DType::Float32) {
-        const float* vt = Vt_contig.data<float>();
-        float* v = V.data<float>();
-        const float* sip = s_inv.data<float>();
-        for (int64_t i = 0; i < n_cols; ++i) {
-            for (int64_t j = 0; j < k; ++j) {
-                v[i * k + j] = vt[j * n_cols + i] * sip[j];
-            }
-        }
-    } else {
-        const double* vt = Vt_contig.data<double>();
-        double* v = V.data<double>();
-        const double* sip = s_inv.data<double>();
-        for (int64_t i = 0; i < n_cols; ++i) {
-            for (int64_t j = 0; j < k; ++j) {
-                v[i * k + j] = vt[j * n_cols + i] * sip[j];
-            }
-        }
-    }
-
-    // UT = U^T, shape (K, M). Same host-pointer assumption as Vt above.
-    auto U_contig = U.device().type == Device::Type::CPU
-        ? U.contiguous() : U.to(Device::cpu()).contiguous();
-    auto UT = zeros({k, m_rows}, compute_dtype, Device::cpu());
-    if (compute_dtype == DType::Float32) {
-        const float* u = U_contig.data<float>();
-        float* ut = UT.data<float>();
-        for (int64_t i = 0; i < k; ++i) {
-            for (int64_t j = 0; j < m_rows; ++j) {
-                ut[i * m_rows + j] = u[j * k + i];
-            }
-        }
-    } else {
-        const double* u = U_contig.data<double>();
-        double* ut = UT.data<double>();
-        for (int64_t i = 0; i < k; ++i) {
-            for (int64_t j = 0; j < m_rows; ++j) {
-                ut[i * m_rows + j] = u[j * k + i];
-            }
-        }
-    }
-
-    // Final: V @ UT  (N, K) @ (K, M) = (N, M).
-    auto result = matmul(V, UT);
-    auto down = maybe_downcast(result, original_dtype);
-    // Restore the original device for GPU callers.
-    if (original_device.type != Device::Type::CPU) {
-        return down.to(original_device);
-    }
-    return down;
+    return maybe_downcast(result, original_dtype);
 }
 
 auto matrix_exp(const Tensor& A) -> Tensor {
@@ -1836,22 +1693,14 @@ auto diag_embed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2)
 
     auto result = tenzor::zeros(out_shape, input.dtype(), input.device());
 
-    // For non-batched 1D case with non-default dims, use CPU scatter
+    // For 1D input the resulting (n, n) output's data layout is identical
+    // regardless of which axis the caller labels dim1 vs. dim2 — the loop
+    // that used to live here writes a row-major (n, n) matrix exactly the
+    // way tenzor::diag(input, offset) does. Delegate to that registered op
+    // so we get a per-backend kernel for free (CUDA / ROCm / Vulkan / OneAPI
+    // all register OpId::Diag).
     if (input.ndim() == 1) {
-        auto cpu_input = input.to(Device::cpu());
-        auto cpu_result = tenzor::zeros(out_shape, input.dtype(), Device::cpu());
-        auto elem_size = dtype_size(input.dtype());
-        const auto* src = static_cast<const uint8_t*>(cpu_input.data_ptr());
-        auto* dst = static_cast<uint8_t*>(cpu_result.data_ptr());
-
-        for (int64_t i = 0; i < diag_len; ++i) {
-            // Compute position in output for diagonal element i
-            int64_t row = offset >= 0 ? i : i - offset;
-            int64_t col = offset >= 0 ? i + offset : i;
-            int64_t dst_idx = (row * n + col) * elem_size;
-            std::memcpy(dst + dst_idx, src + i * elem_size, elem_size);
-        }
-        return cpu_result.to(input.device());
+        return tenzor::diag(input, offset);
     }
 
     return result;

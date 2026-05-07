@@ -2282,25 +2282,24 @@ auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
         Q = Q.contiguous();
     }
 
+    // Precompute the per-step mask/override columns on-device once. For each
+    // reflector j we need v_j to look like:
+    //   v_j[i] = 0      for i < j   ← mask = 0, override = 0
+    //   v_j[i] = 1      for i = j   ← mask = 0, override = 1
+    //   v_j[i] = V[i,j] for i > j   ← mask = 1, override = 0
+    // Encode as two (m, k) device tensors and slice column j per step:
+    //   M_full[i, j] = (i > j) ? 1 : 0   →  tril(ones({m,k}), -1)
+    //   O_full[i, j] = (i == j) ? 1 : 0  →  eye(m, k)
+    // Replaces the previous m-element host scalar fill + H2D per iteration.
+    Tensor M_full = tenzor::tril(tenzor::ones({m, k}, compute_dt, dev), -1);
+    Tensor O_full = tenzor::eye(m, k, compute_dt, dev);
+
     for (int64_t j = k - 1; j >= 0; --j) {
         Tensor v_j = tenzor::slice(V, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
 
-        // Mask rows [0..j) to 0 and overwrite row j with 1, keeping rows (j..m) as V[i, j].
-        auto mask_cpu = tenzor::ones({m, int64_t(1)}, compute_dt, Device::cpu());
-        auto overrides_cpu = tenzor::zeros({m, int64_t(1)}, compute_dt, Device::cpu());
-        if (compute_dt == DType::Float32) {
-            float* mm = mask_cpu.data<float>();
-            float* oo = overrides_cpu.data<float>();
-            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0f; oo[i] = 0.0f; }
-            if (j < m) { mm[j] = 0.0f; oo[j] = 1.0f; }
-        } else {
-            double* mm = mask_cpu.data<double>();
-            double* oo = overrides_cpu.data<double>();
-            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0; oo[i] = 0.0; }
-            if (j < m) { mm[j] = 0.0; oo[j] = 1.0; }
-        }
-        Tensor mask = mask_cpu.to(dev);
-        Tensor overrides = overrides_cpu.to(dev);
+        // (m, 1) mask + override sliced from precomputed device tensors.
+        Tensor mask = tenzor::slice(M_full, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+        Tensor overrides = tenzor::slice(O_full, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
         if (ndim > 2) {
             std::vector<int64_t> bshape(shape.begin(), shape.end() - 1);
             bshape.push_back(1);
@@ -5221,25 +5220,24 @@ auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
         Q = Q.contiguous();
     }
 
+    // Precompute the per-step mask/override columns on-device once. For each
+    // reflector j we need v_j to look like:
+    //   v_j[i] = 0      for i < j   ← mask = 0, override = 0
+    //   v_j[i] = 1      for i = j   ← mask = 0, override = 1
+    //   v_j[i] = V[i,j] for i > j   ← mask = 1, override = 0
+    // Encode as two (m, k) device tensors and slice column j per step:
+    //   M_full[i, j] = (i > j) ? 1 : 0   →  tril(ones({m,k}), -1)
+    //   O_full[i, j] = (i == j) ? 1 : 0  →  eye(m, k)
+    // Replaces the previous m-element host scalar fill + H2D per iteration.
+    Tensor M_full = tenzor::tril(tenzor::ones({m, k}, compute_dt, dev), -1);
+    Tensor O_full = tenzor::eye(m, k, compute_dt, dev);
+
     for (int64_t j = k - 1; j >= 0; --j) {
         Tensor v_j = tenzor::slice(V, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
 
-        // Mask rows [0..j) to 0 and overwrite row j with 1, keeping rows (j..m) as V[i, j].
-        auto mask_cpu = tenzor::ones({m, int64_t(1)}, compute_dt, Device::cpu());
-        auto overrides_cpu = tenzor::zeros({m, int64_t(1)}, compute_dt, Device::cpu());
-        if (compute_dt == DType::Float32) {
-            float* mm = mask_cpu.data<float>();
-            float* oo = overrides_cpu.data<float>();
-            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0f; oo[i] = 0.0f; }
-            if (j < m) { mm[j] = 0.0f; oo[j] = 1.0f; }
-        } else {
-            double* mm = mask_cpu.data<double>();
-            double* oo = overrides_cpu.data<double>();
-            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0; oo[i] = 0.0; }
-            if (j < m) { mm[j] = 0.0; oo[j] = 1.0; }
-        }
-        Tensor mask = mask_cpu.to(dev);
-        Tensor overrides = overrides_cpu.to(dev);
+        // (m, 1) mask + override sliced from precomputed device tensors.
+        Tensor mask = tenzor::slice(M_full, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+        Tensor overrides = tenzor::slice(O_full, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
         if (ndim > 2) {
             std::vector<int64_t> bshape(shape.begin(), shape.end() - 1);
             bshape.push_back(1);

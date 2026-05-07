@@ -5847,9 +5847,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t max_len = padded.shape()[1];
             int64_t D = (padded.shape().size() > 2) ? padded.shape()[2] : 1;
 
-            // Read only offsets[B] to get total_len for output allocation
-            Tensor total_len_scalar = tenzor::slice(offsets, 0, B, B + 1).to(Device::cpu());
-            int64_t total_len = total_len_scalar.data<int64_t>()[0];
+            // Read only offsets[B] (the total flattened length) for output
+            // sizing. A full Tensor::to(cpu) on a 1-element slice would cycle
+            // through the dispatch table and the CPU caching allocator just
+            // to fetch one int64; do a direct USM memcpy of those 8 bytes.
+            int64_t total_len = 0;
+            {
+                auto& q = oneapi_internal::get_queue(offsets.device().index);
+                const int64_t* off_ptr = offsets.data<int64_t>();
+                q.memcpy(&total_len, off_ptr + B, sizeof(int64_t)).wait();
+            }
 
             auto values = tenzor::empty({total_len, D}, padded.dtype(), padded.device());
             auto& queue = oneapi_internal::get_queue(padded.device().index);

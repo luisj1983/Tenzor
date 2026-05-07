@@ -336,20 +336,31 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
         return dispatchUnaryOp("sqrt", sum);
     } else {
         // General p-norm: (sum(|x|^p))^(1/p)
-        // Create a tensor filled with p for the power operation
+        // Build the p / (1/p) scalars on CPU first because Vulkan tensors
+        // live in VK_MEMORY_PROPERTY_DEVICE_LOCAL memory — Tensor::data_ptr()
+        // on a Vulkan tensor returns a synthetic VkBuffer marker, so writing
+        // through it silently no-ops and the kernel reads uninitialised
+        // device memory. Stage the scalars via a CPU tensor and let
+        // Tensor::to(...) push them through the proper Vulkan upload path.
         std::vector<int64_t> scalar_shape = {1};
-        Tensor p_tensor(scalar_shape, input.dtype(), input.device());
-        float* p_data = static_cast<float*>(p_tensor.data_ptr());
-        *p_data = p;
+        Tensor p_cpu(scalar_shape, input.dtype(), Device::cpu());
+        Tensor inv_p_cpu(scalar_shape, input.dtype(), Device::cpu());
+        if (input.dtype() == DType::Float32) {
+            *static_cast<float*>(p_cpu.data_ptr()) = p;
+            *static_cast<float*>(inv_p_cpu.data_ptr()) = 1.0f / p;
+        } else if (input.dtype() == DType::Float64) {
+            *static_cast<double*>(p_cpu.data_ptr()) = static_cast<double>(p);
+            *static_cast<double*>(inv_p_cpu.data_ptr()) = 1.0 / static_cast<double>(p);
+        } else {
+            throw std::runtime_error(
+                "Vulkan dispatchNorm (general p): unsupported dtype " +
+                std::string(tenzor::dtype_name(input.dtype())));
+        }
+        Tensor p_tensor = p_cpu.to(input.device());
+        Tensor inv_p_tensor = inv_p_cpu.to(input.device());
 
         Tensor powered = dispatchBinaryOp("pow", abs_input, p_tensor);
         Tensor sum = dispatchReduction("sum", powered, dim, keepdim);
-
-        // Compute 1/p root
-        Tensor inv_p_tensor(scalar_shape, input.dtype(), input.device());
-        float* inv_p_data = static_cast<float*>(inv_p_tensor.data_ptr());
-        *inv_p_data = 1.0f / p;
-
         return dispatchBinaryOp("pow", sum, inv_p_tensor);
     }
 }

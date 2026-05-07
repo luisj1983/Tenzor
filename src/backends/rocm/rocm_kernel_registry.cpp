@@ -836,10 +836,11 @@ namespace rocm {
     auto rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
     auto rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
 #ifdef TENZOR_HAS_ROCSPARSE
-    // SpGEMM / triangular solve are only defined in the rocSPARSE path —
-    // the HIP fallback at the bottom of sparse.hip.cpp intentionally
-    // omits them. sparse_ops.cpp will fall through to the CPU path if
-    // has_kernel returns false.
+    // SpGEMM / triangular solve via rocSPARSE. When rocSPARSE isn't available
+    // the dispatch table below registers the standalone HIP kernels
+    // (spgemm_standalone_hip / sparse_trsv_standalone_hip / sparse_trsm_…)
+    // so SparseSpGEMM / SparseTrsv / SparseTrsm always have a ROCm-side
+    // implementation — no CPU fallback.
     auto rocm_spgemm_kernel(const SparseTensor& a, const SparseTensor& b) -> SparseTensor;
     auto rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
                                   bool upper) -> Tensor;

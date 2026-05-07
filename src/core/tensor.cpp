@@ -818,11 +818,24 @@ auto Tensor::to(DType dtype) const -> Tensor {
             "then cast the resulting float tensor");
     }
 
-    // Try GPU-side Cast kernel to avoid costly CPU round-trip (GPU -> CPU -> cast -> GPU).
-    // If a Cast kernel is registered for the current device, dispatch directly on-device.
-    if (impl_->device.type != Device::Type::CPU &&
-        is_op_supported(OpId::Cast, impl_->device.type)) {
-        // Ensure contiguous layout for the cast kernel
+    // GPU-side Cast kernel: dispatch directly on-device when registered.
+    if (impl_->device.type != Device::Type::CPU) {
+        if (!is_op_supported(OpId::Cast, impl_->device.type)) {
+            // Silently routing a GPU dtype-cast through the CPU backend (the
+            // historical fallback) violates the project's no-CPU-fallback
+            // policy: it makes a multi-GB H2D + serial scalar conversion +
+            // D2H round-trip look like a free op. Force the user to either
+            // register a native Cast kernel for this device, or move the
+            // tensor to CPU explicitly with .cpu() before casting.
+            std::string src_dtype_str{tenzor::dtype_name(impl_->dtype)};
+            std::string dst_dtype_str{tenzor::dtype_name(dtype)};
+            std::string device_str = impl_->device.to_string();
+            throw std::runtime_error(
+                "Tensor::to(DType): no native Cast kernel registered for device " +
+                device_str + " (cast " + src_dtype_str + " -> " + dst_dtype_str +
+                "). Either register a Cast kernel for this backend or call "
+                ".cpu() explicitly before casting.");
+        }
         Tensor src = is_contiguous() ? *this : contiguous();
         OpAttributes attrs;
         attrs.set(AttrKey::TargetDtype, static_cast<int64_t>(static_cast<uint8_t>(dtype)));
@@ -831,35 +844,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
         return result;
     }
 
-    // Fallback: convert on CPU (for CPU tensors or backends without Cast kernel)
-    const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
-
-    if (was_on_gpu) {
-        // Warn once per process that we're taking the CPU round-trip path.
-        // Silent round-trips are a massive perf footgun — users should either
-        // register a GPU Cast kernel or avoid dtype conversion inside a hot
-        // loop. Gated by TENZOR_WARN_CPU_ROUNDTRIP so CI doesn't spam stderr.
-        static const bool warn_enabled = [] {
-            const char* env = std::getenv("TENZOR_WARN_CPU_ROUNDTRIP");
-            return env != nullptr && env[0] != '\0' && env[0] != '0';
-        }();
-        if (warn_enabled) {
-            static std::atomic<bool> warned{false};
-            if (!warned.exchange(true, std::memory_order_relaxed)) {
-                std::string src_dtype_str{tenzor::dtype_name(impl_->dtype)};
-                std::string dst_dtype_str{tenzor::dtype_name(dtype)};
-                std::string device_str = impl_->device.to_string();
-                fprintf(stderr,
-                    "[tenzor] warning: Cast fallback via CPU for %s->%s on "
-                    "device %s — register a native Cast kernel to avoid "
-                    "round-trip overhead\n",
-                    src_dtype_str.c_str(), dst_dtype_str.c_str(),
-                    device_str.c_str());
-            }
-        }
-    }
-
-    Tensor cpu_tensor = was_on_gpu ? cpu() : *this;
+    // CPU dtype conversion (input is already on CPU; this is the genuine path).
+    Tensor cpu_tensor = *this;
 
     // Ensure contiguous layout for efficient conversion
     if (!cpu_tensor.is_contiguous()) {
@@ -1003,11 +989,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
 
     #undef DISPATCH_SRC_DTYPE
 
-    // If original tensor was on GPU, move result back to GPU
-    if (was_on_gpu) {
-        return result.to(impl_->device);
-    }
-
+    // The GPU branch above either dispatched or threw, so this CPU cast path
+    // produces a CPU result whose device already matches *this.
     return result;
 }
 

@@ -344,7 +344,13 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     int64_t total_elements = embeddings_shape[0];
     int64_t embedding_dim = embeddings_shape[1];
 
-    int64_t num_bags = offsets.numel();
+    // include_last_offset=true means the caller passed (B+1) offsets where
+    // the final entry is the total flattened length. In that case num_bags
+    // is one less than offsets.numel(); otherwise the bag count equals the
+    // number of offsets and the final bag implicitly ends at total_elements.
+    const int64_t offsets_size = offsets.numel();
+    int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
+    if (num_bags < 0) num_bags = 0;
 
     Tensor output({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
@@ -365,7 +371,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 int64_t bag_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t start_idx = offsets_ptr[bag_idx];
-                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t end_idx = (bag_idx + 1 < offsets_size) ? offsets_ptr[bag_idx + 1] : total_elements;
                 int64_t bag_size = end_idx - start_idx;
 
                 if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0.0f; return; }
@@ -392,7 +398,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 int64_t bag_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t start_idx = offsets_ptr[bag_idx];
-                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t end_idx = (bag_idx + 1 < offsets_size) ? offsets_ptr[bag_idx + 1] : total_elements;
                 int64_t bag_size = end_idx - start_idx;
 
                 if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0.0; return; }
@@ -419,7 +425,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 int64_t bag_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t start_idx = offsets_ptr[bag_idx];
-                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t end_idx = (bag_idx + 1 < offsets_size) ? offsets_ptr[bag_idx + 1] : total_elements;
                 int64_t bag_size = end_idx - start_idx;
 
                 if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = sycl::half(0.0f); return; }
@@ -447,7 +453,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 int64_t bag_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t start_idx = offsets_ptr[bag_idx];
-                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t end_idx = (bag_idx + 1 < offsets_size) ? offsets_ptr[bag_idx + 1] : total_elements;
                 int64_t bag_size = end_idx - start_idx;
 
                 if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0; return; }

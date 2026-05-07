@@ -429,6 +429,17 @@ public:
         // runtime picks up the setting before it JIT-compiles SPIR-V kernels.
         configure_opencl_cpu_target_arch();
 
+        // Per project policy, the OneAPI backend is the *GPU* backend.
+        // Silently registering a SYCL CPU device here would route every op
+        // submitted to Device::OneAPI through the Intel OpenCL CPU runtime
+        // and masquerade host execution as GPU. Default behaviour: skip any
+        // device that is not a GPU. Set TENZOR_ONEAPI_ALLOW_CPU=1 only when
+        // intentionally exercising the CPU SYCL path (debug/CI parity runs).
+        const bool allow_cpu_sycl = [] {
+            const char* env = std::getenv("TENZOR_ONEAPI_ALLOW_CPU");
+            return env != nullptr && env[0] != '\0' && env[0] != '0';
+        }();
+
         try {
             // Enumerate all available SYCL devices
             auto platforms = sycl::platform::get_platforms();
@@ -440,6 +451,11 @@ public:
                     std::string vendor = device.get_info<sycl::info::device::vendor>();
                     if (vendor.find("NVIDIA") != std::string::npos ||
                         vendor.find("nvidia") != std::string::npos) {
+                        continue;
+                    }
+
+                    // Reject non-GPU SYCL devices unless the user opted in.
+                    if (!device.is_gpu() && !allow_cpu_sycl) {
                         continue;
                     }
 

@@ -998,23 +998,28 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     return output;
 }
 
-// Fill kernel - fill existing tensor with value using memcpy
+// Fill kernel - fill output tensor with `value` entirely on device.
+// Earlier versions built a host std::vector<T>(numel, value) and uploaded it
+// via queue.memcpy — that's host compute followed by an H2D transfer, i.e.
+// silent CPU work. SYCL's queue.fill() does the same thing as a device-side
+// parallel_for and avoids the host loop / staging buffer.
 auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor {
     Tensor output(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
                   tensor.dtype(), tensor.device());
 
     const int64_t numel = tensor.numel();
+    const size_t count = static_cast<size_t>(numel);
+
+    auto fill_simple = [&]<typename T>(T val) {
+        T* device_ptr = get_data_ptr<T>(output);
+        queue.fill(device_ptr, val, count).wait();
+    };
 
     if (tensor.dtype() == DType::Float32) {
-        std::vector<float> host_data(numel, value);
-        float* device_ptr = get_data_ptr<float>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
+        fill_simple(value);
     }
     else if (tensor.dtype() == DType::Float64) {
-        const double value_d = static_cast<double>(value);
-        std::vector<double> host_data(numel, value_d);
-        double* device_ptr = get_data_ptr<double>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+        fill_simple(static_cast<double>(value));
     }
     else if (tensor.dtype() == DType::Float16) {
         const sycl::half value_h(value);
@@ -1024,59 +1029,32 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
         });
     }
     else if (tensor.dtype() == DType::BFloat16) {
-        const uint16_t value_bf16 = f32_to_bf16(value);
-        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
-        queue.parallel_for<FillKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            device_ptr[i] = value_bf16;
-        });
+        // BFloat16 is stored as raw uint16_t; fill the bit pattern directly.
+        fill_simple(f32_to_bf16(value));
     }
     else if (tensor.dtype() == DType::Int32) {
-        const int32_t value_i = static_cast<int32_t>(value);
-        std::vector<int32_t> host_data(numel, value_i);
-        int32_t* device_ptr = get_data_ptr<int32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+        fill_simple(static_cast<int32_t>(value));
     }
     else if (tensor.dtype() == DType::Int64) {
-        const int64_t value_i = static_cast<int64_t>(value);
-        std::vector<int64_t> host_data(numel, value_i);
-        int64_t* device_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+        fill_simple(static_cast<int64_t>(value));
     }
     else if (tensor.dtype() == DType::Int8) {
-        const int8_t value_i = static_cast<int8_t>(value);
-        std::vector<int8_t> host_data(numel, value_i);
-        int8_t* device_ptr = get_data_ptr<int8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+        fill_simple(static_cast<int8_t>(value));
     }
     else if (tensor.dtype() == DType::Int16) {
-        const int16_t value_i = static_cast<int16_t>(value);
-        std::vector<int16_t> host_data(numel, value_i);
-        int16_t* device_ptr = get_data_ptr<int16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+        fill_simple(static_cast<int16_t>(value));
     }
     else if (tensor.dtype() == DType::UInt8) {
-        const uint8_t value_i = static_cast<uint8_t>(value);
-        std::vector<uint8_t> host_data(numel, value_i);
-        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+        fill_simple(static_cast<uint8_t>(value));
     }
     else if (tensor.dtype() == DType::UInt16) {
-        const uint16_t value_i = static_cast<uint16_t>(value);
-        std::vector<uint16_t> host_data(numel, value_i);
-        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+        fill_simple(static_cast<uint16_t>(value));
     }
     else if (tensor.dtype() == DType::UInt32) {
-        const uint32_t value_i = static_cast<uint32_t>(value);
-        std::vector<uint32_t> host_data(numel, value_i);
-        uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+        fill_simple(static_cast<uint32_t>(value));
     }
     else if (tensor.dtype() == DType::UInt64) {
-        const uint64_t value_i = static_cast<uint64_t>(value);
-        std::vector<uint64_t> host_data(numel, value_i);
-        uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
+        fill_simple(static_cast<uint64_t>(value));
     }
     else {
         throw std::runtime_error("Unsupported dtype for fill");

@@ -840,165 +840,152 @@ auto LinalgHouseholderBackward::backward(std::vector<Tensor> grad_outputs) -> st
 
     const Device orig_device = V_orig.device();
 
-    auto to_compute = [&](const Tensor& t) {
-        Tensor out = t.to(Device::cpu());
-        if (out.dtype() != compute_dtype) out = out.to(compute_dtype);
-        if (!out.is_contiguous()) out = out.contiguous();
-        return out;
-    };
-    Tensor V = to_compute(V_orig);
-    Tensor tau = to_compute(tau_orig);
-    Tensor G = to_compute(G_orig);
-
-    auto V_shape = V.shape();
-    const int64_t ndim = static_cast<int64_t>(V_shape.size());
+    auto V_shape_v = V_orig.shape();
+    const int64_t ndim = static_cast<int64_t>(V_shape_v.size());
     if (ndim < 2) {
         throw std::runtime_error(
             "householder_product backward: input must be at least 2D");
     }
-    const int64_t m = V_shape[ndim - 2];
-    const int64_t k_reflectors = V_shape[ndim - 1];
-    const int64_t n = G.shape()[G.ndim() - 1];
+    const int64_t m = V_shape_v[ndim - 2];
+    const int64_t k = V_shape_v[ndim - 1];
+    const int64_t n = G_orig.shape()[G_orig.ndim() - 1];
 
-    int64_t nbatch = 1;
-    for (int64_t d = 0; d < ndim - 2; ++d) nbatch *= V_shape[d];
-
-    std::vector<int64_t> grad_V_shape(V_shape.begin(), V_shape.end());
-    std::vector<int64_t> grad_tau_shape(tau.shape().begin(), tau.shape().end());
-    Tensor grad_V = zeros(grad_V_shape, compute_dtype, Device::cpu());
-    Tensor grad_tau = zeros(grad_tau_shape, compute_dtype, Device::cpu());
-
-    auto kernel = [&]<typename T>(T*) {
-        const T* V_ptr = V.data<T>();
-        const T* tau_ptr = tau.data<T>();
-        const T* G_ptr = G.data<T>();
-        T* gV_ptr = grad_V.data<T>();
-        T* gT_ptr = grad_tau.data<T>();
-
-        const int64_t V_batch_stride = m * k_reflectors;
-        const int64_t tau_batch_stride = k_reflectors;
-        const int64_t G_batch_stride = m * n;
-
-        std::vector<T> P(m * n);
-        // Store every B_j = (H_{j+1} … H_{k-1})[:, :n] so the forward P-walk
-        // can read B_j when it needs it. Compute via a backward pass:
-        //   B_{k-1} = I[:, :n],   B_{j-1} = H_j · B_j.
-        // Using a forward pass starting from Q_trunc only works when every
-        // H_j is its own inverse (τ_j = 2/‖v_j‖², i.e. a true reflector).
-        // Gradcheck feeds arbitrary τ so that assumption fails.
-        std::vector<T> B_store(k_reflectors * m * n);
-        std::vector<T> v_j(m);
-        std::vector<T> u(n), w(n);
-
-        for (int64_t b = 0; b < nbatch; ++b) {
-            const T* Vb = V_ptr + b * V_batch_stride;
-            const T* taub = tau_ptr + b * tau_batch_stride;
-            const T* Gb = G_ptr + b * G_batch_stride;
-            T* gVb = gV_ptr + b * V_batch_stride;
-            T* gTb = gT_ptr + b * tau_batch_stride;
-
-            // --- Backward pass: populate B_store[j] for j = k-1 … 0. ---
-            // Initialise B_{k-1} = I[:, :n].
-            {
-                T* B_last = B_store.data() + (k_reflectors - 1) * m * n;
-                std::fill(B_last, B_last + m * n, T(0));
-                const int64_t limit = std::min(m, n);
-                for (int64_t i = 0; i < limit; ++i) B_last[i * n + i] = T(1);
-            }
-            for (int64_t j = k_reflectors - 2; j >= 0; --j) {
-                T* B_j = B_store.data() + j * m * n;
-                const T* B_jp1 = B_store.data() + (j + 1) * m * n;
-
-                const int64_t jp1 = j + 1;
-                for (int64_t i = 0; i < jp1; ++i) v_j[i] = T(0);
-                v_j[jp1] = T(1);
-                for (int64_t i = jp1 + 1; i < m; ++i) {
-                    v_j[i] = Vb[i * k_reflectors + jp1];
-                }
-                const T tau_jp1 = taub[jp1];
-
-                // B_j = B_{j+1} − τ_{j+1} · v_{j+1} · (v_{j+1}ᵀ B_{j+1})
-                for (int64_t c = 0; c < n; ++c) {
-                    T s = 0;
-                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * B_jp1[i * n + c];
-                    w[c] = s;
-                }
-                for (int64_t i = 0; i < m; ++i) {
-                    const T tv = tau_jp1 * v_j[i];
-                    for (int64_t c = 0; c < n; ++c) {
-                        B_j[i * n + c] = B_jp1[i * n + c] - tv * w[c];
-                    }
-                }
-            }
-
-            // --- Forward pass: walk j = 0 … k-1 with P_j, using stored B_j. ---
-            std::memcpy(P.data(), Gb, m * n * sizeof(T));
-
-            for (int64_t j = 0; j < k_reflectors; ++j) {
-                for (int64_t i = 0; i < j; ++i) v_j[i] = T(0);
-                v_j[j] = T(1);
-                for (int64_t i = j + 1; i < m; ++i) {
-                    v_j[i] = Vb[i * k_reflectors + j];
-                }
-
-                const T tau_j = taub[j];
-                const T* B_j = B_store.data() + j * m * n;
-
-                // u := v_jᵀ P_j
-                for (int64_t c = 0; c < n; ++c) {
-                    T s = 0;
-                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * P[i * n + c];
-                    u[c] = s;
-                }
-                // w := v_jᵀ B_j
-                for (int64_t c = 0; c < n; ++c) {
-                    T s = 0;
-                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * B_j[i * n + c];
-                    w[c] = s;
-                }
-
-                // ∂L/∂τ_j = − u · w
-                T gt = 0;
-                for (int64_t c = 0; c < n; ++c) gt += u[c] * w[c];
-                gTb[j] = -gt;
-
-                // ∂L/∂V[i, j] for i > j = −τ_j · ( Σ_c P[i, c] w[c] + Σ_c B_j[i, c] u[c] )
-                for (int64_t i = j + 1; i < m; ++i) {
-                    T Pw = 0, Bu = 0;
-                    for (int64_t c = 0; c < n; ++c) {
-                        Pw += P[i * n + c] * w[c];
-                        Bu += B_j[i * n + c] * u[c];
-                    }
-                    gVb[i * k_reflectors + j] = -tau_j * (Pw + Bu);
-                }
-
-                // P_{j+1} = H_j P_j = P − τ_j · v_j · (v_jᵀ P) = P − τ_j · v_j · uᵀ
-                for (int64_t i = 0; i < m; ++i) {
-                    const T tv = tau_j * v_j[i];
-                    for (int64_t c = 0; c < n; ++c) {
-                        P[i * n + c] -= tv * u[c];
-                    }
-                }
-            }
-        }
-    };
-
-    if (compute_dtype == DType::Float32) {
-        kernel(static_cast<float*>(nullptr));
-    } else if (compute_dtype == DType::Float64) {
-        kernel(static_cast<double*>(nullptr));
-    } else {
+    if (compute_dtype != DType::Float32 && compute_dtype != DType::Float64) {
         throw std::runtime_error(
             "householder_product backward: unsupported dtype (only Float32/Float64)");
     }
 
-    auto finalize = [&](Tensor& t, DType target_dtype, Device target_device) {
-        if (t.dtype() != target_dtype) t = t.to(target_dtype);
-        if (t.device().type != target_device.type) t = t.to(target_device);
-        return t;
+    // Cast saved tensors to compute dtype on the same device.
+    auto to_compute = [&](const Tensor& t) {
+        Tensor out = t;
+        if (out.dtype() != compute_dtype) out = out.to(compute_dtype);
+        if (!out.is_contiguous()) out = out.contiguous();
+        return out;
     };
-    finalize(grad_V, orig_dtype, orig_device);
-    finalize(grad_tau, orig_dtype, orig_device);
+    Tensor V_c = to_compute(V_orig);
+    Tensor tau_c = to_compute(tau_orig);
+    Tensor G_c = to_compute(G_orig);
+
+    // Reflector v_j has structural pattern:
+    //   v_j[i] = 0      for i < j   ← mask = 0, override = 0
+    //   v_j[i] = 1      for i = j   ← mask = 0, override = 1
+    //   v_j[i] = V[i,j] for i > j   ← mask = 1, override = 0
+    // Encode the structure as two (m, k) device tensors and slice column j.
+    //   M_full[i, j] = (i > j) ? 1 : 0   →  tril(ones({m,k}), -1)
+    //   O_full[i, j] = (i == j) ? 1 : 0  →  eye(m, k)
+    Tensor M_2d = tenzor::tril(tenzor::ones({m, k}, compute_dtype, orig_device), -1);
+    Tensor O_2d = tenzor::eye(m, k, compute_dtype, orig_device);
+    Tensor M_full = M_2d;
+    Tensor O_full = O_2d;
+    if (ndim > 2) {
+        std::vector<int64_t> bshape(V_shape_v.begin(), V_shape_v.end());
+        M_full = tenzor::expand(M_2d, bshape).contiguous();
+        O_full = tenzor::expand(O_2d, bshape).contiguous();
+    }
+
+    // Build v_j of shape (..., m, 1) from precomputed mask/override columns.
+    auto build_v = [&](int64_t j) -> Tensor {
+        Tensor V_col = tenzor::slice(V_c, /*dim=*/-1, j, j + 1).contiguous();
+        Tensor mask  = tenzor::slice(M_full, /*dim=*/-1, j, j + 1).contiguous();
+        Tensor over  = tenzor::slice(O_full, /*dim=*/-1, j, j + 1).contiguous();
+        return tenzor::add(tenzor::mul(V_col, mask), over);
+    };
+
+    // τ_j as (..., 1, 1) for broadcasting against (..., m, n) matrices.
+    auto build_tau_j = [&](int64_t j) -> Tensor {
+        Tensor t = tenzor::slice(tau_c, /*dim=*/-1, j, j + 1).contiguous();
+        std::vector<int64_t> shp(t.shape().begin(), t.shape().end());
+        shp.push_back(1);
+        return t.reshape(shp);
+    };
+
+    // ------------------------------------------------------------------
+    // Backward pass: B_j = (H_{j+1} … H_{k-1})[:, :n] for j = 0..k-1.
+    // Recurrence B_{j-1} = H_j · B_j with B_{k-1} = I[:, :n].
+    // We materialise all k tensors once (same memory cost as the original
+    // host kernel) so the forward walk below can read them in O(1).
+    // ------------------------------------------------------------------
+    std::vector<Tensor> B_store(k);
+    {
+        Tensor I_mn = tenzor::eye(m, n, compute_dtype, orig_device);
+        Tensor B_last = I_mn;
+        if (ndim > 2) {
+            std::vector<int64_t> bshape(V_shape_v.begin(), V_shape_v.end() - 2);
+            bshape.push_back(m);
+            bshape.push_back(n);
+            B_last = tenzor::expand(I_mn, bshape).contiguous();
+        }
+        B_store[k - 1] = B_last;
+
+        for (int64_t j = k - 2; j >= 0; --j) {
+            const int64_t jp1 = j + 1;
+            Tensor v_jp1   = build_v(jp1);
+            Tensor v_jp1T  = tenzor::transpose(v_jp1, -2, -1);
+            Tensor inner   = tenzor::matmul(v_jp1T, B_store[jp1]);
+            Tensor outer   = tenzor::matmul(v_jp1, inner);
+            Tensor tau_jp1 = build_tau_j(jp1);
+            Tensor scaled  = tenzor::mul(outer, tau_jp1);
+            B_store[j]     = tenzor::sub(B_store[jp1], scaled);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Forward pass: walk j = 0..k-1 with P_j (left-propagated grad) and
+    // accumulate ∂L/∂V column-by-column and ∂L/∂τ entry-by-entry.
+    //   P_0 = G,  P_{j+1} = H_j · P_j = P_j − τ_j · v_j · (v_jᵀ P_j)
+    //   ∂L/∂τ_j = −(v_jᵀ P_j)·(v_jᵀ B_j)ᵀ
+    //   ∂L/∂v_j = −τ_j · (P_j (B_jᵀ v_j) + B_j (P_jᵀ v_j))
+    // ------------------------------------------------------------------
+    Tensor neg_one = tenzor::full({}, -1.0, compute_dtype, orig_device);
+
+    std::vector<Tensor> grad_V_cols(k);
+    std::vector<Tensor> grad_tau_entries(k);
+
+    Tensor P = G_c;
+    for (int64_t j = 0; j < k; ++j) {
+        Tensor v_j   = build_v(j);
+        Tensor v_jT  = tenzor::transpose(v_j, -2, -1);
+        Tensor B_j   = B_store[j];
+        Tensor tau_j = build_tau_j(j);
+
+        // u = v_jᵀ · P  → (..., 1, n);   w = v_jᵀ · B_j → (..., 1, n)
+        Tensor u_j = tenzor::matmul(v_jT, P);
+        Tensor w_j = tenzor::matmul(v_jT, B_j);
+
+        // ∂τ_j = −sum(u·w)  → (..., 1, 1)  → squeeze last to (..., 1)
+        Tensor uw       = tenzor::mul(u_j, w_j);
+        Tensor neg_dot  = tenzor::sum(uw, /*dim=*/-1, /*keepdim=*/true);
+        neg_dot         = tenzor::mul(neg_dot, neg_one);
+        std::vector<int64_t> tau_entry_shape(neg_dot.shape().begin(),
+                                             neg_dot.shape().end() - 1);
+        grad_tau_entries[j] = neg_dot.reshape(tau_entry_shape);  // (..., 1)
+
+        // ∂v_j_full = −τ_j · (P · wᵀ + B_j · uᵀ)  → (..., m, 1)
+        Tensor wT          = tenzor::transpose(w_j, -2, -1);
+        Tensor uT          = tenzor::transpose(u_j, -2, -1);
+        Tensor Pwt         = tenzor::matmul(P, wT);
+        Tensor But         = tenzor::matmul(B_j, uT);
+        Tensor sum_pw_bu   = tenzor::add(Pwt, But);
+        Tensor neg_tau_j   = tenzor::mul(tau_j, neg_one);
+        Tensor grad_v_full = tenzor::mul(sum_pw_bu, neg_tau_j);
+
+        // Mask off entries i ≤ j (only strictly-below-diagonal lands in V).
+        Tensor mask_j   = tenzor::slice(M_full, /*dim=*/-1, j, j + 1).contiguous();
+        grad_V_cols[j]  = tenzor::mul(grad_v_full, mask_j);
+
+        // P_{j+1} = P_j − τ_j · v_j · u_j
+        Tensor v_u      = tenzor::matmul(v_j, u_j);
+        Tensor scaled_v = tenzor::mul(v_u, tau_j);
+        P               = tenzor::sub(P, scaled_v);
+    }
+
+    // Assemble (..., m, k) grad_V from k columns and (..., k) grad_tau from
+    // k entries. cat along last dim.
+    Tensor grad_V   = tenzor::cat(grad_V_cols, /*dim=*/-1);
+    Tensor grad_tau = tenzor::cat(grad_tau_entries, /*dim=*/-1);
+
+    if (grad_V.dtype()   != orig_dtype) grad_V   = grad_V.to(orig_dtype);
+    if (grad_tau.dtype() != orig_dtype) grad_tau = grad_tau.to(orig_dtype);
 
     return {grad_V, grad_tau};
 }

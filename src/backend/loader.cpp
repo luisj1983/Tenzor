@@ -248,7 +248,14 @@ auto BackendLoader::register_backend(std::string_view name,
     } else if (backend_name == "mps") {
         device_type = Device::Type::MPS;
     } else {
-        device_type = Device::Type::CPU; // Default fallback
+        // No silent CPU alias for unknown names — registering an unrecognised
+        // backend name under Device::Type::CPU would let third-party plugins
+        // shadow the real CPU backend and silently steer GPU-intent ops onto
+        // the host. Force the caller to add a Device::Type for new backends.
+        throw std::invalid_argument(
+            "BackendLoader::register_backend: unknown backend name '" + backend_name +
+            "' — no Device::Type mapping. Add the new backend to Device::Type and "
+            "register_backend() before loading.");
     }
 
     // Store backend pointer before moving

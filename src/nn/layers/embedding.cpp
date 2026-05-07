@@ -6,6 +6,10 @@
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -467,12 +471,19 @@ public:
             return {Variable(result, inputs[0].requires_grad())};
         }
 
+        // No GPU kernel registered: refuse to silently demote to CPU. The
+        // user asked for an EmbeddingBag forward on a specific device; if
+        // that device has no kernel, the right behaviour is a clear error,
+        // not a hidden D2H + Float32 host loop + H2D round-trip.
         if (original_device != Device::cpu()) {
-            std::cerr << "Warning: EmbeddingBag falling back to CPU computation for device "
-                      << static_cast<int>(original_device.type) << ". Performance will be degraded." << std::endl;
+            throw std::runtime_error(
+                "EmbeddingBag forward: no EmbeddingBagForward kernel registered for device " +
+                original_device.to_string() +
+                ". Either register a backend kernel for this device or call "
+                ".cpu() on the embedding tensor explicitly.");
         }
 
-        // CPU fallback: transfer to CPU Float32 for computation
+        // CPU compute path (input was already on CPU).
         Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
         if (emb_cpu.dtype() != DType::Float32) {
             emb_cpu = emb_cpu.to(DType::Float32);
@@ -724,14 +735,15 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
             }
         }
 
-        // Apply max_norm if specified (requires CPU for now)
+        // Apply max_norm if specified. renorm_embeddings now runs entirely
+        // through device-aware op composition (index_select + per-row norm
+        // + minimum + index_copy), so we re-fetch the weight after it
+        // mutates the parameter.
         if (max_norm_ > 0.0) {
-            Tensor input_cpu = input_tensor.to(Device::cpu());
-            renorm_embeddings(input_cpu);
-            weight_dev = parameters_["weight"]->tensor();
-            if (weight_dev.device() != target_device) {
-                weight_dev = weight_dev.to(target_device);
-            }
+            renorm_embeddings(input_tensor);
+            Tensor renormed = parameters_["weight"]->tensor();
+            weight_dev = (renormed.device() == target_device)
+                       ? renormed : renormed.to(target_device);
         }
 
         std::vector<Tensor> inputs_vec = {weight_dev, indices_dev};
@@ -860,91 +872,86 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 }
 
 auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
-    // Renormalize embeddings that exceed max_norm
-    // Get weight from parameters_ map to respect offload hooks
-    Tensor weight_tensor = parameters_["weight"]->tensor();
+    // Renormalise rows of the weight matrix that are referenced by `indices`
+    // and exceed max_norm under the L_p norm. Implementation is pure op
+    // composition over registered per-backend primitives — no host pointer
+    // loops, no D2H/H2D round-trip, no device branch:
+    //
+    //   rows  = index_select(weight, 0, idx)
+    //   norm  = (sum(|rows|^p, dim=-1, keepdim))^(1/p)
+    //   scale = min(1, max_norm / (norm + eps))    (per-row, broadcast)
+    //   scale = where(idx == padding_idx, 1, scale)
+    //   weight = index_copy(weight, 0, idx, rows * scale)
+    //
+    // For p = 2 we use sqrt(sum x²) instead of pow(2)/pow(0.5) so backends
+    // without a Float16/BFloat16 pow path (per project memory) still hit a
+    // mature kernel.
+    Tensor weight = parameters_["weight"]->tensor();
+    const Device dev = weight.device();
+    const DType wt_dtype = weight.dtype();
 
-    // Transfer to CPU for pointer-based computation
-    Device weight_device = weight_tensor.device();
-    Device indices_device = indices.device();
+    if (wt_dtype != DType::Float32 && wt_dtype != DType::Float64) {
+        throw std::runtime_error(
+            "Embedding::renorm_embeddings: unsupported weight dtype " +
+            std::string(tenzor::dtype_name(wt_dtype)) +
+            " (only Float32/Float64 supported)");
+    }
 
-    Tensor weight_cpu = (weight_device == Device::cpu()) ? weight_tensor : weight_tensor.to(Device::cpu());
-    Tensor indices_cpu = (indices_device == Device::cpu()) ? indices : indices.to(Device::cpu());
+    // Flatten indices and ensure they're Int64 on the weight's device.
+    Tensor flat_idx = tenzor::reshape(indices, {indices.numel()}).contiguous();
+    if (flat_idx.dtype() != DType::Int64) flat_idx = flat_idx.to(DType::Int64);
+    if (flat_idx.device().type != dev.type ||
+        flat_idx.device().index != dev.index) {
+        flat_idx = flat_idx.to(dev);
+    }
+    const int64_t num_idx = flat_idx.numel();
+    if (num_idx == 0) return;
 
-    auto indices_ptr = indices_cpu.data<int64_t>();
-    int64_t num_indices = indices_cpu.numel();
+    // Gather referenced rows: (num_idx, embedding_dim).
+    Tensor rows = tenzor::index_select(weight, /*dim=*/0, flat_idx);
 
-    DType weight_dtype = weight_cpu.dtype();
-
-    if (weight_dtype == DType::Float32) {
-        auto weight_ptr = weight_cpu.data<float>();
-        for (int64_t i = 0; i < num_indices; ++i) {
-            auto idx = indices_ptr[i];
-            if (idx == padding_idx_) continue;
-
-            // Compute norm
-            double norm = 0.0;
-            for (int64_t j = 0; j < embedding_dim_; ++j) {
-                double val = weight_ptr[idx * embedding_dim_ + j];
-                if (norm_type_ == 2.0) {
-                    norm += val * val;
-                } else {
-                    norm += std::pow(std::abs(val), norm_type_);
-                }
-            }
-            norm = (norm_type_ == 2.0) ? std::sqrt(norm) : std::pow(norm, 1.0 / norm_type_);
-
-            // Renormalize if needed
-            if (norm > max_norm_) {
-                double scale = max_norm_ / (norm + 1e-8);
-                for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    weight_ptr[idx * embedding_dim_ + j] *= scale;
-                }
-            }
-        }
-    } else if (weight_dtype == DType::Float64) {
-        auto weight_ptr = weight_cpu.data<double>();
-        for (int64_t i = 0; i < num_indices; ++i) {
-            auto idx = indices_ptr[i];
-            if (idx == padding_idx_) continue;
-
-            // Compute norm
-            double norm = 0.0;
-            for (int64_t j = 0; j < embedding_dim_; ++j) {
-                double val = weight_ptr[idx * embedding_dim_ + j];
-                if (norm_type_ == 2.0) {
-                    norm += val * val;
-                } else {
-                    norm += std::pow(std::abs(val), norm_type_);
-                }
-            }
-            norm = (norm_type_ == 2.0) ? std::sqrt(norm) : std::pow(norm, 1.0 / norm_type_);
-
-            // Renormalize if needed
-            if (norm > max_norm_) {
-                double scale = max_norm_ / (norm + 1e-8);
-                for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    weight_ptr[idx * embedding_dim_ + j] *= scale;
-                }
-            }
-        }
+    // Per-row L_p norm with keepdim → (num_idx, 1).
+    Tensor norm;
+    if (norm_type_ == 2.0) {
+        Tensor sq    = tenzor::mul(rows, rows);
+        Tensor sumsq = tenzor::sum(sq, /*dim=*/-1, /*keepdim=*/true);
+        norm         = tenzor::sqrt(sumsq);
     } else {
-        throw std::runtime_error("Embedding::renorm_embeddings: Unsupported weight dtype");
+        Tensor abs_rows = tenzor::abs(rows);
+        Tensor pow_rows = tenzor::pow(abs_rows, static_cast<float>(norm_type_));
+        Tensor sumpow   = tenzor::sum(pow_rows, /*dim=*/-1, /*keepdim=*/true);
+        norm            = tenzor::pow(sumpow, static_cast<float>(1.0 / norm_type_));
     }
 
-    // Transfer modified weights back to original device if needed
-    // Update parameters_ map and member variable
-    if (weight_device != Device::cpu()) {
-        Tensor weight_device_tensor = weight_cpu.to(weight_device);
-        auto new_var = std::make_shared<Variable>(weight_device_tensor, parameters_["weight"]->requires_grad());
-        parameters_["weight"] = new_var;
-        weight_ = *new_var;
-    } else if (weight_cpu.data_ptr() != weight_tensor.data_ptr()) {
-        // Even on CPU, update if we created a copy
-        auto new_var = std::make_shared<Variable>(weight_cpu, parameters_["weight"]->requires_grad());
-        parameters_["weight"] = new_var;
-        weight_ = *new_var;
+    // scale = min(1, max_norm / (norm + eps)).
+    Tensor eps   = tenzor::full({}, 1e-8, wt_dtype, dev);
+    Tensor mn    = tenzor::full({}, max_norm_, wt_dtype, dev);
+    Tensor one   = tenzor::full({}, 1.0, wt_dtype, dev);
+    Tensor norms_eps = tenzor::add(norm, eps);
+    Tensor ratio = tenzor::div(mn, norms_eps);
+    Tensor scale = tenzor::minimum(ratio, one);              // (num_idx, 1)
+
+    // Override scale = 1 for any entry that points at the padding row.
+    if (padding_idx_ >= 0) {
+        Tensor pad_t = tenzor::full({}, static_cast<double>(padding_idx_),
+                                    DType::Int64, dev);
+        Tensor pad_mask    = tenzor::eq(flat_idx, pad_t);                  // (num_idx,)
+        Tensor pad_mask_2d = tenzor::reshape(pad_mask, {num_idx, 1});      // (num_idx, 1)
+        scale = tenzor::where(pad_mask_2d, one, scale);
     }
+
+    // Apply per-row scale and scatter rows back into the weight matrix.
+    // index_copy preserves rows that aren't referenced by flat_idx; for
+    // duplicate indices, the last write wins — but every duplicate writes
+    // the *same* rescaled row (scale was computed from the unmodified row),
+    // so the result is correct.
+    Tensor new_rows  = tenzor::mul(rows, scale);
+    Tensor new_weight = tenzor::index_copy(weight, /*dim=*/0, flat_idx, new_rows);
+
+    auto new_var = std::make_shared<Variable>(
+        new_weight, parameters_["weight"]->requires_grad());
+    parameters_["weight"] = new_var;
+    weight_ = *new_var;
 }
 
 auto Embedding::weight() -> Variable& {
@@ -1090,8 +1097,10 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         return Variable(result, false);
     }
 
-    // CPU path: compute aggregation directly
-    Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
+    // CPU path: compute aggregation directly. The branch above either
+    // returned or threw via dispatch_single, so we know we're on CPU here —
+    // no silent .to(cpu) coercion.
+    Tensor emb_cpu = emb_tensor;
     // Upcast to Float32 for aggregation if needed (avoids precision loss with Float16/BFloat16)
     if (emb_cpu.dtype() != DType::Float32) {
         emb_cpu = emb_cpu.to(DType::Float32);
@@ -1147,8 +1156,9 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         return Variable(output, false);
     }
 
-    // With offsets: aggregate each bag separately
-    Tensor offsets_cpu = (original_device == Device::cpu()) ? offsets_tensor : offsets_tensor.to(Device::cpu());
+    // With offsets: aggregate each bag separately. (Already on CPU here — see
+    // comment above; the GPU path returned earlier.)
+    Tensor offsets_cpu = offsets_tensor;
     auto offsets_ptr = offsets_cpu.data<int64_t>();
     int64_t num_bags = offsets_cpu.numel();
 
