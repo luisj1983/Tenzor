@@ -3078,9 +3078,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     //
     // The narrow-back step (Int32 → original dtype) goes through CPU because
     // Vulkan's cast_f32_i8 / cast_f32_i16 shaders saturate to the target
-    // range while PyTorch/numpy/CPU semantics is modular truncation. CPU's
-    // Int32 → Int8 cast already truncates correctly, so the small CPU
-    // round-trip here yields semantically correct values.
+    // range while PyTorch/numpy/CPU semantics is modular truncation. The
+    // narrow-back goes through `dispatchCastTruncateInt32`, which uses
+    // dedicated truncating shaders (cast_i32_i8_truncate / cast_i32_i16 /
+    // cast_i32_bool / cast_i32_i64) — entirely on-device, no CPU roundtrip.
     table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
         if (d == DType::Int32) {
@@ -3088,7 +3089,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", a32, b32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, d)};
     });
     table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
@@ -3097,7 +3098,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", a32, b32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, d)};
     });
     table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
@@ -3106,7 +3107,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", a32, b32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(d).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, d)};
     });
     table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& in = inputs[0];
@@ -3115,7 +3116,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor in32 = in.to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchUnaryOp("bitwise_not", in32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(in.dtype()).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, in.dtype())};
     });
 
     // Native Vulkan RReLU forward
@@ -3380,11 +3381,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                                  static_cast<int64_t>(indices.size()));
         });
 
-    // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders
-    // Same Int32-promote pattern as the AND/OR/XOR registrations above —
-    // see the comment block at OpId::BitwiseAnd for the bit-preservation
-    // guarantees, the Int64-truncation caveat, and why the narrow-back goes
-    // through CPU (Vulkan's cast_f32_i8 saturates instead of truncating).
+    // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders.
+    // Same Int32-promote pattern as the AND/OR/XOR registrations above; the
+    // narrow-back uses dispatchCastTruncateInt32 to preserve the bit pattern
+    // (cast_f32_iX would saturate). All compute stays on-device.
     table.register_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& a = inputs[0];
         const Tensor& b = inputs[1];
@@ -3393,7 +3393,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", a32, b32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(a.dtype()).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, a.dtype())};
     });
     table.register_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& a = inputs[0];
@@ -3403,7 +3403,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
         Tensor out32 = get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", a32, b32);
-        return std::vector<Tensor>{out32.to(Device::cpu()).to(a.dtype()).to(out32.device())};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchCastTruncateInt32(out32, a.dtype())};
     });
 
     // =========================================================================

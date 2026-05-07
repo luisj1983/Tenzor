@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Modular-truncating cast Int32 -> Int8 (preserves the low byte of the bit
+// pattern; sign-extends from 8 bits implicitly via int8_t conversion).
+// Used by bitwise ops where the high bits are well-defined; the saturating
+// cast_f32_i8 corrupts them by clamping to [-128, 127] before truncation.
+//
+// Per GLSL spec §5.4.1: integer narrowing conversions discard the high
+// bits, which is the C/PyTorch modular-truncation semantics we need.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    int data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    int8_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    output_buf.data[idx] = int8_t(input_buf.data[idx]);
+}

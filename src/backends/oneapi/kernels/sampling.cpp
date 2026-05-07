@@ -8,14 +8,20 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 #include <sycl/sycl.hpp>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
+#include <utility>
 
 namespace tenzor {
 namespace oneapi {
+
+// Forward declaration: topk implementation lives in reduction.cpp.
+auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
+                 bool sorted, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
 
 namespace {
 
@@ -27,6 +33,7 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
 struct BernoulliKernelTag {};
 struct MultinomialCdfKernelTag {};
 struct MultinomialSampleKernelTag {};
+struct MultinomialEsKeysKernelTag {};
 struct BucketizeKernelTag {};
 struct HistogramKernelTag {};
 struct HistogramFillEdgesTag {};
@@ -80,7 +87,7 @@ auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor {
 // =========================================================================
 
 auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
-                        bool /*replacement*/, sycl::queue& queue) -> Tensor {
+                        bool replacement, sycl::queue& queue) -> Tensor {
     auto input = probs.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
@@ -89,6 +96,51 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 
     int64_t batch_size = input.shape()[0];
     int64_t num_categories = input.shape()[1];
+
+    if (!replacement && num_samples > num_categories) {
+        throw std::runtime_error("multinomial: cannot sample more than "
+                                 "num_categories without replacement");
+    }
+
+    // Without replacement: Efraimidis-Spirakis weighted reservoir sampling
+    // (Gumbel-top-k). For each (b, i) we compute key[b, i] = -log(U) / w
+    // and select the `num_samples` smallest keys per row. Equivalent in
+    // distribution to repeated weighted sampling without replacement and
+    // runs entirely on-device. Mirrors the CUDA / ROCm implementations.
+    if (!replacement) {
+        Tensor keys({batch_size, num_categories}, DType::Float32, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* keys_ptr = get_data_ptr<float>(keys);
+        const int64_t total_keys = batch_size * num_categories;
+        uint64_t seed = ::tenzor::get_global_seed();
+
+        queue.parallel_for<MultinomialEsKeysKernelTag>(
+            sycl::range<1>(static_cast<size_t>(total_keys)),
+            [=](sycl::id<1> id) {
+                int64_t tid = static_cast<int64_t>(id[0]);
+                uint64_t state = seed +
+                    static_cast<uint64_t>(tid) * 6364136223846793005ULL +
+                    1442695040888963407ULL;
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                float u = (static_cast<float>(state >> 33) + 1.0f) /
+                          static_cast<float>(1ULL << 31);
+                if (u >= 1.0f) u = 1.0f - 1.1920929e-07f;
+                float w = in_ptr[tid];
+                if (!(w > 0.0f)) {
+                    keys_ptr[tid] = std::numeric_limits<float>::infinity();
+                } else {
+                    keys_ptr[tid] = -sycl::log(u) / w;
+                }
+            }).wait();
+
+        auto [picked_vals, picked_idx] = topk_kernel(
+            keys, num_samples, /*dim=*/1,
+            /*largest=*/false, /*sorted=*/true, queue);
+        Tensor result_idx = picked_idx;
+        if (was_1d) result_idx = result_idx.reshape({num_samples});
+        return result_idx;
+    }
+
     Tensor result(std::vector<int64_t>{batch_size, num_samples}, DType::Int64, input.device());
     Tensor cdf_buf(std::vector<int64_t>{batch_size, num_categories}, DType::Float32, input.device());
 

@@ -42,7 +42,7 @@ inline uint16_t f32_to_bf16(float f32) {
  * @brief Generate random numbers from a standard normal distribution (Gaussian with mean=0, stddev=1)
  *
  * Uses Intel oneMKL VSL (Vector Statistics Library) when available for high-performance RNG.
- * Falls back to CPU-based generation using std::normal_distribution when oneMKL is not available.
+ * Falls back to an on-device Philox 4x32-10 + Box-Muller SYCL kernel when oneMKL is not available.
  *
  * @param shape Shape of the output tensor
  * @param dtype Data type (Float32 or Float64)
@@ -245,7 +245,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 /**
  * @brief Generate random numbers from a uniform distribution [0, 1)
  *
- * Uses Intel oneMKL VSL when available. Falls back to CPU generation otherwise.
+ * Uses Intel oneMKL VSL when available. Falls back to an on-device Philox 4x32-10 SYCL kernel otherwise.
  *
  * @param shape Shape of the output tensor
  * @param dtype Data type (Float32 or Float64)

@@ -9,6 +9,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/indexing.hpp"
 
 #include <stdexcept>
 
@@ -34,37 +35,46 @@ static auto to_class_indices(const Tensor& preds, [[maybe_unused]] int64_t num_c
 }
 
 /// Update per-class TP, FP, FN counts given predicted and true class indices.
+/// Vectorised on-device via bincount-with-weights so the per-element loop
+/// no longer drags the full pred/target tensors back to the host. Only the
+/// num_classes-sized partial counters cross the device boundary at the end.
 static auto update_confusion_counts(
     Tensor& tp, Tensor& fp, Tensor& fn,
     const Tensor& pred_classes, const Tensor& target_classes,
-    [[maybe_unused]] int64_t num_classes) -> void
+    int64_t num_classes) -> void
 {
-    // audit-2026-05-03 N1: bring inputs to CPU before raw-pointer access.
-    // Otherwise CUDA / Vulkan / OneAPI inputs would yield device pointers
-    // that the host loop below dereferences directly (hang / segv).
-    auto p = pred_classes.reshape({-1}).to(DType::Int64)
-                 .to(Device::cpu()).contiguous();
-    auto t = target_classes.reshape({-1}).to(DType::Int64)
-                 .to(Device::cpu()).contiguous();
-    auto n = p.numel();
+    auto p = pred_classes.reshape({-1});
+    auto t = target_classes.reshape({-1});
+    if (p.dtype() != DType::Int64) p = p.to(DType::Int64);
+    if (t.dtype() != DType::Int64) t = t.to(DType::Int64);
+    if (p.device() != t.device()) t = t.to(p.device());
+    p = p.contiguous();
+    t = t.contiguous();
 
-    // Access raw data for counting
-    auto* p_data = p.data<int64_t>();
-    auto* t_data = t.data<int64_t>();
-    auto* tp_data = tp.data<float>();
-    auto* fp_data = fp.data<float>();
-    auto* fn_data = fn.data<float>();
+    if (p.numel() == 0) return;
 
-    for (int64_t i = 0; i < n; ++i) {
-        auto pred = p_data[i];
-        auto true_cls = t_data[i];
-        if (pred == true_cls) {
-            tp_data[pred] += 1.0f;
-        } else {
-            fp_data[pred] += 1.0f;
-            fn_data[true_cls] += 1.0f;
-        }
-    }
+    // correct_mask[i] = 1.0f if pred[i] == target[i], else 0.0f.
+    Tensor correct_mask = ::tenzor::eq(p, t).to(DType::Float32);
+    // wrong_mask = 1 - correct_mask, on the same device.
+    Tensor one_t = ::tenzor::full({correct_mask.numel()}, 1.0,
+                                  DType::Float32, correct_mask.device());
+    Tensor wrong_mask = ::tenzor::sub(one_t, correct_mask);
+
+    // bincount(indices, weights, num_classes) → (num_classes,) Float32.
+    Tensor tp_part = ::tenzor::bincount(p, correct_mask, num_classes);
+    Tensor fp_part = ::tenzor::bincount(p, wrong_mask,   num_classes);
+    Tensor fn_part = ::tenzor::bincount(t, wrong_mask,   num_classes);
+
+    if (tp_part.device() != tp.device()) tp_part = tp_part.to(tp.device());
+    if (fp_part.device() != fp.device()) fp_part = fp_part.to(fp.device());
+    if (fn_part.device() != fn.device()) fn_part = fn_part.to(fn.device());
+    if (tp_part.dtype()  != tp.dtype())  tp_part = tp_part.to(tp.dtype());
+    if (fp_part.dtype()  != fp.dtype())  fp_part = fp_part.to(fp.dtype());
+    if (fn_part.dtype()  != fn.dtype())  fn_part = fn_part.to(fn.dtype());
+
+    tp = ::tenzor::add(tp, tp_part);
+    fp = ::tenzor::add(fp, fp_part);
+    fn = ::tenzor::add(fn, fn_part);
 }
 
 // ============================================================================
@@ -76,24 +86,19 @@ Accuracy::Accuracy(int64_t num_classes)
 
 auto Accuracy::update(const Tensor& preds, const Tensor& targets) -> void {
     auto pred_classes = to_class_indices(preds, num_classes_);
-    // audit-2026-05-03 N1: move to CPU before raw-pointer iteration.
-    auto target_flat = targets.reshape({-1}).to(DType::Int64)
-                          .to(Device::cpu()).contiguous();
-    auto pred_flat = pred_classes.reshape({-1}).to(DType::Int64)
-                          .to(Device::cpu()).contiguous();
-
-    auto n = pred_flat.numel();
-    auto* p_data = pred_flat.data<int64_t>();
-    auto* t_data = target_flat.data<int64_t>();
-
-    int64_t batch_correct = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        if (p_data[i] == t_data[i]) {
-            ++batch_correct;
-        }
+    // Compute (pred == target).sum() on-device — only a single int64 scalar
+    // is read back per call, replacing the previous per-element host loop
+    // over class indices that triggered a full-tensor CPU roundtrip.
+    auto pred_flat = pred_classes.reshape({-1}).to(DType::Int64);
+    auto target_flat = targets.reshape({-1}).to(DType::Int64);
+    if (pred_flat.device() != target_flat.device()) {
+        target_flat = target_flat.to(pred_flat.device());
     }
+    Tensor eq_t = ::tenzor::eq(pred_flat, target_flat).to(DType::Int64);
+    Tensor sum_t = ::tenzor::sum(eq_t).to(DType::Int64).to(Device::cpu());
+    int64_t batch_correct = sum_t.data<int64_t>()[0];
     correct_ += batch_correct;
-    total_ += n;
+    total_ += pred_flat.numel();
 }
 
 auto Accuracy::compute() -> Tensor {
@@ -269,12 +274,10 @@ auto F1Score::reset() -> void {
 // ============================================================================
 
 auto AUROC::update(const Tensor& preds, const Tensor& targets) -> void {
-    // Store flattened copies on CPU so compute() can iterate via raw
-    // pointers regardless of input device (audit-2026-05-03 N1).
-    all_preds_.push_back(preds.reshape({-1}).to(DType::Float32)
-                              .to(Device::cpu()).contiguous());
-    all_targets_.push_back(targets.reshape({-1}).to(DType::Float32)
-                                .to(Device::cpu()).contiguous());
+    // Keep tensors on their native device — compute() now does the
+    // ROC-curve construction and trapezoidal sum on-device.
+    all_preds_.push_back(preds.reshape({-1}).to(DType::Float32).contiguous());
+    all_targets_.push_back(targets.reshape({-1}).to(DType::Float32).contiguous());
 }
 
 auto AUROC::compute() -> Tensor {
@@ -282,73 +285,85 @@ auto AUROC::compute() -> Tensor {
         return zeros({1});
     }
 
-    // Concatenate all stored predictions and targets
     auto all_p = cat(all_preds_, /*dim=*/0);
     auto all_t = cat(all_targets_, /*dim=*/0);
-
     auto n = all_p.numel();
     if (n == 0) return zeros({1});
 
-    // Sort by prediction scores in descending order
+    Device dev = all_p.device();
+    if (all_t.device() != dev) all_t = all_t.to(dev);
+
+    // Sort scores descending; gather targets by the same permutation.
     auto [sorted_scores, sort_indices] = sort(all_p, /*dim=*/0, /*descending=*/true);
+    Tensor sorted_t = ::tenzor::index_select(all_t, /*dim=*/0, sort_indices);
 
-    // sort() may produce results on the source device; force CPU layout
-    // so the subsequent host-side trapezoidal walk sees valid pointers.
-    sort_indices = sort_indices.to(Device::cpu()).contiguous();
-    sorted_scores = sorted_scores.to(Device::cpu()).contiguous();
-    all_t = all_t.to(Device::cpu()).contiguous();
-
-    // Gather targets in sorted order
-    auto* idx_data = sort_indices.data<int64_t>();
-    auto* t_data = all_t.data<float>();
-
-    // Count total positives and negatives
-    int64_t total_pos = 0;
-    int64_t total_neg = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        if (t_data[i] >= 0.5f) {
-            ++total_pos;
-        } else {
-            ++total_neg;
-        }
+    // Binarise targets (>= 0.5) → positive indicator. cumsum gives running
+    // TP count; the running FP count is `(i+1) - tp_cum`.
+    Tensor half = ::tenzor::full({n}, 0.5, DType::Float32, dev);
+    Tensor pos_mask = ::tenzor::ge(sorted_t, half).to(DType::Float32);
+    Tensor tp_cum = ::tenzor::cumsum(pos_mask, /*dim=*/0);
+    // Read total_pos / total_neg via single scalar read (last entry).
+    Tensor total_pos_t = ::tenzor::slice(tp_cum, 0, n - 1, n).to(Device::cpu());
+    float total_pos = total_pos_t.data<float>()[0];
+    float total_neg = static_cast<float>(n) - total_pos;
+    if (total_pos == 0.0f || total_neg == 0.0f) {
+        return zeros({1});
     }
 
-    if (total_pos == 0 || total_neg == 0) {
-        return zeros({1});  // Undefined AUROC
+    // fp_cum[i] = (i+1) - tp_cum[i]
+    Tensor idx_arange = ::tenzor::arange(1.0, static_cast<double>(n + 1), 1.0,
+                                          DType::Float32, dev);
+    Tensor fp_cum = ::tenzor::sub(idx_arange, tp_cum);
+
+    // Tie grouping: select only entries that are the LAST of each tie group
+    // (matches the reference CPU behaviour). is_last[i] is true iff i==n-1
+    // or sorted_scores[i] != sorted_scores[i+1].
+    Tensor is_last;
+    if (n == 1) {
+        is_last = ::tenzor::full({1}, 1.0, DType::Float32, dev);
+    } else {
+        Tensor s_curr = ::tenzor::slice(sorted_scores, 0, 0, n - 1);
+        Tensor s_next = ::tenzor::slice(sorted_scores, 0, 1, n);
+        Tensor diff = ::tenzor::ne(s_curr, s_next).to(DType::Float32);
+        Tensor one_tail = ::tenzor::full({1}, 1.0, DType::Float32, dev);
+        is_last = ::tenzor::cat({diff, one_tail}, /*dim=*/0);
+    }
+    Tensor mask_bool = ::tenzor::ne(is_last,
+                                    ::tenzor::full({n}, 0.0, DType::Float32, dev));
+    Tensor group_idx_2d = ::tenzor::nonzero(mask_bool);
+    int64_t group_count = group_idx_2d.shape()[0];
+    if (group_count == 0) {
+        return zeros({1});
+    }
+    Tensor group_idx = ::tenzor::reshape(group_idx_2d, {group_count}).contiguous();
+
+    // tpr / fpr at each group boundary, then prepend 0.
+    Tensor tp_at = ::tenzor::index_select(tp_cum, 0, group_idx);
+    Tensor fp_at = ::tenzor::index_select(fp_cum, 0, group_idx);
+    Tensor tpr = ::tenzor::div(tp_at, total_pos);
+    Tensor fpr = ::tenzor::div(fp_at, total_neg);
+
+    Tensor zero_lead = ::tenzor::full({1}, 0.0, DType::Float32, dev);
+    Tensor tpr_full = ::tenzor::cat({zero_lead, tpr}, 0);
+    Tensor fpr_full = ::tenzor::cat({zero_lead, fpr}, 0);
+
+    int64_t k = tpr_full.numel();
+    if (k <= 1) {
+        return zeros({1});
     }
 
-    // Compute AUROC via trapezoidal rule on ROC curve
-    // Walk thresholds from highest to lowest score
-    double auc = 0.0;
-    double prev_fpr = 0.0;
-    double prev_tpr = 0.0;
-    int64_t tp = 0;
-    int64_t fp = 0;
+    // Trapezoidal: 0.5 * sum((fpr[1:] - fpr[:-1]) * (tpr[1:] + tpr[:-1])).
+    Tensor fpr_a = ::tenzor::slice(fpr_full, 0, 0, k - 1);
+    Tensor fpr_b = ::tenzor::slice(fpr_full, 0, 1, k);
+    Tensor tpr_a = ::tenzor::slice(tpr_full, 0, 0, k - 1);
+    Tensor tpr_b = ::tenzor::slice(tpr_full, 0, 1, k);
+    Tensor dfpr = ::tenzor::sub(fpr_b, fpr_a);
+    Tensor stpr = ::tenzor::add(tpr_a, tpr_b);
+    Tensor area_pieces = ::tenzor::mul(dfpr, stpr);
+    Tensor auc_t = ::tenzor::sum(area_pieces);
+    auc_t = ::tenzor::mul(auc_t, 0.5);
 
-    auto* s_data = sorted_scores.data<float>();
-
-    for (int64_t i = 0; i < n; ++i) {
-        auto idx = idx_data[i];
-        if (t_data[idx] >= 0.5f) {
-            ++tp;
-        } else {
-            ++fp;
-        }
-
-        // Only update ROC point when score changes or at the end
-        if (i == n - 1 || s_data[i] != s_data[i + 1]) {
-            double tpr = static_cast<double>(tp) / static_cast<double>(total_pos);
-            double fpr = static_cast<double>(fp) / static_cast<double>(total_neg);
-
-            // Trapezoidal area
-            auc += (fpr - prev_fpr) * (tpr + prev_tpr) * 0.5;
-
-            prev_fpr = fpr;
-            prev_tpr = tpr;
-        }
-    }
-
-    return full({1}, static_cast<float>(auc));
+    return ::tenzor::reshape(auc_t.to(Device::cpu()), {int64_t(1)});
 }
 
 auto AUROC::reset() -> void {
@@ -365,22 +380,34 @@ ConfusionMatrix::ConfusionMatrix(int64_t num_classes)
     , matrix_(zeros({num_classes, num_classes})) {}
 
 auto ConfusionMatrix::update(const Tensor& preds, const Tensor& targets) -> void {
-    // audit-2026-05-03 N1: bring inputs to CPU before raw-pointer access.
-    auto pred_classes = to_class_indices(preds, num_classes_).reshape({-1})
-                            .to(DType::Int64).to(Device::cpu()).contiguous();
-    auto target_flat = targets.reshape({-1}).to(DType::Int64)
-                          .to(Device::cpu()).contiguous();
+    // Vectorised on-device via bincount on flat indices = true*C + pred.
+    // Replaces the previous per-element host loop that pulled the entire
+    // (preds, targets) pair to CPU each call.
+    auto p = to_class_indices(preds, num_classes_).reshape({-1});
+    auto t = targets.reshape({-1});
+    if (p.dtype() != DType::Int64) p = p.to(DType::Int64);
+    if (t.dtype() != DType::Int64) t = t.to(DType::Int64);
+    if (p.device() != t.device()) t = t.to(p.device());
+    if (p.numel() == 0) return;
+    p = p.contiguous();
+    t = t.contiguous();
+    Device dev = p.device();
 
-    auto n = pred_classes.numel();
-    auto* p_data = pred_classes.data<int64_t>();
-    auto* t_data = target_flat.data<int64_t>();
-    auto* m_data = matrix_.data<float>();
+    int64_t n = p.numel();
+    Tensor C_t = ::tenzor::full({n}, static_cast<double>(num_classes_),
+                                 DType::Int64, dev);
+    Tensor flat_idx = ::tenzor::add(::tenzor::mul(t, C_t), p);
 
-    for (int64_t i = 0; i < n; ++i) {
-        auto true_cls = t_data[i];
-        auto pred_cls = p_data[i];
-        m_data[true_cls * num_classes_ + pred_cls] += 1.0f;
+    int64_t total_bins = num_classes_ * num_classes_;
+    Tensor flat_counts = ::tenzor::bincount(flat_idx, std::nullopt, total_bins);
+    if (flat_counts.dtype() != matrix_.dtype()) {
+        flat_counts = flat_counts.to(matrix_.dtype());
     }
+    Tensor flat_counts_2d = ::tenzor::reshape(flat_counts, {num_classes_, num_classes_});
+    if (flat_counts_2d.device() != matrix_.device()) {
+        flat_counts_2d = flat_counts_2d.to(matrix_.device());
+    }
+    matrix_ = ::tenzor::add(matrix_, flat_counts_2d);
 }
 
 auto ConfusionMatrix::compute() -> Tensor {

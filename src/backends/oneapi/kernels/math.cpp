@@ -49,6 +49,7 @@ struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
 struct MulKernelFloat16 {};
 struct MulKernelInt32 {};
+struct MulKernelInt64 {};
 struct MulKernelBool {};
 struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
@@ -1044,6 +1045,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
         queue.parallel_for<MulKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int64) {
+        const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
+        const int64_t* b_ptr = get_data_ptr<const int64_t>(b_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        queue.parallel_for<MulKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
@@ -7033,14 +7043,21 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
         ::oneapi::dpl::inclusive_scan(policy, d_mask, d_mask + n, d_prefix);
 #else
-        // Fallback: host-side prefix sum
-        std::vector<int32_t> mask_host(n), prefix_host(n);
-        queue.memcpy(mask_host.data(), d_mask, n * sizeof(int32_t)).wait();
-        prefix_host[0] = mask_host[0];
-        for (int64_t i = 1; i < n; ++i) {
-            prefix_host[i] = prefix_host[i - 1] + mask_host[i];
+        // No oneDPL: run an inclusive scan on-device via single_task. The
+        // scan itself is sequential but stays in device memory — no host
+        // roundtrip on the (potentially large) mask array.
+        {
+            int32_t* mask_in = d_mask;
+            int32_t* pref_out = d_prefix;
+            int64_t n_local = n;
+            queue.single_task([=]() {
+                int32_t acc = 0;
+                for (int64_t i = 0; i < n_local; ++i) {
+                    acc += mask_in[i];
+                    pref_out[i] = acc;
+                }
+            }).wait();
         }
-        queue.memcpy(d_prefix, prefix_host.data(), n * sizeof(int32_t)).wait();
 #endif
 
         // Read total unique count from last element of prefix sum (single scalar readback)

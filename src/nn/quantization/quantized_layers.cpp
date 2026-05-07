@@ -13,6 +13,9 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "../../backends/cpu/kernels/fused_quantized_ops.hpp"
 #include <stdexcept>
@@ -86,8 +89,58 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     auto input_shape = input.shape();
     int64_t batch_size = input_shape[0];
 
-    // Remember original device
     auto original_device = input.device();
+
+    // GPU dispatch fast-path: for the common per-tensor INT8 case on a
+    // non-CPU device, route through the registered OpId::QuantizedLinear
+    // (every backend has a native kernel registered). Per-channel and
+    // INT4 paths still fall through to the host loop below — those would
+    // need additional dispatch attributes / kernels to support on-device.
+    {
+        const auto& input_params = input.params();
+        const auto& weight_params = weight_.params();
+        bool wt_per_channel = (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
+                               weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
+        bool wt_int4 = (weight_.data().dtype() == DType::QInt4x2);
+        bool dispatch_eligible =
+            original_device.type != Device::Type::CPU &&
+            !wt_per_channel && !wt_int4 &&
+            input.data().dtype() == DType::Int8 &&
+            weight_.data().dtype() == DType::Int8;
+
+        if (dispatch_eligible) {
+            // The OpId::QuantizedLinear contract is per-tensor scalar attrs,
+            // so we read four small Int32 / Float32 scalars to host. The
+            // tensor data (input / weight / bias) stays on the device.
+            Tensor in_scale_cpu  = input_params.scale.to(Device::cpu());
+            Tensor wt_scale_cpu  = weight_params.scale.to(Device::cpu());
+            Tensor in_zp_cpu     = input_params.zero_point.to(Device::cpu());
+            Tensor wt_zp_cpu     = weight_params.zero_point.to(Device::cpu());
+
+            float in_scale  = in_scale_cpu.data<const float>()[0];
+            float wt_scale  = wt_scale_cpu.data<const float>()[0];
+            int32_t in_zp   = in_zp_cpu.data<int32_t>()[0];
+            int32_t wt_zp   = wt_zp_cpu.data<int32_t>()[0];
+
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::InputScale,      static_cast<double>(in_scale));
+            attrs.set(AttrKey::WeightScaleQ,    static_cast<double>(wt_scale));
+            attrs.set(AttrKey::OutputScale,     1.0);
+            attrs.set(AttrKey::InputZeroPoint,  static_cast<int64_t>(in_zp));
+            attrs.set(AttrKey::WeightZeroPoint, static_cast<int64_t>(wt_zp));
+
+            std::vector<Tensor> inputs_vec;
+            inputs_vec.push_back(input.data());
+            inputs_vec.push_back(weight_.data());
+            if (bias_.has_value()) {
+                Tensor bias_dev = *bias_;
+                if (bias_dev.dtype() != DType::Float32) bias_dev = bias_dev.to(DType::Float32);
+                if (bias_dev.device() != original_device) bias_dev = bias_dev.to(original_device);
+                inputs_vec.push_back(bias_dev);
+            }
+            return dispatch<OpId::QuantizedLinear>(inputs_vec, attrs)[0];
+        }
+    }
 
     // Allocate output on CPU for computation
     Tensor output({batch_size, out_features_}, DType::Float32, Device::cpu());

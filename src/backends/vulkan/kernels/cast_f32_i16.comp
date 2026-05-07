@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+
+// Cast Float32 -> Int16 (saturating to [-32768, 32767], then truncate).
+// Matches cast_f32_i8 semantics. The bitwise narrow-truncation path uses
+// cast_i32_i16 directly to avoid the saturation.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    int16_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    float v = clamp(input_buf.data[idx], -32768.0, 32767.0);
+    output_buf.data[idx] = int16_t(int(v));
+}

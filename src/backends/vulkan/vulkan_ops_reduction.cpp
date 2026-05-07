@@ -1290,16 +1290,34 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     out_shape[dim] = total_repeats;
 
-    // For non-float types, handle via cast round-trip
+    // For non-float types, round-trip through a float dtype the shader can
+    // safely reinterpret. The shader hardcodes `float input_data[]` /
+    // `float output_data[]` SSBO bindings, so any 4-byte non-float input
+    // would silently get reinterpreted as float garbage. Int64 values up
+    // to 2^53 are exactly representable in Float64; smaller integer types
+    // are routed via Float32. (Found by sparse SpGEMM → to_dense round-trip
+    // returning wrong rows: arange Int64 ⇒ Vulkan saw garbage repeats.)
     DType orig_dtype = input.dtype();
-    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool || orig_dtype == DType::UInt8) {
+    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool ||
+        orig_dtype == DType::UInt8 || orig_dtype == DType::Int16 ||
+        orig_dtype == DType::Int32) {
         Tensor f32_input = dispatchCast(input, DType::Float32);
         Tensor f32_result = dispatchRepeatInterleaveTensor(f32_input, repeats, dim);
         return dispatchCast(f32_result, orig_dtype);
     }
+    if (orig_dtype == DType::Int64) {
+        Tensor f64_input = dispatchCast(input, DType::Float64);
+        Tensor f64_result = dispatchRepeatInterleaveTensor(f64_input, repeats, dim);
+        return dispatchCast(f64_result, DType::Int64);
+    }
 
-    // Select shader (float32 only for now; int32/int64 reinterpret as float/double)
-    std::string shader = "repeat_interleave_tensor";
+    // Float32 vs Float64 shader. Other dtypes are handled via cast-roundtrip
+    // above; Float16 / BFloat16 / FP8 are widened to Float32 by dispatchCast
+    // before reaching this dispatcher when the caller routes through the
+    // public op (the kernel registry pre-promotes those).
+    std::string shader = (orig_dtype == DType::Float64)
+        ? "repeat_interleave_tensor_f64"
+        : "repeat_interleave_tensor";
     auto* pipeline = getPipeline(shader, device_id);
 
     Tensor output(out_shape, orig_dtype, input.device());

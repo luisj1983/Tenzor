@@ -717,38 +717,34 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     const bool needs_input_grad = is_grad_enabled() && input.requires_grad();
 
     // ============================================================================
-    // CUDA FAST PATH: Use fused LayerNorm kernel via dispatch (single kernel launch!)
-    // Use fast path when input doesn't need grad (inference) - even if weights require grad
-    // ============================================================================
-    if (!needs_input_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+    // GPU INFERENCE FAST PATH: Use the registered FusedLayerNorm op for any
+    // non-CPU device. Previously only CUDA was routed here; CUDA / ROCm /
+    // OneAPI / Vulkan all register OpId::FusedLayerNorm, so a single
+    // dispatch covers all of them. Float32-only — narrower / wider dtypes
+    // either widen on the kernel side or fall through to the STANDARD PATH.
+    if (!needs_input_grad &&
+        input.tensor().device().type != Device::Type::CPU &&
+        input.tensor().dtype() == DType::Float32) {
         const Tensor& x = input.tensor();
+        Device dev = x.device();
 
-        // Get weight/bias tensors, ensure on CUDA
-        Tensor weight_cuda = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();
-        Tensor bias_cuda = (elementwise_affine_ && cached_bias_) ? cached_bias_->tensor() : bias_.tensor();
+        Tensor weight_dev = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();
+        Tensor bias_dev = (elementwise_affine_ && cached_bias_) ? cached_bias_->tensor() : bias_.tensor();
+        if (weight_dev.device() != dev) weight_dev = weight_dev.to(dev);
+        if (bias_dev.device() != dev) bias_dev = bias_dev.to(dev);
 
-        if (weight_cuda.device().type != Device::Type::CUDA) {
-            weight_cuda = weight_cuda.to(Device::cuda());
-        }
-        if (bias_cuda.device().type != Device::Type::CUDA) {
-            bias_cuda = bias_cuda.to(Device::cuda());
-        }
-
-        // Build normalized_shape as comma-separated string for attrs
         std::string norm_shape_str;
         for (size_t i = 0; i < normalized_shape_.size(); ++i) {
             if (i > 0) norm_shape_str += ",";
             norm_shape_str += std::to_string(normalized_shape_[i]);
         }
-
-        // Dispatch to fused CUDA kernel (single kernel launch for max performance)
         NewOpAttributes attrs;
         attrs.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
         attrs.set(AttrKey::Eps, static_cast<double>(eps_));
 
-        std::vector<Tensor> inputs_vec = {x, weight_cuda, bias_cuda};
+        std::vector<Tensor> inputs_vec = {x, weight_dev, bias_dev};
         auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
-        return Variable(results[0], false);  // results[0] is output, [1] is mean, [2] is inv_std
+        return Variable(results[0], false);
     }
 
     if (!needs_input_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
@@ -816,6 +812,90 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         }
 
         return Variable(output, false);
+    }
+
+    // ============================================================================
+    // GPU TRAINING FAST PATH: dispatch through OpId::FusedLayerNorm for any
+    // non-CPU device when autograd is enabled, building a LayerNormBackward
+    // grad_fn with the kernel-returned (mean, inv_std) tensors saved on the
+    // device. The previous STANDARD PATH downloaded the input to host and
+    // ran a pointer-based forward — a real CPU compute fallback for ROCm /
+    // OneAPI / Vulkan training. Backend kernels handle Float16/BFloat16
+    // internally (widening to Float32 for accumulators), and the existing
+    // LayerNormBackward Function already upcasts Float16/BFloat16 saved
+    // tensors before dispatching the backward. Covers F32/F64/F16/BF16.
+    if (input.tensor().device().type != Device::Type::CPU &&
+        (input.tensor().dtype() == DType::Float32 ||
+         input.tensor().dtype() == DType::Float64 ||
+         input.tensor().dtype() == DType::Float16 ||
+         input.tensor().dtype() == DType::BFloat16)) {
+        const Tensor& x = input.tensor();
+        Device dev = x.device();
+
+        Tensor weight_dev = (elementwise_affine_ && cached_weight_)
+            ? cached_weight_->tensor() : weight_.tensor();
+        Tensor bias_dev = (elementwise_affine_ && cached_bias_)
+            ? cached_bias_->tensor() : bias_.tensor();
+        if (weight_dev.device() != dev) weight_dev = weight_dev.to(dev);
+        if (bias_dev.device() != dev) bias_dev = bias_dev.to(dev);
+        if (weight_dev.dtype() != x.dtype()) weight_dev = weight_dev.to(x.dtype());
+        if (bias_dev.dtype() != x.dtype()) bias_dev = bias_dev.to(x.dtype());
+
+        // OpId::LayerNorm is registered on every backend with the contract
+        // (input, weight, bias) → (output, mean, inv_std). NormalizedShape
+        // is a comma-separated string per existing convention.
+        std::string norm_shape_str;
+        for (size_t i = 0; i < normalized_shape_.size(); ++i) {
+            if (i > 0) norm_shape_str += ",";
+            norm_shape_str += std::to_string(normalized_shape_[i]);
+        }
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
+        attrs.set(AttrKey::Eps, static_cast<double>(eps_));
+
+        // FusedLayerNorm has a uniform `{output, mean, rstd}` return contract
+        // on every backend (Vulkan and ROCm host-recompute the stats inside
+        // the registration as a workaround until their kernels expose them).
+        // OpId::LayerNorm only returns the triple on CUDA/OneAPI/CPU; ROCm
+        // and Vulkan return `{output}` only — using LayerNorm there would
+        // out-of-bounds-read in the backward graph.
+        std::vector<Tensor> inputs_vec = {x, weight_dev, bias_dev};
+        auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
+        Tensor out_dev  = results[0];
+        Tensor mean_dev = results[1];
+        Tensor rstd_dev = results[2];
+
+        // Wire up autograd if needed.
+        const bool wt_needs_grad = elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad();
+        const bool bs_needs_grad = elementwise_affine_ && cached_bias_   && cached_bias_->requires_grad();
+        if (needs_input_grad || wt_needs_grad || bs_needs_grad) {
+            auto result = Variable(out_dev, true);
+
+            std::vector<Tensor> tensors_to_save = {
+                x,
+                mean_dev,
+                rstd_dev,
+                weight_dev,
+            };
+            auto grad_fn = std::make_shared<LayerNormBackward>(
+                elementwise_affine_, eps_, N, std::move(tensors_to_save));
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+            if (wt_needs_grad && cached_weight_->grad_fn()) next_funcs.push_back(cached_weight_->grad_fn());
+            if (bs_needs_grad && cached_bias_->grad_fn())   next_funcs.push_back(cached_bias_->grad_fn());
+            grad_fn->set_next_functions(std::move(next_funcs));
+
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) input_vars.push_back(input);
+            if (wt_needs_grad) input_vars.push_back(*cached_weight_);
+            if (bs_needs_grad) input_vars.push_back(*cached_bias_);
+            grad_fn->set_input_variables(std::move(input_vars));
+
+            result.set_grad_fn(grad_fn);
+            return result;
+        }
+        return Variable(out_dev, false);
     }
 
     // ============================================================================

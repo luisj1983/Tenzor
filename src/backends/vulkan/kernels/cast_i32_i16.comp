@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+
+// Modular-truncating cast Int32 -> Int16. Preserves the low 16 bits of the
+// bit pattern (sign-extension from 16 bits applied implicitly via int16_t
+// conversion). Used directly by dispatchCast for the previously-CPU Int16
+// path, and by the bitwise narrow-truncation cluster.
+//
+// Per GLSL spec §5.4.1: integer narrowing conversions discard the high
+// bits — matches C/PyTorch modular-truncation semantics.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    int data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    int16_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    output_buf.data[idx] = int16_t(input_buf.data[idx]);
+}

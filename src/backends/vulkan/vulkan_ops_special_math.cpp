@@ -197,30 +197,32 @@ auto VulkanBackend::dispatchSpecialMathTernary(const Tensor& a, const Tensor& b,
 
     int32_t device_id = a.device().index;
 
-    // Float64 betainc cannot be computed accurately in a Vulkan compute
-    // shader: GLSL has no double-precision transcendental intrinsics
-    // (log, exp, sin) — the SPIR-V Float64 capability covers arithmetic
-    // only. The Lentz CF iteration plus the lgamma/log/exp scaffolding
-    // accumulate ~F32 precision loss, breaking gradcheck (rtol 1e-5).
-    // Round-trip via CPU for F64. This is not a kernel fallback: it's a
-    // GLSL-platform limitation that the user explicitly opted out of by
-    // requesting Float64 on a backend whose shaders can't compute it.
-    if (orig_dtype == DType::Float64) {
-        auto a_cpu = a.contiguous().to(Device::cpu());
-        auto b_cpu = b.contiguous().to(Device::cpu());
-        auto x_cpu = x.contiguous().to(Device::cpu());
-        auto out_cpu = ::tenzor::betainc(a_cpu, b_cpu, x_cpu);
-        return out_cpu.to(a.device());
+    // Float64 betainc runs through the dedicated F64 ternary shader. The
+    // shader implements log64 / exp64 / sin64 inline (no SPIR-V Float64
+    // transcendental intrinsics exist; the implementations use frexp / ldexp
+    // plus polynomial range-reduction for ~ULP precision). Replaces the
+    // previous CPU round-trip — see kernels/special_math_ternary_f64.comp.
+    bool is_f64_path = (orig_dtype == DType::Float64);
+
+    Tensor compute_a, compute_b, compute_x;
+    Tensor output;
+    if (is_f64_path) {
+        compute_a = a.contiguous();
+        compute_b = b.contiguous();
+        compute_x = x.contiguous();
+        std::vector<int64_t> shape(compute_a.shape().begin(), compute_a.shape().end());
+        output = Tensor(shape, DType::Float64, compute_a.device());
+    } else {
+        compute_a = maybe_promote(a, orig_dtype, this);
+        compute_b = maybe_promote(b, orig_dtype, this);
+        compute_x = maybe_promote(x, orig_dtype, this);
+        std::vector<int64_t> shape(compute_a.shape().begin(), compute_a.shape().end());
+        output = Tensor(shape, DType::Float32, compute_a.device());
     }
 
-    Tensor compute_a = maybe_promote(a, orig_dtype, this);
-    Tensor compute_b = maybe_promote(b, orig_dtype, this);
-    Tensor compute_x = maybe_promote(x, orig_dtype, this);
-
-    std::vector<int64_t> shape(compute_a.shape().begin(), compute_a.shape().end());
-    Tensor output(shape, DType::Float32, compute_a.device());
-
-    auto* pipeline = getPipeline("special_math_ternary", device_id);
+    auto* pipeline = getPipeline(is_f64_path ? "special_math_ternary_f64"
+                                              : "special_math_ternary",
+                                 device_id);
 
     BinaryPushConstants pc{};
     pc.n = static_cast<uint32_t>(compute_a.numel());
@@ -232,7 +234,8 @@ auto VulkanBackend::dispatchSpecialMathTernary(const Tensor& a, const Tensor& b,
         {2, compute_x.data_ptr()},
         {3, output.data_ptr()},
     };
-    size_t buf_size = compute_a.numel() * sizeof(float);
+    size_t elem_bytes = is_f64_path ? sizeof(double) : sizeof(float);
+    size_t buf_size = compute_a.numel() * elem_bytes;
     std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(

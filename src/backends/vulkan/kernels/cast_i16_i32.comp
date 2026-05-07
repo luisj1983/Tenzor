@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+
+// Sign-extending cast Int16 -> Int32. Combined with cast_i32_i16 this
+// gives dispatchCast a native GPU path for any pair {Int16, X}: route via
+// Int32 intermediate. Replaces the previous CPU roundtrip in
+// vulkan_ops_misc.cpp.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    int16_t data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    int data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    output_buf.data[idx] = int(input_buf.data[idx]);
+}

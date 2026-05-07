@@ -822,6 +822,95 @@ auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tens
     }
 }
 
+// ----------------------------------------------------------------------------
+// Symmetry probe: max |A| and max |A - A^T| over a batched square matrix,
+// reduced into two device-side scalars. Used by linalg_eig_kernel to choose
+// between the eigh fast-path and the QR fallback without downloading the
+// whole input back to the host. Mirrors the CUDA / ROCm helpers.
+// ----------------------------------------------------------------------------
+template <typename T>
+class EigSymProbeKernelTag;
+
+template <typename T>
+inline std::pair<double, double> linalg_eig_symmetry_metrics(
+    const T* d_A, int64_t nbatch, int64_t n, sycl::queue& queue)
+{
+    if (nbatch == 0 || n == 0) return {0.0, 0.0};
+
+    double* d_pair = sycl::malloc_device<double>(2, queue);
+    double init[2] = {0.0, 0.0};
+    queue.memcpy(d_pair, init, 2 * sizeof(double)).wait();
+
+    constexpr int LOCAL = 256;
+    sycl::range<1> global(static_cast<size_t>(nbatch) * LOCAL);
+    sycl::range<1> local(LOCAL);
+
+    queue.submit([&](sycl::handler& h) {
+        sycl::local_accessor<double, 1> s_abs(LOCAL, h);
+        sycl::local_accessor<double, 1> s_diff(LOCAL, h);
+        int64_t n_ = n;
+        int64_t total = n_ * n_;
+        const T* A = d_A;
+        double* pair = d_pair;
+
+        h.parallel_for<EigSymProbeKernelTag<T>>(
+            sycl::nd_range<1>(global, local),
+            [=](sycl::nd_item<1> it) {
+                int64_t b = it.get_group_linear_id();
+                int tid = it.get_local_linear_id();
+                int wsz = it.get_local_range(0);
+                const T* mat = A + b * total;
+
+                double local_max_abs = 0.0;
+                double local_max_diff = 0.0;
+                for (int64_t idx = tid; idx < total; idx += wsz) {
+                    int64_t i = idx / n_;
+                    int64_t j = idx - i * n_;
+                    double v = static_cast<double>(mat[idx]);
+                    double av = (v < 0.0) ? -v : v;
+                    if (av > local_max_abs) local_max_abs = av;
+                    if (j > i) {
+                        double vt = static_cast<double>(mat[j * n_ + i]);
+                        double d = v - vt;
+                        if (d < 0.0) d = -d;
+                        if (d > local_max_diff) local_max_diff = d;
+                    }
+                }
+                s_abs[tid] = local_max_abs;
+                s_diff[tid] = local_max_diff;
+                sycl::group_barrier(it.get_group());
+
+                for (int stride = wsz / 2; stride > 0; stride >>= 1) {
+                    if (tid < stride) {
+                        if (s_abs[tid + stride] > s_abs[tid])
+                            s_abs[tid] = s_abs[tid + stride];
+                        if (s_diff[tid + stride] > s_diff[tid])
+                            s_diff[tid] = s_diff[tid + stride];
+                    }
+                    sycl::group_barrier(it.get_group());
+                }
+
+                if (tid == 0) {
+                    sycl::atomic_ref<double,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space> a_abs(pair[0]);
+                    sycl::atomic_ref<double,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space> a_diff(pair[1]);
+                    a_abs.fetch_max(s_abs[0]);
+                    a_diff.fetch_max(s_diff[0]);
+                }
+            });
+    }).wait();
+
+    double host_pair[2] = {0.0, 0.0};
+    queue.memcpy(host_pair, d_pair, 2 * sizeof(double)).wait();
+    sycl::free(d_pair, queue);
+    return {host_pair[0], host_pair[1]};
+}
+
 // ============================================================================
 // LinalgEigh - Symmetric eigendecomposition via syevd
 // ============================================================================
@@ -913,44 +1002,15 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
     // matrix. Sum-of-eigenvalues equals trace, which is preserved by
     // symmetrization, so the numerical gradient matches the analytical.
     if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
-        size_t elem_real = (input.dtype() == DType::Float32) ? sizeof(float) : sizeof(double);
-        std::vector<char> host_data(nbatch * n * n * elem_real);
-        queue.memcpy(host_data.data(), input.contiguous().data_ptr(),
-            nbatch * n * n * elem_real).wait();
+        auto A_cont = input.contiguous();
         bool is_near_symmetric = true;
         if (input.dtype() == DType::Float32) {
-            const float* p = reinterpret_cast<const float*>(host_data.data());
-            float a_max = 0.0f, diff_max = 0.0f;
-            for (int64_t i = 0; i < nbatch * n * n; ++i) {
-                float v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch && is_near_symmetric; ++b) {
-                const float* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        float d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
-            is_near_symmetric = (diff_max < 1e-2f * std::max(a_max, 1.0f));
+            auto [a_max, diff_max] = linalg_eig_symmetry_metrics<float>(
+                get_data_ptr<const float>(A_cont), nbatch, n, queue);
+            is_near_symmetric = (diff_max < 1e-2 * std::max(a_max, 1.0));
         } else {
-            const double* p = reinterpret_cast<const double*>(host_data.data());
-            double a_max = 0.0, diff_max = 0.0;
-            for (int64_t i = 0; i < nbatch * n * n; ++i) {
-                double v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch && is_near_symmetric; ++b) {
-                const double* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        double d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
+            auto [a_max, diff_max] = linalg_eig_symmetry_metrics<double>(
+                get_data_ptr<const double>(A_cont), nbatch, n, queue);
             is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
         }
         if (is_near_symmetric) {
@@ -958,7 +1018,7 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
             auto A_sym = ::tenzor::mul(::tenzor::add(input, At), 0.5);
             auto [W, V] = linalg_eigh_kernel(A_sym.contiguous(), queue);
             auto WI = Tensor(w_shape, input.dtype(), input.device());
-            // Zero-fill WI
+            size_t elem_real = (input.dtype() == DType::Float32) ? sizeof(float) : sizeof(double);
             queue.memset(WI.data_ptr(), 0, nbatch * n * elem_real).wait();
             return {W, WI, V};
         }
@@ -1057,44 +1117,14 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
         int64_t nbatch_check = 1;
         for (auto d : batch_dims) nbatch_check *= d;
         if (nbatch_check < 1) nbatch_check = 1;
-        size_t elem_real = (A.dtype() == DType::Float32) ? sizeof(float) : sizeof(double);
-        std::vector<char> host_data(nbatch_check * n * n * elem_real);
-        queue.memcpy(host_data.data(), A.data_ptr(),
-            nbatch_check * n * n * elem_real).wait();
         bool is_near_symmetric = true;
         if (A.dtype() == DType::Float32) {
-            const float* p = reinterpret_cast<const float*>(host_data.data());
-            float a_max = 0.0f, diff_max = 0.0f;
-            for (int64_t i = 0; i < nbatch_check * n * n; ++i) {
-                float v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch_check && is_near_symmetric; ++b) {
-                const float* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        float d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
-            is_near_symmetric = (diff_max < 1e-2f * std::max(a_max, 1.0f));
+            auto [a_max, diff_max] = linalg_eig_symmetry_metrics<float>(
+                get_data_ptr<const float>(A), nbatch_check, n, queue);
+            is_near_symmetric = (diff_max < 1e-2 * std::max(a_max, 1.0));
         } else {
-            const double* p = reinterpret_cast<const double*>(host_data.data());
-            double a_max = 0.0, diff_max = 0.0;
-            for (int64_t i = 0; i < nbatch_check * n * n; ++i) {
-                double v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch_check && is_near_symmetric; ++b) {
-                const double* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        double d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
+            auto [a_max, diff_max] = linalg_eig_symmetry_metrics<double>(
+                get_data_ptr<const double>(A), nbatch_check, n, queue);
             is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
         }
         if (is_near_symmetric) {

@@ -508,15 +508,16 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
             batch_mean = fused_results[3];  // saved_mean for backward
             batch_var = fused_results[4];   // saved_inv_var for backward
-            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            // Increment num_batches_tracked on the buffer's native device —
+            // host-staging a single int64 each forward used to round-trip
+            // through CPU. Adding via tenzor::add stays on-device.
             {
                 auto& nbt = buffers_["num_batches_tracked"]->tensor();
-                if (nbt.device().type != Device::Type::CPU) {
-                    auto nbt_cpu = nbt.to(Device::cpu());
-                    nbt_cpu.data<int64_t>()[0]++;
-                    nbt = nbt_cpu.to(nbt.device());
-                } else {
+                if (nbt.device().type == Device::Type::CPU) {
                     nbt.data<int64_t>()[0]++;
+                } else {
+                    Tensor one = ::tenzor::full({1}, 1.0, nbt.dtype(), nbt.device());
+                    nbt = ::tenzor::add(nbt, one);
                 }
             }
 
@@ -628,14 +629,13 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rm_var_ptr->tensor() = updated_stats[0].to(DType::Float32);
             rv_var_ptr->tensor() = updated_stats[1].to(DType::Float32);
 
-            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            // Increment on the buffer's native device (avoids host roundtrip).
             auto& nbt = buffers_["num_batches_tracked"]->tensor();
-            if (nbt.device().type != Device::Type::CPU) {
-                auto nbt_cpu = nbt.to(Device::cpu());
-                nbt_cpu.data<int64_t>()[0]++;
-                nbt = nbt_cpu.to(nbt.device());
-            } else {
+            if (nbt.device().type == Device::Type::CPU) {
                 nbt.data<int64_t>()[0]++;
+            } else {
+                Tensor one = ::tenzor::full({1}, 1.0, nbt.dtype(), nbt.device());
+                nbt = ::tenzor::add(nbt, one);
             }
         }
     } else {
@@ -1127,14 +1127,13 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
             rm_tensor = rm_tensor * (1.0f - momentum_) + batch_mean * momentum_;
             rv_tensor = rv_tensor * (1.0f - momentum_) + unbiased_var * momentum_;
 
-            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            // Increment on the buffer's native device (avoids host roundtrip).
             auto& nbt = buffers_["num_batches_tracked"]->tensor();
-            if (nbt.device().type != Device::Type::CPU) {
-                auto nbt_cpu = nbt.to(Device::cpu());
-                nbt_cpu.data<int64_t>()[0]++;
-                nbt = nbt_cpu.to(nbt.device());
-            } else {
+            if (nbt.device().type == Device::Type::CPU) {
                 nbt.data<int64_t>()[0]++;
+            } else {
+                Tensor one = ::tenzor::full({1}, 1.0, nbt.dtype(), nbt.device());
+                nbt = ::tenzor::add(nbt, one);
             }
         }
     } else {

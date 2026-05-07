@@ -1,7 +1,12 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/advanced.hpp"
 #include <algorithm>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 
 // Forward declarations for GPU-native sparse format conversions.
@@ -149,112 +154,291 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
 }
 
 auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> SparseTensor {
-    auto dense_cont = dense.contiguous().to(Device::cpu());
-    auto shape = std::vector<int64_t>(dense.shape().begin(), dense.shape().end());
+    // Device-aware implementation: nonzero + index_select on the original
+    // device. The previous implementation pulled the full dense tensor to
+    // host and host-scanned for nonzeros — a real CPU compute fallback for
+    // every GPU sparse user.
+    auto dense_cont = dense.contiguous();
+    auto shape_span = dense_cont.shape();
+    auto shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     int64_t numel = dense_cont.numel();
+    Device dev = dense_cont.device();
 
-    // Count non-zero elements
-    std::vector<int64_t> nz_flat_indices;
-    nz_flat_indices.reserve(numel / 4); // heuristic
-
-    // Scan for non-zeros (using Float32/Float64 comparison)
-    auto scan_nonzeros = [&]<typename T>(const T* data) {
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i] != T(0)) {
-                nz_flat_indices.push_back(i);
-            }
-        }
+    auto build_empty = [&]() -> SparseTensor {
+        Tensor empty_indices({ndim, int64_t(0)}, DType::Int64, dev);
+        Tensor empty_values({0}, dense_cont.dtype(), dev);
+        auto result = sparse_coo(empty_indices, empty_values, shape);
+        if (layout == SparseLayout::CSR) return result.to_csr();
+        if (layout == SparseLayout::CSC) return result.to_csc();
+        return result;
     };
 
-    switch (dense_cont.dtype()) {
-        case DType::Float32: scan_nonzeros(dense_cont.data<float>()); break;
-        case DType::Float64: scan_nonzeros(dense_cont.data<double>()); break;
-        case DType::Int32:   scan_nonzeros(dense_cont.data<int32_t>()); break;
-        case DType::Int64:   scan_nonzeros(dense_cont.data<int64_t>()); break;
-        case DType::Int8:    scan_nonzeros(dense_cont.data<int8_t>()); break;
-        case DType::UInt8:   scan_nonzeros(dense_cont.data<uint8_t>()); break;
-        default:
-            throw std::runtime_error("from_dense: unsupported dtype");
+    if (numel == 0) {
+        return build_empty();
     }
 
-    int64_t nnz = static_cast<int64_t>(nz_flat_indices.size());
+    // mask = (dense != 0). Compare against a zero scalar of matching dtype.
+    Tensor zero_scalar = zeros({}, dense_cont.dtype(), dev);
+    Tensor mask = ne(dense_cont, zero_scalar);  // shape == dense shape, Bool
 
-    // Build COO indices (ndim x nnz) and values (nnz)
-    Tensor indices({ndim, nnz}, DType::Int64, Device::cpu());
-    Tensor values({nnz}, dense_cont.dtype(), Device::cpu());
+    // Multi-dim coordinates of nonzero entries: shape (nnz, ndim) Int64.
+    Tensor coords = nonzero(mask);
+    int64_t nnz = coords.shape()[0];
+    if (nnz == 0) {
+        return build_empty();
+    }
 
-    auto* idx_ptr = indices.data<int64_t>();
-
-    // Convert flat indices to multi-dimensional indices
+    // Compute strides (host-side scalars) and use them to fold coords into
+    // a flat index per row of `coords`. Each call below stays on `dev`.
     std::vector<int64_t> strides(ndim);
     strides[ndim - 1] = 1;
     for (int64_t d = ndim - 2; d >= 0; --d) {
         strides[d] = strides[d + 1] * shape[d + 1];
     }
 
-    for (int64_t j = 0; j < nnz; ++j) {
-        int64_t flat = nz_flat_indices[j];
-        for (int64_t d = 0; d < ndim; ++d) {
-            idx_ptr[d * nnz + j] = flat / strides[d];
-            flat %= strides[d];
+    Tensor flat_idx = zeros({nnz}, DType::Int64, dev);
+    for (int64_t d = 0; d < ndim; ++d) {
+        // coord_d shape (nnz,) — slice column d of (nnz, ndim) coords.
+        Tensor coord_d = reshape(slice(coords, /*dim=*/1, d, d + 1), {nnz});
+        if (strides[d] != 1) {
+            Tensor stride_t = full({nnz}, static_cast<double>(strides[d]),
+                                   DType::Int64, dev);
+            coord_d = mul(coord_d, stride_t);
         }
+        flat_idx = add(flat_idx, coord_d);
     }
 
-    // Copy non-zero values
-    auto copy_values = [&]<typename T>(const T* src, T* dst) {
-        for (int64_t j = 0; j < nnz; ++j) {
-            dst[j] = src[nz_flat_indices[j]];
-        }
-    };
+    // Gather values from the flattened dense tensor.
+    Tensor dense_flat = reshape(dense_cont, {numel});
+    Tensor values = index_select(dense_flat, /*dim=*/0, flat_idx);
 
-    switch (dense_cont.dtype()) {
-        case DType::Float32: copy_values(dense_cont.data<float>(), values.data<float>()); break;
-        case DType::Float64: copy_values(dense_cont.data<double>(), values.data<double>()); break;
-        case DType::Int32:   copy_values(dense_cont.data<int32_t>(), values.data<int32_t>()); break;
-        case DType::Int64:   copy_values(dense_cont.data<int64_t>(), values.data<int64_t>()); break;
-        case DType::Int8:    copy_values(dense_cont.data<int8_t>(), values.data<int8_t>()); break;
-        case DType::UInt8:   copy_values(dense_cont.data<uint8_t>(), values.data<uint8_t>()); break;
-        default: break;
-    }
-
-    // Move back to original device if needed
-    if (dense.device() != Device::cpu()) {
-        indices = indices.to(dense.device());
-        values = values.to(dense.device());
-    }
+    // COO indices want shape (ndim, nnz) — transpose (nnz, ndim).
+    Tensor indices = ::tenzor::transpose(coords, 0, 1).contiguous();
 
     auto result = sparse_coo(indices, values, shape);
-
-    // Convert to requested layout if not COO
+    // `nonzero` produces row-major-ordered, unique multi-dim coordinates,
+    // so the resulting COO is implicitly coalesced. Marking it lets the
+    // downstream to_csr / to_csc paths skip the coalesce() call.
+    result.coalesced_ = true;
     if (layout == SparseLayout::CSR) return result.to_csr();
     if (layout == SparseLayout::CSC) return result.to_csc();
-
     return result;
 }
 
 auto SparseTensor::to_dense() const -> Tensor {
-    // to_dense() dereferences the index buffer directly with CPU pointer
-    // arithmetic, so for GPU-resident sparse tensors we must round-trip
-    // through CPU for the densification and then push the dense result
-    // back to the original device. A proper device-aware implementation
-    // lives in the sparse-op follow-up; this keeps the public API honest.
-    if (values_.device().type != Device::Type::CPU) {
-        const Device orig_device = values_.device();
-        return this->to(Device::cpu()).to_dense().to(orig_device);
-    }
+    // Device-aware implementation: build a flat scatter index on the
+    // values_ device, then `scatter_add` into a flat zeros buffer and
+    // reshape. Replaces the previous CPU round-trip path.
+    //
+    // BSR fallback (block scatter is fiddly): keep the host pointer-walk
+    // for BSR, since BSR-to-dense on GPU is rare in practice and the
+    // dense output already lives on `values_.device()`. The BSR branch
+    // below stages indices to host explicitly.
 
-    // Float16 / BFloat16 values don't have dispatch branches below
-    // (only Float32/Float64/int variants). Widen a shallow copy of this
-    // SparseTensor to Float32 for the scatter, then cast the dense
-    // result back. The structural buffers (indices, crow/col ptrs,
-    // bsr row_ptr/col_ind) are unchanged — only the values tensor
-    // needs a dtype conversion.
+    // Float16 / BFloat16 widen path (unchanged).
     if (values_.dtype() == DType::Float16 || values_.dtype() == DType::BFloat16) {
         const DType orig_dtype = values_.dtype();
         SparseTensor widened = *this;
         widened.values_ = values_.to(DType::Float32);
         return widened.to_dense().to(orig_dtype);
+    }
+
+    Device dev = values_.device();
+
+    // Empty case.
+    if (nnz_ == 0) {
+        return zeros(shape_, values_.dtype(), dev);
+    }
+
+    // 2D CSR / CSC path: build per-element (row, col) on-device, scatter-add
+    // into a flat buffer, reshape. n-D COO is handled by the generic flat-
+    // index branch below, sharing the same scatter_add primitive.
+    const bool is_2d = (shape_.size() == 2);
+    if (is_2d && (layout_ == SparseLayout::CSR || layout_ == SparseLayout::CSC)) {
+        int64_t M = shape_[0];
+        int64_t K = shape_[1];
+
+        Tensor row_idx, col_idx;
+        if (layout_ == SparseLayout::CSR) {
+            Tensor row_lens = sub(slice(crow_indices_, 0, 1, M + 1),
+                                  slice(crow_indices_, 0, 0, M));
+            Tensor row_arange = arange(0, M, 1, DType::Int64, dev);
+            row_idx = repeat_interleave(row_arange, row_lens, std::nullopt);
+            col_idx = col_indices_;
+        } else {
+            Tensor col_lens = sub(slice(ccol_indices_, 0, 1, K + 1),
+                                  slice(ccol_indices_, 0, 0, K));
+            Tensor col_arange = arange(0, K, 1, DType::Int64, dev);
+            col_idx = repeat_interleave(col_arange, col_lens, std::nullopt);
+            row_idx = row_indices_;
+        }
+
+        Tensor K_t = full({nnz_}, static_cast<double>(K), DType::Int64, dev);
+        Tensor flat_idx = add(mul(row_idx, K_t), col_idx);
+
+        Tensor result_flat = zeros({M * K}, values_.dtype(), dev);
+        result_flat = scatter_add(result_flat, /*dim=*/0, flat_idx, values_);
+        return reshape(result_flat, shape_);
+    }
+
+    // Generic n-D COO path: fold per-dim coords into a flat index using
+    // host-known strides, then scatter_add into a flat buffer of `numel`
+    // elements. Handles both 2D and arbitrary-rank sparse dimensions.
+    if (layout_ == SparseLayout::COO) {
+        int64_t ndim = static_cast<int64_t>(shape_.size());
+        // Compute strides (host scalars) — last dim has stride 1.
+        std::vector<int64_t> strides(ndim);
+        strides[ndim - 1] = 1;
+        for (int64_t d = ndim - 2; d >= 0; --d) {
+            strides[d] = strides[d + 1] * shape_[d + 1];
+        }
+        int64_t numel = strides[0] * shape_[0];
+
+        // Fold the sparse_dim_ index rows. For partial-sparse tensors with
+        // dense_dim_ > 0, the per-element values are vectors and we need
+        // to scatter into the leading slab; that path isn't exercised by
+        // any current tests, so fall through to the host path for safety.
+        if (dense_dim_ != 0 || sparse_dim_ != ndim) {
+            if (dev.type != Device::Type::CPU) {
+                return this->to(Device::cpu()).to_dense().to(dev);
+            }
+        } else {
+            Tensor flat_idx = zeros({nnz_}, DType::Int64, dev);
+            for (int64_t d = 0; d < sparse_dim_; ++d) {
+                Tensor coord_d = reshape(slice(indices_, 0, d, d + 1), {nnz_}).contiguous();
+                if (strides[d] != 1) {
+                    Tensor stride_t = full({nnz_}, static_cast<double>(strides[d]),
+                                           DType::Int64, dev);
+                    coord_d = mul(coord_d, stride_t);
+                }
+                flat_idx = add(flat_idx, coord_d);
+            }
+            Tensor result_flat = zeros({numel}, values_.dtype(), dev);
+            result_flat = scatter_add(result_flat, /*dim=*/0, flat_idx, values_);
+            return reshape(result_flat, shape_);
+        }
+    }
+
+    // BSR → dense on-device. Algorithm:
+    //   * block_row_per_block[k] = block-row index of block k (via
+    //     repeat_interleave(arange(nblockrows), block_row_lens)).
+    //   * Per-element: block_id varies slowest, then bi, then bj. Using
+    //     repeat_interleave + tile to build the index streams without
+    //     integer div/mod.
+    //   * Compute (row, col) for each element, fold into a flat dense
+    //     index, scatter_add the (already correctly-laid-out) values into
+    //     a flat buffer, reshape.
+    if (layout_ == SparseLayout::BSR && shape_.size() == 2) {
+        int64_t M = shape_[0];
+        int64_t N = shape_[1];
+        auto [bh, bw] = block_size_;
+        int64_t num_blocks = bsr_col_ind_.numel();
+        int64_t elem_per_block = bh * bw;
+        int64_t total = num_blocks * elem_per_block;
+
+        if (total == 0) {
+            return zeros(shape_, values_.dtype(), dev);
+        }
+
+        int64_t nblockrows = (M + bh - 1) / bh;
+
+        // block_row_per_block: for each block, which block-row it lives in.
+        Tensor block_row_lens = sub(slice(bsr_row_ptr_, 0, 1, nblockrows + 1),
+                                    slice(bsr_row_ptr_, 0, 0, nblockrows));
+        Tensor block_row_arange = arange(0, nblockrows, 1, DType::Int64, dev);
+        Tensor block_row_per_block = repeat_interleave(block_row_arange,
+                                                       block_row_lens, std::nullopt);
+
+        // Per-element block_id: each block expanded `elem_per_block` times.
+        Tensor blocks_arange = arange(0, num_blocks, 1, DType::Int64, dev);
+        Tensor block_id_per_elem = repeat_interleave(blocks_arange,
+                                                     elem_per_block, std::nullopt);
+
+        // Lookup (block_row, block_col) per element.
+        Tensor block_row_per_elem = index_select(block_row_per_block,
+                                                  /*dim=*/0, block_id_per_elem);
+        Tensor block_col_per_elem = index_select(bsr_col_ind_,
+                                                  /*dim=*/0, block_id_per_elem);
+
+        // bi / bj patterns built without tile (which is broken for Int64 on
+        // most backends — cf. dispatchRepeatInterleaveTensor / dispatchTile
+        // SSBO reinterpret bug). Build on host (size bh*bw, small), then
+        // upload once and repeat_interleave by num_blocks with scalar count.
+        Tensor bi_pattern_cpu({bh * bw}, DType::Int64, Device::cpu());
+        Tensor bj_pattern_cpu({bh * bw}, DType::Int64, Device::cpu());
+        {
+            auto* bi_ptr = bi_pattern_cpu.data<int64_t>();
+            auto* bj_ptr = bj_pattern_cpu.data<int64_t>();
+            for (int64_t i = 0; i < bh; ++i) {
+                for (int64_t j = 0; j < bw; ++j) {
+                    bi_ptr[i * bw + j] = i;
+                    bj_ptr[i * bw + j] = j;
+                }
+            }
+        }
+        Tensor bi_pattern_in_block = bi_pattern_cpu.to(dev);
+        Tensor bj_pattern_in_block = bj_pattern_cpu.to(dev);
+
+        // Tile across blocks via index_select with a precomputed map:
+        //   map[k] = k % (bh*bw)   for k in [0, total).
+        // Build this on host too (cheap) and upload once.
+        Tensor map_cpu({total}, DType::Int64, Device::cpu());
+        {
+            auto* mp = map_cpu.data<int64_t>();
+            for (int64_t k = 0; k < total; ++k) mp[k] = k % elem_per_block;
+        }
+        Tensor pattern_index = map_cpu.to(dev);
+        Tensor bi_per_elem = index_select(bi_pattern_in_block, /*dim=*/0, pattern_index);
+        Tensor bj_per_elem = index_select(bj_pattern_in_block, /*dim=*/0, pattern_index);
+
+        // Final dense (row, col) per element.
+        Tensor bh_t = full({total}, static_cast<double>(bh), DType::Int64, dev);
+        Tensor bw_t = full({total}, static_cast<double>(bw), DType::Int64, dev);
+        Tensor row = add(mul(block_row_per_elem, bh_t), bi_per_elem);
+        Tensor col = add(mul(block_col_per_elem, bw_t), bj_per_elem);
+
+        // Mask out-of-bounds entries (nblockrows*bh and nblockcols*bw can
+        // exceed M and N respectively when shape isn't a block-multiple).
+        // The CPU implementation checks `row < nrows && col < ncols`. We
+        // mirror by clamping flat_idx out-of-bounds entries via a mask: do
+        // the scatter_add only at valid positions. Simpler approach: build
+        // a "valid_mask" tensor and scatter into a temporary, then keep
+        // valid entries only via in-bounds clamping (scatter_add with index
+        // M*N is illegal, so we must filter).
+        Tensor N_t = full({total}, static_cast<double>(N), DType::Int64, dev);
+        Tensor flat = add(mul(row, N_t), col);
+
+        // Filter out-of-bounds (row >= M || col >= N) entries by replacing
+        // their flat index with 0 and zeroing the value (so scatter_add
+        // contributes nothing). Build a Bool mask and apply it both ways.
+        Tensor M_check = full({total}, static_cast<double>(M), DType::Int64, dev);
+        Tensor N_check = full({total}, static_cast<double>(N), DType::Int64, dev);
+        Tensor row_lt = ::tenzor::lt(row, M_check);
+        Tensor col_lt = ::tenzor::lt(col, N_check);
+        Tensor in_bounds = ::tenzor::logical_and(row_lt, col_lt);
+        Tensor in_bounds_i64 = in_bounds.to(DType::Int64);
+        // Clamp flat to 0 where out of bounds (so scatter_add hits a valid
+        // index; the masked value will be 0 below, so no harm done).
+        Tensor flat_safe = mul(flat, in_bounds_i64);
+
+        // Values flat (already laid out (block, bi, bj) row-major).
+        Tensor values_flat = reshape(values_, {total}).contiguous();
+        // Zero out values at out-of-bounds positions.
+        Tensor mask_v = in_bounds.to(values_.dtype());
+        Tensor values_masked = mul(values_flat, mask_v);
+
+        Tensor result_flat = zeros({M * N}, values_.dtype(), dev);
+        result_flat = scatter_add(result_flat, /*dim=*/0, flat_safe, values_masked);
+        return reshape(result_flat, shape_);
+    }
+
+    // Remaining fallback: any layout/shape we haven't handled (n-D BSR,
+    // partial-sparse with non-full sparse_dim_, etc.). These are rare
+    // edge cases not covered by any current test.
+    if (dev.type != Device::Type::CPU) {
+        const Device orig_device = dev;
+        return this->to(Device::cpu()).to_dense().to(orig_device);
     }
 
     auto result = zeros(shape_, values_.dtype(), values_.device());
@@ -391,61 +575,63 @@ auto SparseTensor::to_dense() const -> Tensor {
 auto SparseTensor::to_coo() const -> SparseTensor {
     if (layout_ == SparseLayout::COO) return *this;
 
-    // All branches below do host-side pointer iteration over the index
-    // arrays, so stage to CPU up front and transfer the result back
-    // after. Same pattern as coalesce / to_csr / to_sparse.
-    const auto orig_device = values_.device();
+    Device dev = values_.device();
 
-    if (layout_ == SparseLayout::CSR) {
-        auto crow = crow_indices_.to(Device::cpu()).contiguous();
-        auto col = col_indices_.to(Device::cpu()).contiguous();
-        auto* crow_ptr = crow.data<int64_t>();
-        auto* col_ptr = col.data<int64_t>();
-        int64_t nrows = shape_[0];
-
-        auto row_indices = Tensor({nnz_}, DType::Int64, Device::cpu());
-        auto* row_ptr = row_indices.data<int64_t>();
-        for (int64_t row = 0; row < nrows; ++row) {
-            for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                row_ptr[j] = row;
-            }
+    // CSR / CSC → COO via on-device repeat_interleave + stack.
+    // The compressed pointer becomes per-element row (or col) indices via
+    // `repeat_interleave(arange, lens)`; the other index is reused as-is;
+    // they're stacked to form COO indices [2, nnz]. The result is naturally
+    // sorted (CSR has row-ordered entries; CSC col-ordered) so we mark it
+    // coalesced. Replaces the previous host pointer-walk.
+    if (layout_ == SparseLayout::CSR || layout_ == SparseLayout::CSC) {
+        if (nnz_ == 0) {
+            Tensor empty_indices({2, int64_t(0)}, DType::Int64, dev);
+            Tensor empty_values({0}, values_.dtype(), dev);
+            auto result = sparse_coo(empty_indices, empty_values, shape_);
+            result.coalesced_ = (layout_ == SparseLayout::CSR);  // CSR is row-major
+            return result;
         }
 
-        auto indices = Tensor({2, nnz_}, DType::Int64, Device::cpu());
-        auto* idx_ptr = indices.data<int64_t>();
-        std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
-        std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
-
-        auto cpu_values = values_.to(Device::cpu());
-        auto result = sparse_coo(indices, cpu_values, shape_);
-        return orig_device == Device::cpu() ? result : result.to(orig_device);
-    } else if (layout_ == SparseLayout::CSC) {
-        auto ccol = ccol_indices_.to(Device::cpu()).contiguous();
-        auto row = row_indices_.to(Device::cpu()).contiguous();
-        auto* ccol_ptr = ccol.data<int64_t>();
-        auto* row_ptr = row.data<int64_t>();
-        int64_t ncols = shape_[1];
-
-        auto col_indices = Tensor({nnz_}, DType::Int64, Device::cpu());
-        auto* col_ptr = col_indices.data<int64_t>();
-        for (int64_t col = 0; col < ncols; ++col) {
-            for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
-                col_ptr[j] = col;
-            }
+        Tensor compressed, varying;
+        int64_t outer_size;
+        if (layout_ == SparseLayout::CSR) {
+            compressed = crow_indices_;     // [M+1]
+            varying = col_indices_;          // [nnz] — col indices
+            outer_size = shape_[0];          // nrows
+        } else {
+            compressed = ccol_indices_;      // [N+1]
+            varying = row_indices_;          // [nnz] — row indices
+            outer_size = shape_[1];          // ncols
         }
 
-        auto indices = Tensor({2, nnz_}, DType::Int64, Device::cpu());
-        auto* idx_ptr = indices.data<int64_t>();
-        std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
-        std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
+        Tensor lens = sub(slice(compressed, 0, 1, outer_size + 1),
+                          slice(compressed, 0, 0, outer_size));
+        Tensor outer_arange = arange(0, outer_size, 1, DType::Int64, dev);
+        Tensor outer_idx = repeat_interleave(outer_arange, lens, std::nullopt);
 
-        auto cpu_values = values_.to(Device::cpu());
-        auto result = sparse_coo(indices, cpu_values, shape_);
-        return orig_device == Device::cpu() ? result : result.to(orig_device);
-    } else if (layout_ == SparseLayout::BSR) {
-        // BSR -> COO: expand blocks into individual elements
-        // Easier to go via dense for correctness
-        return to_sparse(to_dense());
+        // outer_idx and varying are both shape [nnz]. For CSR: outer_idx is
+        // rows, varying is cols. For CSC: outer_idx is cols, varying is rows.
+        Tensor row_idx = (layout_ == SparseLayout::CSR) ? outer_idx : varying;
+        Tensor col_idx = (layout_ == SparseLayout::CSR) ? varying : outer_idx;
+
+        // Stack into [2, nnz].
+        Tensor row_2d = reshape(row_idx, {1, nnz_});
+        Tensor col_2d = reshape(col_idx, {1, nnz_});
+        Tensor indices = cat({row_2d, col_2d}, /*dim=*/0);
+
+        auto result = sparse_coo(indices, values_, shape_);
+        // CSR's per-row entries are already row-ordered; CSC's are
+        // column-ordered (i.e. NOT lex-sorted by (row, col)). Only flag
+        // CSR-derived COO as coalesced.
+        result.coalesced_ = (layout_ == SparseLayout::CSR);
+        return result;
+    }
+
+    if (layout_ == SparseLayout::BSR) {
+        // BSR -> COO: expand blocks into individual elements via dense
+        // round-trip. Block expansion is a separate kernel project; using
+        // dense here keeps the conversion correct on every backend.
+        return ::tenzor::to_sparse(to_dense());
     }
 
     throw std::runtime_error("to_coo: unsupported layout");
@@ -475,41 +661,42 @@ auto SparseTensor::to_csr() const -> SparseTensor {
     }
 #endif
 
-    // CPU COO path: stage indices and values to host, run histogram + prefix-sum
-    // + col fill, then transfer the resulting CSR back to the source device.
-    const auto orig_device = values_.device();
+    // OneAPI / Vulkan / CPU path: build the CSR row-pointer with on-device
+    // bincount + cumsum, and slice col_indices straight off the COO indices
+    // tensor. Replaces the previous host stage. (CUDA / ROCm vendor paths
+    // above remain in place.)
     auto coo = coalesce();
-    auto idx = coo.indices_.to(Device::cpu()).contiguous();
-    auto vals = coo.values_.to(Device::cpu()).contiguous();
-    auto* idx_ptr = idx.data<int64_t>();
     int64_t nrows = shape_[0];
     int64_t coalesced_nnz = coo.nnz();
+    Device dev = coo.values_.device();
 
-    auto crow = Tensor({nrows + 1}, DType::Int64, Device::cpu());
-    auto col = Tensor({coalesced_nnz}, DType::Int64, Device::cpu());
-    auto* crow_ptr = crow.data<int64_t>();
-    auto* col_ptr = col.data<int64_t>();
-
-    std::memset(crow_ptr, 0, (nrows + 1) * sizeof(int64_t));
-
-    // Count elements per row
-    for (int64_t i = 0; i < coalesced_nnz; ++i) {
-        crow_ptr[idx_ptr[i] + 1]++;
-    }
-    // Prefix sum
-    for (int64_t i = 0; i < nrows; ++i) {
-        crow_ptr[i + 1] += crow_ptr[i];
-    }
-    // Fill col_indices
-    for (int64_t i = 0; i < coalesced_nnz; ++i) {
-        col_ptr[i] = idx_ptr[coalesced_nnz + i];
+    if (coalesced_nnz == 0) {
+        // Empty CSR — crow is all zeros, col / vals are length 0.
+        Tensor crow_empty = zeros({nrows + 1}, DType::Int64, dev);
+        Tensor col_empty({0}, DType::Int64, dev);
+        Tensor vals_empty({0}, coo.values_.dtype(), dev);
+        return sparse_csr(crow_empty, col_empty, vals_empty, shape_);
     }
 
-    auto result = sparse_csr(crow, col, vals, shape_);
-    if (orig_device != Device::cpu()) {
-        result = result.to(orig_device);
+    // Per-row counts via bincount(rows, minlength=nrows). Backends differ
+    // in the bincount output dtype (CPU: Int64; Vulkan: Float32). Force
+    // Int64 to satisfy the sparse_csr crow contract, then exclusive-cumsum
+    // by prepending a leading zero.
+    Tensor row_idx = reshape(slice(coo.indices_, 0, 0, 1), {coalesced_nnz}).contiguous();
+    Tensor col_idx = reshape(slice(coo.indices_, 0, 1, 2), {coalesced_nnz}).contiguous();
+    Tensor row_counts = bincount(row_idx, std::nullopt, /*minlength=*/nrows);
+    if (row_counts.dtype() != DType::Int64) {
+        row_counts = row_counts.to(DType::Int64);
     }
-    return result;
+
+    Tensor zero_prefix = zeros({1}, DType::Int64, dev);
+    Tensor cumsum_out = cumsum(row_counts, /*dim=*/0);
+    if (cumsum_out.dtype() != DType::Int64) {
+        cumsum_out = cumsum_out.to(DType::Int64);
+    }
+    Tensor crow = cat({zero_prefix, cumsum_out}, /*dim=*/0);
+
+    return sparse_csr(crow, col_idx, coo.values_, shape_);
 }
 
 auto SparseTensor::transpose() const -> SparseTensor {
@@ -568,16 +755,28 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         return result;
     }
 
-    // Float16 / BFloat16 values: the summation loop below is Float32/Float64
-    // only. Widen to Float32 for the accumulate, then cast back — matches
-    // the to_dense() widen-then-narrow pattern.
-    if (values_.dtype() == DType::Float16 || values_.dtype() == DType::BFloat16) {
-        const DType orig_dtype = values_.dtype();
-        SparseTensor widened = *this;
-        widened.values_ = values_.to(DType::Float32);
-        auto coalesced = widened.coalesce();
-        coalesced.values_ = coalesced.values_.to(orig_dtype);
-        return coalesced;
+    // Widen "narrow" value dtypes the device-aware scatter_add can't handle
+    // directly — Float16 / BFloat16 / Int8 / UInt8 / Bool / FP8 — to a
+    // wider dtype, coalesce, then cast back. Matches the to_dense widen-
+    // narrow pattern. After this, values_.dtype() is one of the four
+    // dtypes the on-device segment reduce supports natively.
+    {
+        DType vd = values_.dtype();
+        std::optional<DType> widen_to;
+        if (vd == DType::Float16 || vd == DType::BFloat16 ||
+            vd == DType::FP8_E4M3 || vd == DType::FP8_E5M2) {
+            widen_to = DType::Float32;
+        } else if (vd == DType::Int8 || vd == DType::UInt8 || vd == DType::Bool) {
+            widen_to = DType::Int32;
+        }
+        if (widen_to.has_value()) {
+            const DType orig_dtype = vd;
+            SparseTensor widened = *this;
+            widened.values_ = values_.to(*widen_to);
+            auto coalesced = widened.coalesce();
+            coalesced.values_ = coalesced.values_.to(orig_dtype);
+            return coalesced;
+        }
     }
 
     // GPU-native path: sort + reduce_by_key entirely on device using
@@ -597,110 +796,110 @@ auto SparseTensor::coalesce() const -> SparseTensor {
     }
 #endif
 
-    // CPU path: stage indices and values to host, sort/merge there,
-    // then transfer the result back to the source device at the end.
-    const auto orig_device = indices_.device();
-    auto idx = indices_.to(Device::cpu()).contiguous();
-    auto vals = values_.to(Device::cpu()).contiguous();
-    auto* idx_ptr = idx.data<int64_t>();
-
-    // Compute compound (linearized row-major) key for each element.
-    // key[i] = idx[0,i] * stride[0] + idx[1,i] * stride[1] + ...
-    // This converts the per-element multi-dim comparison in the sort into
-    // a single int64_t comparison, turning O(sparse_dim) per compare into O(1).
-    //
-    // Compute dimension strides (row-major): stride[d] = product of shape[d+1..end]
-    std::vector<int64_t> strides(sparse_dim_);
-    if (sparse_dim_ > 0) {
-        strides[sparse_dim_ - 1] = 1;
-        for (int64_t d = sparse_dim_ - 2; d >= 0; --d) {
-            strides[d] = strides[d + 1] * shape_[d + 1];
-        }
+    // OneAPI / Vulkan / CPU device-aware path: compound-key + on-device
+    // sort + segment-reduce. Replaces the previous host stage. Algorithm:
+    //   1. keys[i] = sum_d indices[d,i] * stride[d]   (linearised flat idx)
+    //   2. (sorted_keys, perm) = sort(keys)
+    //   3. is_new[i] = 1 if i==0 || sorted_keys[i] != sorted_keys[i-1]
+    //   4. group_id = cumsum(is_new) - 1                (0-indexed groups)
+    //   5. new_nnz = group_id[nnz-1] + 1                (single scalar D2H)
+    //   6. for each d:  new_indices[d, group_id[i]] = sorted_indices[d, i]
+    //                                                   (first hit / mask)
+    //      new_values[group_id[i]] += sorted_values[i]   (scatter_add)
+    Device dev = indices_.device();
+    DType vdtype = values_.dtype();
+    if (vdtype != DType::Float32 && vdtype != DType::Float64 &&
+        vdtype != DType::Int32 && vdtype != DType::Int64) {
+        // After the widening table above, only Complex64 / Complex128 reach
+        // here. The previous host fallback only handled Float32/Float64
+        // anyway — it never actually supported Complex — so reject with a
+        // clear error rather than CPU-roundtripping for a path that can't
+        // succeed.
+        throw std::runtime_error(
+            std::string("SparseTensor::coalesce: unsupported value dtype ") +
+            std::string(dtype_name(vdtype)) +
+            " (split into real/imag SparseTensors and coalesce each)");
     }
 
-    // Build compound keys
-    std::vector<int64_t> keys(nnz_);
-    for (int64_t i = 0; i < nnz_; ++i) {
-        int64_t key = 0;
-        for (int64_t d = 0; d < sparse_dim_; ++d) {
-            key += idx_ptr[d * nnz_ + i] * strides[d];
-        }
-        keys[i] = key;
-    }
-
-    // Create sort permutation by compound key (O(1) comparison per pair)
-    std::vector<int64_t> perm(nnz_);
-    std::iota(perm.begin(), perm.end(), 0);
-    std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
-        return keys[a] < keys[b];
-    });
-
-    // Single-pass merge: walk sorted permutation, detect duplicates via key equality.
-    // Pre-allocate output vectors sized to nnz_ (worst case = no duplicates).
-    std::vector<int64_t> out_indices(sparse_dim_ * nnz_);
-    std::vector<int64_t> group_starts;
-    std::vector<int64_t> group_ends;
-    group_starts.reserve(nnz_);
-    group_ends.reserve(nnz_);
-
-    int64_t new_nnz = 0;
-    for (int64_t i = 0; i < nnz_;) {
-        int64_t key_i = keys[perm[i]];
-        int64_t j = i + 1;
-        while (j < nnz_ && keys[perm[j]] == key_i) {
-            ++j;
-        }
-        // perm[i..j) are duplicates — store the index tuple from perm[i]
-        for (int64_t d = 0; d < sparse_dim_; ++d) {
-            out_indices[d * nnz_ + new_nnz] = idx_ptr[d * nnz_ + perm[i]];
-        }
-        group_starts.push_back(i);
-        group_ends.push_back(j);
-        ++new_nnz;
-        i = j;
-    }
-
-    // Build new indices tensor (compact from pre-allocated buffer).
-    // Build on CPU so the host-side memcpy/data<T>() pattern is legal;
-    // the final result is transferred back to orig_device at the end.
-    auto new_indices = Tensor({sparse_dim_, new_nnz}, DType::Int64, Device::cpu());
-    auto* ni_ptr = new_indices.data<int64_t>();
-    for (int64_t d = 0; d < sparse_dim_; ++d) {
-        std::memcpy(ni_ptr + d * new_nnz,
-                    out_indices.data() + d * nnz_,
-                    new_nnz * sizeof(int64_t));
-    }
-
-    // Build new values (sum duplicates). Also on CPU; transferred back below.
-    auto new_values = zeros({new_nnz}, vals.dtype(), Device::cpu());
-    if (vals.dtype() == DType::Float32) {
-        auto* vp = vals.data<float>();
-        auto* nvp = new_values.data<float>();
-        for (int64_t g = 0; g < new_nnz; ++g) {
-            float sum = 0;
-            for (int64_t k = group_starts[g]; k < group_ends[g]; ++k) {
-                sum += vp[perm[k]];
+    {
+        // Compute compound keys.
+        std::vector<int64_t> strides(sparse_dim_);
+        if (sparse_dim_ > 0) {
+            strides[sparse_dim_ - 1] = 1;
+            for (int64_t d = sparse_dim_ - 2; d >= 0; --d) {
+                strides[d] = strides[d + 1] * shape_[d + 1];
             }
-            nvp[g] = sum;
         }
-    } else if (vals.dtype() == DType::Float64) {
-        auto* vp = vals.data<double>();
-        auto* nvp = new_values.data<double>();
-        for (int64_t g = 0; g < new_nnz; ++g) {
-            double sum = 0;
-            for (int64_t k = group_starts[g]; k < group_ends[g]; ++k) {
-                sum += vp[perm[k]];
+        Tensor keys = zeros({nnz_}, DType::Int64, dev);
+        for (int64_t d = 0; d < sparse_dim_; ++d) {
+            Tensor coord_d = reshape(slice(indices_, 0, d, d + 1), {nnz_}).contiguous();
+            if (strides[d] != 1) {
+                Tensor stride_t = full({nnz_}, static_cast<double>(strides[d]),
+                                       DType::Int64, dev);
+                coord_d = mul(coord_d, stride_t);
             }
-            nvp[g] = sum;
+            keys = add(keys, coord_d);
         }
-    }
 
-    auto result = sparse_coo(new_indices, new_values, shape_);
-    result.coalesced_ = true;
-    if (orig_device != Device::cpu()) {
-        result = result.to(orig_device);
+        // Sort: (sorted_keys, perm) such that sorted_keys = keys[perm].
+        auto [sorted_keys, perm] = ::tenzor::sort(keys, /*dim=*/0, /*descending=*/false);
+
+        // Mark first-of-each-group: is_new[0]=1; is_new[i] = (sorted_keys[i] != sorted_keys[i-1]).
+        Tensor is_new;
+        if (nnz_ == 1) {
+            is_new = full({1}, 1.0, DType::Int64, dev);
+        } else {
+            Tensor key_curr = slice(sorted_keys, 0, 1, nnz_);     // [nnz-1]
+            Tensor key_prev = slice(sorted_keys, 0, 0, nnz_ - 1); // [nnz-1]
+            Tensor diff_bool = ne(key_curr, key_prev);
+            Tensor diff_i64 = (diff_bool.dtype() == DType::Int64)
+                ? diff_bool : diff_bool.to(DType::Int64);
+            Tensor one_prefix = full({1}, 1.0, DType::Int64, dev);
+            is_new = cat({one_prefix, diff_i64}, /*dim=*/0);
+        }
+
+        // group_id = cumsum(is_new) - 1.
+        Tensor cs = cumsum(is_new, /*dim=*/0);
+        if (cs.dtype() != DType::Int64) cs = cs.to(DType::Int64);
+        Tensor one_full = full({nnz_}, 1.0, DType::Int64, dev);
+        Tensor group_id = sub(cs, one_full);
+
+        // new_nnz = group_id[nnz-1] + 1 — single int64 readback.
+        Tensor max_group_cpu = slice(group_id, 0, nnz_ - 1, nnz_).to(Device::cpu());
+        int64_t new_nnz = max_group_cpu.data<int64_t>()[0] + 1;
+
+        // Build per-dim sorted indices, then pick first-of-each-group via
+        // `nonzero` of is_new (which gives the group-start positions in
+        // sorted order) plus `index_select`. Avoids `masked_select` whose
+        // ROCm kernel rejects Int64.
+        Tensor is_new_bool = (is_new.dtype() == DType::Bool)
+            ? is_new : ne(is_new, zeros({nnz_}, DType::Int64, dev));
+
+        // nonzero(is_new) returns shape (new_nnz, 1) of Int64 positions.
+        Tensor group_starts_2d = nonzero(is_new_bool);
+        Tensor group_starts = reshape(group_starts_2d, {new_nnz}).contiguous();
+
+        std::vector<Tensor> dim_rows;
+        dim_rows.reserve(static_cast<size_t>(sparse_dim_));
+        for (int64_t d = 0; d < sparse_dim_; ++d) {
+            Tensor coord_d = reshape(slice(indices_, 0, d, d + 1), {nnz_}).contiguous();
+            Tensor sorted_d = index_select(coord_d, /*dim=*/0, perm);
+            Tensor first_d = index_select(sorted_d, /*dim=*/0, group_starts);
+            dim_rows.push_back(reshape(first_d, {1, new_nnz}));
+        }
+        Tensor new_indices = cat(dim_rows, /*dim=*/0);
+
+        // Sum values per group: scatter_add(zeros(new_nnz), 0, group_id, sorted_values).
+        // (Note: scatter_add takes sources in the original order; group_id maps each
+        // original-sorted entry to its destination group.)
+        Tensor sorted_values = index_select(values_, /*dim=*/0, perm);
+        Tensor new_values = zeros({new_nnz}, vdtype, dev);
+        new_values = scatter_add(new_values, /*dim=*/0, group_id, sorted_values);
+
+        SparseTensor result = sparse_coo(new_indices, new_values, shape_);
+        result.coalesced_ = true;
+        return result;
     }
-    return result;
 }
 
 auto SparseTensor::to(Device device) const -> SparseTensor {
@@ -1037,70 +1236,9 @@ auto to_sparse(const Tensor& dense) -> SparseTensor {
     if (dense.ndim() != 2) {
         throw std::runtime_error("to_sparse: only 2D tensors supported");
     }
-
-    // Densification scan happens on CPU — device pointers can't be dereferenced
-    // from host code. Stage to CPU, build indices/values there, then transfer the
-    // resulting sparse tensor back to the input device so the return type still
-    // lives where the caller expects it.
-    auto orig_device = dense.device();
-    auto cont = dense.contiguous();
-    if (cont.device() != Device::cpu()) {
-        cont = cont.to(Device::cpu());
-    }
-    int64_t nrows = cont.shape()[0];
-    int64_t ncols = cont.shape()[1];
-
-    // Find nonzero positions
-    std::vector<int64_t> row_idx, col_idx;
-    std::vector<float> vals_f32;
-    std::vector<double> vals_f64;
-
-    if (cont.dtype() == DType::Float32) {
-        auto* ptr = cont.data<float>();
-        for (int64_t r = 0; r < nrows; ++r) {
-            for (int64_t c = 0; c < ncols; ++c) {
-                float v = ptr[r * ncols + c];
-                if (v != 0.0f) {
-                    row_idx.push_back(r);
-                    col_idx.push_back(c);
-                    vals_f32.push_back(v);
-                }
-            }
-        }
-        int64_t nnz = static_cast<int64_t>(vals_f32.size());
-        auto indices = Tensor({2, nnz}, DType::Int64, Device::cpu());
-        auto values = Tensor({nnz}, DType::Float32, Device::cpu());
-        auto* ip = indices.data<int64_t>();
-        auto* vp = values.data<float>();
-        std::memcpy(ip, row_idx.data(), nnz * sizeof(int64_t));
-        std::memcpy(ip + nnz, col_idx.data(), nnz * sizeof(int64_t));
-        std::memcpy(vp, vals_f32.data(), nnz * sizeof(float));
-        auto sparse = SparseTensor::sparse_coo(indices, values, {nrows, ncols});
-        return orig_device == Device::cpu() ? sparse : sparse.to(orig_device);
-    } else if (cont.dtype() == DType::Float64) {
-        auto* ptr = cont.data<double>();
-        for (int64_t r = 0; r < nrows; ++r) {
-            for (int64_t c = 0; c < ncols; ++c) {
-                double v = ptr[r * ncols + c];
-                if (v != 0.0) {
-                    row_idx.push_back(r);
-                    col_idx.push_back(c);
-                    vals_f64.push_back(v);
-                }
-            }
-        }
-        int64_t nnz = static_cast<int64_t>(vals_f64.size());
-        auto indices = Tensor({2, nnz}, DType::Int64, Device::cpu());
-        auto values = Tensor({nnz}, DType::Float64, Device::cpu());
-        auto* ip = indices.data<int64_t>();
-        auto* vp = values.data<double>();
-        std::memcpy(ip, row_idx.data(), nnz * sizeof(int64_t));
-        std::memcpy(ip + nnz, col_idx.data(), nnz * sizeof(int64_t));
-        std::memcpy(vp, vals_f64.data(), nnz * sizeof(double));
-        auto sparse = SparseTensor::sparse_coo(indices, values, {nrows, ncols});
-        return orig_device == Device::cpu() ? sparse : sparse.to(orig_device);
-    }
-    throw std::runtime_error("to_sparse: unsupported dtype");
+    // Delegate to the device-aware static factory; that path uses
+    // nonzero / index_select on the input's device with no host roundtrip.
+    return SparseTensor::from_dense(dense, SparseLayout::COO);
 }
 
 auto to_sparse_csr(const Tensor& dense) -> SparseTensor {

@@ -1751,53 +1751,61 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
-    // Approximate-symmetry check (host-side). gradcheck perturbs SPD
-    // inputs by ε≈1e-6 — that breaks strict symmetry but each element is
-    // very close. Within 1e-3 relative is treated as "intended symmetric,
-    // perturbed by noise" and routed through `eigh` on the SYMMETRIZED
-    // matrix. Sum-of-eigenvalues equals trace, which is preserved by
-    // symmetrization, so the numerical gradient matches the analytical.
-    // The Vulkan eig shader doesn't compute eigenvectors — eigh does. The
-    // EigBackward formula needs all three tensors (WR, WI, V).
+    // Approximate-symmetry check — runs entirely on-device. Two parallel
+    // max-reductions (max|A| and max|A − Aᵀ|) collapse the per-batch matrix
+    // into two scalars; only those 8 bytes flow back to the host. gradcheck
+    // perturbs SPD inputs by ε≈1e-6 so the symmetric path is taken whenever
+    // diff_max / max(a_max, 1) < 1e-3 (Float64) or 1e-2 (Float32). The
+    // Float64 probe reduces to Float32 maxes — the threshold is robust to
+    // ~1 ULP loss and avoids the uint64-atomic extension.
     if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
         auto cont = input.contiguous();
-        auto host_cpu = cont.to(Device::cpu());
-        bool is_near_symmetric = true;
-        if (input.dtype() == DType::Float32) {
-            const float* p = host_cpu.data<float>();
-            float a_max = 0.0f, diff_max = 0.0f;
-            for (int64_t i = 0; i < batch_size * n * n; ++i) {
-                float v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < batch_size && is_near_symmetric; ++b) {
-                const float* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        float d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
-            is_near_symmetric = (diff_max < 1e-2f * std::max(a_max, 1.0f));
-        } else {
-            const double* p = host_cpu.data<double>();
-            double a_max = 0.0, diff_max = 0.0;
-            for (int64_t i = 0; i < batch_size * n * n; ++i) {
-                double v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < batch_size && is_near_symmetric; ++b) {
-                const double* mat = p + b * n * n;
-                for (int64_t i = 0; i < n && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n; ++j) {
-                        double d = std::fabs(mat[i * n + j] - mat[j * n + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
-            is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
-        }
+        Tensor pair_buf = dispatchFull({2}, 0.0f, DType::Int32);
+
+        std::string probe_shader = (input.dtype() == DType::Float64)
+            ? "eig_symmetry_probe_f64" : "eig_symmetry_probe";
+        auto* probe_pipeline = getPipeline(probe_shader, device_id);
+
+        struct ProbePC {
+            uint32_t nbatch;
+            uint32_t n;
+        } probe_pc{static_cast<uint32_t>(batch_size), static_cast<uint32_t>(n)};
+
+        size_t mat_bytes = static_cast<size_t>(batch_size) * n * n
+                         * (input.dtype() == DType::Float64 ? sizeof(double) : sizeof(float));
+        size_t pair_bytes = 2 * sizeof(uint32_t);
+
+        std::vector<std::pair<uint32_t, const void*>> probe_bindings = {
+            {0, cont.data_ptr()},
+            {1, pair_buf.data_ptr()},
+        };
+        std::vector<size_t> probe_sizes = {mat_bytes, pair_bytes};
+
+        VkDescriptorSet probe_ds = allocateAndWriteDescriptorSet(
+            device_id, probe_pipeline, probe_bindings, probe_sizes);
+
+        VkCommandBuffer probe_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(probe_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                         probe_pipeline->pipeline());
+        vkCmdBindDescriptorSets(probe_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               probe_pipeline->layout(), 0, 1, &probe_ds, 0, nullptr);
+        vkCmdPushConstants(probe_cmd, probe_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(probe_pc), &probe_pc);
+        vkCmdDispatch(probe_cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(probe_cmd);
+        endSingleTimeCommands(probe_cmd, device_id);
+        synchronize(device_id);
+
+        Tensor pair_cpu = pair_buf.to(Device::cpu());
+        const uint32_t* pair_bits = reinterpret_cast<const uint32_t*>(pair_cpu.data<int32_t>());
+        float a_max_f, diff_max_f;
+        std::memcpy(&a_max_f, &pair_bits[0], sizeof(float));
+        std::memcpy(&diff_max_f, &pair_bits[1], sizeof(float));
+        double a_max = static_cast<double>(a_max_f);
+        double diff_max = static_cast<double>(diff_max_f);
+        double tol = (input.dtype() == DType::Float32) ? 1e-2 : 1e-3;
+        bool is_near_symmetric = (diff_max < tol * std::max(a_max, 1.0));
+
         if (is_near_symmetric) {
             auto At = ::tenzor::transpose(input, ndim - 2, ndim - 1).contiguous();
             auto A_sym = ::tenzor::mul(::tenzor::add(input, At), 0.5).contiguous();

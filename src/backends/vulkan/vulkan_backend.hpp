@@ -649,6 +649,13 @@ public:
     // Type cast operations
     auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
 
+    // Modular-truncating Int32 -> {Int8, Int16, Int64, Bool} cast.
+    // Used by bitwise ops where the high bits of an Int32 result are
+    // semantically meaningful and must NOT be saturated. Standard
+    // dispatchCast routes through `cast_f32_i8` / `cast_f32_i16` which clamp
+    // to the destination range; this helper preserves the bit pattern.
+    auto dispatchCastTruncateInt32(const Tensor& input, DType target_dtype) -> Tensor;
+
     // RNN operations (Phase 11.3)
     auto dispatchLSTMForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
                              const Tensor& bias_ih, const Tensor& bias_hh,

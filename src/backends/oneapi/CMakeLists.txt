@@ -67,7 +67,7 @@ if(ONEDPL_INCLUDE_DIR)
     set(ONEDPL_FOUND TRUE)
     message(STATUS "OneAPI Backend: oneDPL found at ${ONEDPL_INCLUDE_DIR}")
 else()
-    message(STATUS "OneAPI Backend: oneDPL not found - using host-side sort fallback")
+    message(STATUS "OneAPI Backend: oneDPL not found - using on-device SYCL bitonic sort fallback")
 endif()
 
 # =========================================================================

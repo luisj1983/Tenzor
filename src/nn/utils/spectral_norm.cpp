@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 
 namespace tenzor::nn::utils {
 
@@ -60,18 +61,24 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
     sn->u_ = randn({h}, weight.dtype(), weight.device());
     sn->v_ = randn({w}, weight.dtype(), weight.device());
 
-    // Normalize initial vectors. Upcast the scalar norm to Float32 so reading
-    // works for any input dtype (Float16/BFloat16/Float64/Float32).
-    auto u_norm = norm(sn->u_);
-    float u_norm_val = u_norm.to(Device::cpu()).to(DType::Float32).data<float>()[0];
-    if (u_norm_val > 0) {
-        sn->u_ = div(sn->u_, u_norm_val);
+    // Normalize initial vectors on-device — substitute 1.0 for the divisor
+    // when the norm is zero (avoids NaN from 0/0). The previous host-scalar
+    // read forced a per-call CPU roundtrip on every spectral-norm setup.
+    {
+        Tensor u_norm = norm(sn->u_);
+        Tensor zero_t = zeros({}, u_norm.dtype(), u_norm.device());
+        Tensor mask = ::tenzor::gt(u_norm, zero_t);
+        Tensor one_t = ::tenzor::full({}, 1.0, u_norm.dtype(), u_norm.device());
+        Tensor safe = ::tenzor::where(mask, u_norm, one_t);
+        sn->u_ = div(sn->u_, safe);
     }
-
-    auto v_norm = norm(sn->v_);
-    float v_norm_val = v_norm.to(Device::cpu()).to(DType::Float32).data<float>()[0];
-    if (v_norm_val > 0) {
-        sn->v_ = div(sn->v_, v_norm_val);
+    {
+        Tensor v_norm = norm(sn->v_);
+        Tensor zero_t = zeros({}, v_norm.dtype(), v_norm.device());
+        Tensor mask = ::tenzor::gt(v_norm, zero_t);
+        Tensor one_t = ::tenzor::full({}, 1.0, v_norm.dtype(), v_norm.device());
+        Tensor safe = ::tenzor::where(mask, v_norm, one_t);
+        sn->v_ = div(sn->v_, safe);
     }
 
     // Initial sigma
@@ -127,21 +134,25 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
         Tensor u_col = reshape(u_, {static_cast<int64_t>(u_.shape()[0]), 1});
         Tensor v_new = reshape(matmul(wt, u_col), {static_cast<int64_t>(v_.shape()[0])});
 
+        // On-device clamp: divide by max(norm, eps) — avoids any host
+        // roundtrip in the per-forward power iteration loop.
         auto v_norm_t = norm(v_new);
-        float v_norm_val = v_norm_t.to(Device::cpu()).to(DType::Float32).data<float>()[0];
-        if (v_norm_val > eps_) {
-            v_ = div(v_new, v_norm_val);
-        }
+        Tensor v_eps_t = ::tenzor::full({}, eps_, v_norm_t.dtype(), v_norm_t.device());
+        Tensor v_mask = ::tenzor::gt(v_norm_t, v_eps_t);
+        Tensor v_safe = ::tenzor::where(v_mask, v_norm_t, ::tenzor::full({}, 1.0, v_norm_t.dtype(), v_norm_t.device()));
+        Tensor v_div  = ::tenzor::where(v_mask, v_new,    v_);
+        v_ = div(v_div, v_safe);
 
         // u_new = W @ v
         Tensor v_col = reshape(v_, {static_cast<int64_t>(v_.shape()[0]), 1});
         Tensor u_new = reshape(matmul(weight_2d, v_col), {static_cast<int64_t>(u_.shape()[0])});
 
         auto u_norm_t = norm(u_new);
-        float u_norm_val = u_norm_t.to(Device::cpu()).to(DType::Float32).data<float>()[0];
-        if (u_norm_val > eps_) {
-            u_ = div(u_new, u_norm_val);
-        }
+        Tensor u_eps_t = ::tenzor::full({}, eps_, u_norm_t.dtype(), u_norm_t.device());
+        Tensor u_mask = ::tenzor::gt(u_norm_t, u_eps_t);
+        Tensor u_safe = ::tenzor::where(u_mask, u_norm_t, ::tenzor::full({}, 1.0, u_norm_t.dtype(), u_norm_t.device()));
+        Tensor u_div  = ::tenzor::where(u_mask, u_new,    u_);
+        u_ = div(u_div, u_safe);
     }
 
     // Compute sigma = u^T W v
@@ -152,12 +163,13 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
 }
 
 auto SpectralNorm::compute_weight(const Tensor& weight) -> Tensor {
-    // W_normalized = W / sigma(W)
-    float sigma_val = sigma_.to(Device::cpu()).to(DType::Float32).data<float>()[0];
-    if (sigma_val < eps_) {
-        sigma_val = static_cast<float>(eps_);
-    }
-    return div(weight, sigma_val);
+    // W_normalized = W / max(sigma, eps) — keeps the divide on-device.
+    Tensor eps_t = ::tenzor::full({}, eps_, sigma_.dtype(), sigma_.device());
+    Tensor mask = ::tenzor::gt(sigma_, eps_t);
+    Tensor safe = ::tenzor::where(mask, sigma_, eps_t);
+    if (safe.device() != weight.device()) safe = safe.to(weight.device());
+    if (safe.dtype()  != weight.dtype())  safe = safe.to(weight.dtype());
+    return div(weight, safe);
 }
 
 auto SpectralNorm::remove() -> void {

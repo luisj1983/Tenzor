@@ -1812,14 +1812,20 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
+    } else if (src_dtype == DType::Int16 && target_dtype == DType::Int32) {
+        shader_name = "cast_i16_i32";
+    } else if (src_dtype == DType::Int32 && target_dtype == DType::Int16) {
+        // Modular-truncating direct cast (PyTorch / numpy semantics).
+        shader_name = "cast_i32_i16";
+    } else if (src_dtype == DType::Int16 && target_dtype == DType::Float32) {
+        shader_name = "cast_i16_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::Int16) {
+        shader_name = "cast_f32_i16";
     } else if (src_dtype == DType::Int16 || target_dtype == DType::Int16) {
-        // No native Int16 SPIR-V cast shaders. Round-trip through CPU; this
-        // matches the existing BFloat16/FP8 fallback pattern in this file
-        // when no direct GPU path exists. Used by the Int32-promoted bitwise
-        // path in vulkan_kernel_registry.cpp for Int16 inputs.
-        Tensor cpu_input = input.to(Device::cpu());
-        Tensor cpu_output = cpu_input.to(target_dtype);
-        return cpu_output.to(input.device());
+        // Any other Int16 pair: two-step via Float32 intermediate.
+        // Replaces the previous CPU round-trip — both legs run on-device
+        // through cast_i16_f32 / cast_f32_i16.
+        two_step = true;
     } else {
         // Should not reach here; all paths covered. Safety fallback.
         throw std::runtime_error("Vulkan cast: unsupported dtype pair (" +
@@ -1845,7 +1851,8 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         }
         size_t raw = static_cast<size_t>(numel) * dtype_size(dtype);
         if (dtype == DType::Bool || dtype == DType::Int8 || dtype == DType::UInt8 ||
-            dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2) {
+            dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+            dtype == DType::Int16) {
             return (raw + 3) & ~size_t(3);  // Round up to 4-byte boundary
         }
         return raw;
@@ -1902,6 +1909,85 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
 
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+/*
+ * Modular-truncating Int32 -> {Int8, Int16, Int64, Bool} cast.
+ *
+ * dispatchCast routes Int32 -> Int8 / Int16 through cast_f32_i8 / cast_f32_i16
+ * which CLAMP to the destination range. That's the right behaviour for normal
+ * casts (e.g. converting a float result to int8) but wrong for bitwise ops
+ * where the upper bits of the int32 input are intentionally significant and
+ * the contract is "discard the top bits" (PyTorch / numpy / C). This helper
+ * uses dedicated truncating shaders so the bit pattern is preserved.
+ */
+auto VulkanBackend::dispatchCastTruncateInt32(const Tensor& input, DType target_dtype) -> Tensor {
+    if (input.dtype() != DType::Int32) {
+        throw std::runtime_error(
+            "dispatchCastTruncateInt32: input must be Int32 (got " +
+            std::string(dtype_name(input.dtype())) + ")");
+    }
+    if (target_dtype == DType::Int32) return input;
+
+    int32_t device_id = input.device().index;
+    int64_t numel = input.numel();
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    Tensor output(out_shape, target_dtype, input.device());
+
+    if (numel == 0) return output;
+
+    std::string shader_name;
+    size_t out_buf_size = 0;
+    switch (target_dtype) {
+        case DType::Int8:
+        case DType::Bool:
+            shader_name = (target_dtype == DType::Int8) ? "cast_i32_i8_truncate"
+                                                        : "cast_i32_bool";
+            // 1 byte per element, rounded up to 4-byte boundary
+            out_buf_size = (static_cast<size_t>(numel) + 3) & ~size_t(3);
+            break;
+        case DType::Int16:
+            shader_name = "cast_i32_i16";
+            // 2 bytes per element, rounded up to 4-byte boundary
+            out_buf_size = (static_cast<size_t>(numel) * 2 + 3) & ~size_t(3);
+            break;
+        case DType::Int64:
+            shader_name = "cast_i32_i64";
+            out_buf_size = static_cast<size_t>(numel) * sizeof(int64_t);
+            break;
+        default:
+            throw std::runtime_error(
+                "dispatchCastTruncateInt32: unsupported target dtype " +
+                std::string(dtype_name(target_dtype)));
+    }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+    size_t in_buf_size = static_cast<size_t>(numel) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()},
+        {1, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {in_buf_size, out_buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants { uint32_t num_elements; } pc{static_cast<uint32_t>(numel)};
+    uint32_t dispatch_count = div_wg(static_cast<uint32_t>(numel),
+                                      devices_[device_id].workgroupSize);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, dispatch_count, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
 
     return output;
 }

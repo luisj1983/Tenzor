@@ -1,0 +1,49 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Float64 variant of repeat_interleave_tensor.comp. See that file for the
+// algorithm; the only difference is the SSBO element type. Required because
+// the parent shader binds `float input_data[]`, which silently reinterprets
+// Float64 / Int64 SSBO bytes as Float32 garbage when Int64 indices arrive
+// via the cast-roundtrip path in dispatchRepeatInterleaveTensor.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input  { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+layout(binding = 2) buffer Offsets { int   offsets_data[]; };  // exclusive prefix sum
+
+layout(push_constant) uniform PushConstants {
+    uint total_output;
+    uint dim_size;
+    uint inner_size;
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.total_output) return;
+
+    uint inner_idx = out_idx % params.inner_size;
+    uint out_dim_and_outer = out_idx / params.inner_size;
+    uint total_out_dim = uint(offsets_data[params.dim_size]);
+    uint outer_idx = out_dim_and_outer / total_out_dim;
+    uint out_dim_idx = out_dim_and_outer % total_out_dim;
+
+    uint lo = 0;
+    uint hi = params.dim_size;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2;
+        if (uint(offsets_data[mid + 1]) <= out_dim_idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint src_dim_idx = lo;
+
+    uint src_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   src_dim_idx * params.inner_size +
+                   inner_idx;
+
+    output_data[out_idx] = input_data[src_idx];
+}

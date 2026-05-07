@@ -378,6 +378,26 @@ auto VulkanBackend::dispatchTile(const Tensor& input, const std::vector<int64_t>
         return out_f16;
     }
 
+    // The base tile.comp / tile_f64.comp shaders have hardcoded
+    // `float input_data[]` / `double input_data[]` SSBO bindings.
+    // Non-Float dtypes would silently reinterpret as float garbage. Route
+    // narrow types via Float32, Int64 via Float64 (preserves all int values
+    // up to 2^53). Int8 / Bool / UInt8 widen to Float32. Mirror of the
+    // repeat_interleave Int64 fix.
+    DType orig_dtype = input.dtype();
+    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool ||
+        orig_dtype == DType::UInt8 || orig_dtype == DType::Int16 ||
+        orig_dtype == DType::Int32) {
+        Tensor f32_input = dispatchCast(input, DType::Float32);
+        Tensor f32_result = dispatchTile(f32_input, reps);
+        return dispatchCast(f32_result, orig_dtype);
+    }
+    if (orig_dtype == DType::Int64) {
+        Tensor f64_input = dispatchCast(input, DType::Float64);
+        Tensor f64_result = dispatchTile(f64_input, reps);
+        return dispatchCast(f64_result, DType::Int64);
+    }
+
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
     DType dtype = input.dtype();

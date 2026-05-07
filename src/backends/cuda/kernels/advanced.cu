@@ -11,7 +11,6 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
-#include <random>
 #include <algorithm>
 #include <cstring>
 #include "cuda_common.cuh"
@@ -32,24 +31,13 @@
 #include <stdexcept>
 #include <optional>
 
-// Forward declarations for CPU fallback functions (avoid C++23 headers in CUDA)
+// Forward declarations for tenzor frontend ops used inside CUDA kernels
+// (declared here to avoid pulling C++23 frontend headers into nvcc).
+// These dispatch back to the CUDA backend for CUDA-resident inputs — they
+// are NOT CPU fallbacks.
 namespace tenzor {
     auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
-    auto index(const Tensor& input,
-               const std::vector<std::optional<Tensor>>& indices) -> Tensor;
-    auto index_put(Tensor& input,
-                   const std::vector<std::optional<Tensor>>& indices,
-                   const Tensor& values) -> void;
-namespace fft {
-    auto stft(const Tensor& input, int64_t n_fft, int64_t hop_length,
-              int64_t win_length, const Tensor& window, bool center,
-              bool normalized, bool onesided) -> Tensor;
-    auto istft(const Tensor& input, int64_t n_fft, int64_t hop_length,
-               int64_t win_length, const Tensor& window, bool center,
-               bool normalized, bool onesided,
-               std::optional<int64_t> length) -> Tensor;
-} // namespace fft
-} // namespace tenzor
+}
 
 namespace tenzor {
 namespace cuda {
@@ -1486,6 +1474,37 @@ __global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
     output[sid] = lo;
 }
 
+// Per-element Efraimidis-Spirakis keys for weighted sampling without
+// replacement: key[b, i] = -log(U) / w[b, i], with U ~ Uniform(0, 1).
+// Selecting the smallest `k` keys per row reproduces multinomial sampling
+// without replacement exactly (in distribution). Zero / negative weights map
+// to +inf so they are never selected.
+__global__ void multinomial_es_keys_kernel(const float* __restrict__ probs,
+                                            float* __restrict__ keys,
+                                            int64_t batch_size,
+                                            int64_t num_categories,
+                                            uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = batch_size * num_categories;
+    if (tid >= total) return;
+
+    // Same per-thread LCG seeding pattern as bernoulli/poisson kernels.
+    uint64_t state = seed + static_cast<uint64_t>(tid) * 6364136223846793005ULL +
+                     1442695040888963407ULL;
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    // u in (0, 1) — bias upward by 1 ULP to keep -log(u) finite.
+    float u = (static_cast<float>(state >> 33) + 1.0f) /
+              static_cast<float>(1ULL << 31);
+    if (u >= 1.0f) u = 1.0f - 1.1920929e-07f;  // < 1 strictly
+
+    float w = probs[tid];
+    if (!(w > 0.0f)) {
+        keys[tid] = INFINITY;       // never selected by smallest-k topk
+        return;
+    }
+    keys[tid] = -logf(u) / w;
+}
+
 auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                         bool replacement, cudaStream_t stream) -> Tensor {
     auto input = probs.contiguous();
@@ -1507,45 +1526,38 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                                   "num_categories without replacement");
     }
 
-    // Without replacement: do the sampling on the host (sizes here are
-    // typically tiny — categories ≤ a few thousand, samples ≤ categories).
-    // The on-device kernel ignores `replacement` and would emit duplicates
-    // for the without-replacement case (audit follow-up).
+    // Without replacement: Efraimidis-Spirakis weighted reservoir sampling
+    // (a.k.a. Gumbel-top-k). For each (batch, category) we compute a key
+    //
+    //     key = -log(U) / w        (U ~ Uniform(0, 1))
+    //
+    // and select the `num_samples` smallest keys per row. This is provably
+    // equivalent in distribution to repeated weighted sampling without
+    // replacement, runs entirely on-device (no host roundtrip), and uses the
+    // same per-thread LCG already used by bernoulli/poisson kernels for seed
+    // semantics consistency. Categories with w == 0 receive +inf and are
+    // never selected.
     if (!replacement) {
-        auto host_input = input.to(Device::cpu());
-        const float* p_data = host_input.data<float>();
-        std::vector<int64_t> out_host(batch_size * num_samples);
-        std::mt19937_64 rng(::tenzor::get_global_seed());
-        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::vector<float> weights(p_data + b * num_categories,
-                                       p_data + (b + 1) * num_categories);
-            for (int64_t s = 0; s < num_samples; ++s) {
-                std::vector<float> cs(num_categories);
-                cs[0] = weights[0];
-                for (int64_t i = 1; i < num_categories; ++i) {
-                    cs[i] = cs[i - 1] + weights[i];
-                }
-                float total = cs[num_categories - 1];
-                if (total <= 0.0f) {
-                    throw std::runtime_error(
-                        "multinomial: ran out of positive-weight categories");
-                }
-                float u = uniform(rng) * total;
-                int64_t idx = static_cast<int64_t>(
-                    std::lower_bound(cs.begin(), cs.end(), u) - cs.begin());
-                if (idx >= num_categories) idx = num_categories - 1;
-                out_host[b * num_samples + s] = idx;
-                weights[idx] = 0.0f;
-            }
-        }
-        auto out_cpu = Tensor({batch_size, num_samples}, DType::Int64,
-                              Device::cpu());
-        std::memcpy(out_cpu.data<int64_t>(), out_host.data(),
-                    out_host.size() * sizeof(int64_t));
-        auto result_dev = out_cpu.to(probs.device());
-        if (was_1d) result_dev = result_dev.reshape({num_samples});
-        return result_dev;
+        auto keys = Tensor({batch_size, num_categories}, DType::Float32,
+                           input.device());
+        const int64_t total_keys = batch_size * num_categories;
+        int threads_k = 256;
+        int blocks_k = static_cast<int>((total_keys + threads_k - 1) / threads_k);
+        uint64_t seed = ::tenzor::get_global_seed();
+        multinomial_es_keys_kernel<<<blocks_k, threads_k, 0, stream>>>(
+            input.data<float>(), keys.data<float>(),
+            batch_size, num_categories, seed);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Pick the `num_samples` smallest keys along dim=1; the indices ARE
+        // the without-replacement samples.
+        auto [picked_vals, picked_idx] = topk_kernel(
+            keys, num_samples, /*dim=*/1,
+            /*largest=*/false, /*sorted=*/true, stream);
+
+        Tensor result = picked_idx;
+        if (was_1d) result = result.reshape({num_samples});
+        return result;
     }
 
     auto result = Tensor({batch_size, num_samples}, DType::Int64, input.device());

@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Float64 variant of eig_symmetry_probe. Reads `double` matrix entries but
+// reduces to Float32 maxes — the symmetry threshold check is robust to ~1
+// ULP loss (rtol 1e-3 to 1e-2), so the f32 maxes are sufficient and avoid
+// the uint64 atomic extension.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InBuf  { double A[]; };
+layout(set = 0, binding = 1) buffer        PairBuf { uint pair[]; };  // [max_abs, max_diff]
+
+layout(push_constant) uniform PC {
+    uint nbatch;
+    uint n;
+};
+
+shared uint s_max_abs;
+shared uint s_max_diff;
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint wsz = gl_WorkGroupSize.x;
+    if (b >= nbatch) return;
+
+    if (tid == 0u) {
+        s_max_abs = 0u;
+        s_max_diff = 0u;
+    }
+    barrier();
+
+    uint base = b * n * n;
+    uint total = n * n;
+    for (uint idx = tid; idx < total; idx += wsz) {
+        uint i = idx / n;
+        uint j = idx - i * n;
+        double v = A[base + idx];
+        float av = float(abs(v));
+        atomicMax(s_max_abs, floatBitsToUint(av));
+        if (j > i) {
+            double vt = A[base + j * n + i];
+            float d = float(abs(v - vt));
+            atomicMax(s_max_diff, floatBitsToUint(d));
+        }
+    }
+    barrier();
+
+    if (tid == 0u) {
+        atomicMax(pair[0], s_max_abs);
+        atomicMax(pair[1], s_max_diff);
+    }
+}

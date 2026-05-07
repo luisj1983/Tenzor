@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
 #include <stdexcept>
@@ -941,20 +942,17 @@ auto MultiMarginLoss::forward(const Variable& input, const Tensor& target) -> Va
     auto diff = margin_var - correct_scores + input;
     auto hinge = relu(diff);
 
-    // Build the one-hot mask that zeros out the correct-class contribution.
-    // The mask is constant w.r.t. input — we can construct it via raw tensor
-    // ops without breaking autograd, since we wrap the result in a no-grad
-    // Variable.
-    Tensor target_cpu = target.to(Device::cpu()).to(DType::Int64).contiguous();
-    const int64_t* target_data = target_cpu.data<int64_t>();
-    auto one_hot_cpu = zeros({N, C}, DType::Float32, Device::cpu());
-    float* oh_data = one_hot_cpu.data<float>();
-    for (int64_t i = 0; i < N; ++i) {
-        oh_data[i * C + target_data[i]] = 1.0f;
+    // Build the one-hot mask via the device-aware one_hot op rather than
+    // host-staging the targets and writing the mask in a CPU loop. The mask
+    // is constant w.r.t. input, so wrap the result in a no-grad Variable.
+    Tensor target_i64 = (target.dtype() == DType::Int64)
+        ? target : target.to(DType::Int64);
+    Tensor one_hot_i = ::tenzor::one_hot(target_i64, C);
+    Tensor one_hot_t = one_hot_i.to(input.tensor().dtype());
+    if (one_hot_t.device() != input.tensor().device()) {
+        one_hot_t = one_hot_t.to(input.tensor().device());
     }
-    auto one_hot = Variable(
-        one_hot_cpu.to(input.tensor().dtype()).to(input.tensor().device()),
-        false);
+    auto one_hot = Variable(one_hot_t, false);
 
     auto one = scalar_var(1.0f, one_hot);
     auto mask = one - one_hot;  // 1 for incorrect classes, 0 for correct

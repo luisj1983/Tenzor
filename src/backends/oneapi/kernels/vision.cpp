@@ -106,90 +106,69 @@ auto nms_kernel(
     const float* boxes_f32_ptr = get_data_ptr<const float>(boxes_f32);
     const float* scores_f32_ptr = get_data_ptr<const float>(scores_f32);
 
-    // Sort boxes by score (descending)
-    std::vector<int64_t> order(num_boxes);
+    // Sort boxes by score (descending). The sorted-by-score original-index
+    // array `d_order` stays on the device; greedy suppression below consumes
+    // it directly without a host roundtrip.
+    int64_t* d_order = sycl::malloc_device<int64_t>(num_boxes, queue);
 
 #ifdef TENZOR_HAS_ONEDPL
     {
-        // Device-side sort by score descending using oneDPL
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
-
-        // Allocate device buffers for scores copy and indices
         float* d_scores = sycl::malloc_device<float>(num_boxes, queue);
-        int64_t* d_order = sycl::malloc_device<int64_t>(num_boxes, queue);
         queue.memcpy(d_scores, scores_f32_ptr, num_boxes * sizeof(float));
-
-        // Initialize indices [0, 1, 2, ..., num_boxes-1] on device
         queue.parallel_for(sycl::range<1>(num_boxes), [=](sycl::id<1> i) {
             d_order[i] = static_cast<int64_t>(i[0]);
         }).wait();
-
-        // Sort indices by score descending using sort_by_key
         ::oneapi::dpl::sort(policy,
             ::oneapi::dpl::make_zip_iterator(d_scores, d_order),
             ::oneapi::dpl::make_zip_iterator(d_scores + num_boxes, d_order + num_boxes),
             [](const auto& a, const auto& b) {
                 return std::get<0>(a) > std::get<0>(b);
             });
-
-        // Copy sorted order back to host (needed for greedy suppression)
-        queue.memcpy(order.data(), d_order, num_boxes * sizeof(int64_t)).wait();
-
         sycl::free(d_scores, queue);
-        sycl::free(d_order, queue);
     }
 #else
     {
-        // Device-side bitonic argsort descending (no oneDPL dependency)
-        // Pad to next power of 2 for bitonic sort
+        // Device-side bitonic argsort descending (no oneDPL dependency).
         int64_t padded = 1;
         while (padded < num_boxes) padded <<= 1;
 
         float* d_scores = sycl::malloc_device<float>(padded, queue);
-        int64_t* d_order = sycl::malloc_device<int64_t>(padded, queue);
+        int64_t* d_order_padded = sycl::malloc_device<int64_t>(padded, queue);
 
         queue.memcpy(d_scores, scores_f32_ptr, num_boxes * sizeof(float));
-        // Initialize indices and pad with sentinel values
         queue.parallel_for(sycl::range<1>(padded), [=](sycl::id<1> i) {
             int64_t idx = static_cast<int64_t>(i[0]);
-            d_order[idx] = idx;
+            d_order_padded[idx] = idx;
             if (idx >= num_boxes) {
                 d_scores[idx] = -std::numeric_limits<float>::infinity();
             }
         }).wait();
 
-        // Bitonic sort: descending order
         for (int64_t k = 2; k <= padded; k <<= 1) {
             for (int64_t j = k >> 1; j > 0; j >>= 1) {
                 queue.parallel_for(sycl::range<1>(padded / 2),
                     [=](sycl::id<1> gid) {
                         int64_t tid = static_cast<int64_t>(gid[0]);
-                        int64_t ixj = tid ^ j;
-                        // Map tid to the actual element index
                         int64_t l = tid | (tid & ~(j - 1));
                         int64_t r = l ^ j;
                         if (r <= l) return;
-                        // Descending: swap if left < right in ascending half
                         bool ascending_half = ((l & k) == 0);
                         float lv = d_scores[l], rv = d_scores[r];
-                        // For descending sort: swap in ascending half if l < r
                         bool should_swap = ascending_half ? (lv < rv) : (lv > rv);
                         if (should_swap) {
                             d_scores[l] = rv;
                             d_scores[r] = lv;
-                            int64_t tmp = d_order[l];
-                            d_order[l] = d_order[r];
-                            d_order[r] = tmp;
+                            int64_t tmp = d_order_padded[l];
+                            d_order_padded[l] = d_order_padded[r];
+                            d_order_padded[r] = tmp;
                         }
                     }).wait();
             }
         }
-
-        // Copy sorted order (only valid elements) back to host
-        queue.memcpy(order.data(), d_order, num_boxes * sizeof(int64_t)).wait();
-
+        queue.memcpy(d_order, d_order_padded, num_boxes * sizeof(int64_t));
         sycl::free(d_scores, queue);
-        sycl::free(d_order, queue);
+        sycl::free(d_order_padded, queue);
     }
 #endif
 
@@ -267,46 +246,81 @@ auto nms_kernel(
             }).wait();
     }
 
-    // Copy only the compact bitmask to host (N * ceil(N/64) * 8 bytes)
-    std::vector<uint64_t> h_bitmask(bitmask_elems);
-    queue.memcpy(h_bitmask.data(), d_bitmask, bitmask_elems * sizeof(uint64_t)).wait();
+    // Greedy suppression on-device, in a single SYCL work-group. tid==0
+    // drives the sequential keep/suppress decisions; the whole work-group
+    // cooperates on the chunk-OR step. Mirrors the CUDA
+    // `nms_greedy_suppression_kernel` design — only `num_keep` (8 bytes)
+    // flows back to the host.
+    int64_t* d_keep = sycl::malloc_device<int64_t>(num_boxes, queue);
+    int64_t* d_num_keep = sycl::malloc_device<int64_t>(1, queue);
+    queue.memset(d_num_keep, 0, sizeof(int64_t)).wait();
+
+    constexpr int LOCAL = 256;
+    int64_t cols_u64_local = cols_u64;
+    int64_t num_boxes_local = num_boxes;
+    int64_t num_chunks = cols_u64;
+
+    queue.submit([&](sycl::handler& h) {
+        sycl::local_accessor<uint64_t, 1> s_remv(static_cast<size_t>(num_chunks), h);
+        sycl::local_accessor<int64_t, 1> s_keep_count(1, h);
+        sycl::local_accessor<int, 1> s_keep_flag(1, h);
+        const uint64_t* mask = d_bitmask;
+        const int64_t* sorted = d_order;
+        int64_t* keep_out = d_keep;
+        int64_t* nk_out = d_num_keep;
+
+        h.parallel_for<class NmsGreedySuppressKernel>(
+            sycl::nd_range<1>(sycl::range<1>(LOCAL), sycl::range<1>(LOCAL)),
+            [=](sycl::nd_item<1> it) {
+                int tid = it.get_local_linear_id();
+                int wsz = it.get_local_range(0);
+
+                for (int64_t c = tid; c < num_chunks; c += wsz) s_remv[c] = 0ULL;
+                if (tid == 0) s_keep_count[0] = 0;
+                sycl::group_barrier(it.get_group());
+
+                for (int64_t i = 0; i < num_boxes_local; ++i) {
+                    if (tid == 0) {
+                        int64_t box_idx = sorted[i];
+                        int64_t chunk_i = box_idx / 64;
+                        uint64_t bit_i = uint64_t(1) << (box_idx % 64);
+                        if (s_remv[chunk_i] & bit_i) {
+                            s_keep_flag[0] = 0;
+                        } else {
+                            keep_out[s_keep_count[0]] = box_idx;
+                            s_keep_count[0] = s_keep_count[0] + 1;
+                            s_keep_flag[0] = 1;
+                        }
+                    }
+                    sycl::group_barrier(it.get_group());
+
+                    if (s_keep_flag[0]) {
+                        int64_t box_idx = sorted[i];
+                        const uint64_t* row = mask + box_idx * cols_u64_local;
+                        for (int64_t c = tid; c < num_chunks; c += wsz) {
+                            s_remv[c] |= row[c];
+                        }
+                    }
+                    sycl::group_barrier(it.get_group());
+                }
+
+                if (tid == 0) nk_out[0] = s_keep_count[0];
+            });
+    }).wait();
+
+    int64_t num_keep = 0;
+    queue.memcpy(&num_keep, d_num_keep, sizeof(int64_t)).wait();
 
     sycl::free(d_bitmask, queue);
+    sycl::free(d_num_keep, queue);
+    sycl::free(d_order, queue);
 
-    // Greedy suppression using bitmask (inherently sequential).
-    // This loop is O(N) on the compact bitmask and is the standard approach
-    // used by all major frameworks (torchvision, detectron2). Parallelizing it
-    // would require speculative execution with rollback, which is slower for
-    // typical NMS box counts (< 10K).
-    std::vector<bool> suppressed(num_boxes, false);
-    std::vector<int64_t> keep;
-
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        int64_t idx = order[i];
-        if (suppressed[idx]) continue;
-
-        keep.push_back(idx);
-
-        // Suppress all boxes that overlap with idx above threshold
-        // by scanning the bitmask row for idx
-        const uint64_t* row = h_bitmask.data() + idx * cols_u64;
-        for (int64_t w = 0; w < cols_u64; ++w) {
-            uint64_t bits = row[w];
-            while (bits) {
-                int bit_pos = __builtin_ctzll(bits);
-                int64_t jdx = w * 64 + bit_pos;
-                if (jdx < num_boxes) {
-                    suppressed[jdx] = true;
-                }
-                bits &= bits - 1; // clear lowest set bit
-            }
-        }
+    Tensor result({num_keep}, DType::Int64, boxes.device());
+    if (num_keep > 0) {
+        queue.memcpy(get_data_ptr<int64_t>(result), d_keep,
+                     num_keep * sizeof(int64_t)).wait();
     }
-
-    // Create output tensor
-    Tensor result({static_cast<int64_t>(keep.size())}, DType::Int64, boxes.device());
-    int64_t* result_ptr = get_data_ptr<int64_t>(result);
-    queue.memcpy(result_ptr, keep.data(), keep.size() * sizeof(int64_t)).wait();
+    sycl::free(d_keep, queue);
 
     return result;
 }

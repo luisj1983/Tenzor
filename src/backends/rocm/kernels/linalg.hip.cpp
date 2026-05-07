@@ -1400,6 +1400,120 @@ __global__ void qr_eig_fallback_kernel(
     }
 }
 
+// ----------------------------------------------------------------------------
+// Symmetry probe: max |A| and max |A - A^T| over a batched square matrix,
+// reduced into two device-side scalars. Used by linalg_eig_kernel below to
+// choose between the eigh fast-path and the QR fallback without downloading
+// the entire input back to the host.
+// ----------------------------------------------------------------------------
+template <typename T>
+__global__ void eig_symmetry_probe_kernel(const T* __restrict__ A,
+                                          int64_t nbatch, int64_t n,
+                                          double* __restrict__ d_max_abs,
+                                          double* __restrict__ d_max_diff) {
+    extern __shared__ double smem[];
+    double* s_abs = smem;                 // blockDim.x doubles
+    double* s_diff = smem + blockDim.x;   // blockDim.x doubles
+
+    int64_t b = blockIdx.x;
+    if (b >= nbatch) return;
+    const T* mat = A + b * n * n;
+
+    double local_max_abs = 0.0;
+    double local_max_diff = 0.0;
+
+    // Each thread strides over the matrix; for the diff we look at the
+    // upper triangle (i < j) so each pair is visited exactly once.
+    int64_t total = n * n;
+    for (int64_t idx = threadIdx.x; idx < total; idx += blockDim.x) {
+        int64_t i = idx / n;
+        int64_t j = idx - i * n;
+        double v = static_cast<double>(mat[idx]);
+        double av = (v < 0.0) ? -v : v;
+        if (av > local_max_abs) local_max_abs = av;
+        if (j > i) {
+            double vt = static_cast<double>(mat[j * n + i]);
+            double d = v - vt;
+            if (d < 0.0) d = -d;
+            if (d > local_max_diff) local_max_diff = d;
+        }
+    }
+
+    s_abs[threadIdx.x] = local_max_abs;
+    s_diff[threadIdx.x] = local_max_diff;
+    __syncthreads();
+
+    // Block-level max reduction.
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            if (s_abs[threadIdx.x + stride] > s_abs[threadIdx.x])
+                s_abs[threadIdx.x] = s_abs[threadIdx.x + stride];
+            if (s_diff[threadIdx.x + stride] > s_diff[threadIdx.x])
+                s_diff[threadIdx.x] = s_diff[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        // Atomic max over batches via CAS. atomicMax(double*) is not
+        // universally available across HIP arches, so emulate with CAS on
+        // the 64-bit bit pattern.
+        double block_abs = s_abs[0];
+        double block_diff = s_diff[0];
+        unsigned long long* ull_abs = reinterpret_cast<unsigned long long*>(d_max_abs);
+        unsigned long long* ull_diff = reinterpret_cast<unsigned long long*>(d_max_diff);
+        unsigned long long old_a = *ull_abs;
+        unsigned long long assumed_a;
+        do {
+            assumed_a = old_a;
+            double cur = __longlong_as_double(static_cast<long long>(assumed_a));
+            if (block_abs <= cur) break;
+            old_a = atomicCAS(ull_abs, assumed_a,
+                              static_cast<unsigned long long>(
+                                  __double_as_longlong(block_abs)));
+        } while (assumed_a != old_a);
+
+        unsigned long long old_d = *ull_diff;
+        unsigned long long assumed_d;
+        do {
+            assumed_d = old_d;
+            double cur = __longlong_as_double(static_cast<long long>(assumed_d));
+            if (block_diff <= cur) break;
+            old_d = atomicCAS(ull_diff, assumed_d,
+                              static_cast<unsigned long long>(
+                                  __double_as_longlong(block_diff)));
+        } while (assumed_d != old_d);
+    }
+}
+
+// Returns {max_abs, max_diff} computed on-device. Only 16 bytes flow back
+// to the host (two doubles) — necessary metadata, not a CPU compute path.
+template <typename T>
+inline std::pair<double, double> eig_symmetry_metrics(const T* d_A,
+                                                      int64_t nbatch,
+                                                      int64_t n,
+                                                      hipStream_t stream) {
+    double* d_pair = nullptr;
+    HIP_CHECK_LINALG(hipMalloc(&d_pair, 2 * sizeof(double)));
+    double init[2] = {0.0, 0.0};
+    HIP_CHECK_LINALG(hipMemcpyAsync(d_pair, init, 2 * sizeof(double),
+                                    hipMemcpyHostToDevice, stream));
+
+    int threads = 256;
+    size_t smem_bytes = 2 * threads * sizeof(double);
+    hipLaunchKernelGGL(eig_symmetry_probe_kernel<T>,
+        dim3(static_cast<unsigned>(nbatch)), dim3(threads), smem_bytes, stream,
+        d_A, nbatch, n, d_pair, d_pair + 1);
+    HIP_CHECK_LINALG(hipGetLastError());
+
+    double host_pair[2] = {0.0, 0.0};
+    HIP_CHECK_LINALG(hipMemcpyAsync(host_pair, d_pair, 2 * sizeof(double),
+                                    hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream));
+    HIP_CHECK_LINALG(hipFree(d_pair));
+    return {host_pair[0], host_pair[1]};
+}
+
 // ============================================================================
 // Eigendecomposition (non-symmetric)
 // ============================================================================
@@ -1425,44 +1539,15 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     {
         auto [n_check, ndim_check] = check_square(A);
         int64_t nbatch_check = batch_size(A);
-        size_t elem_real = (A.dtype() == DType::Float32) ? sizeof(float) : sizeof(double);
-        std::vector<char> host_data(nbatch_check * n_check * n_check * elem_real);
-        HIP_CHECK_LINALG(hipMemcpy(host_data.data(), A.contiguous().data_ptr(),
-            nbatch_check * n_check * n_check * elem_real, hipMemcpyDeviceToHost));
+        auto A_cont = A.contiguous();
         bool is_near_symmetric = true;
         if (A.dtype() == DType::Float32) {
-            const float* p = reinterpret_cast<const float*>(host_data.data());
-            float a_max = 0.0f, diff_max = 0.0f;
-            for (int64_t i = 0; i < nbatch_check * n_check * n_check; ++i) {
-                float v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch_check && is_near_symmetric; ++b) {
-                const float* mat = p + b * n_check * n_check;
-                for (int64_t i = 0; i < n_check && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n_check; ++j) {
-                        float d = std::fabs(mat[i * n_check + j] - mat[j * n_check + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
-            is_near_symmetric = (diff_max < 1e-2f * std::max(a_max, 1.0f));
+            auto [a_max, diff_max] = eig_symmetry_metrics<float>(
+                A_cont.data<float>(), nbatch_check, n_check, stream);
+            is_near_symmetric = (diff_max < 1e-2 * std::max(a_max, 1.0));
         } else {
-            const double* p = reinterpret_cast<const double*>(host_data.data());
-            double a_max = 0.0, diff_max = 0.0;
-            for (int64_t i = 0; i < nbatch_check * n_check * n_check; ++i) {
-                double v = std::fabs(p[i]);
-                if (v > a_max) a_max = v;
-            }
-            for (int64_t b = 0; b < nbatch_check && is_near_symmetric; ++b) {
-                const double* mat = p + b * n_check * n_check;
-                for (int64_t i = 0; i < n_check && is_near_symmetric; ++i) {
-                    for (int64_t j = i + 1; j < n_check; ++j) {
-                        double d = std::fabs(mat[i * n_check + j] - mat[j * n_check + i]);
-                        if (d > diff_max) diff_max = d;
-                    }
-                }
-            }
+            auto [a_max, diff_max] = eig_symmetry_metrics<double>(
+                A_cont.data<double>(), nbatch_check, n_check, stream);
             is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
         }
         if (is_near_symmetric) {
