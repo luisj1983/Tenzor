@@ -355,10 +355,18 @@ inline std::vector<std::string> getAvailableBackendsWithDevices() {
  */
 class MultiBackendDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
 protected:
-    Device device_;
-    DType dtype_;
-    float rtol_;
-    float atol_;
+    // device_ defaults to CPU so that derived SetUp() methods which run
+    // after a GTEST_SKIP() returns from this base SetUp() observe a
+    // well-defined Device::Type. Without this, Device::type is an
+    // uninitialised uint8_t and code paths like
+    //   if (device().type == Device::Type::CPU) GTEST_SKIP();
+    // (in the DataParallel fixtures) read garbage and may hit downstream
+    // backend dispatch with an invalid type, manifesting as
+    // "Subprocess aborted" instead of a clean skip.
+    Device device_ = Device::cpu();
+    DType dtype_ = DType::Float32;
+    float rtol_ = 1e-4f;
+    float atol_ = 1e-5f;
     static bool initialized_;
 
     void SetUp() override {
@@ -714,10 +722,10 @@ inline bool MultiBackendDTypeTest::initialized_ = false;
  */
 class MultiDTypeTest : public ::testing::TestWithParam<DType> {
 protected:
-    Device device_;
-    DType dtype_;
-    float rtol_;
-    float atol_;
+    Device device_ = Device::cpu();
+    DType dtype_ = DType::Float32;
+    float rtol_ = 1e-4f;
+    float atol_ = 1e-5f;
     static bool initialized_;
 
     void SetUp() override {

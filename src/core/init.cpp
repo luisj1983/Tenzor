@@ -430,6 +430,8 @@ auto initialize() -> void {
                         if (vulkan_op_count == 0) {
                             std::cerr << "Warning: Vulkan backend registered 0 operations" << std::endl;
                         }
+
+
                     } else {
                         std::cerr << "Warning: Could not find register_kernels in Vulkan backend" << std::endl;
                     }

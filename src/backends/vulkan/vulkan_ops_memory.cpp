@@ -1120,7 +1120,7 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
 auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_name,
                                         const Tensor& input_raw,
                                         uint32_t opcode,
-                                        float param) -> Tensor {
+                                        double param) -> Tensor {
     // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
     auto input = input_raw.contiguous();
     // Handle empty tensors - no GPU work needed
@@ -1248,7 +1248,7 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
                                                 const Tensor& grad_output_raw,
                                                 const Tensor& input_or_output_raw,
                                                 uint32_t opcode,
-                                                float param) -> Tensor {
+                                                double param) -> Tensor {
     // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs.
     auto grad_output = grad_output_raw.contiguous();
     auto input_or_output = input_or_output_raw.contiguous();
@@ -1275,16 +1275,39 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
     std::vector<int64_t> output_shape(shape.begin(), shape.end());
     Tensor grad_input(output_shape, grad_output.dtype(), grad_output.device());
 
-    // Prepare push constants
-    struct PushConstants {
-        uint32_t n;      // Number of elements
-        uint32_t op;     // Operation code
-        float alpha;     // For leaky_relu_backward
-    } push_constants;
+    // Prepare push constants — must match the shader's layout exactly.
+    // The f64 backward shader declares `double alpha`, the others declare
+    // `float alpha`. Picking the wrong struct silently truncates alpha to
+    // a Float32 value (visible as ~1e-9 error on Float64 LeakyReLU/ELU
+    // backward at alpha=0.1) or worse, misaligns the read.
+    struct PushConstantsF32 {
+        uint32_t n;
+        uint32_t op;
+        float alpha;
+    };
+    struct PushConstantsF64 {
+        uint32_t n;
+        uint32_t op;
+        double alpha;
+    };
 
-    push_constants.n = static_cast<uint32_t>(grad_output.numel());
-    push_constants.op = opcode;
-    push_constants.alpha = param;
+    PushConstantsF32 push_constants_f32;
+    PushConstantsF64 push_constants_f64;
+    void* push_constants_ptr;
+    size_t push_constants_size;
+    if (is_float64) {
+        push_constants_f64.n = static_cast<uint32_t>(grad_output.numel());
+        push_constants_f64.op = opcode;
+        push_constants_f64.alpha = param;
+        push_constants_ptr = &push_constants_f64;
+        push_constants_size = sizeof(PushConstantsF64);
+    } else {
+        push_constants_f32.n = static_cast<uint32_t>(grad_output.numel());
+        push_constants_f32.op = opcode;
+        push_constants_f32.alpha = static_cast<float>(param);
+        push_constants_ptr = &push_constants_f32;
+        push_constants_size = sizeof(PushConstantsF32);
+    }
 
     // Get VkBuffer handles
     const void* buffer_grad_out = grad_output.data_ptr();
@@ -1324,7 +1347,7 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, push_constants_size, push_constants_ptr);
 
     // Dispatch compute workgroups
     // For Float16, each thread processes 2 elements (pairs)

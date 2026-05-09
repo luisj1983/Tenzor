@@ -27,6 +27,15 @@ if(TENZOR_TEST_ALL_DEVICES)
     add_compile_definitions(TENZOR_TEST_ALL_DEVICES)
 endif()
 
+# When ON, every ctest run propagates TENZOR_ONEAPI_ALLOW_CPU=1, which lets
+# the OneAPI backend register Intel/AMD CPU SYCL devices (it skips them by
+# default per the project policy that "OneAPI is the GPU backend"). Set this
+# on machines where the only available SYCL runtime is the OpenCL CPU
+# runtime — without it, every parametrized OneAPI test fails its SetUp with
+# "Backend dispatch table not ready" because no device gets registered.
+option(TENZOR_TEST_ONEAPI_ALLOW_CPU
+       "Allow OneAPI tests to bind to a SYCL CPU device (debug/CI parity runs)" off)
+
 # Custom function that wraps gtest_discover_tests
 # Supports optional LABELS parameter for CTest label-based filtering
 function(tenzor_discover_tests target)
@@ -59,6 +68,21 @@ function(tenzor_discover_tests target)
     # the embedded `;` as a real list separator.
     if(ARG_LABELS)
         list(APPEND PROPS LABELS "${ARG_LABELS}")
+    endif()
+
+    # Inject TENZOR_ONEAPI_ALLOW_CPU=1 if the project was configured with
+    # TENZOR_TEST_ONEAPI_ALLOW_CPU=ON. Honors any user-supplied ENVIRONMENT
+    # entry by appending instead of overwriting.
+    if(TENZOR_TEST_ONEAPI_ALLOW_CPU)
+        list(FIND PROPS "ENVIRONMENT" _env_idx)
+        if(_env_idx EQUAL -1)
+            list(APPEND PROPS ENVIRONMENT "TENZOR_ONEAPI_ALLOW_CPU=1")
+        else()
+            math(EXPR _env_val_idx "${_env_idx} + 1")
+            list(GET PROPS ${_env_val_idx} _existing_env)
+            list(REMOVE_AT PROPS ${_env_val_idx})
+            list(INSERT PROPS ${_env_val_idx} "${_existing_env};TENZOR_ONEAPI_ALLOW_CPU=1")
+        endif()
     endif()
 
     # Now call gtest_discover_tests

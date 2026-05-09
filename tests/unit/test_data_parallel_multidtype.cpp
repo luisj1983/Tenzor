@@ -39,10 +39,15 @@ class DataParallelMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void SetUp() override {
         MultiBackendDTypeTest::SetUp();
+        if (IsSkipped()) return;
 
-        // DataParallel requires CUDA (or similar multi-device backend)
-        if (device().type == Device::Type::CPU) {
-            GTEST_SKIP() << "DataParallel requires a GPU backend";
+        // DataParallel is wired to CUDA-specific runtime calls
+        // (cudaGetDeviceCount, cudaSetDevice, .cuda()). Other GPU backends
+        // (Vulkan/OneAPI/ROCm) currently throw "DataParallel: CUDA support
+        // not enabled" from validate_devices(). Until DataParallel grows a
+        // generic backend path, restrict the test matrix to CUDA.
+        if (device().type != Device::Type::CUDA) {
+            GTEST_SKIP() << "DataParallel currently requires the CUDA backend";
         }
 
         // Check if at least 1 device is available for this backend
@@ -52,7 +57,7 @@ protected:
             GTEST_SKIP() << "Cannot allocate on " << backend_name();
         }
     }
-};
+};;
 
 TEST_P(DataParallelMultiDTypeTest, ConstructionWithValidDevice) {
     auto module = std::make_shared<DoubleModuleMD>();

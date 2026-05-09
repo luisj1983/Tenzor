@@ -78,12 +78,27 @@ TEST_P(TransformerContainerMultiDTypeTest, TransformerEncoder_BackwardGradFlow) 
 
     auto src = Variable(createRandn({kBatch, kSeqLen, kDModel}), true);
     auto out = enc.forward(src, Tensor{}, Tensor{});
-    // Scale loss to keep gradients above Float16 underflow threshold
-    // (~5.96e-8). Backward through a 3-layer transformer produces ~1e-3
-    // gradients for unit-loss input, which underflows Float16 to zero
-    // and trips EXPECT_GRAD_FLOWS' "max-abs > 0" check despite the
-    // computation being correct on Float32+.
-    auto loss = tenzor::sum(out);
+    // Use a non-linear loss (sum-of-squares) instead of plain sum().
+    //
+    // The encoder is post-LN (default), so its final op is LayerNorm with
+    // affine weight initialised to 1.0 along the normalised dim. With
+    // grad_output = constant (which `sum(out)` produces), the LayerNorm
+    // backward yields *exactly zero* input gradient by construction:
+    //
+    //   ∂L/∂z_i = (γ/σ) * Σ_j [δ_ji - 1/N - x̂_i·x̂_j/N]
+    //           = (1/σ) * (1 - 1 - x̂_i · 0) = 0       (with γ=1, Σx̂=0)
+    //
+    // CPU/ROCm/OneAPI used to pass this assertion only because their
+    // accumulation order leaves residual numerical noise that rounds away
+    // from zero. Vulkan's F16 path computes the sum more cleanly and lands
+    // exactly on the math, tripping `EXPECT_GRAD_FLOWS`. Squaring the
+    // output makes grad_output non-uniform (= 2*out), which breaks the
+    // constant-grad symmetry and produces a real, non-zero src.grad on
+    // every backend regardless of accumulation accuracy.
+    //
+    // Float16 still scales the loss to keep gradients above the
+    // representable range (~5.96e-8) through 3 layers.
+    auto loss = tenzor::sum(out * out);
     if (dtype() == DType::Float16) loss = loss * 1024.0f;
     loss.backward();
     EXPECT_GRAD_FLOWS(src);

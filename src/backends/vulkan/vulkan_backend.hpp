@@ -746,17 +746,23 @@ public:
     auto dispatchNMS(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
 
     // Forward activation operations
+    //
+    // `param` is a double so a Float64-typed alpha (LeakyReLU/ELU) or
+    // beta (Softplus) survives the trip from the attrs map (where it is
+    // already a double) into the f64 push-constant struct without losing
+    // precision via an intermediate float cast. The f32/f16/bf16 paths
+    // implicitly narrow it back when filling their push constants.
     auto dispatchActivation(const std::string& op_name,
                            const Tensor& input,
                            uint32_t opcode,
-                           float param) -> Tensor;
+                           double param) -> Tensor;
 
     // Backward activation operations
     auto dispatchActivationBackward(const std::string& op_name,
                                      const Tensor& grad_output,
                                      const Tensor& input_or_output,
                                      uint32_t opcode,
-                                     float param) -> Tensor;
+                                     double param) -> Tensor;
     auto dispatchSwishBackward(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto dispatchRReLU(const Tensor& input, float lower, float upper, bool training) -> Tensor;
     auto dispatchRReLUBackward(const Tensor& grad_output, const Tensor& input, float slope) -> Tensor;

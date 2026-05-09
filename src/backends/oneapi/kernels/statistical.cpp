@@ -508,6 +508,16 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Product tensor
  */
 auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16: compute in Float32 for numerical stability and
+    // because the SYCL kernels below are only specialised for Float32/
+    // Float64/Int32/Int64. Matches the widen-narrow pattern used by the
+    // norm/var/std kernels in this file.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto result = prod_kernel(input.to(DType::Float32), attrs, queue);
+        return result.to(orig);
+    }
+
     // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
     // negative dim as a back-from-end axis.
     int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);

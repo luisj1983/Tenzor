@@ -261,18 +261,25 @@ TEST_P(UNetMultiDTypeTest, BatchSizeVariation) {
     auto model = std::make_shared<UNet>(3, 21, false);
     convert_model(model);
 
-    // Test with different batch sizes
+    // U-Net keeps full-resolution feature maps live across the encoder/
+    // decoder skip connections, so the activation footprint scales as
+    // batch * H * W * channels * num_skips. On 8 GB Vulkan/CUDA devices the
+    // 256x256 setup overflows even at batch=1 once Float32 activations are
+    // doubled by the autograd graph. Halve the spatial dims on memory-
+    // constrained backends; the kernel coverage is identical.
+    bool tight = (backend_name() == "vulkan" || backend_name() == "cuda");
+    int64_t hw = tight ? 128 : 256;
     std::vector<int64_t> batch_sizes = {1, 2, 4};
 
     for (int64_t batch : batch_sizes) {
-        Variable images = createInput({batch, 3, 256, 256});
+        Variable images = createInput({batch, 3, hw, hw});
         Variable output = model->forward(images);
 
         auto shape = output.tensor().shape();
         EXPECT_EQ(shape[0], batch) << "Batch size not preserved";
         EXPECT_EQ(shape[1], 21);
-        EXPECT_EQ(shape[2], 256);
-        EXPECT_EQ(shape[3], 256);
+        EXPECT_EQ(shape[2], hw);
+        EXPECT_EQ(shape[3], hw);
     }
 }
 
@@ -311,14 +318,20 @@ TEST_P(UNetMultiDTypeTest, BinarySegmentation) {
 }
 
 TEST_P(UNetMultiDTypeTest, MultiClassSegmentation) {
-    // Test various numbers of classes
+    // Iterates 5 class-count variants; on memory-constrained backends the
+    // residual graph from one iteration overlaps the model construction of
+    // the next, so even 256x256 at batch=1 OOMs on 8 GB Vulkan. See
+    // BatchSizeVariation above for the rationale on shrinking H/W rather
+    // than skipping the test.
+    bool tight = (backend_name() == "vulkan" || backend_name() == "cuda");
+    int64_t hw = tight ? 128 : 256;
     std::vector<int64_t> num_classes = {2, 5, 10, 21, 50};
 
     for (int64_t classes : num_classes) {
         auto model = std::make_shared<UNet>(3, classes, false);
         convert_model(model);
 
-        Variable images = createInput({1, 3, 256, 256});
+        Variable images = createInput({1, 3, hw, hw});
         Variable output = model->forward(images);
 
         auto shape = output.tensor().shape();

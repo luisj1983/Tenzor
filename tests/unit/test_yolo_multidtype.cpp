@@ -420,9 +420,17 @@ TEST_P(YOLOMultiDTypeTest, YOLOv3BatchProcessing) {
     auto model = yolov3(80, false);
     convert_model(model);
 
-    // Test different batch sizes
+    // YOLOv3 has a deep Darknet-53 backbone whose 416x416 feature pyramid
+    // alone occupies several GB once activations are duplicated for the
+    // autograd graph. On 8 GB Vulkan/CUDA the {1,2,4} batch sweep ramps
+    // straight to OOM on the batch=2 step. Halve the spatial dims on
+    // memory-constrained backends (still 208x208, divisible by 32 = the
+    // YOLOv3 grid stride).
+    bool tight = (backend_name() == "vulkan" || backend_name() == "cuda");
+    int hw = tight ? 224 : 416;  // 224 = 7 grid cells at stride 32
+
     for (int batch_size : {1, 2, 4}) {
-        auto images = createInput({batch_size, 3, 416, 416});
+        auto images = createInput({batch_size, 3, hw, hw});
         auto output = model->forward(images);
         EXPECT_TRUE(output.tensor().numel() > 0)
             << "Failed for batch size " << batch_size;

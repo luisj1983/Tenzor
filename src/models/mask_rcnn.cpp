@@ -603,9 +603,24 @@ auto MaskRCNN::forward_test(const Variable& images)
     auto cls_probs = tenzor::softmax(cls_logits, 1).tensor();
 
     // For simplicity, take top predictions
-    // In production, this would apply proper NMS per class
-    auto scores = tenzor::max(cls_probs, 1);
-    auto labels = tenzor::argmax(cls_probs, 1);
+    // In production, this would apply proper NMS per class.
+    //
+    // cls_probs has shape (N, num_classes + 1) — column 0 is the
+    // background class. mask_logits has shape (N, num_classes, H, W) —
+    // one channel per real class, no background. process_masks/paste_masks
+    // index mask_logits directly with the per-detection label (no -1
+    // remap), so labels passed in must be in [0, num_classes). Argmax-ing
+    // over `cls_probs[:, 1:]` skips the background column and yields a
+    // 0-based index over real classes, exactly what mask_logits expects.
+    // Without this slice, when the background column happens not to win
+    // and class num_classes does (a normal occurrence on Vulkan Float64
+    // for the RPN multi-scale test, just not on CPU due to small numeric
+    // drift in softmax), `select(mask_logits, 0, num_classes)` raises
+    // "Index out of range for select" because the 91-channel mask_logits
+    // has no channel 91.
+    auto cls_probs_no_bg = cls_probs.slice(1, 1, num_classes_ + 1);
+    auto scores = tenzor::max(cls_probs_no_bg, 1);
+    auto labels = tenzor::argmax(cls_probs_no_bg, 1);
 
     // Decode predicted box deltas relative to proposal anchors
     auto proposal_boxes = proposals.slice(1, 1, 5);  // Remove batch index

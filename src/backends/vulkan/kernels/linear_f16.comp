@@ -45,6 +45,29 @@ float16_t readBias(uint element_idx) {
     return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
 }
 
+// Write a single Float16 element into the packed output without clobbering
+// the neighbouring element in the same 32-bit word. A flat write of two
+// elements per word would race when row*N is odd (e.g. when N=1 every row
+// shares word 0 with another row). Using atomicCompSwap matches the
+// approach in linear_backward_f16.comp's writeF16.
+void writeF16Out(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    uint cur = output_data[word_idx];
+    output_data[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
 void main() {
     uint row = gl_GlobalInvocationID.y;
     uint col_pair = gl_GlobalInvocationID.x;
@@ -98,7 +121,9 @@ void main() {
         barrier();
     }
 
-    // Add bias if present
+    // Add bias if present, then write each element with the atomic
+    // half-word writer so adjacent (row, col) threads cannot clobber
+    // each other on shared 32-bit words.
     if (row < params.M && col0 < params.N) {
         if (params.has_bias != 0) {
             sum0 += float(readBias(col0));
@@ -107,12 +132,9 @@ void main() {
             }
         }
 
-        uint out_idx = row * params.N + col0;
-        uint word_idx = out_idx / 2;
-
-        uint bits0 = packHalf2x16(vec2(sum0, 0.0)).x & 0xFFFFu;
-        uint bits1 = (col1 < params.N) ? (packHalf2x16(vec2(sum1, 0.0)).x & 0xFFFFu) : 0u;
-
-        output_data[word_idx] = bits0 | (bits1 << 16);
+        writeF16Out(row * params.N + col0, sum0);
+        if (col1 < params.N) {
+            writeF16Out(row * params.N + col1, sum1);
+        }
     }
 }

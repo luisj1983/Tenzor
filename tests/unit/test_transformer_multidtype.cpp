@@ -583,9 +583,23 @@ TEST_P(TransformerIntegrationMultiDTypeTest, ForwardBackward) {
     Variable tgt(randn({2, 3, 128}, dtype(), device()), true);
 
     Variable output = model.forward(src, tgt);
-    // sum() rather than mean() preserves gradient magnitude through deep
-    // transformer stacks; mean(output)/N divides by hundreds of elements.
-    Variable loss = sum(output);
+    // Use sum-of-squares rather than plain sum().
+    //
+    // The default Transformer is post-LN, so the last op of forward is a
+    // LayerNorm whose affine weight γ initialises to 1. With a constant
+    // grad_output (= 1, what `sum(output)` produces), the LayerNorm
+    // backward formula collapses to exactly 0 input gradient:
+    //
+    //   ∂L/∂z_i = (γ/σ) · Σ_j [δ_ji - 1/N - x̂_i·x̂_j/N]
+    //           = (1/σ)·(1 - 1 - x̂_i · 0) = 0     (with γ=1, Σx̂=0)
+    //
+    // Other backends used to pass `EXPECT_GT(src_max, 0.0f)` only because
+    // their accumulation order left residual numerical noise that rounded
+    // off zero. Vulkan F32 computes the sum cleanly and lands on the math,
+    // tripping the assertion. Squaring `output` makes grad_output = 2·out
+    // (non-uniform), which breaks the constant-grad symmetry and yields a
+    // real, non-zero src.grad on every backend.
+    Variable loss = sum(output * output);
     loss.backward();
 
     // has_grad() returns true even when grad is all zeros; assert that the

@@ -449,7 +449,7 @@ INSTANTIATE_TEST_SUITE_P(
     RoBERTaELECTRAMultiDTypeTest,
     ::testing::Combine(
         STANDARD_BACKENDS,
-        ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::Int64)
+        FLOAT_DTYPES
     ),
     BackendDTypeParamName);
 

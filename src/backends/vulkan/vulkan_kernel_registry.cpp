@@ -393,11 +393,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("leaky_relu", inputs[0], 4, static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("leaky_relu", inputs[0], 4, attrs.get_float(AttrKey::Alpha, 0.01))};
     });
 
     table.register_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("leaky_relu_backward", inputs[0], inputs[1], 3, static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("leaky_relu_backward", inputs[0], inputs[1], 3, attrs.get_float(AttrKey::Alpha, 0.01))};
     });
 
     table.register_kernel(OpId::Swish, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -409,11 +409,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("elu", inputs[0], 6, static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("elu", inputs[0], 6, attrs.get_float(AttrKey::Alpha, 1.0))};
     });
 
     table.register_kernel(OpId::EluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, attrs.get_float(AttrKey::Alpha, 1.0))};
     });
 
     table.register_kernel(OpId::Selu, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -433,11 +433,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Softplus, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("softplus", inputs[0], 9, static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("softplus", inputs[0], 9, attrs.get_float(AttrKey::Beta, 1.0))};
     });
 
     table.register_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, attrs.get_float(AttrKey::Beta, 1.0))};
     });
 
     // ========================================================================
@@ -1180,7 +1180,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         auto vk = get_vulkan_backend();
-        auto result = vk->dispatchActivation("leaky_relu", target, 4, static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01)));
+        auto result = vk->dispatchActivation("leaky_relu", target, 4, attrs.get_float(AttrKey::Alpha, 0.01));
         auto bytes = target.numel() * dtype_size(target.dtype());
         if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
@@ -1892,12 +1892,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // New Ternary Math Operations
     // ========================================================================
     table.register_kernel(OpId::Addcmul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+        float value = attrs.get_float(AttrKey::Alpha, 1.0);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAddcmul(inputs[0], inputs[1], inputs[2], value)};
     });
 
     table.register_kernel(OpId::Addcdiv, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+        float value = attrs.get_float(AttrKey::Alpha, 1.0);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAddcdiv(inputs[0], inputs[1], inputs[2], value)};
     });
 

@@ -31,12 +31,11 @@ using namespace tenzor::testing;
 class OpsAdditionalMultiDTypeTest : public MultiBackendDTypeTest {
 
 protected:
-    float tolerance;
     template<typename T>
     T getTypedValue(double val) {
         return static_cast<T>(val);
     }
-};
+};;
 
 //==============================================================================
 // Reduction Operations Tests
@@ -429,9 +428,9 @@ TEST_P(OpsAdditionalMultiDTypeTest, TrigonometricFunctions) {
     auto sin_cpu = sin_result.to(Device::cpu());
     if (dtype() == DType::Float32) {
         auto sin_data = sin_cpu.data<float>();
-        EXPECT_NEAR(sin_data[0], 0.0f, tolerance);
-        EXPECT_NEAR(sin_data[1], 0.5f, tolerance);
-        EXPECT_NEAR(sin_data[3], 1.0f, tolerance);
+        EXPECT_NEAR(sin_data[0], 0.0f, atol());
+        EXPECT_NEAR(sin_data[1], 0.5f, atol());
+        EXPECT_NEAR(sin_data[3], 1.0f, atol());
     }
 }
 

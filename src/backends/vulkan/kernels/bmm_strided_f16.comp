@@ -89,16 +89,27 @@ void main() {
         barrier();
     }
 
-    // Write result (output is always contiguous, packed F16)
+    // Write result (output is always contiguous, packed F16). The non-
+    // atomic read-modify-write that lived here used to lose half of every
+    // collision when adjacent threads (different col, or different row
+    // when N is odd) shared the same 32-bit word. Use atomicCompSwap so
+    // the two halves of every word merge correctly.
     if (in_bounds) {
         uint out_elem = c_base + row * params.N + col;
-        uint out_word = out_elem / 2;
-        uint out_off = out_elem % 2;
+        uint out_word = out_elem >> 1u;
+        uint out_off = out_elem & 1u;
         uint bits = packHalf2x16(vec2(sum, 0.0)) & 0xFFFFu;
-        // Read-modify-write for packed output
-        uint existing = c[out_word];
-        uint mask = 0xFFFFu << (out_off * 16);
-        uint new_word = (existing & ~mask) | (bits << (out_off * 16));
-        c[out_word] = new_word;
+        uint shift = out_off * 16u;
+        uint mask = 0xFFFFu << shift;
+
+        uint old_val = c[out_word];
+        for (uint iter = 0u; iter < 64u; iter++) {
+            uint expected = old_val;
+            uint new_val = (expected & ~mask) | (bits << shift);
+            old_val = atomicCompSwap(c[out_word], expected, new_val);
+            if (old_val == expected) return;
+        }
+        uint cur = c[out_word];
+        c[out_word] = (cur & ~mask) | (bits << shift);
     }
 }

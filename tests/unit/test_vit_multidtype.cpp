@@ -37,14 +37,18 @@ protected:
      * Sizes are chosen to be divisible by common patch sizes (14, 16)
      */
     int getImageSizeForMemory(int default_size, size_t param_count, bool needs_gradients, int patch_size = 16) const {
+        (void)patch_size;
         if (backend_name() != "cuda" && backend_name() != "vulkan") return default_size;
 
         bool is_float64 = (dtype() == DType::Float64);
         // Vulkan uses unfused attention (separate BMM ops) while CUDA uses cuDNN SDPA,
         // so Vulkan needs more memory for attention intermediates in the autograd graph.
         bool is_vulkan = (backend_name() == "vulkan");
-        // Vulkan F16 uses F32 upcasts for key ops, so memory usage is similar to F32
-        bool is_vulkan_f16 = (is_vulkan && dtype() == DType::Float16);
+        // Vulkan F16/BF16 widens to F32 inside several ops (LayerNorm/SDPA/...) and
+        // also stores activations packed into F32 words for the autograd graph, so
+        // memory usage tracks F32, not F16. Treat them like F32 here.
+        bool is_vulkan_half = (is_vulkan && (dtype() == DType::Float16 ||
+                                             dtype() == DType::BFloat16));
 
         // ViT-Huge (~632M params) with Float64 + gradients needs very small images
         if (param_count > 500'000'000 && needs_gradients && is_float64) {
@@ -52,22 +56,67 @@ protected:
         }
         // ViT-Huge (~632M params) with Float32 + gradients
         if (param_count > 500'000'000 && needs_gradients) {
-            return 112;  // 112 is divisible by 14 and 16
+            return is_vulkan ? 56 : 112;  // 112 is divisible by 14 and 16
         }
-        // ViT-Huge forward-only with Float64
+        // ViT-Huge forward-only with Float64 — Vulkan's 8 GB VRAM can't hold
+        // a 5 GB Float64 weight set plus activations. Pick a per-patch-size
+        // image dim that gives a small-enough sequence length:
+        //   * Patch14: 56 (=4 patches/side, seq_len=17)
+        //   * Patch16: 64 (=4 patches/side, seq_len=17)
+        // Both leave headroom for the 32-layer attention working set.
         if (param_count > 500'000'000 && is_float64) {
-            return 112;  // Divisible by 14 and 16
+            if (is_vulkan) return (patch_size == 14) ? 56 : 64;
+            return 112;
+        }
+        // ViT-Huge forward-only with Float16/BFloat16 on Vulkan: still hits OOM at 224
+        // because the attention intermediates are stored in F32 representation.
+        if (param_count > 500'000'000 && is_vulkan_half) {
+            return 112;
         }
         // ViT-Large with gradients and Float64
         // Vulkan needs smaller images due to unfused attention intermediates
         if (param_count > 200'000'000 && needs_gradients && is_float64) {
             return is_vulkan ? 64 : 160;  // 64 divisible by 16, smaller for Vulkan F64 memory
         }
+        // ViT-Large with gradients on Vulkan F16/BF16/F32: 224 is fine for CUDA's
+        // fused SDPA but Vulkan's unfused-attention activation graph blows the
+        // 8 GB device budget. Halve for Vulkan.
+        if (param_count > 200'000'000 && needs_gradients && is_vulkan) {
+            return 112;
+        }
+        // ViT-Large forward-only with Float64 on Vulkan: 307M * 8B = 2.5 GB
+        // weights + 224x224 activations exceeds 8 GB. Reduce to 128.
+        if (param_count > 200'000'000 && is_float64 && is_vulkan) {
+            return 128;
+        }
         // Large image sizes (512+) need reduction with Float64
         if (default_size >= 512 && is_float64) {
             return 384;  // Divisible by 16
         }
         return default_size;
+    }
+
+    /**
+     * @brief Pick a batch size that fits in 8 GB GPU memory for parametrized
+     * "large batch" tests. Returns `default_batch` on CPU/oneapi/rocm; on
+     * memory-constrained CUDA/Vulkan it shrinks the batch when the model is
+     * big enough to push activations past the device budget.
+     */
+    int getBatchSizeForMemory(int default_batch, size_t param_count) const {
+        if (backend_name() != "cuda" && backend_name() != "vulkan") return default_batch;
+        bool is_float64 = (dtype() == DType::Float64);
+        bool is_vulkan = (backend_name() == "vulkan");
+        if (param_count > 50'000'000 && is_float64) {
+            // ViT-Base: 86M F64 params x 8 B = 700 MB; 8 batches at 224x224
+            // pushes a 32-layer attention graph past 8 GB. Halve.
+            return std::max(1, default_batch / 2);
+        }
+        if (param_count > 50'000'000 && is_vulkan) {
+            // Vulkan stores half activations in F32-equivalent buffers; 8x224
+            // ViT-Base activations ~6 GB. Quarter on Vulkan to be safe.
+            return std::max(1, default_batch / 4);
+        }
+        return default_batch;
     }
 };
 
@@ -327,10 +376,16 @@ TEST_P(ViTMultiDtypeTest, ViTLargeConfig) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16ForwardShape) {
-    auto model = ViT_Large_Patch16(1000, false, 224);
+    // 307M-param model + 224x224 activations exceeds an 8 GB Vulkan device
+    // at Float64 (and at Float16/BFloat16 because Vulkan's half-precision
+    // attention path widens to F32 internally). Use the memory helper so
+    // memory-constrained backends shrink the input but CPU/CUDA-with-headroom
+    // still exercise the full model.
+    int img_size = getImageSizeForMemory(224, 307'000'000, false);
+    auto model = ViT_Large_Patch16(1000, false, img_size);
     convert_model(model);
 
-    auto input = createInput({2, 3, 224, 224});
+    auto input = createInput({2, 3, img_size, img_size});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
@@ -401,7 +456,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugeConfig) {
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
     // Use smaller image for Float64 CUDA to fit in 8GB
-    int img_size = getImageSizeForMemory(224, 632'000'000, false);
+    int img_size = getImageSizeForMemory(224, 632'000'000, false, /*patch_size=*/14);
 
     auto model = ViT_Huge_Patch14(1000, false, img_size);
     convert_model(model);
@@ -421,7 +476,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
     bool use_reduced_model = (backend_name() != "cpu" &&
         (dtype() == DType::Float64 ||
          backend_name() == "vulkan"));
-    int img_size = use_reduced_model ? 112 : getImageSizeForMemory(224, 632'000'000, true);
+    int img_size = use_reduced_model ? 112 : getImageSizeForMemory(224, 632'000'000, true, /*patch_size=*/14);
 
     std::shared_ptr<ViTForImageClassification> model;
     if (use_reduced_model) {
@@ -469,7 +524,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ParameterCount) {
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
     // Use smaller image for Float64 CUDA to fit in 8GB
-    int img_size = getImageSizeForMemory(224, 632'000'000, false);
+    int img_size = getImageSizeForMemory(224, 632'000'000, false, /*patch_size=*/16);
 
     auto model = ViT_Huge_Patch16(1000, false, img_size);
     convert_model(model);
@@ -536,13 +591,17 @@ TEST_P(ViTMultiDtypeTest, ViTConfigNumPatchesCalculation) {
 // ============================================================================
 
 TEST_P(ViTMultiDtypeTest, ViTBaseLargeBatchSize) {
+    // ViT-Base is ~86M params; 8 batches at 224x224 in Float64 push the
+    // autograd-graph activations past an 8 GB Vulkan/CUDA budget. Shrink
+    // the batch on memory-constrained backends.
+    int batch = getBatchSizeForMemory(8, 86'000'000);
     auto model = ViT_Base_Patch16(10, false, 224);
     convert_model(model);
 
-    auto input = createInput({8, 3, 224, 224});
+    auto input = createInput({batch, 3, 224, 224});
     auto output = model->forward(input);
 
-    expectShape(output.tensor(), {8, 10});
+    expectShape(output.tensor(), {batch, 10});
     expectDType(output.tensor());
 }
 

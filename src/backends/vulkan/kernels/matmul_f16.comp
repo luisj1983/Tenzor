@@ -39,6 +39,29 @@ float16_t readB(uint element_idx) {
     return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
 }
 
+// Atomic half-word writer for the packed Float16 output. The original
+// "write both results as a packed pair" comment was wrong when N is odd:
+// in that case row*N can be odd, so adjacent (row, col_pair) threads
+// share the same 32-bit word and the unsynchronised store loses one
+// half of every collision (e.g. fc with N=1 trains on garbage).
+void writeC(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = c[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(c[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    uint cur = c[word_idx];
+    c[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
 void main() {
     uint row = gl_GlobalInvocationID.y;
     // Each thread processes 2 adjacent columns to write a complete packed word
@@ -97,15 +120,12 @@ void main() {
         barrier();
     }
 
-    // Write both results as a packed pair - no race condition!
+    // Write each element via the atomic half-word writer to avoid the
+    // racy unsynchronised pair-store when row*N lands on an odd boundary.
     if (row < params.M && col0 < params.N) {
-        uint out_idx = row * params.N + col0;
-        uint word_idx = out_idx / 2;
-
-        // Pack both float16 values into one uint32 (convert from float32 accumulator)
-        uint bits0 = packHalf2x16(vec2(sum0, 0.0)).x & 0xFFFFu;
-        uint bits1 = (col1 < params.N) ? (packHalf2x16(vec2(sum1, 0.0)).x & 0xFFFFu) : 0u;
-
-        c[word_idx] = bits0 | (bits1 << 16);
+        writeC(row * params.N + col0, sum0);
+        if (col1 < params.N) {
+            writeC(row * params.N + col1, sum1);
+        }
     }
 }

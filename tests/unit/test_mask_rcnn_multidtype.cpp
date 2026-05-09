@@ -63,10 +63,19 @@ protected:
             return default_size;
         }
 
-        // Float64 needs much smaller sizes (2x memory usage)
+        bool is_vulkan = (device().type == Device::Type::Vulkan);
         bool is_float64 = (dtype() == DType::Float64);
-        // Float16 also reduced to avoid numerical issues with large activations
         bool is_float16 = (dtype() == DType::Float16);
+
+        // Vulkan ResNet-50 + FPN + RPN keeps the autograd graph live for
+        // every multi-scale proposal in RPNMultiScaleProposals; the working
+        // set is dominated by the high-resolution P2/P3 feature maps from
+        // FPN. On 8 GB Vulkan we have to drop further than CUDA can.
+        if (is_vulkan) {
+            if (is_float64) return std::min(default_size, int64_t(96));
+            if (is_float16) return std::min(default_size, int64_t(128));
+            return std::min(default_size, int64_t(160));
+        }
 
         if (is_float64) {
             // Float64: MaskRCNN needs very small sizes (2x memory of Float32)

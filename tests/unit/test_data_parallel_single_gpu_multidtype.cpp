@@ -51,9 +51,14 @@ class DataParallelSingleGPUMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void SetUp() override {
         MultiBackendDTypeTest::SetUp();
+        if (IsSkipped()) return;
 
-        if (device().type == Device::Type::CPU) {
-            GTEST_SKIP() << "DataParallel requires a GPU backend";
+        // DataParallel is wired to CUDA-specific runtime calls
+        // (cudaGetDeviceCount, cudaSetDevice, .cuda()). Other GPU backends
+        // currently throw "DataParallel: CUDA support not enabled". Until
+        // DataParallel grows a generic backend path, restrict to CUDA.
+        if (device().type != Device::Type::CUDA) {
+            GTEST_SKIP() << "DataParallel currently requires the CUDA backend";
         }
 
         // Verify device is usable
@@ -65,7 +70,7 @@ protected:
     }
 
     int dev_idx() const { return static_cast<int>(device().index); }
-};
+};;
 
 // ============================================================================
 // Tests
