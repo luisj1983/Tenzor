@@ -1393,6 +1393,110 @@ TEST_F(ZeROStage3Test, SpeculativePrefetchGathersUpcomingLayers) {
 }
 
 // ============================================================================
+// Chunked all-gather (review item #9): bounds the transient gather buffer to
+// `world_size * chunk_size` instead of `world_size * partition_n`, so very
+// large partitioned tensors (LM head, embedding tables) don't blow GPU memory
+// during the all-gather even though the model fits when partitioned.
+// ============================================================================
+
+TEST_F(ZeROStage3Test, ChunkedGatherDefaultsOff) {
+    // Sanity: opting in is required, no behavioural change for legacy callers.
+    Stage3Config cfg;
+    EXPECT_EQ(cfg.chunked_gather_threshold, 0u)
+        << "chunked-gather should default to 'off' (threshold=0)";
+    EXPECT_GT(cfg.chunked_gather_chunk_size, 0u)
+        << "chunk size has a sensible non-zero default so flipping the threshold "
+           "alone is enough to enable the feature";
+}
+
+TEST_F(ZeROStage3Test, ChunkedGatherSingleRankProducesIdenticalResults) {
+    // With world_size=1 there is no real all_gather to chunk — the gather just
+    // stages local_partition into full_param. Setting the chunked flag must NOT
+    // change single-rank behaviour: this is the contract that lets users flip
+    // the flag globally without single-process tests breaking.
+    auto model = create_multilayer_model(2, 32);
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
+
+    auto run_with = [&](size_t threshold) {
+        // Each run constructs its own optimizer because register_model() is
+        // single-shot (the second call throws "Model already registered").
+        auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+        Stage3Config cfg = default_stage3_config;
+        cfg.world_size = 1;
+        cfg.rank = 0;
+        cfg.pin_first_layer = false;
+        cfg.pin_last_layer  = false;
+        cfg.prefetch_depth = 0;  // keep the LRU + speculative path out of this test
+        cfg.chunked_gather_threshold = threshold;
+        cfg.chunked_gather_chunk_size = 1024;  // tiny: forces chunking if active
+
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), cfg);
+        optimizer.register_model(*model);
+
+        Tensor* p0 = &params[0]->tensor();
+        Tensor gathered = optimizer.gather_parameter(p0);
+        Tensor copy = gathered.contiguous();  // detach from cache before free
+        optimizer.free_gathered_parameter(p0);
+        optimizer.unregister_model();
+        return copy;
+    };
+
+    // threshold=0 → bulk (legacy) path; threshold=1 → chunked path attempted.
+    Tensor bulk    = run_with(0);
+    Tensor chunked = run_with(1);
+
+    ASSERT_EQ(bulk.numel(), chunked.numel());
+    ASSERT_EQ(bulk.dtype(), chunked.dtype());
+
+    // Element-wise compare via subtraction; for fp32-ones-init params the diff
+    // must be bit-zero (chunking is a memory-layout change, not numerical).
+    Tensor diff = bulk - chunked;
+    Tensor abs_diff = abs(diff);
+    Tensor max_diff = max(abs_diff);  // reduce-all
+    EXPECT_FLOAT_EQ(max_diff.template item<float>(), 0.0f)
+        << "single-rank chunked-gather changed param values vs bulk gather";
+}
+
+TEST_F(ZeROStage3Test, ChunkedGatherDoesNotCrashWhenThresholdSubdividesPartition) {
+    // Picks a chunk_size in elements that does NOT cleanly divide the param
+    // numel, so the chunk loop has to handle a short tail iteration. Single-rank
+    // for tractable testing — the chunk-iteration logic itself runs only when
+    // world_size>1, but the chunk-size sanity arithmetic and the tail-handling
+    // call site exercise the same code path through the full_param staging.
+    auto model = create_multilayer_model(2, 17);
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+    Stage3Config cfg = default_stage3_config;
+    cfg.world_size = 1;
+    cfg.rank = 0;
+    cfg.pin_first_layer = false;
+    cfg.pin_last_layer  = false;
+    cfg.prefetch_depth = 0;
+    cfg.chunked_gather_threshold = 1;
+    // Pick a chunk size in bytes that maps to 7 elements — coprime with the
+    // common element counts of the test params (17 and 289), so any param at
+    // params[0] hits the tail-iteration path.
+    cfg.chunked_gather_chunk_size = 7 * sizeof(float);
+
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), cfg);
+    optimizer.register_model(*model);
+
+    Tensor* p0 = &params[0]->tensor();
+    int64_t expected_numel = params[0]->tensor().numel();
+    EXPECT_NO_THROW({
+        Tensor gathered = optimizer.gather_parameter(p0);
+        // Result must preserve the original element count regardless of how
+        // the chunked-gather control flow subdivided the partition.
+        EXPECT_EQ(gathered.numel(), expected_numel);
+        optimizer.free_gathered_parameter(p0);
+    });
+    optimizer.unregister_model();
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

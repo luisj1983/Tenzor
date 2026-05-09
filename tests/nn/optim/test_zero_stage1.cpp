@@ -23,6 +23,7 @@
 #include <vector>
 #include <filesystem>
 #include <tenzor/distributed/gradient_compression.hpp>
+#include <tenzor/core/offload_engine.hpp>
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -1078,4 +1079,179 @@ TEST_F(ZeROStage1Test, GradientCompressorDefaultsToNullptr) {
     // Sanity: legacy callers see no behavioural change.
     ZeROStage1Config cfg = default_config;
     EXPECT_EQ(cfg.grad_compressor, nullptr);
+}
+
+// ============================================================================
+// Shared OffloadEngine plumbing (avoids duplicating pinned-host pool when
+// activation offload + optimizer offload are both active in the same process).
+// ============================================================================
+
+TEST_F(ZeROStage1Test, SharedOffloadEngineDefaultsToNullptr) {
+    // Sanity: legacy callers don't see any new behaviour.
+    ZeROStage1Config cfg = default_config;
+    EXPECT_EQ(cfg.shared_offload_engine, nullptr);
+}
+
+TEST_F(ZeROStage1Test, SharedOffloadEngineIsAdoptedWhenProvided) {
+    // The user pre-builds an OffloadEngine — typically because they already have
+    // one wired up for activation offload — and passes it to the optimizer to
+    // avoid spinning up a second pinned-host pool. The optimizer should hold the
+    // exact same shared_ptr instead of constructing its own engine.
+    auto params = create_test_params(10);
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    core::OffloadEngine::Config eng_config;
+    eng_config.pinned_memory_size = 16ULL * 1024 * 1024;  // 16 MB to keep the test cheap
+    eng_config.num_transfer_streams = 1;
+    eng_config.enable_prefetch = false;
+    eng_config.enable_auto_monitoring = false;
+    auto shared_engine = std::make_shared<core::OffloadEngine>(eng_config);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = true;
+    config.shared_offload_engine = shared_engine;
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    // The optimizer must adopt the engine pointer-equal, not construct a new one.
+    EXPECT_EQ(optimizer.offload_engine().get(), shared_engine.get());
+}
+
+TEST_F(ZeROStage1Test, SharedOffloadEngineIgnoredWhenOffloadDisabled) {
+    // If the user provides a shared engine but turns off CPU offload, the engine
+    // should simply not be wired up — no init, no adoption — because there's no
+    // offload work to route through it. This matters because OffloadEngine
+    // construction is moderately expensive and we don't want to pay for it when
+    // it won't be used.
+    auto params = create_test_params(10);
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    core::OffloadEngine::Config eng_config;
+    eng_config.pinned_memory_size = 16ULL * 1024 * 1024;
+    eng_config.num_transfer_streams = 1;
+    eng_config.enable_prefetch = false;
+    eng_config.enable_auto_monitoring = false;
+    auto shared_engine = std::make_shared<core::OffloadEngine>(eng_config);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = false;  // <-- offload off
+    config.shared_offload_engine = shared_engine;
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    EXPECT_EQ(optimizer.offload_engine(), nullptr);
+}
+
+// ============================================================================
+// Balanced (size-aware) parameter partitioning across ranks.
+//
+// The legacy partitioner slices `parameters_` by *index*, which is fine when all
+// params have similar size but produces severe per-rank memory imbalance for
+// models with one (or a few) huge tensors among many small ones — the rank that
+// owns the huge tensor pays a multi-GB tax while peer ranks sit nearly empty.
+// The opt-in greedy LPT (longest-processing-time) variant assigns by descending
+// size to the least-loaded rank, which is provably within 4/3 of optimal.
+// ============================================================================
+
+TEST_F(ZeROStage1Test, BalancedPartitioningDefaultsOff) {
+    // Sanity: legacy callers see no behavioural change.
+    ZeROStage1Config cfg = default_config;
+    EXPECT_FALSE(cfg.balanced_partitioning);
+}
+
+TEST_F(ZeROStage1Test, BalancedPartitioningKeepsLegacyOrderWhenOff) {
+    // With the flag off and all params equal size, the index-based partitioner
+    // should still produce the same per-rank counts that distributed users
+    // already rely on (test_zero_stage1_distributed.UnevenParameterDistribution
+    // hard-codes this assignment).
+    auto params = create_test_params(8);
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;  // single-process for this unit test
+    config.rank = 0;
+    config.balanced_partitioning = false;
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    EXPECT_EQ(optimizer.local_param_count(), 8u);
+}
+
+TEST_F(ZeROStage1Test, BalancedPartitioningEvensOutMemoryAcrossRanks) {
+    // Construct a deliberately skewed parameter set: 3 large (1M elements each
+    // = ~4 MB in fp32) + 3 tiny (16 elements = 64 B). With world_size=2 and the
+    // legacy index-slice partitioner, rank 0 ends up with all 3 large tensors
+    // (~12 MB optimizer-state-bearing) and rank 1 with the 3 tiny ones (~192 B
+    // bearing). Greedy LPT places one large on rank 0 and two on rank 1, then
+    // packs the smalls onto the lighter rank — nearly perfect balance.
+    //
+    // The optimizer is constructed once per rank because partition_parameters()
+    // runs at constructor time and we want to inspect each rank's partition
+    // memory_bytes. Same Variables are shared across all rank-fixtures because
+    // the partition assignment depends only on size, not on tensor identity.
+    std::vector<std::shared_ptr<Variable>> params;
+    for (int i = 0; i < 3; ++i) {
+        params.push_back(std::make_shared<Variable>(
+            ones({1000, 1000}, DType::Float32, Device::cpu()), true));
+    }
+    for (int i = 0; i < 3; ++i) {
+        params.push_back(std::make_shared<Variable>(
+            ones({4, 4}, DType::Float32, Device::cpu()), true));
+    }
+
+    constexpr int world_size = 2;
+
+    auto memory_per_rank = [&](bool balanced) {
+        std::vector<size_t> per_rank(world_size, 0);
+        for (int rank = 0; rank < world_size; ++rank) {
+            // Each rank-fixture needs its own base_optimizer (Adam takes a copy
+            // of the params vector, but the Adam dtor unregisters hooks etc).
+            auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+            ZeROStage1Config cfg = default_config;
+            cfg.world_size = world_size;
+            cfg.rank = rank;
+            cfg.process_group = nullptr;  // partition_parameters() doesn't need comms
+            cfg.balanced_partitioning = balanced;
+
+            ZeROStage1Optimizer optimizer(std::move(base_optimizer), cfg);
+            auto stats = optimizer.get_memory_stats();
+            // CPU-resident params land in cpu_optimizer_memory; the field is
+            // populated unconditionally for the local rank.
+            per_rank[rank] = stats.cpu_optimizer_memory;
+        }
+        return per_rank;
+    };
+
+    // Legacy contiguous-slice baseline: rank 0 gets all 3 large tensors, rank 1
+    // gets the 3 tiny ones. Confirm the imbalance is genuine before claiming a
+    // fix — without this, a passing "balanced" assertion could mean nothing.
+    auto legacy = memory_per_rank(false);
+    auto legacy_max = *std::max_element(legacy.begin(), legacy.end());
+    auto legacy_min = *std::min_element(legacy.begin(), legacy.end());
+    ASSERT_GT(legacy_min, 0u) << "legacy partitioner left a rank empty; test is invalid";
+    EXPECT_GT(legacy_max / legacy_min, 100u)
+        << "legacy partitioner should be heavily skewed for this input"
+        << " (large_rank=" << legacy_max << " small_rank=" << legacy_min << ")";
+
+    // With balanced=true the per-rank memory should be within ~2× of each
+    // other — perfect balance is impossible because the smallest unit is one
+    // 1M-element tensor, but greedy LPT will end up with 1× large + 0 small on
+    // one rank and 2× large + 3× small on the other (or vice versa).
+    auto balanced = memory_per_rank(true);
+    auto bal_max = *std::max_element(balanced.begin(), balanced.end());
+    auto bal_min = *std::min_element(balanced.begin(), balanced.end());
+    ASSERT_GT(bal_min, 0u);
+    EXPECT_LT(bal_max, bal_min * 3u)
+        << "balanced partitioner should be within ~2× across ranks"
+        << " (rank0=" << balanced[0] << " rank1=" << balanced[1] << ")";
+
+    // Sanity: total memory should be equal between the two configurations
+    // (we just moved tensors between bins, didn't add or drop any).
+    size_t legacy_total = legacy[0] + legacy[1];
+    size_t balanced_total = balanced[0] + balanced[1];
+    EXPECT_EQ(legacy_total, balanced_total);
 }

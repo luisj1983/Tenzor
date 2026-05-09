@@ -680,22 +680,63 @@ auto ZeROStage1Optimizer::get_memory_stats() const -> MemoryStats {
 auto ZeROStage1Optimizer::partition_parameters() -> void {
     const auto& params = parameters_;
     size_t total_params = params.size();
-    size_t params_per_rank = (total_params + config_.world_size - 1) / config_.world_size;
 
     // Determine device from first parameter (all params should be on same device)
     Device param_device = !params.empty() ? params[0]->tensor().device() : Device::cpu();
 
     // Create partitions for all ranks
     partitions_.resize(config_.world_size);
-
     for (int rank = 0; rank < config_.world_size; ++rank) {
-        auto& partition = partitions_[rank];
-        partition.rank = rank;
+        partitions_[rank].rank = rank;
         // Always use parameter device for computation
         // States will be offloaded to CPU after initialization if offload_to_cpu is enabled
-        partition.device = param_device;
+        partitions_[rank].device = param_device;
+    }
 
-        // Assign parameters to this rank
+    if (config_.balanced_partitioning) {
+        // Size-aware greedy LPT: sort params by size descending, assign each to the
+        // currently least-loaded rank. Provably within 4/3 of optimal makespan; in
+        // practice the imbalance for typical transformer-shaped param distributions
+        // collapses from "rank-with-embedding holds everything" to ≤2× across ranks.
+        struct Item {
+            size_t param_idx;
+            size_t bytes;
+        };
+        std::vector<Item> items;
+        items.reserve(total_params);
+        for (size_t i = 0; i < total_params; ++i) {
+            const auto& t = params[i]->tensor();
+            items.push_back({i, static_cast<size_t>(t.numel()) * dtype_size(t.dtype())});
+        }
+        // Stable sort: when two params tie on size, the one with the lower index
+        // wins, so partition assignment is deterministic and reproducible across
+        // runs (matters for checkpoint compatibility within a single flag value).
+        std::stable_sort(items.begin(), items.end(),
+                         [](const Item& a, const Item& b) { return a.bytes > b.bytes; });
+
+        for (const auto& it : items) {
+            // Pick the rank with smallest current memory_bytes; tie-break on rank
+            // id so the schedule is fully deterministic.
+            int best_rank = 0;
+            size_t best_load = partitions_[0].memory_bytes;
+            for (int r = 1; r < config_.world_size; ++r) {
+                if (partitions_[r].memory_bytes < best_load) {
+                    best_load = partitions_[r].memory_bytes;
+                    best_rank = r;
+                }
+            }
+            auto& part = partitions_[best_rank];
+            part.params.push_back(params[it.param_idx]);
+            part.memory_bytes += it.bytes;
+        }
+        return;
+    }
+
+    // Legacy: contiguous index-slice. Preserved for checkpoint compatibility and
+    // for the existing distributed tests that hard-code the assignment.
+    size_t params_per_rank = (total_params + config_.world_size - 1) / config_.world_size;
+    for (int rank = 0; rank < config_.world_size; ++rank) {
+        auto& partition = partitions_[rank];
         size_t start_idx = rank * params_per_rank;
         size_t end_idx = std::min(start_idx + params_per_rank, total_params);
 
@@ -814,12 +855,21 @@ auto ZeROStage1Optimizer::initialize_offload_engine() -> void {
     if (!config_.offload_to_cpu) {
         return;
     }
-    
+
+    // Prefer a caller-supplied engine so the pinned-host buffer pool is shared with
+    // any other subsystem (typically activation offload) that already has one. The
+    // legacy path constructed a private 1 GB pinned pool unconditionally — that's
+    // still the fallback when the caller doesn't provide one.
+    if (config_.shared_offload_engine) {
+        offload_engine_ = config_.shared_offload_engine;
+        return;
+    }
+
     core::OffloadEngine::Config offload_config;
     offload_config.pinned_memory_size = 1024ULL * 1024 * 1024;  // 1GB default
     offload_config.num_transfer_streams = 4;
     offload_config.enable_prefetch = true;
-    
+
     offload_engine_ = std::make_shared<core::OffloadEngine>(offload_config);
 }
 
@@ -2724,36 +2774,81 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
     Tensor flat_view = state.full_param.view({-1});
 
     if (config_.world_size > 1) {
-        std::vector<Tensor> gathered_parts(config_.world_size);
-
-        // When the process group supports stream-based collectives and we have a comm
-        // stream, route through all_gather_async on that stream. The default backend
-        // fallback is sync, so non-NCCL backends behave identically. NCCL overrides can
-        // launch directly on `comm_stream_` and overlap with default-stream compute; we
-        // synchronize before reading `gathered_parts` below.
-        if (use_gpu_comm_ && comm_stream_) {
-            config_.process_group->all_gather_async(src, gathered_parts, comm_stream_);
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-            cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
-#endif
-        } else {
-            config_.process_group->all_gather(src, gathered_parts);
-        }
-
         int64_t partition_n = src.numel();
-        for (int rank = 0; rank < config_.world_size; ++rank) {
-            int64_t off = static_cast<int64_t>(rank) * partition_n;
-            int64_t end = std::min(off + partition_n, total_elements);
-            if (end <= off) continue;
-            Tensor slot = flat_view.slice(0, off, end);
-            slot.zero_();
-            Tensor part_flat = gathered_parts[rank].contiguous().view({-1});
-            // Guard against the (uneven-split) case where world_size * partition_n exceeds
-            // total_elements: only stage the leading `end-off` elements of the chunk.
-            if (part_flat.numel() != (end - off)) {
-                part_flat = part_flat.slice(0, 0, end - off);
+        const size_t full_bytes = static_cast<size_t>(total_elements) * dtype_size(buf_dtype);
+
+        // Decide bulk vs chunked. Chunked only kicks in when:
+        //   1. The user explicitly opted in (threshold > 0), AND
+        //   2. The full gathered tensor exceeds the threshold, AND
+        //   3. The chunk size is smaller than the per-rank partition (otherwise
+        //      "chunked" with K=1 is just bulk with extra bookkeeping overhead).
+        const size_t chunk_bytes_per_rank = stage3_config_.chunked_gather_chunk_size;
+        const int64_t chunk_n = (chunk_bytes_per_rank > 0)
+            ? std::max<int64_t>(1, static_cast<int64_t>(chunk_bytes_per_rank / dtype_size(buf_dtype)))
+            : partition_n;
+        const bool use_chunked = stage3_config_.chunked_gather_threshold > 0
+                              && full_bytes > stage3_config_.chunked_gather_threshold
+                              && chunk_n < partition_n;
+
+        auto run_all_gather = [&](const Tensor& tensor_in, std::vector<Tensor>& parts_out) {
+            // Route through async-on-stream when the backend supports it (NCCL/RCCL),
+            // otherwise the default sync fallback. Same dispatch rule as the legacy
+            // bulk path — kept identical so chunked gather inherits the same
+            // overlap-with-compute properties.
+            if (use_gpu_comm_ && comm_stream_) {
+                config_.process_group->all_gather_async(tensor_in, parts_out, comm_stream_);
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+                cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
+#endif
+            } else {
+                config_.process_group->all_gather(tensor_in, parts_out);
             }
-            add_(slot, part_flat);
+        };
+
+        auto stage_chunk_into_full = [&](const std::vector<Tensor>& parts,
+                                         int64_t chunk_off, int64_t chunk_len) {
+            // Each rank `r` contributed `chunk_len` elements that belong at offset
+            // `r * partition_n + chunk_off` in the full-parameter buffer.
+            for (int rank = 0; rank < config_.world_size; ++rank) {
+                int64_t off = static_cast<int64_t>(rank) * partition_n + chunk_off;
+                int64_t end = std::min(off + chunk_len, total_elements);
+                if (end <= off) continue;
+                Tensor slot = flat_view.slice(0, off, end);
+                slot.zero_();
+                Tensor part_flat = parts[rank].contiguous().view({-1});
+                // Guard against the uneven-split tail: this rank's chunk may be
+                // shorter than `chunk_len` if `partition_n * world_size` exceeds
+                // `total_elements`.
+                if (part_flat.numel() != (end - off)) {
+                    part_flat = part_flat.slice(0, 0, end - off);
+                }
+                add_(slot, part_flat);
+            }
+        };
+
+        if (use_chunked) {
+            // Chunked gather: K rounds of `world_size × chunk_n` element collectives,
+            // staged into the persistent full_param. Peak transient memory across
+            // the loop is `world_size × chunk_n × dtype_size`, independent of
+            // `partition_n` — the property that lets jumbo embedding tables fit.
+            Tensor src_flat = src.contiguous().view({-1});
+            for (int64_t chunk_off = 0; chunk_off < partition_n; chunk_off += chunk_n) {
+                int64_t chunk_end = std::min(chunk_off + chunk_n, partition_n);
+                int64_t chunk_len = chunk_end - chunk_off;
+                Tensor src_chunk = src_flat.slice(0, chunk_off, chunk_end);
+
+                std::vector<Tensor> chunk_parts(config_.world_size);
+                run_all_gather(src_chunk, chunk_parts);
+                stage_chunk_into_full(chunk_parts, chunk_off, chunk_len);
+                // chunk_parts goes out of scope at the bottom of the loop; the
+                // staging output (and any pinned host buffers underneath) gets
+                // freed before the next round allocates its replacement.
+            }
+        } else {
+            // Legacy bulk path: one collective sized to the full parameter.
+            std::vector<Tensor> gathered_parts(config_.world_size);
+            run_all_gather(src, gathered_parts);
+            stage_chunk_into_full(gathered_parts, 0, partition_n);
         }
     } else {
         // Single rank: stage the local partition straight into the buffer.

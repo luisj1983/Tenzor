@@ -146,6 +146,49 @@ struct ZeROStage1Config {
      */
     std::shared_ptr<distributed::GradientCompressor> grad_compressor{nullptr};
 
+    /** Optional pre-built OffloadEngine to adopt instead of constructing a private one.
+     *
+     *  Wire this in when another subsystem in the same process — typically activation
+     *  offload via `OffloadContext` — already has an `OffloadEngine` running. Sharing
+     *  the engine means sharing its underlying `TransferEngine`, which means a single
+     *  pinned-host buffer pool serves both kinds of offload instead of two pools each
+     *  holding ~1–2 GB of pinned RAM hostage. The mechanics are the same as the
+     *  `Config::shared_transfer_engine` knob on `OffloadEngine` itself (see
+     *  include/tenzor/core/offload_engine.hpp:46-56) — this is the next layer up so
+     *  callers don't have to construct the OffloadEngine twice.
+     *
+     *  Has no effect when `offload_to_cpu` is false: there is no offload work to route.
+     *
+     *  Default `nullptr` preserves the legacy behaviour of constructing a private 1 GB
+     *  pinned pool inside `initialize_offload_engine()`.
+     */
+    std::shared_ptr<core::OffloadEngine> shared_offload_engine{nullptr};
+
+    /** Use size-aware (greedy LPT) partitioning instead of the legacy contiguous
+     *  index-slice when assigning parameters to ranks.
+     *
+     *  The legacy partitioner splits `parameters_` by index into `world_size`
+     *  contiguous chunks. That is fine when all parameters have similar size, but
+     *  produces severe per-rank memory imbalance for models with one (or a few)
+     *  huge tensors among many small ones — typically: a model with one large
+     *  embedding/lm_head + many small layernorms/biases. The rank that ends up
+     *  owning the huge tensor pays a multi-GB tax in optimizer-state memory while
+     *  peer ranks sit nearly empty. Since per-rank usable GPU memory is the
+     *  *minimum* across ranks, this directly caps your usable model size.
+     *
+     *  When set, parameters are sorted by size descending and each is placed onto
+     *  the currently least-loaded rank — a "Longest Processing Time first" (LPT)
+     *  greedy schedule, provably within 4/3 of optimal makespan.
+     *
+     *  Default off — preserves the partition assignment that distributed unit
+     *  tests (and any existing on-disk checkpoints) rely on. Note that turning
+     *  this on changes which parameters live on which rank, so checkpoints saved
+     *  before the flag was on are NOT compatible after enabling — save+restore is
+     *  per-rank-partition and the partition assignment changed underneath. Pick
+     *  the flag value once at the start of training and don't toggle it.
+     */
+    bool balanced_partitioning{false};
+
     ZeROStage1Config() = default;
 };
 
@@ -323,6 +366,20 @@ public:
      */
     auto base_optimizer() const -> const Optimizer& {
         return *base_optimizer_;
+    }
+
+    /**
+     * @brief Borrow the OffloadEngine this optimizer is currently using, if any.
+     *
+     * Returns nullptr when CPU offload is disabled (config_.offload_to_cpu == false)
+     * or before construction has wired one up. When non-null, the engine is either
+     * the one passed in via Config::shared_offload_engine or a privately-constructed
+     * one — callers can't tell the difference and don't need to. Useful for tests
+     * verifying the shared-engine plumbing and for downstream subsystems that want
+     * to route their own transfers through the same pinned pool.
+     */
+    auto offload_engine() const -> std::shared_ptr<core::OffloadEngine> {
+        return offload_engine_;
     }
 
     // ========================================================================
@@ -1033,6 +1090,47 @@ struct Stage3Config : public ZeROStage2Config {
 
     /** Monitor interval for memory pressure (milliseconds) */
     int memory_monitor_interval_ms{100};
+
+    // ========================================================================
+    // Chunked all-gather (review item #9)
+    // ========================================================================
+    //
+    // The legacy `gather_parameter_impl()` path issues a single all_gather that
+    // produces `world_size * partition_n` elements of staging output before that
+    // result can be folded into `state.full_param`. For typical transformer
+    // params this is fine, but for jumbo tensors (a 32k×4096 fp32 LM head ≈ 512
+    // MB partition × 8 ranks ≈ 4 GB transient on every GPU during the gather)
+    // it breaks Stage 3's "model bigger than one device" promise on exactly the
+    // few params that prompted the user to use Stage 3 in the first place.
+    //
+    // When `chunked_gather_threshold > 0` and the param's full byte count
+    // exceeds it, the gather is decomposed into K rounds, each gathering at
+    // most `chunked_gather_chunk_size` bytes per rank. Peak transient drops
+    // from `world_size × partition_n` to `world_size × chunk_size` regardless
+    // of partition_n, at the cost of K-1 extra collective launches (which are
+    // bandwidth-amortising once the chunk is ≥ a few MB).
+
+    /** Threshold (bytes) at and above which `gather_parameter_impl()` switches
+     *  from a single bulk all-gather to a chunked all-gather. Compared against
+     *  `world_size × partition_n × dtype_size` — the size of the full gathered
+     *  parameter, not the per-rank partition.
+     *
+     *  Set to 0 (default) to disable chunked gather entirely; this preserves
+     *  the legacy bulk path. Recommended starting value when enabling: 256 MB.
+     */
+    size_t chunked_gather_threshold{0};
+
+    /** Target per-rank chunk size (bytes) when chunked gather is active. Each
+     *  round of the chunked collective gathers at most this many bytes from
+     *  each rank, so the transient gather buffer per round is `world_size ×
+     *  chunked_gather_chunk_size`.
+     *
+     *  Smaller chunks lower peak memory but multiply collective-launch overhead;
+     *  64 MB is a reasonable default that keeps NCCL ring-bandwidth saturated
+     *  on common transformer params. No effect when `chunked_gather_threshold`
+     *  is 0.
+     */
+    size_t chunked_gather_chunk_size{64ULL * 1024 * 1024};
 
     Stage3Config() = default;
 };
