@@ -34,12 +34,19 @@ OffloadEngine::OffloadEngine(const Config& config)
     }
 
     try {
-        // Initialize TransferEngine
-        TransferEngine::Config transfer_config;
-        transfer_config.num_streams = config_.num_transfer_streams;
-        transfer_config.use_pinned_memory = true;
-        transfer_config.pinned_pool_size = config_.pinned_memory_size;
-        transfer_engine_ = std::make_unique<TransferEngine>(transfer_config);
+        // Initialize TransferEngine. Adopt the caller's pre-built engine if provided so
+        // multiple cooperating subsystems (parameter offload via OffloadEngine, activation
+        // offload via OffloadContext) can share a single host-pinned buffer pool — see
+        // review item #17.
+        if (config_.shared_transfer_engine) {
+            transfer_engine_ = config_.shared_transfer_engine;
+        } else {
+            TransferEngine::Config transfer_config;
+            transfer_config.num_streams = config_.num_transfer_streams;
+            transfer_config.use_pinned_memory = true;
+            transfer_config.pinned_pool_size = config_.pinned_memory_size;
+            transfer_engine_ = std::make_shared<TransferEngine>(transfer_config);
+        }
 
         // Initialize PinnedMemoryAllocator
         PinnedMemoryAllocator::Config pinned_config;
@@ -87,6 +94,18 @@ OffloadEngine::~OffloadEngine() {
         stop_prefetch_worker_.store(true);
         prefetch_cv_.notify_all();
         prefetch_worker_thread_.join();
+    }
+
+    // Drop any in-flight prefetch handles. We deliberately do *not* dereference the user's
+    // Tensor* targets here: the engine is being destroyed alongside the rest of the
+    // session's state, and we have no liveness guarantees on those raw pointers (the user's
+    // tensors may already have been freed). The handles themselves clean up their own
+    // staging buffers when they destruct. If the caller wants the GPU results assigned
+    // back to their tensors they must call wait_for_prefetch() before tearing down the
+    // engine.
+    {
+        std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
+        in_flight_prefetches_.clear();
     }
 
     // Synchronize all pending transfers
@@ -337,38 +356,40 @@ auto OffloadEngine::check_and_offload() -> size_t {
         return 0;  // No action needed
     }
 
-    std::lock_guard<std::mutex> lock(registry_mutex_);
+    // Snapshot the registry under the lock, then drop the lock before any disk/PCIe
+    // transfer. The legacy code held registry_mutex_ across each gpu_to_cpu_async +
+    // handle.wait(), which blocked register_auto_offload / unregister_auto_offload /
+    // get_registered_tensor_count for the duration of every transfer — and on a 100ms
+    // monitoring cadence that produced visible stalls. After the snapshot, mutations to
+    // the registry (priority changes, registrations) take effect on the *next* tick.
+    std::vector<AutoOffloadEntry> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        sort_auto_offload_registry();
+        snapshot = auto_offload_registry_;  // value-copy, releases the lock immediately
+    }
 
     size_t offloaded = 0;
 
-    // Sort by priority (LOW priority first)
-    sort_auto_offload_registry();
-
-    // Offload tensors until we're under threshold
-    for (const auto& entry : auto_offload_registry_) {
+    // Offload tensors until we're under threshold. is_over_threshold() reads from the
+    // memory_manager_ which has its own internal locking, so it's safe to call here.
+    for (const auto& entry : snapshot) {
         if (!is_over_threshold()) {
             break;  // Pressure relieved
         }
 
         Tensor* tensor = entry.tensor;
-
-        // Check if tensor is on GPU
-        if (!is_gpu_device(tensor->device())) {
-            continue;  // Already on CPU
+        if (tensor == nullptr || !is_gpu_device(tensor->device())) {
+            continue;  // Already on CPU or invalidated
         }
 
-        // Offload to CPU
         try {
-            auto handle = transfer_engine_->gpu_to_cpu_async(*tensor);
-
-            // Wait for the transfer to complete
-            handle.wait();
-
-            // Get the resulting CPU tensor and update the original tensor
-            Tensor cpu_tensor = handle.get_tensor();
+            // Synchronous GPU→CPU. The legacy code did gpu_to_cpu_async() followed
+            // immediately by handle.wait() and handle.get_tensor() — that's the same as
+            // sync with two extra allocations. Just call the sync version.
+            Tensor cpu_tensor = transfer_engine_->gpu_to_cpu(*tensor);
             *tensor = cpu_tensor;
 
-            // Update memory manager to reflect the new location
             if (memory_manager_) {
                 memory_manager_->update_tensor_location(tensor, Device::cpu());
             }
@@ -424,7 +445,8 @@ auto OffloadEngine::wait_for_prefetch() -> void {
         return;
     }
 
-    // Wait until prefetch queue is empty
+    // Phase 1: drain the queue. Worker has to pick up every queued request and issue the
+    // async transfer before we can wait on completion.
     while (true) {
         {
             std::lock_guard<std::mutex> lock(prefetch_mutex_);
@@ -435,7 +457,29 @@ auto OffloadEngine::wait_for_prefetch() -> void {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // Synchronize transfer engine to ensure all prefetches complete
+    // Phase 2: commit every in-flight handle. Snapshot the list under the in-flight lock
+    // and clear the engine's state, then await + assign outside the lock so a slow PCIe
+    // transfer doesn't block other engine operations (e.g. concurrent register_auto_offload
+    // from a different thread).
+    std::vector<InFlightPrefetch> to_commit;
+    {
+        std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
+        to_commit.swap(in_flight_prefetches_);
+    }
+    for (auto& f : to_commit) {
+        try {
+            Tensor result = f.handle.get_tensor();  // implicit wait
+            if (f.target != nullptr) {
+                *f.target = result;
+            }
+        } catch (const std::exception&) {
+            // Best-effort; bad transfers shouldn't poison the rest of the batch.
+            continue;
+        }
+    }
+
+    // Belt-and-braces: drain anything else the transfer engine might still hold
+    // (host-side staging copies queued internally, etc.).
     if (transfer_engine_) {
         transfer_engine_->synchronize();
     }
@@ -498,18 +542,23 @@ auto OffloadEngine::prefetch_worker() -> void {
         // Process request outside lock
         if (has_request && request.tensor != nullptr) {
             try {
-                // Check if tensor is still on CPU
+                // Only prefetch tensors that are actually on the host. If something else
+                // already moved the tensor (e.g. an unrelated load_to_gpu call between the
+                // queue push and the worker pickup) just drop the request.
                 if (request.tensor->device().type == Device::Type::CPU) {
-                    // Issue async transfer
                     auto handle = transfer_engine_->cpu_to_gpu_async(
                         *request.tensor,
                         request.target_device
                     );
-                    // Let transfer run in background
-                    // Note: In production, we'd need to track handles and update tensors
+                    // Stash (target, handle) so wait_for_prefetch / destructor can commit
+                    // the GPU result back into *target. Multiple async transfers can be in
+                    // flight at once on the TransferEngine's stream pool — we don't wait
+                    // here.
+                    std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
+                    in_flight_prefetches_.push_back({request.tensor, std::move(handle)});
                 }
             } catch (const std::exception& e) {
-                // Silently skip on error
+                // Silently skip on error — prefetch is a hint, not a guarantee.
                 continue;
             }
         }

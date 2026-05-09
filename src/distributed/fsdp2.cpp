@@ -11,6 +11,7 @@
  */
 
 #include "tenzor/distributed/fsdp2.hpp"
+#include "tenzor/autograd/checkpoint.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -108,8 +109,20 @@ auto FSDP2::forward(const Variable& input) -> Variable {
     // Unshard parameters for forward computation
     unshard_params();
 
-    // Run the module's forward pass with full parameters
-    auto output = module_->forward(input);
+    // Run the module's forward pass with full parameters. With activation_checkpointing,
+    // wrap in autograd::checkpoint so intermediates between input and output are dropped
+    // after forward and recomputed on backward — trades ~33% backward compute for typically
+    // 4-8× activation-memory reduction on transformer blocks.
+    Variable output;
+    if (config_.activation_checkpointing) {
+        nn::Module* mod = module_.get();
+        output = autograd::checkpoint(
+            [mod](const Variable& x) -> Variable { return mod->forward(x); },
+            input
+        );
+    } else {
+        output = module_->forward(input);
+    }
 
     // Optionally reshard to free memory
     if (config_.reshard_after_forward && shard_world_size_ > 1) {

@@ -21,6 +21,8 @@
 #include <tenzor/ops/math.hpp>
 #include <memory>
 #include <vector>
+#include <filesystem>
+#include <tenzor/distributed/gradient_compression.hpp>
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -744,4 +746,336 @@ TEST_F(ZeROStage1Test, GetLocalParamCount) {
 
     // Single rank should own all 100 parameters
     EXPECT_EQ(optimizer.local_param_count(), 100);
+}
+
+// ============================================================================
+// 11. Mixed-Precision (fp32 master + fp32 states)
+// ============================================================================
+
+TEST_F(ZeROStage1Test, MixedPrecisionFloat16ParamsKeepFp32MomentumAndMaster) {
+    // Build fp16 parameters with non-zero gradients so step() actually does work.
+    std::vector<std::shared_ptr<Variable>> params;
+    for (int i = 0; i < 4; ++i) {
+        auto p = std::make_shared<Variable>(
+            ones({16, 16}, DType::Float16, Device::cpu()),
+            true
+        );
+        p->set_grad(ones({16, 16}, DType::Float16, Device::cpu()));
+        params.push_back(p);
+    }
+
+    auto adam = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.use_master_fp32 = true;
+    config.state_dtype = DType::Float32;
+
+    ZeROStage1Optimizer optimizer(std::move(adam), config);
+
+    // Take one step. With master enabled, the optimizer should:
+    //   - hold momentum/variance in fp32
+    //   - hold a fp32 master copy of each param
+    //   - downcast master back into the user's fp16 param after the step.
+    optimizer.step();
+
+    // The user-visible params should still be fp16 — the master copy is internal.
+    for (const auto& p : params) {
+        EXPECT_EQ(p->tensor().dtype(), DType::Float16);
+    }
+
+    // Walk the saved state to verify dtypes. state_dict exposes momentum_*, variance_* keys.
+    auto sd = optimizer.state_dict();
+    int momentum_seen = 0, variance_seen = 0;
+    for (const auto& [key, t] : sd) {
+        if (key.rfind("momentum_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Float32) << "momentum should be fp32 (state_dtype)";
+            ++momentum_seen;
+        } else if (key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Float32) << "variance should be fp32 (state_dtype)";
+            ++variance_seen;
+        }
+    }
+    EXPECT_EQ(momentum_seen, 4);
+    EXPECT_EQ(variance_seen, 4);
+
+    // After step, fp16 params should not be all-ones any more (Adam moved them).
+    bool any_changed = false;
+    for (const auto& p : params) {
+        const auto* data = static_cast<const Float16*>(p->tensor().data_ptr());
+        for (int64_t k = 0; k < p->tensor().numel(); ++k) {
+            if (static_cast<float>(data[k]) != 1.0f) { any_changed = true; break; }
+        }
+        if (any_changed) break;
+    }
+    EXPECT_TRUE(any_changed) << "fp16 params should have been updated by the step";
+}
+
+TEST_F(ZeROStage1Test, MixedPrecisionDisabledKeepsLegacyDtypes) {
+    // With master disabled and state_dtype unset, optimizer states should match the param
+    // dtype — the legacy behaviour.
+    auto params = create_test_params(2);
+    for (auto& p : params) {
+        p->set_grad(ones_like(p->tensor()));
+    }
+    auto adam = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    EXPECT_FALSE(config.use_master_fp32);
+    EXPECT_FALSE(config.state_dtype.has_value());
+
+    ZeROStage1Optimizer optimizer(std::move(adam), config);
+    optimizer.step();
+
+    auto sd = optimizer.state_dict();
+    for (const auto& [key, t] : sd) {
+        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Float32)
+                << "legacy path: state should match param dtype (fp32 here)";
+        }
+    }
+}
+
+// ============================================================================
+// 12. Int8 Quantization of Offloaded Optimizer States
+// ============================================================================
+
+TEST_F(ZeROStage1Test, QuantizedOffloadStepsCompleteAndPreserveTrajectory) {
+    // Verifies the int8 offload codec end-to-end:
+    //   - offload_states_to_cpu quantizes momentum/variance to int8 + scalar scale,
+    //   - fetch_states_to_gpu dequantizes back to fp32,
+    //   - the optimizer step completes successfully across multiple iterations,
+    //   - param trajectory stays close to the unquantized reference (within int8 noise).
+    if (!cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping GPU offload test";
+    }
+
+    constexpr int n_steps = 3;
+    constexpr int n_params = 4;
+    constexpr float lr = 0.001f;
+
+    // Build two identical setups: one with quantization off, one with it on. We compare
+    // the resulting param values after `n_steps`.
+    auto make_setup = [&](bool quantize) {
+        auto params = create_test_params(n_params, {32, 32}, Device::cuda(0));
+        for (auto& p : params) {
+            p->set_grad(ones_like(p->tensor()));
+        }
+        auto adam = std::make_unique<Adam>(params, lr);
+
+        ZeROStage1Config cfg = default_config;
+        cfg.world_size = 1;
+        cfg.rank = 0;
+        cfg.offload_to_cpu = true;
+        cfg.quantize_offloaded_states_int8 = quantize;
+
+        return std::pair{params, std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg)};
+    };
+
+    auto [ref_params, ref_opt] = make_setup(false);
+    auto [q_params, q_opt]     = make_setup(true);
+
+    for (int s = 0; s < n_steps; ++s) {
+        ASSERT_NO_THROW(ref_opt->step());
+        ASSERT_NO_THROW(q_opt->step());
+        // Refresh grads each step (Adam has consumed them).
+        for (auto& p : ref_params) p->set_grad(ones_like(p->tensor()));
+        for (auto& p : q_params)   p->set_grad(ones_like(p->tensor()));
+    }
+
+    // Param trajectories should match within int8 quantization noise. With per-tensor
+    // scale and constant grads, the quantization error in m,v stays small relative to
+    // the param magnitudes; a 5% absolute tolerance is a generous bound.
+    for (size_t i = 0; i < ref_params.size(); ++i) {
+        auto ref_cpu = ref_params[i]->tensor().to(Device::cpu());
+        auto q_cpu   = q_params[i]->tensor().to(Device::cpu());
+        ASSERT_EQ(ref_cpu.numel(), q_cpu.numel());
+        const float* a = ref_cpu.data<float>();
+        const float* b = q_cpu.data<float>();
+        for (int64_t k = 0; k < ref_cpu.numel(); ++k) {
+            EXPECT_NEAR(a[k], b[k], 0.05f * std::max(std::abs(a[k]), 1e-3f))
+                << "param[" << i << "][" << k << "] drift exceeded int8 noise budget";
+        }
+    }
+
+    // After step(), the optimizer re-offloads state to CPU as part of its tail. With the
+    // quantization flag on, the CPU-resident momentum/variance tensors should carry Int8
+    // payloads — that's the proof the codec actually fired (and not e.g. silently bypassed).
+    auto sd = q_opt->state_dict();
+    int int8_states_seen = 0;
+    for (const auto& [key, t] : sd) {
+        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Int8)
+                << "post-step CPU-offloaded state should be int8 quantized";
+            ++int8_states_seen;
+        }
+    }
+    EXPECT_GT(int8_states_seen, 0) << "expected at least one quantized state in state_dict";
+
+    // Reference (no quantization) should still report fp32 states.
+    auto ref_sd = ref_opt->state_dict();
+    for (const auto& [key, t] : ref_sd) {
+        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Float32)
+                << "reference (no-quant) state should remain fp32 on CPU";
+        }
+    }
+}
+
+TEST_F(ZeROStage1Test, QuantizationDisabledByDefault) {
+    // Sanity: the new flag defaults off and doesn't perturb the legacy CPU offload path.
+    ZeROStage1Config cfg = default_config;
+    EXPECT_FALSE(cfg.quantize_offloaded_states_int8);
+}
+
+// ============================================================================
+// 13. NVMe Offload (ZeRO-Infinity-style)
+// ============================================================================
+
+TEST_F(ZeROStage1Test, NvmeOffloadStepsCompleteAndPreserveTrajectory) {
+    // End-to-end: an optimizer with offload_to_nvme=true should serialize momentum/variance
+    // to disk between steps and read them back on the next step, producing a param
+    // trajectory that matches the no-offload reference within fp32 round-trip tolerance.
+    namespace fs = std::filesystem;
+    fs::path nvme_dir = fs::temp_directory_path() / "tenzor_zero_nvme_test";
+    fs::remove_all(nvme_dir);  // clean slate per test run
+
+    constexpr int n_steps = 3;
+    constexpr int n_params = 3;
+
+    auto make_setup = [&](bool nvme) {
+        auto params = create_test_params(n_params, {16, 16});
+        for (auto& p : params) {
+            p->set_grad(ones_like(p->tensor()));
+        }
+        auto adam = std::make_unique<Adam>(params, 0.001);
+
+        ZeROStage1Config cfg = default_config;
+        cfg.offload_to_nvme = nvme;
+        cfg.nvme_path = nvme ? nvme_dir.string() : std::string{};
+
+        return std::pair{params, std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg)};
+    };
+
+    auto [ref_params, ref_opt]   = make_setup(false);
+    auto [nvme_params, nvme_opt] = make_setup(true);
+
+    // After construction with NVMe enabled, scratch files must exist for every state.
+    ASSERT_TRUE(fs::exists(nvme_dir));
+    int blob_count = 0;
+    for (auto& e : fs::directory_iterator(nvme_dir)) {
+        if (e.is_regular_file()) ++blob_count;
+    }
+    EXPECT_EQ(blob_count, n_params * 2)  // momentum + variance per param
+        << "expected one blob per momentum and variance state on disk";
+
+    // Drive multiple steps and verify both setups stay in lockstep.
+    for (int s = 0; s < n_steps; ++s) {
+        ASSERT_NO_THROW(ref_opt->step());
+        ASSERT_NO_THROW(nvme_opt->step());
+        for (auto& p : ref_params)  p->set_grad(ones_like(p->tensor()));
+        for (auto& p : nvme_params) p->set_grad(ones_like(p->tensor()));
+    }
+
+    // NVMe round-trip is bit-identical for fp32 (no quantization in this test), so we use
+    // a tight tolerance — anything looser would mask an actual data-corruption bug.
+    for (size_t i = 0; i < ref_params.size(); ++i) {
+        const auto& a = ref_params[i]->tensor();
+        const auto& b = nvme_params[i]->tensor();
+        ASSERT_EQ(a.numel(), b.numel());
+        const float* ad = a.data<float>();
+        const float* bd = b.data<float>();
+        for (int64_t k = 0; k < a.numel(); ++k) {
+            EXPECT_NEAR(ad[k], bd[k], 1e-6f)
+                << "NVMe round-trip drift at param[" << i << "][" << k << "]";
+        }
+    }
+
+    // Destructor cleanup: blobs should be removed when the optimizer goes away.
+    nvme_opt.reset();
+    int leftover = 0;
+    if (fs::exists(nvme_dir)) {
+        for (auto& e : fs::directory_iterator(nvme_dir)) {
+            if (e.is_regular_file()) ++leftover;
+        }
+    }
+    EXPECT_EQ(leftover, 0) << "destructor should remove NVMe scratch files";
+
+    fs::remove_all(nvme_dir);
+}
+
+TEST_F(ZeROStage1Test, NvmeOffloadCombinesWithInt8Quantization) {
+    // When both quantize_offloaded_states_int8 and offload_to_nvme are on, the on-disk
+    // payload should be int8 (size = numel bytes) plus a tiny scale file. Verifies the
+    // combined memory savings stack as documented.
+    namespace fs = std::filesystem;
+    fs::path nvme_dir = fs::temp_directory_path() / "tenzor_zero_nvme_q_test";
+    fs::remove_all(nvme_dir);
+
+    constexpr int n_params = 2;
+    auto params = create_test_params(n_params, {32, 32});
+    for (auto& p : params) {
+        p->set_grad(ones_like(p->tensor()));
+    }
+    auto adam = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config cfg = default_config;
+    cfg.offload_to_nvme = true;
+    cfg.nvme_path = nvme_dir.string();
+    cfg.quantize_offloaded_states_int8 = true;
+
+    ZeROStage1Optimizer optimizer(std::move(adam), cfg);
+
+    // After step(), states are quantized and re-written to disk.
+    ASSERT_NO_THROW(optimizer.step());
+
+    // Each state file should be ~numel bytes (int8) and each scale file should be 4 bytes.
+    int int8_state_files = 0;
+    int scale_files = 0;
+    for (auto& e : fs::directory_iterator(nvme_dir)) {
+        if (!e.is_regular_file()) continue;
+        const auto sz = static_cast<size_t>(fs::file_size(e.path()));
+        const auto name = e.path().filename().string();
+        if (name.find("_scale.bin") != std::string::npos) {
+            ++scale_files;
+            EXPECT_EQ(sz, 4u) << "fp32 scalar scale should be 4 bytes: " << name;
+        } else {
+            ++int8_state_files;
+            EXPECT_EQ(sz, 32u * 32u) << "int8 state should be numel bytes: " << name;
+        }
+    }
+    EXPECT_EQ(int8_state_files, n_params * 2);
+    EXPECT_EQ(scale_files,      n_params * 2);
+
+    fs::remove_all(nvme_dir);
+}
+
+// ============================================================================
+// 14. Gradient Compression Hook (review item #24)
+// ============================================================================
+
+TEST_F(ZeROStage1Test, GradientCompressorConfigPlumbsThrough) {
+    // The new config field accepts a shared_ptr<GradientCompressor>; constructing the
+    // optimizer with one set should not throw, and the field should round-trip via the
+    // base optimizer access (we don't expose it back, but the constructor should at
+    // least accept it and not silently drop or assert on it).
+    auto params = create_test_params(2);
+    for (auto& p : params) p->set_grad(ones_like(p->tensor()));
+
+    auto adam = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config cfg = default_config;
+    cfg.world_size = 1;
+    cfg.rank = 0;
+    cfg.grad_compressor = std::make_shared<distributed::FP16Compressor>();
+
+    EXPECT_NO_THROW({
+        ZeROStage1Optimizer optimizer(std::move(adam), cfg);
+        optimizer.step();  // single-rank: all_reduce isn't called, but the wiring is exercised
+    });
+}
+
+TEST_F(ZeROStage1Test, GradientCompressorDefaultsToNullptr) {
+    // Sanity: legacy callers see no behavioural change.
+    ZeROStage1Config cfg = default_config;
+    EXPECT_EQ(cfg.grad_compressor, nullptr);
 }

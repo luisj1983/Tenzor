@@ -96,6 +96,19 @@ public:
         bool enable_auto_monitoring{true};                      ///< Enable automatic memory monitoring
         int monitoring_interval_ms{100};                        ///< Monitoring check interval in milliseconds
 
+        /** Optional pre-built TransferEngine to share across cooperating components.
+         *
+         *  When set, OffloadEngine adopts this engine instead of constructing its own
+         *  (the pinned_memory_size / num_transfer_streams knobs are then ignored). The
+         *  intended use case is wiring the same TransferEngine into both an
+         *  OffloadEngine (for parameter / optimizer-state offload) and an
+         *  OffloadContext (for activation offload) so the host-side pinned buffer pool
+         *  is shared rather than duplicated — see review item #17. A typical training
+         *  setup with both kinds of offload pinned ~2.5 GB of host RAM in two separate
+         *  pools; sharing cuts that to one ~2 GB pool.
+         */
+        std::shared_ptr<TransferEngine> shared_transfer_engine{nullptr};
+
         Config() = default;
     };
 
@@ -354,12 +367,18 @@ public:
      */
     auto reset_statistics() -> void;
 
+    /** @brief Borrow this engine's underlying TransferEngine so other subsystems
+     *         (e.g. OffloadContext for activation offload) can share the same pinned
+     *         host buffer pool. See review item #17 for the rationale.
+     */
+    auto transfer_engine() const -> std::shared_ptr<TransferEngine> { return transfer_engine_; }
+
 private:
     // Configuration
     Config config_;
 
     // Core components
-    std::unique_ptr<TransferEngine> transfer_engine_;      ///< Low-level async transfer engine
+    std::shared_ptr<TransferEngine> transfer_engine_;      ///< Low-level async transfer engine (shared so OffloadContext can adopt the same pool)
     std::unique_ptr<PinnedMemoryAllocator> pinned_alloc_;  ///< Pinned memory pool
     std::unique_ptr<MemoryManager> memory_manager_;        ///< Memory pressure tracking
 
@@ -388,6 +407,18 @@ private:
     std::condition_variable prefetch_cv_;
     std::atomic<bool> stop_prefetch_worker_{false};
     std::thread prefetch_worker_thread_;
+
+    // Track in-flight async prefetches the worker issued so wait_for_prefetch (and the
+    // destructor) can commit the results back to the user-supplied target tensors. The
+    // legacy code dropped the TransferHandle on the floor — see review item #4 — which
+    // meant prefetch_to_gpu kicked off a real transfer but the user's Tensor* never saw
+    // the GPU copy, defeating the whole point of the API.
+    struct InFlightPrefetch {
+        Tensor* target;                          ///< User-owned tensor to update on commit
+        tenzor::core::TransferHandle handle;     ///< Async transfer handle; awaited on commit
+    };
+    std::vector<InFlightPrefetch> in_flight_prefetches_;
+    std::mutex in_flight_mutex_;
 
     // Monitoring thread for automatic offload
     std::thread monitoring_thread_;

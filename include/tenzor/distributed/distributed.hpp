@@ -116,6 +116,26 @@ public:
     virtual auto all_gather(const Tensor& tensor, std::vector<Tensor>& output) -> void = 0;
 
     /**
+     * @brief Asynchronous all-gather on a caller-provided CUDA stream.
+     *
+     * Schedules an all-gather on `stream` without blocking the caller. Backends that
+     * support stream-based collectives (NCCL, RCCL) override this to launch directly on
+     * the user's stream — pairs with `comm_stream_` in subsystems that want gather to
+     * overlap with default-stream compute. The default fallback is the synchronous
+     * all_gather, so non-GPU backends keep working with no behaviour change.
+     *
+     * @param tensor Local input.
+     * @param output Per-rank outputs (filled on completion).
+     * @param stream CUDA stream (as void*) to launch on; ignored by sync backends.
+     */
+    virtual auto all_gather_async(const Tensor& tensor,
+                                  std::vector<Tensor>& output,
+                                  void* stream) -> void {
+        (void)stream;
+        all_gather(tensor, output);
+    }
+
+    /**
      * @brief Gather tensors to destination rank.
      */
     virtual auto gather(const Tensor& tensor, std::vector<Tensor>& output, int dst_rank) -> void = 0;
@@ -253,6 +273,18 @@ public:
      * @param output Vector of tensors (one per rank)
      */
     auto all_gather(const Tensor& tensor, std::vector<Tensor>& output) -> void;
+
+    /**
+     * @brief Asynchronous all-gather on a caller-provided CUDA stream.
+     *
+     * Forwards to the backend's all_gather_async; the default backend implementation is a
+     * sync fallback ignoring the stream. NCCL backends override to schedule directly on
+     * the user's stream so gather can overlap with default-stream compute. Caller is
+     * responsible for synchronisation via cudaStreamSynchronize(stream) before reading
+     * `output`.
+     */
+    auto all_gather_async(const Tensor& tensor, std::vector<Tensor>& output,
+                          void* stream) -> void;
 
     /**
      * @brief Gather tensors to destination rank.

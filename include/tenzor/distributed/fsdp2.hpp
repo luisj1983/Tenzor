@@ -69,6 +69,24 @@ struct FSDP2Config {
 
     /** @brief Prefetch params for backward during forward */
     bool backward_prefetch = true;
+
+    /** @brief Wrap the wrapped module's forward in autograd::checkpoint to recompute
+     *         activations on backward instead of saving them.
+     *
+     *  This is the activation-memory complement of FSDP2's parameter sharding: param sharding
+     *  cuts model-state memory by world_size; activation checkpointing cuts the *activations*
+     *  (the dominant memory consumer for transformers above ~3B params) by trading a single
+     *  extra forward pass per backward. Together they're how DeepSpeed/FSDP train multi-tens-
+     *  of-billions-of-params on a single node.
+     *
+     *  Memory impact: activations between this FSDP2's input and output are not saved during
+     *  forward; only the input is saved. Recomputed on first backward call. Typical savings
+     *  for transformer blocks: 4-8× activation memory at the cost of ~33% extra forward FLOPs
+     *  on backward.
+     *
+     *  Default off — activation memory is rarely the bottleneck below ~1B params.
+     */
+    bool activation_checkpointing = false;
 };
 
 /**

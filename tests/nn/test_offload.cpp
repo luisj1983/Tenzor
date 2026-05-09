@@ -805,6 +805,52 @@ TEST_F(ParameterOffloadTest, EdgeCase_MultipleEnableDisable) {
 }
 
 // ==========================
+// Async offload round-trip
+// ==========================
+
+TEST_F(ParameterOffloadTest, AsyncOffloadEndsWithCommittedState) {
+    // After the offload path was rewritten to issue async transfers and lazily finalize, we
+    // need to confirm that:
+    //   (a) enable() leaves every param fully-committed on CPU (not stuck mid-transfer);
+    //   (b) get_stats() drives drain_all_pending() and reports a consistent snapshot;
+    //   (c) cross-device data comparison still matches the pre-offload params bit-for-bit.
+    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+
+    auto model = createTestModule(128, 256, 64);
+    model->to(Device::cuda(0));
+
+    auto params = model->parameters();
+    std::vector<Tensor> params_before;
+    params_before.reserve(params.size());
+    for (const auto& p : params) {
+        params_before.push_back(p->tensor().clone());  // GPU clone; we'll compare via CPU
+    }
+
+    OffloadContext ctx(*model, default_config);
+    ctx.enable();  // issues async offloads internally, drains before returning
+
+    // Every param should now live on CPU — the async TransferHandles must have all been
+    // finalized by enable()'s tail drain.
+    for (const auto& p : params) {
+        EXPECT_EQ(p->tensor().device().type, Device::Type::CPU)
+            << "After enable(), all offloaded params should sit on CPU";
+    }
+
+    // Stats reflect the committed state: count == params.size().
+    auto stats = ctx.get_stats();
+    EXPECT_EQ(stats.num_parameters_offloaded, params.size());
+
+    // Bit-exact data preservation through the async offload path.
+    std::vector<Tensor> params_after;
+    params_after.reserve(params.size());
+    for (const auto& p : params) {
+        params_after.push_back(p->tensor());
+    }
+    EXPECT_TRUE(verifyParameterData(params_before, params_after))
+        << "Async offload should preserve param data byte-for-byte";
+}
+
+// ==========================
 // Main
 // ==========================
 

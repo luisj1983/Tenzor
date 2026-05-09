@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/core/offload_engine.hpp"
+#include "tenzor/core/transfer_engine.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -317,6 +318,62 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_MultipleTensors) {
     ASSERT_NO_THROW({
         engine.prefetch_to_gpu(tensors);
     });
+}
+
+TEST_F(OffloadEngineTest, AsyncPrefetch_CommitsToTargetTensor) {
+    // Locks in the contract that prefetch_to_gpu + wait_for_prefetch actually moves the
+    // tensor to GPU and preserves its data — the legacy code dropped the TransferHandle on
+    // the floor so the user's Tensor* never saw the GPU copy.
+    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+
+    OffloadEngine engine(default_config);
+
+    Tensor t = createPatternTensor({1024}, DType::Float32, Device::cpu());
+    Tensor expected_cpu = t.clone();  // for post-prefetch comparison
+
+    ASSERT_EQ(t.device().type, Device::Type::CPU);
+
+    std::vector<Tensor*> tensors = {&t};
+    engine.prefetch_to_gpu(tensors);
+    engine.wait_for_prefetch();
+
+    EXPECT_NE(t.device().type, Device::Type::CPU)
+        << "after wait_for_prefetch the target tensor should now live on GPU";
+
+    // Pull back to CPU and verify byte-exact data preservation.
+    Tensor verify = t.to(Device::cpu()).contiguous();
+    Tensor expected = expected_cpu.contiguous();
+    ASSERT_EQ(verify.numel(), expected.numel());
+    const float* a = expected.data<float>();
+    const float* b = verify.data<float>();
+    for (int64_t i = 0; i < verify.numel(); ++i) {
+        EXPECT_FLOAT_EQ(a[i], b[i]) << "data mismatch at idx " << i;
+    }
+}
+
+TEST_F(OffloadEngineTest, SharedTransferEngine_ConfigAdoptsCallerEngine) {
+    // Locks in the contract that OffloadEngine::Config::shared_transfer_engine, when set,
+    // is *adopted* by the OffloadEngine rather than ignored — the latter would silently
+    // fall back to the legacy "every subsystem keeps its own pinned pool" behaviour and
+    // defeat #17's whole point.
+    auto shared_te = std::make_shared<TransferEngine>(TransferEngine::Config{});
+
+    OffloadEngine::Config cfg;
+    cfg.shared_transfer_engine = shared_te;
+
+    OffloadEngine engine(cfg);
+
+    EXPECT_EQ(engine.transfer_engine().get(), shared_te.get())
+        << "OffloadEngine should adopt the caller's TransferEngine when one is provided";
+}
+
+TEST_F(OffloadEngineTest, SharedTransferEngine_DefaultsToOwnEngine) {
+    // The shared_transfer_engine field is opt-in: with it unset, OffloadEngine should
+    // build its own engine (legacy behaviour) so existing callers are unaffected.
+    OffloadEngine engine(default_config);
+
+    EXPECT_NE(engine.transfer_engine(), nullptr)
+        << "OffloadEngine must always have a TransferEngine, shared or owned";
 }
 
 // =============================================================================

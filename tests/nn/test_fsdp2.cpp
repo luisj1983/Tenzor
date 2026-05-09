@@ -19,6 +19,7 @@
 #include <tenzor/distributed/fsdp2.hpp>
 #include <tenzor/distributed/device_mesh.hpp>
 #include <tenzor/nn/layers/linear.hpp>
+#include <tenzor/autograd/checkpoint.hpp>
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -188,4 +189,74 @@ TEST_F(FSDP2Test, BackwardHook_NoOp_SingleProcess) {
     FSDP2 fsdp(mlp, cfg);
     fsdp.shard_parameters();
     EXPECT_NO_THROW(fsdp.backward_hook());
+}
+
+TEST_F(FSDP2Test, ActivationCheckpointing_DefaultsOff) {
+    // Sanity check: the new flag should default to off, preserving legacy forward semantics
+    // for any existing FSDP2 user.
+    FSDP2Config cfg;
+    EXPECT_FALSE(cfg.activation_checkpointing);
+}
+
+TEST_F(FSDP2Test, ActivationCheckpointing_ForwardOutputMatchesUnwrapped) {
+    // With activation checkpointing on, forward should still produce bit-identical outputs
+    // to the legacy path (recompute is purely a backward-time optimization). And the
+    // checkpoint counter in the autograd subsystem should tick to prove the wrapping
+    // actually engaged.
+    auto mesh = std::make_shared<DeviceMesh>(Device::Type::CPU,
+                                              std::vector<int64_t>{1},
+                                              std::vector<std::string>{"dp"});
+    auto mlp_ref = std::make_shared<TwoLayerMLP>(8, 16, 4);
+    auto mlp_chk = std::make_shared<TwoLayerMLP>(8, 16, 4);
+    {
+        // Sync weights between the two MLPs so outputs are directly comparable.
+        auto src = mlp_ref->named_parameters();
+        auto dst = mlp_chk->named_parameters();
+        ASSERT_EQ(src.size(), dst.size());
+        for (size_t i = 0; i < src.size(); ++i) {
+            dst[i].second->tensor() = src[i].second->tensor().clone();
+        }
+    }
+
+    FSDP2Config cfg_ref;
+    cfg_ref.mesh = mesh;
+    cfg_ref.activation_checkpointing = false;
+    FSDP2 fsdp_ref(mlp_ref, cfg_ref);
+    fsdp_ref.shard_parameters();
+
+    FSDP2Config cfg_chk;
+    cfg_chk.mesh = mesh;
+    cfg_chk.activation_checkpointing = true;
+    FSDP2 fsdp_chk(mlp_chk, cfg_chk);
+    fsdp_chk.shard_parameters();
+
+    // Input must require grad so autograd::checkpoint actually engages — the implementation
+    // short-circuits to a plain forward call when no input has requires_grad (no point
+    // checkpointing if there's nothing to recompute for).
+    Variable x(randn({4, 8}, DType::Float32, Device::cpu()), true);
+
+    autograd::reset_checkpoint_stats();
+    const auto checkpoints_before = autograd::get_checkpoint_stats().num_checkpoints;
+
+    auto out_ref = fsdp_ref.forward(x).tensor();
+    auto out_chk = fsdp_chk.forward(x).tensor();
+
+    const auto checkpoints_after = autograd::get_checkpoint_stats().num_checkpoints;
+
+    // The checkpoint-enabled forward should have ticked the global checkpoint counter at
+    // least once; the reference forward should not have ticked it at all.
+    EXPECT_GT(checkpoints_after, checkpoints_before)
+        << "FSDP2 with activation_checkpointing=true should invoke autograd::checkpoint";
+
+    // Outputs must match bit-for-bit (checkpointing only changes when activations are kept,
+    // not what they evaluate to).
+    ASSERT_EQ(out_ref.shape().size(), out_chk.shape().size());
+    for (size_t i = 0; i < out_ref.shape().size(); ++i) {
+        EXPECT_EQ(out_ref.shape()[i], out_chk.shape()[i]);
+    }
+    const float* a = out_ref.contiguous().data<float>();
+    const float* b = out_chk.contiguous().data<float>();
+    for (int64_t i = 0; i < out_ref.numel(); ++i) {
+        EXPECT_NEAR(a[i], b[i], 1e-5f) << "checkpointed output differs at " << i;
+    }
 }

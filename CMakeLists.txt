@@ -85,36 +85,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
-
-# nvcc has a max supported host GCC (CUDA 13.x caps at GCC 15 via host_config.h).
-# When the host CMAKE_CXX_COMPILER is newer, the CUDA compiler-id probe blows up
-# in /usr/include/c++/<v>/type_traits with __type_identity / __is_complete_or_unbounded
-# / char8_t / "requires"-keyword errors during enable_language(CUDA). Detect that
-# situation and pin CMAKE_CUDA_HOST_COMPILER to the newest available versioned g++
-# that nvcc tolerates. CMAKE_CXX_COMPILER (used for plain .cpp TUs) is left alone,
-# so the rest of the project still builds with the user's chosen toolchain.
-# Override by passing -DCMAKE_CUDA_HOST_COMPILER=/path/to/g++ or setting CUDAHOSTCXX.
-if(TENZOR_BUILD_CUDA
-   AND NOT CMAKE_CUDA_HOST_COMPILER
-   AND NOT DEFINED ENV{CUDAHOSTCXX}
-   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
-    find_program(_TENZOR_NVCC_HOST_GXX
-                 NAMES g++-15 g++-14 g++-13 g++-12)
-    if(_TENZOR_NVCC_HOST_GXX)
-        message(STATUS "CUDA: host GCC ${CMAKE_CXX_COMPILER_VERSION} exceeds nvcc's "
-                "supported max (15); pinning CMAKE_CUDA_HOST_COMPILER="
-                "${_TENZOR_NVCC_HOST_GXX}")
-        set(CMAKE_CUDA_HOST_COMPILER "${_TENZOR_NVCC_HOST_GXX}"
-            CACHE FILEPATH "Host compiler used by nvcc" FORCE)
-    else()
-        message(WARNING "GCC ${CMAKE_CXX_COMPILER_VERSION} is newer than nvcc supports "
-                "and no g++-15/g++-14/g++-13/g++-12 was found on PATH. "
-                "Install one (e.g. pacman -S gcc15) or pass -DCMAKE_CUDA_HOST_COMPILER "
-                "explicitly. enable_language(CUDA) will fail otherwise.")
-    endif()
-endif()
-
 # Note: TENZOR_BUILD_ROCM is set before project() to enable HIP language
 option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
 option(TENZOR_BUILD_VULKAN "Build Vulkan backend" ON)

@@ -24,12 +24,20 @@ namespace {
 OffloadContext::OffloadContext(Module& model, const Config& config)
     : model_(model), config_(config), enabled_(false) {
 
-    // Initialize transfer engine
-    core::TransferEngine::Config engine_config;
-    engine_config.num_streams = 4;  // Multiple streams for parallelism
-    engine_config.use_pinned_memory = true;
-    engine_config.pinned_pool_size = 512 * 1024 * 1024;  // 512 MB pinned pool
-    transfer_engine_ = std::make_shared<core::TransferEngine>(engine_config);
+    // Adopt the caller's TransferEngine when provided so the host-pinned pool is shared
+    // with whichever other subsystem (typically a core::OffloadEngine driving Stage 1+
+    // optimizer-state offload) built it. Without sharing, each component keeps its own
+    // ~512 MB – 2 GB pinned pool live for the duration of training, doubling host RAM
+    // pressure on systems where it's already the constraining resource.
+    if (config_.shared_transfer_engine) {
+        transfer_engine_ = config_.shared_transfer_engine;
+    } else {
+        core::TransferEngine::Config engine_config;
+        engine_config.num_streams = 4;  // Multiple streams for parallelism
+        engine_config.use_pinned_memory = true;
+        engine_config.pinned_pool_size = 512 * 1024 * 1024;  // 512 MB pinned pool
+        transfer_engine_ = std::make_shared<core::TransferEngine>(engine_config);
+    }
 
     // Initialize memory manager
     core::MemoryManager::Config mem_config;
@@ -85,11 +93,19 @@ auto OffloadContext::enable() -> void {
                         }
                     }
 
-                    // Offload to CPU
+                    // Issue an async offload — the call returns immediately with an
+                    // in-flight TransferHandle stashed in TensorInfo.
                     offload_tensor(tensor_ptr);
                 }
             }
         }
+
+        // The async path lets multiple offloads overlap on the TransferEngine's streams,
+        // but enable() should *feel* synchronous to outside callers (they expect get_stats
+        // afterwards to report all params offloaded). Drain all pending transfers here so
+        // the post-enable state is fully committed.
+        std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+        drain_all_pending();
     }
 }
 
@@ -154,8 +170,12 @@ auto OffloadContext::get_stats() -> OffloadStats {
         stats.avg_transfer_time_ms = total_time / transfer_count;
     }
 
-    // Count currently offloaded tensors (separate parameters and gradients)
+    // Count currently offloaded tensors (separate parameters and gradients).
+    // Drain any in-flight async transfers first so the snapshot is consistent — otherwise
+    // a user calling get_stats() between forward_post_hook(N) and forward_post_hook(N+1)
+    // would see layer N's offload as not-yet-applied even though it's effectively committed.
     std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+    drain_all_pending();
     for (const auto& [tensor_ptr, info] : tensor_map_) {
         if (info.is_offloaded) {
             if (info.is_gradient) {
@@ -359,6 +379,51 @@ auto OffloadContext::prefetch_layer(Module* layer) -> void {
     }
 }
 
+auto OffloadContext::drain_all_pending() -> void {
+    // Caller must hold tensor_map_mutex_. Walks every tracked tensor and forces finalization
+    // of any in-flight async transfer so subsequent state reads (e.g. get_stats) observe the
+    // committed state rather than the in-progress one.
+    for (auto& [tensor_ptr, info] : tensor_map_) {
+        if (info.pending_handle.is_valid()) {
+            finalize_pending(info, tensor_ptr);
+        }
+    }
+}
+
+auto OffloadContext::finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> void {
+    if (!info.pending_handle.is_valid() || tensor_ptr == nullptr) {
+        return;
+    }
+
+    auto start = std::chrono::high_resolution_clock::now();
+    Tensor result = info.pending_handle.get_tensor();  // implicit wait if not ready
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    if (info.pending_is_offload) {
+        // Commit the GPU→CPU offload: keep the CPU copy and free the GPU storage by
+        // rebinding *tensor_ptr.
+        info.cpu_copy = result;
+        *tensor_ptr = info.cpu_copy;
+        info.is_offloaded = true;
+        stats_.current_cpu_memory.fetch_add(info.size_bytes, std::memory_order_relaxed);
+    } else {
+        // Commit the CPU→GPU prefetch.
+        *tensor_ptr = result;
+        info.is_offloaded = false;
+        // current_cpu_memory was already decremented when the prefetch was issued.
+    }
+
+    // Stats: only count *wait* time as user-visible transfer time. Anything that overlapped
+    // with compute already happened in the background and shouldn't be billed against the
+    // critical-path profile.
+    stats_.total_transfer_time_ms.fetch_add(elapsed_ms, std::memory_order_relaxed);
+
+    // Reset the handle to default-constructed state (transfer is no longer in flight).
+    info.pending_handle = tenzor::core::TransferHandle{};
+    info.pending_is_offload = false;
+}
+
 auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
     if (!tensor_ptr) {
         return false;
@@ -376,36 +441,31 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
 
     auto& info = it->second;
 
+    // If a previous async transfer for this tensor is still pending, drain it so we have a
+    // consistent view before deciding whether a new offload is needed.
+    finalize_pending(info, tensor_ptr);
+
     // Check if should offload
     if (!should_offload(info) || info.is_offloaded) {
         return false;
     }
 
-    // Time the transfer
-    auto start = std::chrono::high_resolution_clock::now();
-
     try {
         // Save the original device before offloading
         info.original_device = tensor_ptr->device();
 
-        // Transfer to CPU
-        info.cpu_copy = transfer_engine_->gpu_to_cpu(*tensor_ptr);
+        // Issue async GPU→CPU transfer. The actual data motion runs on the TransferEngine's
+        // dedicated stream, which lets it overlap with the next layer's compute on the
+        // default stream. We do *not* swap *tensor_ptr yet — the GPU memory must stay alive
+        // until the DMA completes. The swap and memory-free happen in finalize_pending(),
+        // typically called from the next forward_post_hook / backward_post_hook.
+        info.pending_handle = transfer_engine_->gpu_to_cpu_async(*tensor_ptr);
+        info.pending_is_offload = true;
 
-        // CRITICAL: Replace the GPU tensor with the CPU copy to actually free GPU memory.
-        // The original GPU tensor's memory will be released when we assign the CPU tensor to it.
-        // This is the key to actually reducing GPU memory usage during offloading.
-        *tensor_ptr = info.cpu_copy;
-
-        info.is_offloaded = true;
-
-        // Update statistics
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
+        // Stats: count the offload at issue time (so callers see immediate feedback in
+        // stats); transfer-time accounting happens in finalize_pending against actual wait.
         stats_.total_offloads.fetch_add(1, std::memory_order_relaxed);
-        stats_.total_transfer_time_ms.fetch_add(elapsed_ms, std::memory_order_relaxed);
         stats_.transfer_count.fetch_add(1, std::memory_order_relaxed);
-        stats_.current_cpu_memory.fetch_add(info.size_bytes, std::memory_order_relaxed);
 
         return true;
     } catch (const std::exception& e) {
@@ -424,27 +484,26 @@ auto OffloadContext::prefetch_tensor(Tensor* tensor_ptr) -> bool {
 
     auto& info = it->second;
 
+    // Drain any prior pending transfer (could be an offload that finished while we were
+    // doing other work; we must commit it before issuing a load in the opposite direction).
+    finalize_pending(info, tensor_ptr);
+
     // Only prefetch if currently offloaded
     if (!info.is_offloaded) {
         return false;
     }
 
-    // Time the transfer
-    auto start = std::chrono::high_resolution_clock::now();
-
     try {
-        // Transfer back to GPU using the original device
-        Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(info.cpu_copy, info.original_device);
-        *tensor_ptr = gpu_tensor;
-        info.is_offloaded = false;
-
-        // Update statistics
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+        // Issue async CPU→GPU transfer; commit happens in finalize_pending() (typically the
+        // forward_pre_hook or backward_pre_hook of the consuming layer).
+        info.pending_handle = transfer_engine_->cpu_to_gpu_async(info.cpu_copy, info.original_device);
+        info.pending_is_offload = false;
 
         stats_.total_prefetches.fetch_add(1, std::memory_order_relaxed);
-        stats_.total_transfer_time_ms.fetch_add(elapsed_ms, std::memory_order_relaxed);
         stats_.transfer_count.fetch_add(1, std::memory_order_relaxed);
+
+        // Eagerly decrement CPU memory at issue time (matches symmetric increment in
+        // offload_tensor's finalize); we'll never re-touch info.cpu_copy after a load issues.
         stats_.current_cpu_memory.fetch_sub(info.size_bytes, std::memory_order_relaxed);
 
         return true;
@@ -482,6 +541,13 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     auto load_tensor_to_gpu = [&](Tensor* tensor_ptr) {
         std::lock_guard<std::mutex> lock(tensor_map_mutex_);
         auto it = tensor_map_.find(tensor_ptr);
+
+        // First: drain any in-flight async transfer for this tensor. After finalize the
+        // tensor is in a known state (either committed-to-CPU after an offload, or
+        // committed-to-GPU after a prefetch), and we can decide what to do next.
+        if (it != tensor_map_.end()) {
+            finalize_pending(it->second, tensor_ptr);
+        }
 
         // Case 1: Tensor was offloaded from GPU - restore it
         if (it != tensor_map_.end() && it->second.is_offloaded) {

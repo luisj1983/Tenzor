@@ -11,6 +11,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include <filesystem>
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
@@ -19,8 +21,157 @@
 #include <iostream>
 #include <iomanip>
 
+// CUDA/HIP runtime for the dedicated comm stream. Same conditional pattern as ddp.cpp:
+// when neither CUDA nor ROCm is compiled in, the async path is unavailable and the
+// optimizer transparently falls back to fully-synchronous all_reduce.
+#if defined(TENZOR_USE_CUDA)
+    #include <cuda_runtime.h>
+#elif defined(TENZOR_USE_ROCM)
+    #include <hip/hip_runtime.h>
+    #define cudaStream_t              hipStream_t
+    #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
+    #define cudaStreamNonBlocking     hipStreamNonBlocking
+    #define cudaStreamDestroy         hipStreamDestroy
+    #define cudaStreamSynchronize     hipStreamSynchronize
+    #define cudaSuccess               hipSuccess
+    #define cudaGetErrorString        hipGetErrorString
+    using cudaError_t = hipError_t;
+#endif
+
 namespace tenzor {
 namespace optim {
+
+// =============================================================================
+// Helpers
+// =============================================================================
+namespace {
+
+// Build a 1-element tensor in the same dtype/device as `ref` carrying `value`.
+// Used by the in-place optimizer kernels to multiply/add a scalar without forcing a
+// fp32 demotion (the previous implementation cast everything through `float`, which
+// silently lost precision for Float64 params — see feedback_float32_accum_bug.md).
+inline auto scalar_like(double value, const Tensor& ref) -> Tensor {
+    return full({1}, value, ref.dtype(), ref.device());
+}
+
+// Per-tensor int8 quantization. Returns the int8 payload and a 1-element fp32 scale
+// tensor; reconstruct via `q.to(orig_dtype) * scale`. The scalar reduction `max(|t|)`
+// runs on whatever device `t` lives on, then we materialise the scale via the
+// scalar-tensor builder so dequantization can broadcast it without a copy back to host.
+struct QuantizedInt8 {
+    Tensor data;   // shape == t.shape(), dtype == Int8
+    Tensor scale;  // shape {1}, dtype == Float32, on t.device()
+};
+
+inline auto quantize_to_int8(const Tensor& t) -> QuantizedInt8 {
+    // scale = max(|t|) / 127. If all-zero (max==0), pin scale to 1 so we don't
+    // emit a NaN/Inf-laden int8 payload.
+    Tensor abs_t = abs(t);
+    Tensor max_t = tenzor::max(abs_t);
+    float max_val = max_t.item<float>();
+    float scale = (max_val > 0.0f) ? (max_val / 127.0f) : 1.0f;
+
+    // q = clamp(round(t / scale), -128, 127) cast to Int8.
+    Tensor scaled = t * (1.0 / scale);
+    Tensor rounded = round(scaled);
+    Tensor clamped = clamp(rounded, -128.0f, 127.0f);
+    QuantizedInt8 out;
+    out.data = clamped.to(DType::Int8);
+    out.scale = full({1}, scale, DType::Float32, t.device());
+    return out;
+}
+
+inline auto dequantize_from_int8(const Tensor& q, const Tensor& scale, DType target_dtype) -> Tensor {
+    // First widen int8 → target dtype, then multiply by the broadcast scalar scale.
+    // The order matters: doing q * scale in int8 would clip to int8 range.
+    Tensor widened = q.to(target_dtype);
+    Tensor scale_in_target = (scale.dtype() != target_dtype) ? scale.to(target_dtype) : scale;
+    return widened * scale_in_target;
+}
+
+// ---------------------------------------------------------------------------
+// NVMe offload helpers (synchronous std::ofstream / std::ifstream)
+// ---------------------------------------------------------------------------
+//
+// Format: raw little-endian element bytes only. Shape and dtype are tracked in
+// the optimizer's StatePartition::DiskSlot rather than in a file header — the
+// optimizer is the only writer + reader, so a self-describing format would just
+// duplicate state that we already have.
+
+inline auto resolve_nvme_dir(const std::string& configured) -> std::filesystem::path {
+    namespace fs = std::filesystem;
+    fs::path dir = configured.empty()
+        ? (fs::temp_directory_path() / "tenzor_zero_offload")
+        : fs::path(configured);
+    fs::create_directories(dir);
+    return dir;
+}
+
+// Stage GPU→host (if needed), then write the raw bytes to `path`. Returns the
+// number of bytes written so the caller can assert it later if desired. Throws
+// std::runtime_error on IO failure rather than ignoring it — silent disk-full
+// during training is way worse than a hard failure at the offload boundary.
+inline auto write_tensor_blob(const Tensor& t, const std::filesystem::path& path) -> size_t {
+    Tensor host_tensor = (t.device().type == Device::Type::CPU)
+        ? t.contiguous()
+        : t.to(Device::cpu()).contiguous();
+
+    const size_t bytes = static_cast<size_t>(host_tensor.numel()) * dtype_size(host_tensor.dtype());
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("write_tensor_blob: failed to open '" + path.string() + "'");
+    }
+    if (bytes > 0) {
+        out.write(static_cast<const char*>(host_tensor.data_ptr()), static_cast<std::streamsize>(bytes));
+        if (!out) {
+            throw std::runtime_error("write_tensor_blob: short write to '" + path.string() + "'");
+        }
+    }
+    return bytes;
+}
+
+// Allocate a tensor with the recorded shape/dtype on `device` and read the file
+// contents into it. Use a host-side staging tensor when device != CPU.
+inline auto read_tensor_blob(
+    const std::filesystem::path& path,
+    const std::vector<int64_t>& shape,
+    DType dtype,
+    Device device
+) -> Tensor {
+    // First materialise into a CPU tensor so we can read into its data_ptr() directly.
+    Tensor host_tensor = empty(shape, dtype, Device::cpu());
+    const size_t bytes = static_cast<size_t>(host_tensor.numel()) * dtype_size(dtype);
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("read_tensor_blob: failed to open '" + path.string() + "'");
+    }
+    if (bytes > 0) {
+        in.read(static_cast<char*>(host_tensor.data_ptr()), static_cast<std::streamsize>(bytes));
+        if (in.gcount() != static_cast<std::streamsize>(bytes)) {
+            throw std::runtime_error("read_tensor_blob: short read from '" + path.string() + "'");
+        }
+    }
+    return (device.type == Device::Type::CPU) ? host_tensor : host_tensor.to(device);
+}
+
+// Build a file path for a particular state slot. Deterministic so a restart with
+// the same config can pick up where the previous run left off (best-effort —
+// we don't currently checksum, so corrupted files would silently break training).
+inline auto state_blob_path(
+    const std::filesystem::path& dir,
+    int rank,
+    size_t param_idx,
+    std::string_view state_name
+) -> std::filesystem::path {
+    std::string fname = "zero_r" + std::to_string(rank) +
+                        "_p" + std::to_string(param_idx) +
+                        "_" + std::string(state_name) + ".bin";
+    return dir / fname;
+}
+
+}  // namespace
 
 // =============================================================================
 // Constructor & Destructor
@@ -47,6 +198,21 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
         config_.process_group = distributed::DistributedContext::get_process_group();
     }
 
+    // Detect whether the process group can run all_reduce on a caller-supplied stream
+    // (NCCL/RCCL on GPU). When yes, allocate a dedicated non-blocking stream so the
+    // all-reduce in step_impl can overlap with the host-side fetch_states_to_gpu work.
+    if (config_.process_group && config_.process_group->supports_async_stream()) {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+        cudaStream_t s = nullptr;
+        cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        if (err == cudaSuccess) {
+            comm_stream_ = static_cast<void*>(s);
+            use_gpu_comm_ = true;
+        }
+        // If stream creation fails, fall back to sync path; not fatal.
+#endif
+    }
+
     partition_parameters();
 
     if (config_.offload_to_cpu) {
@@ -57,7 +223,39 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
 }
 
 ZeROStage1Optimizer::~ZeROStage1Optimizer() {
-    // Cleanup is automatic via smart pointers
+    // Best-effort cleanup of NVMe scratch files. We don't want a destructor exception under
+    // any circumstance, so we swallow any IO error — leaving stale blobs behind is at worst
+    // a disk-space leak that the user can wipe via the configured nvme_path.
+    if (config_.offload_to_nvme) {
+        try {
+            for (auto& part : partitions_) {
+                auto remove_slot = [](StatePartition::DiskSlot& s) {
+                    if (s.on_disk()) {
+                        std::error_code ec;
+                        std::filesystem::remove(s.path, ec);
+                        s.path.clear();
+                    }
+                };
+                for (auto& s : part.momentum_disk)       remove_slot(s);
+                for (auto& s : part.variance_disk)       remove_slot(s);
+                for (auto& s : part.momentum_scale_disk) remove_slot(s);
+                for (auto& s : part.variance_scale_disk) remove_slot(s);
+            }
+        } catch (...) {
+            // swallow — destructors must not throw
+        }
+    }
+    // Tear down the dedicated comm stream if we allocated one. cudaStreamDestroy waits for
+    // any in-flight ops on the stream, so this is safe even if the user dropped the
+    // optimizer mid-step (which they shouldn't but might in error paths).
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    if (comm_stream_) {
+        cudaStreamDestroy(static_cast<cudaStream_t>(comm_stream_));
+        comm_stream_ = nullptr;
+    }
+#endif
+
+    // Other cleanup is automatic via smart pointers.
 }
 
 // =============================================================================
@@ -73,22 +271,18 @@ auto ZeROStage1Optimizer::step_impl() -> void {
         step_start_time_ = step_start;
     }
 
-    // Step 1: All-reduce gradients across ranks
+    // Step 1a: Issue async all-reduce of gradients on the comm stream. When the process
+    // group supports stream-based collectives, this returns immediately and lets us run
+    // host/PCIe-side optimizer-state fetch concurrently with the all-reduce. The wait is
+    // deferred to step 1b just before update_local_partition reads the grads.
+    auto comm_start = std::chrono::steady_clock::now();
     if (config_.world_size > 1) {
-        auto comm_start = std::chrono::steady_clock::now();
-        all_reduce_gradients();
-        if (profiling_enabled_) {
-            auto comm_end = std::chrono::steady_clock::now();
-            auto comm_duration = std::chrono::duration<double, std::milli>(comm_end - comm_start).count();
-            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
-            profiling_stats_.all_reduce_time_ms += comm_duration;
-            profiling_stats_.communication_time_ms += comm_duration;
-            profiling_stats_.num_all_reduces++;
-        }
+        issue_async_all_reduce_gradients();
     }
 
-    // Step 2: Fetch optimizer states from CPU if offloaded
-    if (config_.offload_to_cpu && offload_engine_) {
+    // Step 2: Fetch optimizer states from CPU if offloaded — this overlaps with the
+    // in-flight all-reduce when use_gpu_comm_ is on.
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         auto offload_start = std::chrono::steady_clock::now();
         fetch_states_to_gpu();
         if (profiling_enabled_) {
@@ -96,6 +290,22 @@ auto ZeROStage1Optimizer::step_impl() -> void {
             auto offload_duration = std::chrono::duration<double, std::milli>(offload_end - offload_start).count();
             std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
             profiling_stats_.offload_time_ms += offload_duration;
+        }
+    }
+
+    // Step 1b: Block on the comm stream before the update reads gradients. Profiling
+    // accounts for the *wait* time only, so the comm time is reported as the slack
+    // between step 1a and here — anything that overlapped with fetch_states is excluded
+    // from the comm budget, which is the metric users actually care about.
+    if (config_.world_size > 1) {
+        wait_for_async_all_reduce();
+        if (profiling_enabled_) {
+            auto comm_end = std::chrono::steady_clock::now();
+            auto comm_duration = std::chrono::duration<double, std::milli>(comm_end - comm_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.all_reduce_time_ms += comm_duration;
+            profiling_stats_.communication_time_ms += comm_duration;
+            profiling_stats_.num_all_reduces++;
         }
     }
 
@@ -110,7 +320,7 @@ auto ZeROStage1Optimizer::step_impl() -> void {
     }
 
     // Step 4: Offload states back to CPU if enabled
-    if (config_.offload_to_cpu && offload_engine_) {
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         auto offload_start = std::chrono::steady_clock::now();
         offload_states_to_cpu();
         if (profiling_enabled_) {
@@ -507,34 +717,96 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
 
     partition.momentum.reserve(partition.params.size());
     partition.variance.reserve(partition.params.size());
+    if (config_.use_master_fp32) {
+        partition.master_params.reserve(partition.params.size());
+    }
+    const bool any_offload = config_.offload_to_cpu || config_.offload_to_nvme;
+    if (any_offload && config_.quantize_offloaded_states_int8) {
+        // One scale slot per state tensor, all initially empty (= "not currently quantized").
+        // Populated when the state goes to CPU; cleared on fetch back to GPU.
+        partition.momentum_scales.assign(partition.params.size(), Tensor());
+        partition.variance_scales.assign(partition.params.size(), Tensor());
+    }
+    if (config_.offload_to_nvme) {
+        partition.momentum_disk.resize(partition.params.size());
+        partition.variance_disk.resize(partition.params.size());
+        if (config_.quantize_offloaded_states_int8) {
+            partition.momentum_scale_disk.resize(partition.params.size());
+            partition.variance_scale_disk.resize(partition.params.size());
+        }
+    }
 
     // If CPU offload is enabled, create states on GPU and immediately offload each one
     // This minimizes peak GPU memory usage during initialization
-    bool should_offload = config_.offload_to_cpu && offload_engine_;
+    const bool should_cpu_offload = config_.offload_to_cpu && offload_engine_;
+    const bool should_nvme_offload = config_.offload_to_nvme;
+    std::filesystem::path nvme_dir;
+    if (should_nvme_offload) {
+        nvme_dir = resolve_nvme_dir(config_.nvme_path);
+    }
 
-    for (const auto& param : partition.params) {
-        // Momentum buffer - create on same device as parameters
-        Tensor momentum = zeros_like(param->tensor()).to(partition.device);
+    for (size_t i = 0; i < partition.params.size(); ++i) {
+        const auto& param = partition.params[i];
+        const Tensor& p = param->tensor();
+        // Resolve effective state dtype: caller can override via config_.state_dtype, else
+        // match the parameter dtype (legacy behaviour).
+        DType state_dtype = config_.state_dtype.value_or(p.dtype());
 
-        // Variance buffer (Adam family) - create on same device as parameters
-        Tensor variance = zeros_like(param->tensor()).to(partition.device);
+        // Momentum and variance live in `state_dtype` so that fp16/bf16 training can keep
+        // optimizer-state precision in fp32 without doubling the parameter storage. zeros() is
+        // used (instead of zeros_like + to(state_dtype)) to avoid an extra allocation pass.
+        std::vector<int64_t> shape(p.shape().begin(), p.shape().end());
+        Tensor momentum = zeros(shape, state_dtype, partition.device);
+        Tensor variance = zeros(shape, state_dtype, partition.device);
 
-        // Track memory
         partition.memory_bytes += momentum.numel() * dtype_size(momentum.dtype());
         partition.memory_bytes += variance.numel() * dtype_size(variance.dtype());
 
-        // Immediately offload to CPU if enabled (minimizes peak GPU memory)
-        if (should_offload) {
+        // Optional fp32 master copy. Only allocate if the param itself isn't already fp32 —
+        // otherwise the master would just be an alias and we'd double the memory for nothing.
+        Tensor master;
+        if (config_.use_master_fp32 && p.dtype() != DType::Float32) {
+            master = p.to(DType::Float32).to(partition.device);
+            partition.memory_bytes += master.numel() * dtype_size(master.dtype());
+        }
+
+        if (should_cpu_offload) {
+            // Immediately offload to CPU if enabled (minimizes peak GPU memory)
             momentum = offload_engine_->offload_to_cpu(momentum);
             variance = offload_engine_->offload_to_cpu(variance);
+            if (master.numel() > 0) {
+                master = offload_engine_->offload_to_cpu(master);
+            }
+        } else if (should_nvme_offload) {
+            // NVMe path: write each freshly-zeroed state to disk and clear the in-memory
+            // tensor. Master copies stay in memory — the whole point of master is high
+            // precision on the hot path; serialising it would defeat the purpose.
+            partition.momentum_disk[i] = StatePartition::DiskSlot{
+                state_blob_path(nvme_dir, partition.rank, i, "momentum").string(),
+                shape, state_dtype
+            };
+            write_tensor_blob(momentum, partition.momentum_disk[i].path);
+            momentum = Tensor();  // free the GPU/CPU buffer
+
+            partition.variance_disk[i] = StatePartition::DiskSlot{
+                state_blob_path(nvme_dir, partition.rank, i, "variance").string(),
+                shape, state_dtype
+            };
+            write_tensor_blob(variance, partition.variance_disk[i].path);
+            variance = Tensor();
         }
 
         partition.momentum.push_back(momentum);
         partition.variance.push_back(variance);
+        if (config_.use_master_fp32) {
+            // Always push (possibly empty Tensor) so the index aligns with `params`. An empty
+            // master signals "param is already fp32, use it directly".
+            partition.master_params.push_back(master);
+        }
     }
 
-    if (should_offload) {
-        states_on_cpu_ = true;
+    if (should_cpu_offload || should_nvme_offload) {
+        states_on_cpu_ = true;  // means "not on GPU device, needs fetch before step()"
     }
 }
 
@@ -556,34 +828,106 @@ auto ZeROStage1Optimizer::initialize_offload_engine() -> void {
 // =============================================================================
 
 auto ZeROStage1Optimizer::all_reduce_gradients() -> void {
+    // Synchronous wrapper that preserves the legacy contract: kick off async, wait
+    // immediately. Callers that want to overlap the all-reduce with other work (notably
+    // step_impl wrapping fetch_states_to_gpu in between) should call the issue/wait pair
+    // directly rather than this wrapper.
+    issue_async_all_reduce_gradients();
+    wait_for_async_all_reduce();
+}
+
+auto ZeROStage1Optimizer::issue_async_all_reduce_gradients() -> void {
     if (!config_.process_group) {
         throw std::runtime_error("Process group not initialized");
     }
+    if (async_all_reduce_in_flight_) {
+        throw std::runtime_error("issue_async_all_reduce_gradients called with another async all-reduce already in flight");
+    }
 
-    // All-reduce gradients for all parameters
+    in_flight_compressed_.clear();
+    if (config_.grad_compressor) {
+        // Reserve once so the vector address is stable across the per-param compress
+        // calls (we hand off the .data tensor by value, not by reference, so addresses
+        // matter only for our own bookkeeping below).
+        in_flight_compressed_.reserve(parameters_.size());
+    }
+
+    // All-reduce gradients for all parameters. When use_gpu_comm_ is set we route the
+    // collective through the dedicated comm_stream_ so it can overlap with the host /
+    // PCIe-side fetch_states_to_gpu work that step_impl runs next.
     for (auto& param : parameters_) {
-        if (param->has_grad()) {
-            const auto& grad_opt = param->grad();
-            if (grad_opt.has_value()) {
-                Tensor grad = grad_opt.value();
+        if (!param->has_grad()) continue;
+        const auto& grad_opt = param->grad();
+        if (!grad_opt.has_value()) continue;
 
-                // Track transferred bytes for profiling
-                if (profiling_enabled_) {
-                    size_t bytes = grad.numel() * dtype_size(grad.dtype());
-                    std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
-                    profiling_stats_.transferred_bytes += bytes * config_.world_size;
-                }
+        Tensor grad = grad_opt.value();
 
-                config_.process_group->all_reduce(grad, distributed::ReduceOp::SUM);
+        if (profiling_enabled_) {
+            size_t bytes = grad.numel() * dtype_size(grad.dtype());
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.transferred_bytes += bytes * config_.world_size;
+        }
 
-                // Average by world size
-                grad = grad / static_cast<float>(config_.world_size);
-
-                // Update the gradient
-                param->set_grad(grad);
+        if (config_.grad_compressor) {
+            auto compressed = config_.grad_compressor->compress(grad);
+            if (use_gpu_comm_) {
+                config_.process_group->all_reduce_async(compressed.data,
+                                                        distributed::ReduceOp::AVG,
+                                                        comm_stream_);
+            } else {
+                config_.process_group->all_reduce(compressed.data,
+                                                  distributed::ReduceOp::AVG);
             }
+            in_flight_compressed_.push_back(std::move(compressed));
+        } else {
+            // Linear all-reduce: AVG is native on NCCL ≥ 2.10, folded for other backends.
+            if (use_gpu_comm_) {
+                config_.process_group->all_reduce_async(grad,
+                                                        distributed::ReduceOp::AVG,
+                                                        comm_stream_);
+            } else {
+                config_.process_group->all_reduce(grad, distributed::ReduceOp::AVG);
+            }
+            // Without compression the grad tensor is mutated in-place by the collective —
+            // write it back to the Variable now so the wait phase doesn't have to remember
+            // which params took which path.
+            param->set_grad(grad);
         }
     }
+
+    async_all_reduce_in_flight_ = true;
+}
+
+auto ZeROStage1Optimizer::wait_for_async_all_reduce() -> void {
+    if (!async_all_reduce_in_flight_) {
+        return;
+    }
+
+    // Block until every async all-reduce we issued has completed on the comm stream. For
+    // the sync fallback path (no GPU comm), this is a no-op — the all_reduce calls in
+    // issue_* already finished synchronously.
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    if (use_gpu_comm_ && comm_stream_) {
+        cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
+    }
+#endif
+
+    // Decompress the held-over compressed payloads, if any, and write the resulting
+    // full-precision grads back to their Variables. Order matches the order in which they
+    // were pushed in issue_*; the parameters_ traversal here mirrors that.
+    if (!in_flight_compressed_.empty() && config_.grad_compressor) {
+        size_t comp_idx = 0;
+        for (auto& param : parameters_) {
+            if (!param->has_grad()) continue;
+            if (comp_idx >= in_flight_compressed_.size()) break;
+            Tensor grad = config_.grad_compressor->decompress(in_flight_compressed_[comp_idx]);
+            param->set_grad(grad);
+            ++comp_idx;
+        }
+        in_flight_compressed_.clear();
+    }
+
+    async_all_reduce_in_flight_ = false;
 }
 
 auto ZeROStage1Optimizer::all_gather_parameters() -> void {
@@ -591,26 +935,62 @@ auto ZeROStage1Optimizer::all_gather_parameters() -> void {
         throw std::runtime_error("Process group not initialized");
     }
 
-    // All-gather parameters from all ranks
+    // Coalesce per-parameter broadcasts into a single broadcast per source rank. The legacy
+    // pattern issued one collective per parameter — for a 1000-parameter model that's 1000
+    // collective calls per step, dominated by per-call latency. With this change we issue
+    // exactly `world_size` broadcasts regardless of parameter count, so the latency floor
+    // is fixed instead of scaling with model size.
+    //
+    // Per-rank work:
+    //   - Owner: flatten local params into a contiguous fp/int buffer and broadcast it.
+    //   - Non-owner: allocate a same-shaped destination, receive the broadcast, then
+    //     unflatten back into per-param tensors (rebinds them to slices of the new buffer).
     for (int rank = 0; rank < config_.world_size; ++rank) {
-        const auto& partition = partitions_[rank];
+        auto& partition = partitions_[rank];
+        if (partition.params.empty()) continue;
 
-        for (const auto& param : partition.params) {
-            // Broadcast from owner rank
-            Tensor param_data = param->tensor();
+        // Snapshot each param's current tensor; for non-owner we'll rebind these in-place
+        // after the broadcast.
+        std::vector<Tensor> param_tensors;
+        param_tensors.reserve(partition.params.size());
+        size_t total_elements = 0;
+        for (auto& p : partition.params) {
+            param_tensors.push_back(p->tensor());
+            total_elements += static_cast<size_t>(p->tensor().numel());
+        }
 
-            // Track transferred bytes for profiling
-            if (profiling_enabled_) {
-                size_t bytes = param_data.numel() * dtype_size(param_data.dtype());
-                std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
-                profiling_stats_.transferred_bytes += bytes;
-            }
+        if (param_tensors.empty()) continue;
 
-            config_.process_group->broadcast(param_data, rank);
+        const DType dt = param_tensors.front().dtype();
+        const Device dev = param_tensors.front().device();
 
-            if (rank != config_.rank) {
-                // Copy broadcasted data to local parameter
-                param->tensor() = param_data;
+        Tensor flat;
+        if (rank == config_.rank) {
+            // Owner: contiguous flatten of local params. flatten_tensors returns a fresh
+            // contiguous buffer containing each param's data back-to-back.
+            flat = flatten_tensors(param_tensors);
+        } else {
+            // Non-owner: just allocate the receive buffer; broadcast() will overwrite.
+            flat = empty({static_cast<int64_t>(total_elements)}, dt, dev);
+        }
+
+        // Profiling accounting matches the legacy contract (bytes-per-broadcast, summed
+        // across calls). Same total bytes as the per-param loop, just fewer calls.
+        if (profiling_enabled_) {
+            const size_t bytes = static_cast<size_t>(flat.numel()) * dtype_size(dt);
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.transferred_bytes += bytes;
+        }
+
+        // ONE broadcast for the whole partition.
+        config_.process_group->broadcast(flat, rank);
+
+        if (rank != config_.rank) {
+            // Unflatten back: each entry in param_tensors gets rebound to a slice+reshape
+            // view of `flat`. Then write each new tensor through to the Variable.
+            unflatten_into(flat, param_tensors);
+            for (size_t i = 0; i < partition.params.size(); ++i) {
+                partition.params[i]->tensor() = param_tensors[i];
             }
         }
     }
@@ -689,36 +1069,61 @@ auto ZeROStage1Optimizer::update_partition_adam(
             continue;
         }
 
-        const Tensor& grad = grad_opt.value();
+        // Pick the tensor we'll actually do the optimizer math on. With use_master_fp32 the
+        // master copy is fp32; we read+write it here, then downcast back into param->tensor()
+        // at the end of the iteration. Without master we operate directly on param->tensor()
+        // (legacy behaviour).
+        bool has_master = config_.use_master_fp32
+                       && i < partition.master_params.size()
+                       && partition.master_params[i].numel() > 0;
+        Tensor& target = has_master ? partition.master_params[i] : param->tensor();
+        DType target_dtype = target.dtype();
+
+        // Cast grad up to target dtype if necessary (fp16 grad → fp32 master math).
+        const Tensor& raw_grad = grad_opt.value();
+        Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
 
         // Apply weight decay (L2 regularization)
         Tensor grad_with_decay = grad;
         if (weight_decay != 0.0) {
-            grad_with_decay = grad + param->tensor() * static_cast<float>(weight_decay);
+            grad_with_decay = grad + target * weight_decay;
         }
 
-        // Update biased first moment estimate
+        // Update biased first moment estimate IN PLACE: m = beta1*m + (1-beta1)*g_eff
+        // Saves one full-partition allocation per step versus the rebind-via-OoP form.
         Tensor& momentum = partition.momentum[i];
-        momentum = momentum * static_cast<float>(beta1) +
-                   grad_with_decay * static_cast<float>(1.0 - beta1);
+        mul_(momentum, scalar_like(beta1, momentum));
+        {
+            Tensor scaled_g = grad_with_decay * (1.0 - beta1);
+            add_(momentum, scaled_g);
+        }
 
-        // Update biased second moment estimate
+        // Update biased second moment estimate IN PLACE: v = beta2*v + (1-beta2)*g^2
         Tensor& variance = partition.variance[i];
-        variance = variance * static_cast<float>(beta2) +
-                   (grad_with_decay * grad_with_decay) * static_cast<float>(1.0 - beta2);
+        mul_(variance, scalar_like(beta2, variance));
+        {
+            Tensor g_sq_scaled = grad_with_decay * grad_with_decay;
+            mul_(g_sq_scaled, scalar_like(1.0 - beta2, g_sq_scaled));
+            add_(variance, g_sq_scaled);
+        }
 
-        // Compute bias-corrected moment estimates
+        // Compute bias-corrected moment estimates (same as legacy code)
         double bias_correction1 = 1.0 - std::pow(beta1, step_count_);
         double bias_correction2 = 1.0 - std::pow(beta2, step_count_);
 
-        Tensor momentum_corrected = momentum * static_cast<float>(1.0 / bias_correction1);
-        Tensor variance_corrected = variance * static_cast<float>(1.0 / bias_correction2);
+        Tensor momentum_corrected = momentum * (1.0 / bias_correction1);
+        Tensor variance_corrected = variance * (1.0 / bias_correction2);
 
         // Compute step: theta = theta - lr * m_hat / (sqrt(v_hat) + eps)
-        Tensor denom = sqrt(variance_corrected) + static_cast<float>(eps);
+        Tensor denom = sqrt(variance_corrected) + eps;
 
-        // Update parameters directly (same pattern as standard Adam)
-        param->tensor() = param->tensor() - div(momentum_corrected, denom) * static_cast<float>(lr);
+        // Update target (master if present, else the user-visible param) directly.
+        target = target - div(momentum_corrected, denom) * lr;
+
+        // Sync master → fp16/bf16 user param so the next forward sees the updated weights.
+        if (has_master) {
+            param->tensor() = target.to(param->tensor().dtype());
+        }
     }
 }
 
@@ -745,34 +1150,55 @@ auto ZeROStage1Optimizer::update_partition_adamw(
             continue;
         }
 
-        const Tensor& grad = grad_opt.value();
+        // Master-fp32 plumbing: same idea as in update_partition_adam — when enabled, do the
+        // optimizer math against the fp32 master and downcast to the user's fp16/bf16 param at
+        // the end. Without master, operate directly on the param tensor (legacy behaviour).
+        bool has_master = config_.use_master_fp32
+                       && i < partition.master_params.size()
+                       && partition.master_params[i].numel() > 0;
+        Tensor& target = has_master ? partition.master_params[i] : param->tensor();
+        DType target_dtype = target.dtype();
 
-        // Update biased first moment estimate
+        const Tensor& raw_grad = grad_opt.value();
+        Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
+
         Tensor& momentum = partition.momentum[i];
-        momentum = momentum * static_cast<float>(beta1) +
-                   grad * static_cast<float>(1.0 - beta1);
-
-        // Update biased second moment estimate
         Tensor& variance = partition.variance[i];
-        variance = variance * static_cast<float>(beta2) +
-                   (grad * grad) * static_cast<float>(1.0 - beta2);
 
-        // Compute bias-corrected moment estimates
+        // m = beta1*m + (1-beta1)*grad   (in-place; AdamW does *not* fold weight decay into grad)
+        mul_(momentum, scalar_like(beta1, momentum));
+        {
+            Tensor scaled_g = grad * (1.0 - beta1);
+            add_(momentum, scaled_g);
+        }
+
+        // v = beta2*v + (1-beta2)*grad^2  (in-place)
+        mul_(variance, scalar_like(beta2, variance));
+        {
+            Tensor g_sq_scaled = grad * grad;
+            mul_(g_sq_scaled, scalar_like(1.0 - beta2, g_sq_scaled));
+            add_(variance, g_sq_scaled);
+        }
+
+        // Final update: keep the legacy numerical sequence so the loss trajectory matches the
+        // pre-refactor implementation bit-for-bit.
         double bias_correction1 = 1.0 - std::pow(beta1, step_count_);
         double bias_correction2 = 1.0 - std::pow(beta2, step_count_);
 
-        Tensor momentum_corrected = momentum * static_cast<float>(1.0 / bias_correction1);
-        Tensor variance_corrected = variance * static_cast<float>(1.0 / bias_correction2);
+        Tensor momentum_corrected = momentum * (1.0 / bias_correction1);
+        Tensor variance_corrected = variance * (1.0 / bias_correction2);
+        Tensor denom = sqrt(variance_corrected) + eps;
 
-        // Compute denominator
-        Tensor denom = sqrt(variance_corrected) + static_cast<float>(eps);
-
-        // AdamW: Apply decoupled weight decay + optimizer step
         if (weight_decay != 0.0) {
-            param->tensor() = param->tensor() * static_cast<float>(1.0 - lr * weight_decay) -
-                            div(momentum_corrected, denom) * static_cast<float>(lr);
+            // AdamW: decoupled weight decay
+            target = target * (1.0 - lr * weight_decay) -
+                     div(momentum_corrected, denom) * lr;
         } else {
-            param->tensor() = param->tensor() - div(momentum_corrected, denom) * static_cast<float>(lr);
+            target = target - div(momentum_corrected, denom) * lr;
+        }
+
+        if (has_master) {
+            param->tensor() = target.to(param->tensor().dtype());
         }
     }
 }
@@ -795,53 +1221,150 @@ auto ZeROStage1Optimizer::update_partition_sgd(
             continue;
         }
 
-        const Tensor& grad = grad_opt.value();
+        // Master-fp32 plumbing — see update_partition_adam for rationale.
+        bool has_master = config_.use_master_fp32
+                       && i < partition.master_params.size()
+                       && partition.master_params[i].numel() > 0;
+        Tensor& target = has_master ? partition.master_params[i] : param->tensor();
+        DType target_dtype = target.dtype();
+
+        const Tensor& raw_grad = grad_opt.value();
+        Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
 
         // Apply weight decay (L2 regularization)
         Tensor grad_with_decay = grad;
         if (weight_decay != 0.0) {
-            grad_with_decay = grad + param->tensor() * static_cast<float>(weight_decay);
+            grad_with_decay = grad + target * weight_decay;
         }
 
         if (momentum_coef != 0.0) {
-            // SGD with momentum
+            // SGD with momentum (in-place buffer update; param update via legacy OoP form
+            // because in-place ops on the parameter tensor are blocked by requires_grad).
             Tensor& momentum = partition.momentum[i];
-            momentum = momentum * static_cast<float>(momentum_coef) + grad_with_decay;
-            param->tensor() = param->tensor() - momentum * static_cast<float>(lr);
+            mul_(momentum, scalar_like(momentum_coef, momentum));
+            add_(momentum, grad_with_decay);
+            target = target - momentum * lr;
         } else {
             // Vanilla SGD
-            param->tensor() = param->tensor() - grad_with_decay * static_cast<float>(lr);
+            target = target - grad_with_decay * lr;
+        }
+
+        if (has_master) {
+            param->tensor() = target.to(param->tensor().dtype());
         }
     }
 }
 
 auto ZeROStage1Optimizer::fetch_states_to_gpu() -> void {
-    if (!offload_engine_ || !states_on_cpu_) {
+    if (!states_on_cpu_) {
         return;  // Nothing to fetch if states are already on GPU
     }
 
     auto& partition = local_partition();
-
-    // Get target GPU device from parameters
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
+
+    // NVMe path: read each state blob from disk, dequantize if applicable, place on the
+    // parameter device. Master copies always stayed in memory (they were never written to
+    // disk) so we don't touch them here.
+    if (config_.offload_to_nvme) {
+        size_t total_bytes_nvme = 0;
+        const DType dequant_target = DType::Float32;
+
+        auto load_slot = [&](Tensor& state,
+                             StatePartition::DiskSlot& slot,
+                             Tensor& scale_inmem,
+                             StatePartition::DiskSlot& scale_slot) {
+            if (!slot.on_disk()) return;
+            // Read the int8 payload (or raw fp32 if not quantized) into the param device.
+            Tensor data = read_tensor_blob(slot.path, slot.shape, slot.dtype, param_device);
+            if (scale_slot.on_disk()) {
+                Tensor scale = read_tensor_blob(scale_slot.path, scale_slot.shape, scale_slot.dtype, param_device);
+                state = dequantize_from_int8(data, scale, dequant_target);
+                scale_slot.path.clear();
+                scale_inmem = Tensor();  // make sure no stale in-mem scale lingers
+            } else {
+                state = data;
+            }
+            slot.path.clear();
+            total_bytes_nvme += static_cast<size_t>(state.numel()) * dtype_size(state.dtype());
+        };
+
+        Tensor dummy_inmem;
+        StatePartition::DiskSlot dummy_slot;
+
+        for (size_t i = 0; i < partition.momentum.size(); ++i) {
+            Tensor& m_scale_inmem = (i < partition.momentum_scales.size())
+                ? partition.momentum_scales[i] : dummy_inmem;
+            StatePartition::DiskSlot& m_scale_slot = (i < partition.momentum_scale_disk.size())
+                ? partition.momentum_scale_disk[i] : dummy_slot;
+            load_slot(partition.momentum[i], partition.momentum_disk[i],
+                      m_scale_inmem, m_scale_slot);
+
+            Tensor& v_scale_inmem = (i < partition.variance_scales.size())
+                ? partition.variance_scales[i] : dummy_inmem;
+            StatePartition::DiskSlot& v_scale_slot = (i < partition.variance_scale_disk.size())
+                ? partition.variance_scale_disk[i] : dummy_slot;
+            load_slot(partition.variance[i], partition.variance_disk[i],
+                      v_scale_inmem, v_scale_slot);
+        }
+
+        states_on_cpu_ = false;
+        if (profiling_enabled_) {
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offloaded_bytes += total_bytes_nvme;
+        }
+        return;
+    }
+
+    // CPU offload path: requires offload_engine and a non-CPU param device.
+    if (!offload_engine_) {
+        return;
+    }
     if (param_device.type == Device::Type::CPU) {
         return;  // Skip for CPU-only training
     }
 
+    // Effective dtype to dequantize back to. We only quantize fp32 states (see
+    // offload_states_to_cpu), so dequantization always targets fp32.
+    const DType dequant_target = DType::Float32;
+
+    auto load_and_maybe_dequantize = [&](Tensor& state, Tensor& scale_slot) {
+        if (scale_slot.numel() > 0) {
+            // Quantized payload: pull both pieces to GPU, dequantize, drop the scale slot.
+            Tensor gpu_int8 = offload_engine_->load_to_gpu(state, param_device);
+            Tensor gpu_scale = offload_engine_->load_to_gpu(scale_slot, param_device);
+            state = dequantize_from_int8(gpu_int8, gpu_scale, dequant_target);
+            scale_slot = Tensor();  // back to "not quantized"
+        } else {
+            state = offload_engine_->load_to_gpu(state, param_device);
+        }
+    };
+
     // Synchronously load all states to GPU and update tensor references
     size_t total_bytes = 0;
     for (size_t i = 0; i < partition.momentum.size(); ++i) {
-        // Load momentum to GPU
-        Tensor gpu_momentum = offload_engine_->load_to_gpu(partition.momentum[i], param_device);
-        partition.momentum[i] = gpu_momentum;
+        Tensor* m_scale = (i < partition.momentum_scales.size()) ? &partition.momentum_scales[i] : nullptr;
+        Tensor* v_scale = (i < partition.variance_scales.size()) ? &partition.variance_scales[i] : nullptr;
+        Tensor dummy;
 
-        // Load variance to GPU
-        Tensor gpu_variance = offload_engine_->load_to_gpu(partition.variance[i], param_device);
-        partition.variance[i] = gpu_variance;
+        load_and_maybe_dequantize(partition.momentum[i], m_scale ? *m_scale : dummy);
+        load_and_maybe_dequantize(partition.variance[i], v_scale ? *v_scale : dummy);
 
         if (profiling_enabled_) {
-            total_bytes += gpu_momentum.numel() * dtype_size(gpu_momentum.dtype());
-            total_bytes += gpu_variance.numel() * dtype_size(gpu_variance.dtype());
+            total_bytes += partition.momentum[i].numel() * dtype_size(partition.momentum[i].dtype());
+            total_bytes += partition.variance[i].numel() * dtype_size(partition.variance[i].dtype());
+        }
+    }
+
+    // Master fp32 copies live alongside momentum/variance — fetch them too so the optimizer
+    // step has something to read+write. Skip slots where the master is empty (param was
+    // already fp32 at init time, so we never allocated a master).
+    for (size_t i = 0; i < partition.master_params.size(); ++i) {
+        if (partition.master_params[i].numel() == 0) continue;
+        Tensor gpu_master = offload_engine_->load_to_gpu(partition.master_params[i], param_device);
+        partition.master_params[i] = gpu_master;
+        if (profiling_enabled_) {
+            total_bytes += gpu_master.numel() * dtype_size(gpu_master.dtype());
         }
     }
 
@@ -855,11 +1378,84 @@ auto ZeROStage1Optimizer::fetch_states_to_gpu() -> void {
 }
 
 auto ZeROStage1Optimizer::offload_states_to_cpu() -> void {
-    if (!offload_engine_ || states_on_cpu_) {
-        return;  // Nothing to offload if states are already on CPU
+    if (states_on_cpu_) {
+        return;  // Nothing to offload if states are already off-GPU (CPU or NVMe)
     }
 
     auto& partition = local_partition();
+
+    // NVMe path: write each state (optionally quantized) to disk, free the in-memory
+    // tensor. The per-tensor file path was assigned during initialize_optimizer_states.
+    if (config_.offload_to_nvme) {
+        const bool quantize = config_.quantize_offloaded_states_int8;
+        size_t total_bytes_nvme = 0;
+        std::filesystem::path nvme_dir = resolve_nvme_dir(config_.nvme_path);
+
+        auto write_slot = [&](Tensor& state,
+                              StatePartition::DiskSlot& slot,
+                              size_t slot_idx,
+                              std::string_view state_name,
+                              Tensor& scale_inmem,
+                              StatePartition::DiskSlot* scale_slot,
+                              std::string_view scale_name) {
+            if (state.numel() == 0) return;  // already on disk; idempotent
+            QuantizedInt8 qs;
+            const Tensor* data_to_write = &state;
+            std::vector<int64_t> shape(state.shape().begin(), state.shape().end());
+            DType dt = state.dtype();
+            if (quantize && state.dtype() == DType::Float32) {
+                qs = quantize_to_int8(state);
+                data_to_write = &qs.data;
+                dt = qs.data.dtype();
+            }
+            slot.path  = state_blob_path(nvme_dir, partition.rank, slot_idx, state_name).string();
+            slot.shape = std::move(shape);
+            slot.dtype = dt;
+            total_bytes_nvme += write_tensor_blob(*data_to_write, slot.path);
+
+            if (qs.scale.numel() > 0 && scale_slot != nullptr) {
+                scale_slot->path  = state_blob_path(nvme_dir, partition.rank, slot_idx, scale_name).string();
+                scale_slot->shape = std::vector<int64_t>(qs.scale.shape().begin(), qs.scale.shape().end());
+                scale_slot->dtype = qs.scale.dtype();
+                write_tensor_blob(qs.scale, scale_slot->path);
+                scale_inmem = Tensor();  // ensure no stale in-memory scale
+            }
+
+            // Free the GPU/CPU-resident state tensor.
+            state = Tensor();
+        };
+
+        Tensor dummy_inmem;
+        StatePartition::DiskSlot dummy_slot;
+
+        for (size_t i = 0; i < partition.momentum.size(); ++i) {
+            Tensor& m_scale_inmem = (i < partition.momentum_scales.size())
+                ? partition.momentum_scales[i] : dummy_inmem;
+            StatePartition::DiskSlot* m_scale_slot = (i < partition.momentum_scale_disk.size())
+                ? &partition.momentum_scale_disk[i] : nullptr;
+            write_slot(partition.momentum[i], partition.momentum_disk[i], i,
+                       "momentum", m_scale_inmem, m_scale_slot, "momentum_scale");
+
+            Tensor& v_scale_inmem = (i < partition.variance_scales.size())
+                ? partition.variance_scales[i] : dummy_inmem;
+            StatePartition::DiskSlot* v_scale_slot = (i < partition.variance_scale_disk.size())
+                ? &partition.variance_scale_disk[i] : nullptr;
+            write_slot(partition.variance[i], partition.variance_disk[i], i,
+                       "variance", v_scale_inmem, v_scale_slot, "variance_scale");
+        }
+
+        states_on_cpu_ = true;
+        if (profiling_enabled_) {
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offloaded_bytes += total_bytes_nvme;
+            profiling_stats_.num_offloads++;
+        }
+        return;
+    }
+
+    if (!offload_engine_) {
+        return;
+    }
 
     // Only offload if parameters are on GPU (CPU offload only makes sense for GPU training)
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
@@ -867,20 +1463,47 @@ auto ZeROStage1Optimizer::offload_states_to_cpu() -> void {
         return;  // Skip for CPU-only training
     }
 
+    // Whether int8 quantization should be applied this round. Only quantize fp32 states —
+    // fp16/bf16 starting points lose too much precision when squashed to int8, and fp64
+    // states are rare enough that we'd rather leave them untouched.
+    const bool quantize = config_.quantize_offloaded_states_int8;
+
+    auto maybe_quantize_and_offload = [&](Tensor& state, Tensor& scale_slot) {
+        if (quantize && state.dtype() == DType::Float32) {
+            // Quantize while still on GPU (keeps the fp32→int8 conversion off the host),
+            // then offload the smaller int8 payload + scalar scale.
+            QuantizedInt8 qs = quantize_to_int8(state);
+            state = offload_engine_->offload_to_cpu(qs.data);
+            scale_slot = offload_engine_->offload_to_cpu(qs.scale);
+        } else {
+            state = offload_engine_->offload_to_cpu(state);
+        }
+    };
+
     // Synchronously offload all states to CPU and update tensor references
     size_t total_bytes = 0;
     for (size_t i = 0; i < partition.momentum.size(); ++i) {
-        // Offload momentum to CPU
-        Tensor cpu_momentum = offload_engine_->offload_to_cpu(partition.momentum[i]);
-        partition.momentum[i] = cpu_momentum;
+        Tensor* m_scale = (i < partition.momentum_scales.size()) ? &partition.momentum_scales[i] : nullptr;
+        Tensor* v_scale = (i < partition.variance_scales.size()) ? &partition.variance_scales[i] : nullptr;
+        Tensor dummy;  // for paths where the partition didn't allocate scale slots
 
-        // Offload variance to CPU
-        Tensor cpu_variance = offload_engine_->offload_to_cpu(partition.variance[i]);
-        partition.variance[i] = cpu_variance;
+        maybe_quantize_and_offload(partition.momentum[i], m_scale ? *m_scale : dummy);
+        maybe_quantize_and_offload(partition.variance[i], v_scale ? *v_scale : dummy);
 
         if (profiling_enabled_) {
-            total_bytes += cpu_momentum.numel() * dtype_size(cpu_momentum.dtype());
-            total_bytes += cpu_variance.numel() * dtype_size(cpu_variance.dtype());
+            total_bytes += partition.momentum[i].numel() * dtype_size(partition.momentum[i].dtype());
+            total_bytes += partition.variance[i].numel() * dtype_size(partition.variance[i].dtype());
+            // Scales are tiny (1 element each); skip from the bandwidth accounting.
+        }
+    }
+
+    // Master fp32 copies follow the same offload lifecycle as momentum/variance.
+    for (size_t i = 0; i < partition.master_params.size(); ++i) {
+        if (partition.master_params[i].numel() == 0) continue;
+        Tensor cpu_master = offload_engine_->offload_to_cpu(partition.master_params[i]);
+        partition.master_params[i] = cpu_master;
+        if (profiling_enabled_) {
+            total_bytes += cpu_master.numel() * dtype_size(cpu_master.dtype());
         }
     }
 
@@ -910,8 +1533,13 @@ ZeROStage2Optimizer::ZeROStage2Optimizer(
 }
 
 ZeROStage2Optimizer::~ZeROStage2Optimizer() {
-    // Cleanup is automatic via smart pointers
-    // Hooks will be cleaned up by the autograd system
+    // Detach autograd hooks before any of our state (this, buckets) goes away — otherwise
+    // a backward() that runs after the optimizer is destroyed would dereference freed memory.
+    try {
+        unregister_backward_hooks();
+    } catch (...) {
+        // Destructors must not throw. Hook removal is best-effort.
+    }
 }
 
 auto ZeROStage2Optimizer::step_impl() -> void {
@@ -927,7 +1555,7 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     // No need for all-reduce like in Stage 1
 
     // Step 2: Fetch optimizer states from CPU if offloaded
-    if (config_.offload_to_cpu && offload_engine_) {
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         auto offload_start = std::chrono::steady_clock::now();
         fetch_states_to_gpu();
         if (profiling_enabled_) {
@@ -950,7 +1578,7 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     }
 
     // Step 4: Offload states back to CPU if enabled
-    if (config_.offload_to_cpu && offload_engine_) {
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         auto offload_start = std::chrono::steady_clock::now();
         offload_states_to_cpu();
         if (profiling_enabled_) {
@@ -1017,6 +1645,8 @@ auto ZeROStage2Optimizer::step_impl() -> void {
 }
 
 auto ZeROStage2Optimizer::register_backward_hooks() -> void {
+    std::lock_guard<std::mutex> lock(buckets_mutex_);
+
     if (hooks_registered_) {
         return;  // Already registered
     }
@@ -1026,29 +1656,61 @@ auto ZeROStage2Optimizer::register_backward_hooks() -> void {
         return;  // Hooks disabled in config
     }
 
-    // Register a hook for each parameter in each bucket
-    // These hooks will be called during backward pass when gradients are computed
+    // Register a hook on every parameter Variable. The autograd engine calls these
+    // during backward, *before* gradient accumulation, with the freshly-computed grad.
+    // We stash the grad into the bucket's per-param slot and, once the bucket is full,
+    // fire reduce-scatter so it can overlap with the rest of backward.
     for (size_t bucket_idx = 0; bucket_idx < gradient_buckets_.size(); ++bucket_idx) {
         auto& bucket = gradient_buckets_[bucket_idx];
 
-        for (size_t param_idx = 0; param_idx < bucket.params.size(); ++param_idx) {
-            auto param = bucket.params[param_idx];
+        bucket.gradient_buffers.assign(bucket.params.size(), Tensor());
+        bucket.hook_ids.assign(bucket.params.size(), 0);
+        bucket.gradients_received = 0;
+        bucket.ready = false;
 
-            // In a production implementation, this would register with the autograd system:
-            // param->register_hook([this, bucket_idx, param_idx](const Tensor& grad) {
-            //     this->gradient_hook(bucket_idx, param_idx);
-            //     return grad;  // Return gradient unchanged
-            // });
-            //
-            // The hook mechanism would automatically call gradient_hook() during backward()
-            // when this parameter's gradient is computed, enabling automatic reduce-scatter.
-            //
-            // For manual triggering (e.g., in tests), call gradient_hook() explicitly
-            // after backward pass completes for each parameter.
+        for (size_t param_idx = 0; param_idx < bucket.params.size(); ++param_idx) {
+            auto& param = bucket.params[param_idx];
+            if (!param) {
+                continue;
+            }
+
+            // Capture indices by value; capture `this` raw because the destructor
+            // unregisters hooks before optimizer state is destroyed (see ~ZeROStage2Optimizer).
+            size_t hook_id = param->register_hook(
+                [this, bucket_idx, param_idx](const Tensor& grad) -> Tensor {
+                    this->gradient_hook(bucket_idx, param_idx, grad);
+                    return grad;  // Pass-through; reduce-scatter has stashed its own copy.
+                }
+            );
+
+            bucket.hook_ids[param_idx] = hook_id;
         }
     }
 
     hooks_registered_ = true;
+}
+
+auto ZeROStage2Optimizer::unregister_backward_hooks() -> void {
+    std::lock_guard<std::mutex> lock(buckets_mutex_);
+
+    if (!hooks_registered_) {
+        return;
+    }
+
+    for (auto& bucket : gradient_buckets_) {
+        for (size_t i = 0; i < bucket.params.size() && i < bucket.hook_ids.size(); ++i) {
+            auto& param = bucket.params[i];
+            if (param) {
+                param->unregister_hook(bucket.hook_ids[i]);
+            }
+        }
+        bucket.hook_ids.clear();
+        bucket.gradient_buffers.clear();
+        bucket.gradients_received = 0;
+        bucket.ready = false;
+    }
+
+    hooks_registered_ = false;
 }
 
 auto ZeROStage2Optimizer::get_bucket_stats() const -> BucketStats {
@@ -1154,11 +1816,26 @@ auto ZeROStage2Optimizer::create_gradient_buckets() -> void {
         gradient_buckets_ = std::move(new_buckets);
     }
 
-    // Initialize gradient buffers for each bucket
+    // Initialize gradient buffers for each bucket and pre-compute the per-param offsets
+    // into the persistent flat_buffer. The flat_buffer itself is allocated lazily on the
+    // first reduce_scatter_gradients call (we don't yet know dtype/device until we see a
+    // real grad — and for tests that never fire the hook, we shouldn't allocate at all).
     for (auto& bucket : gradient_buckets_) {
         bucket.gradient_buffers.reserve(bucket.params.size());
         bucket.gradients_received = 0;
         bucket.ready = false;
+
+        bucket.param_offsets_elem.clear();
+        bucket.param_sizes_elem.clear();
+        bucket.param_offsets_elem.reserve(bucket.params.size());
+        bucket.param_sizes_elem.reserve(bucket.params.size());
+        int64_t offset = 0;
+        for (const auto& param : bucket.params) {
+            int64_t n = param ? static_cast<int64_t>(param->tensor().numel()) : 0;
+            bucket.param_offsets_elem.push_back(offset);
+            bucket.param_sizes_elem.push_back(n);
+            offset += n;
+        }
     }
 }
 
@@ -1173,26 +1850,50 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
 
     auto scatter_start = std::chrono::steady_clock::now();
 
-    // Collect all gradients from the bucket
+    // Collect all gradients from the bucket. Prefer the per-bucket stash populated by
+    // gradient_hook(...) (autograd-driven path), since param->grad() may not be populated yet
+    // when the hook for the LAST param fires (engine.cpp accumulates *after* hooks run).
+    // Fall back to param->grad() for callers who never installed hooks.
     std::vector<Tensor> gradients;
     gradients.reserve(bucket.params.size());
 
     size_t total_bytes = 0;
-    for (const auto& param : bucket.params) {
-        if (!param->has_grad()) {
-            throw std::runtime_error("Parameter missing gradient in reduce-scatter");
+    bool buffers_have_data = false;
+    {
+        std::lock_guard<std::mutex> stash_lock(*bucket.mutex);
+        if (bucket.gradient_buffers.size() == bucket.params.size()) {
+            buffers_have_data = std::all_of(
+                bucket.gradient_buffers.begin(), bucket.gradient_buffers.end(),
+                [](const Tensor& t) { return t.numel() > 0; }
+            );
         }
-
-        const auto& grad_opt = param->grad();
-        if (!grad_opt.has_value()) {
-            throw std::runtime_error("Parameter gradient not computed in reduce-scatter");
+        if (buffers_have_data) {
+            for (const auto& g : bucket.gradient_buffers) {
+                gradients.push_back(g);
+                if (profiling_enabled_) {
+                    total_bytes += g.numel() * dtype_size(g.dtype());
+                }
+            }
         }
+    }
 
-        Tensor grad = grad_opt.value();
-        gradients.push_back(grad);
+    if (!buffers_have_data) {
+        for (const auto& param : bucket.params) {
+            if (!param->has_grad()) {
+                throw std::runtime_error("Parameter missing gradient in reduce-scatter");
+            }
 
-        if (profiling_enabled_) {
-            total_bytes += grad.numel() * dtype_size(grad.dtype());
+            const auto& grad_opt = param->grad();
+            if (!grad_opt.has_value()) {
+                throw std::runtime_error("Parameter gradient not computed in reduce-scatter");
+            }
+
+            Tensor grad = grad_opt.value();
+            gradients.push_back(grad);
+
+            if (profiling_enabled_) {
+                total_bytes += grad.numel() * dtype_size(grad.dtype());
+            }
         }
     }
 
@@ -1200,63 +1901,63 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         return;
     }
 
-    // Flatten gradients into contiguous buffer
-    Tensor flat_grads = flatten_tensors(gradients);
+    // Stage gradients into the bucket's persistent flat buffer instead of allocating a fresh
+    // tensor every step. The buffer is sized once (lazily, when we know dtype/device from the
+    // first real grad) and reused for the lifetime of the bucket. Per training step this
+    // eliminates one full-bucket-sized allocation (the legacy flatten_tensors result) and one
+    // partition-sized allocation (the legacy zeros() output of reduce_scatter).
+    int64_t total_elements = 0;
+    for (int64_t n : bucket.param_sizes_elem) total_elements += n;
 
-    // For single-process mode (world_size=1), just use the gradients as-is
-    // For multi-process, we would need true reduce-scatter collective
-    Tensor local_grad_sum;
+    DType buf_dtype = gradients.front().dtype();
+    Device buf_device = gradients.front().device();
 
-    if (config_.world_size == 1) {
-        // Single process: no communication needed
-        local_grad_sum = flat_grads;
+    if (bucket.flat_buffer.numel() != total_elements ||
+        bucket.flat_buffer.dtype() != buf_dtype ||
+        bucket.flat_buffer.device() != buf_device) {
+        bucket.flat_buffer = zeros({total_elements}, buf_dtype, buf_device);
     } else {
-        // Multi-process: perform reduce-scatter to partition gradients
-        if (config_.process_group) {
-            // Split flat gradients into world_size chunks for reduce-scatter
-            // This is the core of Stage 2 - gradient partitioning!
-            int64_t total_elements = flat_grads.numel();
-            int64_t chunk_size = (total_elements + config_.world_size - 1) / config_.world_size;
-
-            std::vector<Tensor> gradient_chunks;
-            gradient_chunks.reserve(config_.world_size);
-
-            for (int rank = 0; rank < config_.world_size; ++rank) {
-                int64_t start_idx = rank * chunk_size;
-                int64_t end_idx = std::min(start_idx + chunk_size, total_elements);
-
-                if (start_idx < total_elements) {
-                    // Extract chunk for this rank
-                    Tensor chunk = flat_grads.slice(0, start_idx, end_idx);
-                    gradient_chunks.push_back(chunk);
-                } else {
-                    // Padding chunk if we've run out of elements
-                    Tensor empty_chunk = zeros({0}, flat_grads.dtype(), flat_grads.device());
-                    gradient_chunks.push_back(empty_chunk);
-                }
-            }
-
-            // Allocate output tensor for this rank's portion
-            int64_t local_start = config_.rank * chunk_size;
-            int64_t local_end = std::min(local_start + chunk_size, total_elements);
-            int64_t local_size = std::max(int64_t(0), local_end - local_start);
-
-            local_grad_sum = zeros({local_size}, flat_grads.dtype(), flat_grads.device());
-
-            // Reduce-scatter: Each rank receives 1/N of the reduced gradients
-            // After this, local_grad_sum contains the SUM of all ranks' contributions
-            // for the gradient chunk owned by this rank
-            config_.process_group->reduce_scatter(gradient_chunks, local_grad_sum,
-                                                 distributed::ReduceOp::SUM);
-        } else {
-            // No process group configured - treat as single rank
-            local_grad_sum = flat_grads;
-        }
+        // Reset stale residue from the previous step before re-staging.
+        bucket.flat_buffer.zero_();
     }
 
-    // Unflatten the local portion back into individual gradients
-    // Only update gradients for parameters owned by this rank
-    if (bucket.target_rank == config_.rank && local_grad_sum.numel() > 0) {
+    // Stage each grad into its slot. The buffer is currently zero everywhere, so add_ acts
+    // as a copy (zero + grad = grad) without needing a public copy_ API.
+    for (size_t i = 0; i < gradients.size(); ++i) {
+        const Tensor& g = gradients[i];
+        if (i >= bucket.param_offsets_elem.size() || g.numel() == 0) continue;
+        int64_t off = bucket.param_offsets_elem[i];
+        int64_t sz  = bucket.param_sizes_elem[i];
+        if (g.numel() != sz) {
+            throw std::runtime_error("reduce_scatter_gradients: gradient size mismatch");
+        }
+        Tensor slot = bucket.flat_buffer.slice(0, off, off + sz);
+        Tensor flat_grad = g.contiguous().view({-1});
+        add_(slot, flat_grad);
+    }
+
+    Tensor& flat_grads = bucket.flat_buffer;
+
+    // Run the collective. Replace the legacy chunked reduce_scatter with a single `reduce`
+    // into the bucket's owner rank — that's what ZeRO-Stage-2 actually wants. The legacy
+    // path split the bucket into world_size equal chunks and gave each rank one chunk back,
+    // then asserted (incorrectly) that the owner's chunk equalled the bucket's full
+    // gradient. With shapes mismatched, the subsequent `unflatten_into(local_grad_sum,
+    // full_grads)` would have thrown for any world_size > 1 — only single-process tests
+    // ever reached the post-collective code path, masking the bug. The reduce form is also
+    // strictly less network traffic on the owner side: each non-owner sends its bucket
+    // once, the owner receives + sums, instead of all-to-all chunk distribution.
+    if (config_.world_size > 1 && config_.process_group) {
+        config_.process_group->reduce(flat_grads, bucket.target_rank,
+                                      distributed::ReduceOp::SUM);
+        // After this call only `target_rank` has valid data in flat_grads. Non-owners read
+        // nothing from it below — they zero their per-param grads instead.
+    }
+
+    // Owner: flat_grads contains the bucket's full reduced sum. Slice + reshape back into
+    // per-param grads. Non-owner: free per-param grads since this rank is no longer
+    // responsible for them in Stage 2 semantics.
+    if (bucket.target_rank == config_.rank) {
         std::vector<Tensor> local_grads;
         local_grads.reserve(bucket.params.size());
 
@@ -1270,9 +1971,10 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         }
 
         if (!local_grads.empty()) {
-            unflatten_into(local_grad_sum, local_grads);
+            // Sizes now line up: flat_grads.numel() == sum(local_grads numel). The legacy
+            // shape-mismatch crash that #9 in the review flagged is fixed here.
+            unflatten_into(flat_grads, local_grads);
 
-            // Update the parameter gradients with reduced-scattered values
             size_t grad_idx = 0;
             for (auto& param : bucket.params) {
                 if (param->has_grad() && grad_idx < local_grads.size()) {
@@ -1282,18 +1984,24 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
             }
         }
     } else {
-        // This rank doesn't own these parameters - free their gradients
+        // This rank doesn't own these parameters — free their gradients.
         for (auto& param : bucket.params) {
             if (param->has_grad()) {
-                // Set gradient to empty tensor to free memory
                 param->zero_grad();
             }
         }
     }
 
-    // Mark bucket as processed
-    bucket.ready = false;
-    bucket.gradients_received = 0;
+    // Mark bucket as processed and release the stashed gradient references so we don't
+    // pin GPU memory between steps.
+    {
+        std::lock_guard<std::mutex> stash_lock(*bucket.mutex);
+        bucket.ready = false;
+        bucket.gradients_received = 0;
+        for (auto& slot : bucket.gradient_buffers) {
+            slot = Tensor();
+        }
+    }
 
     // Track profiling stats
     if (profiling_enabled_) {
@@ -1308,25 +2016,60 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     }
 }
 
-auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, [[maybe_unused]] size_t param_idx) -> void {
+auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, size_t param_idx) -> void {
+    // Manual-trigger path (used by tests that call gradient_hook explicitly after backward()).
+    // Pull the grad out of param->grad() and forward to the buffer-based overload.
+    if (bucket_idx >= gradient_buckets_.size()) {
+        return;
+    }
+    auto& bucket = gradient_buckets_[bucket_idx];
+    if (param_idx >= bucket.params.size()) {
+        return;
+    }
+    auto& param = bucket.params[param_idx];
+    if (!param || !param->has_grad()) {
+        return;
+    }
+    const auto& grad_opt = param->grad();
+    if (!grad_opt.has_value()) {
+        return;
+    }
+    gradient_hook(bucket_idx, param_idx, grad_opt.value());
+}
+
+auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, size_t param_idx, const Tensor& grad) -> void {
     if (bucket_idx >= gradient_buckets_.size()) {
         return;
     }
 
     auto& bucket = gradient_buckets_[bucket_idx];
+    if (param_idx >= bucket.params.size()) {
+        return;
+    }
 
+    bool fire_reduce_scatter = false;
     {
         std::lock_guard<std::mutex> lock(*bucket.mutex);
+
+        // Lazy-grow buffer storage for paths that didn't go through register_backward_hooks
+        // (e.g. callers driving gradient_hook manually without ever installing hooks).
+        if (bucket.gradient_buffers.size() < bucket.params.size()) {
+            bucket.gradient_buffers.resize(bucket.params.size());
+        }
+
+        // Stash the grad. Storing the Tensor directly is cheap (refcounted Storage); we don't
+        // clone, but we do rely on the autograd hook's contract that `grad` outlives accumulation
+        // and that the next backward will produce a fresh tensor (so we don't alias across steps).
+        bucket.gradient_buffers[param_idx] = grad;
         bucket.gradients_received++;
 
-        // Check if all gradients in bucket are ready
         if (bucket.gradients_received >= bucket.params.size()) {
             bucket.ready = true;
+            fire_reduce_scatter = true;
         }
     }
 
-    // If bucket is ready, perform reduce-scatter
-    if (is_bucket_ready(bucket)) {
+    if (fire_reduce_scatter) {
         reduce_scatter_gradients(bucket);
     }
 }
@@ -1456,9 +2199,13 @@ auto ZeROStage3Optimizer::register_model(Module& model) -> void {
     // Step 2: Register forward/backward hooks on all modules
     register_gather_scatter_hooks(model);
 
-    // Step 3: Pin first and last layer parameters if configured
-    // Note: Module doesn't expose a modules() method, so we skip this for now
-    // This feature can be implemented when Module's submodule traversal is available
+    // Step 3: Build the execution-order graph used by the speculative prefetcher.
+    // Stamps state.layer_index, state.prefetch_priority, and state.dependent_modules
+    // for every registered parameter; pin_first_layer / pin_last_layer also fire here.
+    // The legacy code declined to call this because the comment in the dead helpers
+    // claimed Module didn't expose its submodules — that was stale; Module::modules()
+    // exists and is what we use.
+    build_execution_graph(model);
 }
 
 auto ZeROStage3Optimizer::unregister_model() -> void {
@@ -1472,8 +2219,13 @@ auto ZeROStage3Optimizer::unregister_model() -> void {
     forward_hooks_.clear();
     backward_hooks_.clear();
 
-    // Clear parameter states
-    param_states_.clear();
+    // Clear parameter states. Also drop the LRU cache list — its pointers index into
+    // param_states_ which we're tearing down.
+    {
+        std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+        param_states_.clear();
+        lru_release_order_.clear();
+    }
 
     registered_model_ = nullptr;
 }
@@ -1489,7 +2241,7 @@ auto ZeROStage3Optimizer::step_impl() -> void {
     // 5. NO all-gather needed - parameters stay partitioned!
 
     // Step 2: Fetch optimizer states from CPU if offloaded
-    if (config_.offload_to_cpu && offload_engine_) {
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         fetch_states_to_gpu();
     }
 
@@ -1497,7 +2249,7 @@ auto ZeROStage3Optimizer::step_impl() -> void {
     update_local_partition();
 
     // Step 4: Offload states back to CPU if enabled
-    if (config_.offload_to_cpu && offload_engine_) {
+    if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         offload_states_to_cpu();
     }
 
@@ -1525,10 +2277,14 @@ auto ZeROStage3Optimizer::gather_parameter(Tensor* param) -> Tensor {
 
     auto& state = it->second;
 
-    // Case 1: Already gathered - just increment ref count
+    // Case 1: Already gathered - just increment ref count.
     if (state.is_gathered) {
         state.acquire();
         perf_stats_.prefetch_hits++;
+        // If this param is in the LRU release list (i.e. previously released to refcount 0
+        // but kept in the cache), pull it out — it's in use again and shouldn't be evicted
+        // for the duration of the new lifetime.
+        lru_release_order_.remove(param);
         return state.full_param;
     }
 
@@ -1541,17 +2297,25 @@ auto ZeROStage3Optimizer::gather_parameter(Tensor* param) -> Tensor {
 
     // Case 3: Not gathered - perform synchronous gather
     perf_stats_.prefetch_misses++;
-
-    // Start prefetch for next parameters (speculation)
-    if (prefetch_scheduler_) {
-        // Unlock to allow prefetch scheduler to work
-        param_states_mutex_.unlock();
-        prefetch_next_parameters(nullptr);
-        param_states_mutex_.lock();
-    }
-
-    // Perform synchronous all-gather
     gather_parameter_impl(state);
+
+    // Speculative prefetch: kick off gathers for the next prefetch_depth layers right
+    // now, while the user's compute on this just-gathered param hasn't started. Currently
+    // synchronous (ProcessGroup has no all_gather_async); the win is converting the *next*
+    // gather_parameter call from a cache miss into a cache hit (LRU cache from #12 keeps
+    // the buffer live across the user's release/reacquire cycle).
+    //
+    // The legacy code gated this on `prefetch_scheduler_` which is permanently null —
+    // dead code. We gate on the user-facing `prefetch_depth` config field instead.
+    //
+    // We're still holding param_states_mutex_; prefetch_next_parameters knows to find the
+    // freshly-gathered layer by scanning for the highest layer_index whose is_gathered
+    // flag is true. The lock_guard here protects from re-entry on the same thread, but
+    // because gather_parameter_impl + the speculative loop both run inside this scope,
+    // we use a raw lock-free helper that assumes caller-holds-lock.
+    if (stage3_config_.prefetch_depth > 0) {
+        prefetch_next_parameters_locked();
+    }
 
     return state.full_param;
 }
@@ -1574,18 +2338,36 @@ auto ZeROStage3Optimizer::free_gathered_parameter(Tensor* param) -> void {
         return;
     }
 
-    // Check if pinned
+    // Pinned parameters are kept gathered indefinitely and never enter the LRU cache.
     if (state.pinned_in_memory) {
         return;
     }
 
-    // Free the gathered parameter
-    if (state.is_gathered) {
-        state.full_param = Tensor();  // Release GPU memory
-        state.is_gathered = false;
+    // Cache the gathered buffer rather than freeing it immediately. The next gather of the
+    // same parameter (typical for the next iteration's forward pass on the same module)
+    // gets a refcount bump instead of a fresh all-gather. The LRU list bounds peak gathered
+    // memory at max_cached_params × per-param-size; anything older falls off the front and
+    // gets its full_param released back to the allocator.
+    if (state.is_gathered && param != nullptr) {
+        // Move-or-append-to-tail: the freshest release sits at the back.
+        lru_release_order_.remove(param);
+        lru_release_order_.push_back(param);
 
-        // Update statistics
-        perf_stats_.current_gathered_memory -= state.size_bytes;
+        const size_t cap = static_cast<size_t>(std::max(0, stage3_config_.max_cached_params));
+        while (lru_release_order_.size() > cap) {
+            Tensor* victim = lru_release_order_.front();
+            lru_release_order_.pop_front();
+            auto v_it = param_states_.find(victim);
+            if (v_it == param_states_.end()) continue;
+            auto& v_state = v_it->second;
+            // Defensive: a param can be pinned after it was already in the list. Don't
+            // evict pinned buffers — they're contractually kept gathered.
+            if (v_state.pinned_in_memory || !v_state.is_gathered) continue;
+
+            v_state.full_param = Tensor();
+            v_state.is_gathered = false;
+            perf_stats_.current_gathered_memory -= v_state.size_bytes;
+        }
     }
 
     // Optionally offload local partition to CPU
@@ -1902,7 +2684,10 @@ auto ZeROStage3Optimizer::register_gather_scatter_hooks(Module& model) -> void {
 }
 
 auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
-    if (!config_.process_group) {
+    // Single-rank gather doesn't need a process group at all — the local partition is
+    // already the full parameter, we just stage it into the persistent buffer below.
+    // Only multi-rank gathers actually call the collective.
+    if (config_.world_size > 1 && !config_.process_group) {
         throw std::runtime_error("Process group not initialized");
     }
 
@@ -1911,22 +2696,69 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
     // Use original shape for full parameter (stored before flattening)
     const auto& full_shape = state.original_shape;
 
-    // All-gather: collect partitions from all ranks
+    // Compute total element count for the gathered result. For single-rank we still want a
+    // full-shaped buffer; for multi-rank the all-gather contract is partition_size × world_size.
+    int64_t total_elements = 1;
+    for (int64_t d : full_shape) total_elements *= d;
+
+    const Tensor& src = state.local_partition;
+    DType buf_dtype = src.dtype();
+    Device buf_device = src.device();
+
+    // Lazy-allocate (or re-use) the gather buffer in the parameter's original shape. For
+    // pinned parameters the buffer survives across gathers, so subsequent gathers skip the
+    // allocation entirely. For non-pinned parameters, free_gathered_parameter() resets
+    // full_param to an empty Tensor and we re-allocate here on the next gather. Either way
+    // we eliminate the per-gather cat() allocation + memcpy and the reshape() of the legacy
+    // path, both of which were full-parameter sized.
+    bool need_alloc = state.full_param.numel() != total_elements
+                   || state.full_param.dtype() != buf_dtype
+                   || state.full_param.device() != buf_device;
+    if (need_alloc) {
+        state.full_param = empty(full_shape, buf_dtype, buf_device);
+    }
+
+    // Stage the gathered data into the persistent buffer. We zero each per-rank slot then
+    // add_ the rank's chunk; with no public copy_() API this is the cheapest way to write
+    // into a contiguous slice without an intermediate allocation.
+    Tensor flat_view = state.full_param.view({-1});
+
     if (config_.world_size > 1) {
         std::vector<Tensor> gathered_parts(config_.world_size);
-        config_.process_group->all_gather(
-            state.local_partition,  // input: local partition (flattened)
-            gathered_parts          // output: gathered partitions from all ranks
-        );
 
-        // Concatenate all gathered parts into full 1D tensor
-        state.full_param = cat(gathered_parts, 0);
+        // When the process group supports stream-based collectives and we have a comm
+        // stream, route through all_gather_async on that stream. The default backend
+        // fallback is sync, so non-NCCL backends behave identically. NCCL overrides can
+        // launch directly on `comm_stream_` and overlap with default-stream compute; we
+        // synchronize before reading `gathered_parts` below.
+        if (use_gpu_comm_ && comm_stream_) {
+            config_.process_group->all_gather_async(src, gathered_parts, comm_stream_);
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+            cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
+#endif
+        } else {
+            config_.process_group->all_gather(src, gathered_parts);
+        }
 
-        // Reshape to original shape
-        state.full_param = state.full_param.reshape(full_shape);
+        int64_t partition_n = src.numel();
+        for (int rank = 0; rank < config_.world_size; ++rank) {
+            int64_t off = static_cast<int64_t>(rank) * partition_n;
+            int64_t end = std::min(off + partition_n, total_elements);
+            if (end <= off) continue;
+            Tensor slot = flat_view.slice(0, off, end);
+            slot.zero_();
+            Tensor part_flat = gathered_parts[rank].contiguous().view({-1});
+            // Guard against the (uneven-split) case where world_size * partition_n exceeds
+            // total_elements: only stage the leading `end-off` elements of the chunk.
+            if (part_flat.numel() != (end - off)) {
+                part_flat = part_flat.slice(0, 0, end - off);
+            }
+            add_(slot, part_flat);
+        }
     } else {
-        // Single rank: reshape local partition to original shape
-        state.full_param = state.local_partition.clone().reshape(full_shape);
+        // Single rank: stage the local partition straight into the buffer.
+        flat_view.zero_();
+        add_(flat_view, src.contiguous().view({-1}));
     }
 
     // Update state
@@ -2062,20 +2894,24 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
     // Perform proper reduce-scatter to partition gradients efficiently
     // Each rank contributes its full gradient and receives only its partition of the sum
 
-    // Split gradient into chunks (one per rank)
+    // Split gradient into chunks (one per rank). For ranks past the end of the unevenly-
+    // partitioned grad we need a zero-element placeholder; allocate it once outside the loop
+    // and share the handle across all padding ranks (Tensor is a refcounted handle, so this
+    // is one zero-element allocation total instead of `world_size - active_ranks` per call).
     std::vector<Tensor> gradient_chunks;
     gradient_chunks.reserve(config_.world_size);
 
+    Tensor empty_chunk;  // lazy: only allocate if we actually need padding
     for (int rank = 0; rank < config_.world_size; ++rank) {
         size_t rank_start = rank * elements_per_rank;
         size_t rank_end = std::min(rank_start + elements_per_rank, total_elements);
 
         if (rank_start < total_elements) {
-            Tensor chunk = flat_grad.slice(0, rank_start, rank_end);
-            gradient_chunks.push_back(chunk);
+            gradient_chunks.push_back(flat_grad.slice(0, rank_start, rank_end));
         } else {
-            // For uneven partitioning, add empty chunk
-            Tensor empty_chunk = zeros({0}, flat_grad.dtype(), flat_grad.device());
+            if (empty_chunk.numel() == 0) {
+                empty_chunk = zeros({0}, flat_grad.dtype(), flat_grad.device());
+            }
             gradient_chunks.push_back(empty_chunk);
         }
     }
@@ -2092,15 +2928,55 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
     param_var->set_grad(local_grad);
 }
 
-auto ZeROStage3Optimizer::prefetch_next_parameters([[maybe_unused]] Module* current_module) -> void {
-    if (!prefetch_scheduler_ || !registered_model_) {
+auto ZeROStage3Optimizer::prefetch_next_parameters_locked() -> void {
+    // Lock-free body — caller must already hold param_states_mutex_. Used from the
+    // speculative-prefetch path inside gather_parameter() which holds the mutex itself.
+    if (!registered_model_ || stage3_config_.prefetch_depth <= 0) {
         return;
     }
 
-    // For now, without a modules() method, we can't traverse the execution graph
-    // This would require Module to expose its submodules in a traversable way
-    // In a full implementation, this would prefetch parameters from upcoming modules
-    // based on the execution order of the model's computational graph
+    int current_layer = -1;
+    for (const auto& [param, state] : param_states_) {
+        if (state.layer_index >= 0 && state.is_gathered) {
+            current_layer = std::max(current_layer, state.layer_index);
+        }
+    }
+    if (current_layer < 0) return;  // nothing gathered yet
+
+    const int prefetch_depth = stage3_config_.prefetch_depth;
+    const int max_concurrent = stage3_config_.max_concurrent_prefetches;
+
+    // Walk param_states_ to gather params in (current_layer, current_layer+depth]. Stop
+    // early when we've issued max_concurrent gathers this call. Cache hits (already
+    // gathered, refcount-bumped via the LRU path in #12) cost effectively nothing.
+    int issued = 0;
+    for (auto& [param, state] : param_states_) {
+        (void)param;
+        if (issued >= max_concurrent) break;
+        if (state.layer_index <= current_layer) continue;
+        if (state.layer_index > current_layer + prefetch_depth) continue;
+        if (state.is_gathered) continue;
+        if (state.is_prefetching) continue;
+
+        try {
+            // Synchronous gather. Once ProcessGroup grows an all_gather_async we can swap
+            // for a true overlap-with-compute path; for now the win is converting the
+            // *next* gather_parameter() call from a cache miss into a cache hit.
+            gather_parameter_impl(state);
+            ++issued;
+        } catch (const std::exception&) {
+            // Prefetch failures are not fatal — the consumer's gather_parameter() will
+            // run a real (cache-miss) gather when it actually needs the data.
+            continue;
+        }
+    }
+}
+
+auto ZeROStage3Optimizer::prefetch_next_parameters([[maybe_unused]] Module* current_module) -> void {
+    // Public-API wrapper that takes the lock. Used by external callers; the speculative
+    // path inside gather_parameter() bypasses this and calls the locked helper directly.
+    std::lock_guard<std::mutex> lock(param_states_mutex_);
+    prefetch_next_parameters_locked();
 }
 
 auto ZeROStage3Optimizer::pin_parameter(Tensor* param) -> void {

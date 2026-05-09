@@ -106,6 +106,12 @@ auto ProcessGroup::all_gather(const Tensor& tensor, std::vector<Tensor>& output)
     backend_->all_gather(tensor, output);
 }
 
+auto ProcessGroup::all_gather_async(const Tensor& tensor, std::vector<Tensor>& output,
+                                     void* stream) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->all_gather_async(tensor, output, stream);
+}
+
 auto ProcessGroup::gather(const Tensor& tensor, std::vector<Tensor>& output, int dst_rank) -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     backend_->gather(tensor, output, dst_rank);

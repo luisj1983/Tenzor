@@ -12,6 +12,7 @@
 
 #include "optimizer.hpp"
 #include "../../distributed/distributed.hpp"
+#include "../../distributed/gradient_compression.hpp"
 #include "../../core/offload_engine.hpp"
 #include "../../nn/module.hpp"
 #include <memory>
@@ -20,6 +21,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <list>
+#include <optional>
 #include <chrono>
 #include <unordered_set>
 #include <queue>
@@ -49,6 +52,99 @@ struct ZeROStage1Config {
     bool overlap_comm{true};                ///< Overlap communication with computation
     bool pin_memory{true};                  ///< Use pinned memory for transfers
     std::shared_ptr<distributed::ProcessGroup> process_group{nullptr}; ///< Communication group
+
+    // ========================================================================
+    // Mixed-precision optimizer state (DeepSpeed-style master-fp32 split)
+    // ========================================================================
+
+    /** Keep an fp32 master copy of each partitioned parameter.
+     *
+     *  When training with fp16 or bfloat16 parameters, the optimizer step needs
+     *  fp32 precision to avoid silent gradient underflow / cancellation in the
+     *  Adam moment updates and bias-correction division. The standard fix
+     *  (DeepSpeed, Megatron, FSDP) is to keep an fp32 "master" copy that the
+     *  optimizer reads + writes; after each step the master is downcast and
+     *  copied back into the user-visible fp16/bf16 parameter tensor.
+     *
+     *  Memory cost per parameter (per rank, with world_size N, in bytes per
+     *  fp16 element):
+     *    - off:  fp16 mom + fp16 var = 2 + 2 = 4    (silently lossy)
+     *    - on:   fp32 master + fp32 mom + fp32 var = 4 + 4 + 4 = 12
+     *  Stage 1+ partitions all of these by N, so the on-rank cost is 12/N.
+     *
+     *  Default off — only enable if your training dtype is not fp32.
+     */
+    bool use_master_fp32{false};
+
+    /** Dtype for momentum / variance buffers.
+     *
+     *  - std::nullopt (default): match the parameter dtype. This is the legacy
+     *    behaviour and is correct when training in fp32 / fp64.
+     *  - DType::Float32: keep optimizer state in fp32 regardless of param dtype.
+     *    This is the right setting for fp16/bf16 training even if you don't
+     *    enable use_master_fp32 (it fixes the moment-update precision bug —
+     *    see feedback_float32_accum_bug.md — without doubling the master copy).
+     */
+    std::optional<DType> state_dtype{};
+
+    /** Quantize CPU-offloaded momentum/variance to int8 (per-tensor dynamic range).
+     *
+     *  Cuts CPU optimizer-state memory by ~4× when offload_to_cpu is on. Only takes
+     *  effect for fp32 states — fp16/bf16 states are skipped (the precision loss to
+     *  int8 from those starting points is too large to be worth the savings).
+     *
+     *  Mechanism: on offload, scale = max(|t|)/127 and q = clamp(round(t/scale),
+     *  -128, 127) cast to int8. On fetch, t = q.to(orig_dtype) * scale. Per-tensor
+     *  scaling (not block-wise like bitsandbytes), so dynamic-range outliers cost
+     *  some precision in the small values — fine for momentum/variance in typical
+     *  transformer training, may matter for models very sensitive to small-grad
+     *  accumulators. Default off.
+     *
+     *  Has no effect when offload_to_cpu is false.
+     */
+    bool quantize_offloaded_states_int8{false};
+
+    /** Offload optimizer states to local NVMe / SSD storage instead of host RAM
+     *  (DeepSpeed-Infinity-style). Use this when the partitioned optimizer states
+     *  for your model don't fit in CPU memory either — common at the multi-billion-
+     *  parameter scale on a single host.
+     *
+     *  Mutually exclusive with offload_to_cpu in this implementation: enabling NVMe
+     *  routes states GPU↔NVMe with a transient host buffer for staging the IO. The
+     *  pinned-memory engine used by the CPU path is bypassed.
+     *
+     *  Storage format: one binary blob file per state tensor, plus one per scale
+     *  tensor when quantize_offloaded_states_int8 is also set. File names are
+     *  deterministic (rank + param index + state name) so restarts can reuse them.
+     *
+     *  No effect when nvme_path is empty.
+     */
+    bool offload_to_nvme{false};
+
+    /** Directory where NVMe offload files live. Created if missing. Cleared on
+     *  optimizer destruction. Defaults to <std::filesystem::temp_directory_path>/
+     *  tenzor_zero_offload when empty.
+     */
+    std::string nvme_path{};
+
+    /** Optional gradient compressor applied around the all-reduce in step().
+     *
+     *  When set, ZeRO Stage 1 compresses each parameter's gradient before the
+     *  collective and decompresses after — directly cutting comm bytes by the
+     *  compressor's compression_ratio. The intended use case is fp16 or bf16
+     *  compression of fp32 gradients (2× bandwidth) on bandwidth-bound multi-
+     *  GPU training: the compressor is *linear* (cast → reduce → cast back),
+     *  so naive AVG reduction composes correctly.
+     *
+     *  Note: non-linear compressors (e.g. TopK with sparse representation) do
+     *  not compose with the AVG reduction this path uses — averaging two
+     *  different rank's TopK selections yields garbage. Those compressors
+     *  need error-feedback all-reduce, which is not implemented here. Stick
+     *  to FP16Compressor / BFloat16Compressor with this hook.
+     *
+     *  Default off (nullptr) preserves the legacy uncompressed behaviour.
+     */
+    std::shared_ptr<distributed::GradientCompressor> grad_compressor{nullptr};
 
     ZeROStage1Config() = default;
 };
@@ -310,12 +406,33 @@ protected:
      * @brief State partition for a single rank
      */
     struct StatePartition {
+        // ----- In-memory state (legacy + CPU-offload paths) -----
         int rank{0};                                ///< Rank that owns this partition
         std::vector<std::shared_ptr<Variable>> params;  ///< Parameters in partition
         std::vector<Tensor> momentum;               ///< Momentum states (if applicable)
         std::vector<Tensor> variance;               ///< Variance states (if applicable)
+        std::vector<Tensor> master_params;          ///< fp32 master param copies (only populated when ZeROStage1Config::use_master_fp32 is set; one per param, in lockstep with `params`)
+        std::vector<Tensor> momentum_scales;        ///< fp32 per-tensor scales when momentum is int8-quantized on CPU; empty Tensor when not quantized
+        std::vector<Tensor> variance_scales;        ///< fp32 per-tensor scales when variance is int8-quantized on CPU; empty Tensor when not quantized
         Device device{Device::cpu()};               ///< Where states are stored
         size_t memory_bytes{0};                     ///< Total memory usage
+
+        // ----- NVMe offload metadata -----
+        // When ZeROStage1Config::offload_to_nvme is set, the corresponding tensor in
+        // momentum/variance is held as an empty Tensor() and the data lives on disk
+        // at the path below. Shape + dtype are tracked here so we can reconstruct
+        // the tensor at fetch time without needing a header in the file. An entry
+        // with empty `path` means the slot's data is currently in memory.
+        struct DiskSlot {
+            std::string path;                       ///< File path, empty if not on disk
+            std::vector<int64_t> shape;             ///< Shape recorded at offload time
+            DType dtype{DType::Float32};            ///< Dtype recorded at offload time
+            bool on_disk() const { return !path.empty(); }
+        };
+        std::vector<DiskSlot> momentum_disk;        ///< Per-momentum disk metadata (empty vector when NVMe disabled)
+        std::vector<DiskSlot> variance_disk;        ///< Per-variance disk metadata
+        std::vector<DiskSlot> momentum_scale_disk;  ///< Per-momentum-scale disk metadata (only populated when also quantizing)
+        std::vector<DiskSlot> variance_scale_disk;  ///< Per-variance-scale disk metadata
     };
 
     // Core components
@@ -335,6 +452,23 @@ protected:
     // Optimizer state
     int64_t step_count_{0};                         ///< Step counter for bias correction
     bool states_on_cpu_{false};                     ///< Whether optimizer states are currently on CPU
+
+    // Async communication. When the process group supports stream-based collectives
+    // (NCCL/RCCL on GPU), all_reduce_gradients can be split into a "kick off async" /
+    // "wait" pair so the all-reduce overlaps with fetch_states_to_gpu in step_impl.
+    // Stored as void* (cudaStream_t / hipStream_t) for opacity — see ddp.cpp for the
+    // CUDA/HIP-conditional lifecycle pattern this mirrors.
+    // Exposed as protected so ZeROStage3Optimizer can route gather_parameter_impl through
+    // the same comm stream. Was inferred-protected previously (the surrounding section at
+    // line 404 starts protected); the explicit re-declaration below is just for clarity.
+    bool use_gpu_comm_{false};                      ///< Process group supports async stream
+    void* comm_stream_{nullptr};                    ///< Dedicated comm stream (cudaStream_t)
+
+    bool async_all_reduce_in_flight_{false};        ///< Set by issue_async_all_reduce_*
+    // Compressor outputs survive across the issue/wait boundary so decompress can run
+    // after the stream sync. Indexed in lockstep with parameters_; only populated when
+    // grad_compressor is configured AND an async all-reduce is in flight.
+    std::vector<distributed::CompressedGradient> in_flight_compressed_;
 
     // Synchronization
     mutable std::mutex mutex_;                      ///< Thread safety
@@ -379,6 +513,25 @@ protected:
      * Synchronizes gradients before optimizer step.
      */
     auto all_reduce_gradients() -> void;
+
+    /**
+     * @brief Issue all per-parameter all-reduce calls without waiting (split form).
+     *
+     * Schedules each parameter's all-reduce on the dedicated comm stream when GPU comm is
+     * available, otherwise falls back to synchronous in-place reduction. Caller must follow
+     * up with wait_for_async_all_reduce() before reading any gradient. Designed so step_impl
+     * can do useful CPU/PCIe work (fetch_states_to_gpu) between issue and wait.
+     */
+    auto issue_async_all_reduce_gradients() -> void;
+
+    /**
+     * @brief Block on the comm stream and finalize per-parameter gradients (split form).
+     *
+     * Synchronizes with the comm stream issued by issue_async_all_reduce_gradients(), then
+     * runs decompress (when a grad_compressor is configured) and writes results back to
+     * the parameter Variables. Idempotent — no-op when no async is in flight.
+     */
+    auto wait_for_async_all_reduce() -> void;
 
     /**
      * @brief All-gather parameters after update
@@ -597,6 +750,14 @@ public:
     auto register_backward_hooks() -> void;
 
     /**
+     * @brief Unregister all backward hooks previously installed by register_backward_hooks().
+     *
+     * Safe to call multiple times. Called automatically from the destructor so the optimizer
+     * cannot leave dangling hooks pointing into freed memory.
+     */
+    auto unregister_backward_hooks() -> void;
+
+    /**
      * @brief Get gradient bucket statistics
      */
     struct BucketStats {
@@ -622,12 +783,24 @@ private:
      */
     struct GradientBucket {
         std::vector<std::shared_ptr<Variable>> params;  ///< Parameters in bucket
-        std::vector<Tensor> gradient_buffers;           ///< Flattened gradient buffers per rank
+        std::vector<Tensor> gradient_buffers;           ///< Stashed grads (one per param), filled by autograd hook before accumulation
+        std::vector<size_t> hook_ids;                   ///< Variable::register_hook handles, one per param, for clean unregistration
         size_t total_size{0};                           ///< Total size in bytes
         int target_rank{-1};                            ///< Rank that owns these gradients
         bool ready{false};                              ///< All gradients computed
         size_t gradients_received{0};                   ///< Count of gradients received
         std::unique_ptr<std::mutex> mutex;              ///< Thread safety for async hooks
+
+        // --- Persistent flat staging buffers (allocated lazily on first reduce-scatter) ---
+        // The legacy code path called flatten_tensors() and zeros() every step, allocating two
+        // bucket-sized tensors per backward. By keeping these around for the lifetime of the
+        // bucket we eliminate 2*N allocator hits per training step, where N is the number of
+        // buckets — the dominant residual allocator pressure once parameter/optimizer-state
+        // memory is partitioned by ZeRO.
+        Tensor flat_buffer;                ///< Bucket-wide flat scratch (size = sum of param numels)
+        Tensor flat_partition_buffer;      ///< Reduce-scatter output buffer (size = ceil(total / world_size))
+        std::vector<int64_t> param_offsets_elem;  ///< Element offset of each param in flat_buffer
+        std::vector<int64_t> param_sizes_elem;    ///< Numel of each param
 
         // Constructor to initialize mutex
         GradientBucket() : mutex(std::make_unique<std::mutex>()) {}
@@ -689,6 +862,16 @@ private:
      * @param param_idx Index of parameter in bucket
      */
     auto gradient_hook(size_t bucket_idx, size_t param_idx) -> void;
+
+    /**
+     * @brief Variant of gradient_hook used by the autograd register_hook callback.
+     *
+     * Stashes @p grad into the bucket's gradient_buffers[param_idx] slot before grad
+     * accumulation runs (so we never have to consult param->grad(), which is not yet
+     * populated when the hook fires for this param). Triggers reduce-scatter when the
+     * bucket has received all of its gradients.
+     */
+    auto gradient_hook(size_t bucket_idx, size_t param_idx, const Tensor& grad) -> void;
 
     /**
      * @brief Check if bucket is ready for reduce-scatter
@@ -1391,6 +1574,17 @@ private:
     /** Module being managed (weak reference to avoid ownership) */
     Module* registered_model_{nullptr};
 
+    // LRU ordering for non-pinned gather buffers. When free_gathered_parameter() drops a
+    // parameter's refcount to zero, instead of immediately freeing state.full_param the
+    // optimizer keeps it cached and pushes the parameter's pointer to the back of this
+    // list. The next gather_parameter() call on the same param can then reuse the buffer
+    // without re-running all_gather. When the list grows past Stage3Config::max_cached_params,
+    // the front (oldest-released) entry is evicted — its full_param is freed, mirroring the
+    // legacy free-on-release behaviour. Pinned parameters never enter this list. Same idea
+    // as a fixed-size ring buffer (review item #12) but accommodates heterogeneous param
+    // sizes without pre-allocating max_param_size × prefetch_depth bytes up front.
+    std::list<Tensor*> lru_release_order_;
+
     /** Parameter state tracking map */
     std::unordered_map<Tensor*, ParameterInfo> param_states_;
     mutable std::mutex param_states_mutex_;
@@ -1492,8 +1686,14 @@ private:
     /** Scatter (reduce-scatter) gradient for a parameter */
     auto scatter_parameter_gradient(Tensor* param) -> void;
 
-    /** Prefetch parameters for next modules */
+    /** Prefetch parameters for next modules. Public wrapper that takes
+     *  param_states_mutex_ internally. */
     auto prefetch_next_parameters(Module* current_module) -> void;
+
+    /** Lock-free body of prefetch_next_parameters. Caller must already hold
+     *  param_states_mutex_. Used by gather_parameter()'s speculative-prefetch
+     *  path so we don't have to drop and re-acquire the mutex mid-call. */
+    auto prefetch_next_parameters_locked() -> void;
 
     /** Get next module in execution order */
     auto get_next_module_in_execution_order(Module* current_module) -> Module*;

@@ -106,6 +106,17 @@ public:
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< GPU memory limit (8 GB)
         Device target_device{Device::cuda(0)}; ///< Target device for computation (for CPU-start models)
 
+        /** Optional pre-built TransferEngine to share with cooperating subsystems
+         *  (typically a `core::OffloadEngine` doing parameter / optimizer-state offload).
+         *  When set, OffloadContext adopts this engine instead of constructing its own,
+         *  so the host-side pinned buffer pool is shared rather than duplicated.
+         *
+         *  See review item #17: a training run with both parameter offload and
+         *  activation offload pinned ~2.5 GB of host RAM in two separate pools by
+         *  default; sharing collapses that to one pool.
+         */
+        std::shared_ptr<core::TransferEngine> shared_transfer_engine{nullptr};
+
         Config() = default;
     };
 
@@ -220,6 +231,14 @@ private:
         OffloadPriority priority{OffloadPriority::NORMAL};  ///< Offload priority
         size_t size_bytes{0};            ///< Size in bytes
         Module* owning_layer{nullptr};   ///< Layer that owns this parameter
+
+        // --- Async transfer plumbing ---
+        // When non-empty, an async PCIe transfer is in flight for this tensor. The next
+        // access (offload_tensor / prefetch_tensor / forward_pre_hook) waits on it before
+        // reading or issuing a new transfer. This is the mechanism that lets a layer's
+        // offload-to-CPU overlap with the *next* layer's compute on the GPU stream.
+        tenzor::core::TransferHandle pending_handle;
+        bool pending_is_offload{false};  ///< Direction of pending_handle (only valid when handle is_valid)
     };
 
     // Map of tracked tensors (parameter/gradient pointers -> info)
@@ -310,6 +329,27 @@ private:
      * @return true if tensor meets offload criteria
      */
     auto should_offload(const TensorInfo& info) const -> bool;
+
+    /**
+     * @brief Drain a pending async transfer for `info` and finalize the tensor swap.
+     *
+     * If `info.pending_handle` is valid, blocks until the transfer completes, then commits
+     * the result: for an offload, replaces *tensor_ptr with the resulting CPU tensor and
+     * marks is_offloaded=true; for a prefetch, replaces *tensor_ptr with the GPU tensor and
+     * marks is_offloaded=false. Idempotent — no-op when no transfer is pending.
+     *
+     * Caller must hold tensor_map_mutex_.
+     */
+    auto finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> void;
+
+    /**
+     * @brief Walk tensor_map_ and finalize every pending async transfer.
+     *
+     * Used by enable() (so the bulk-offload path remains synchronous from the outside —
+     * the per-tensor async benefit is only useful during the per-layer hook path inside a
+     * training loop). Caller must hold tensor_map_mutex_.
+     */
+    auto drain_all_pending() -> void;
 
     // ========================================================================
     // Hook Callbacks

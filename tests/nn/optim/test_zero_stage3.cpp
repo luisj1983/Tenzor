@@ -1200,6 +1200,199 @@ TEST_F(ZeROStage3Test, PerformanceDegradation) {
 }
 
 // ============================================================================
+// Gather buffer LRU cache (review item #12)
+// ============================================================================
+
+TEST_F(ZeROStage3Test, GatherBufferCacheReusesBufferOnReGather) {
+    // Releasing a non-pinned param to refcount 0 should leave its full_param resident in
+    // the gather-buffer cache; the next gather should hit the cache (no fresh allocation,
+    // counted as a prefetch_hit) instead of running another all-gather.
+    auto model = create_multilayer_model(2, 32);
+    auto params = model->parameters();
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    Stage3Config config = default_stage3_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.max_cached_params = 4;  // plenty of headroom
+    // Disable first/last-layer pinning so the LRU is the only thing controlling cache state.
+    config.pin_first_layer = false;
+    config.pin_last_layer  = false;
+    // Disable speculative prefetch — it would pre-gather neighbouring params and confuse
+    // the prefetch_hits counter we're inspecting below.
+    config.prefetch_depth = 0;
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
+
+    Tensor* p0 = &params[0]->tensor();
+
+    // Sanity: no prior gathers.
+    optimizer.reset_stats();
+
+    Tensor first  = optimizer.gather_parameter(p0);
+    optimizer.free_gathered_parameter(p0);
+
+    // After release with cache, param should still report as gathered.
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p0))
+        << "released non-pinned param should remain in the gather-buffer cache";
+
+    // Second gather: cache hit, no fresh all-gather, counter should bump prefetch_hits.
+    auto stats_before = optimizer.get_stats();
+    Tensor second = optimizer.gather_parameter(p0);
+    auto stats_after = optimizer.get_stats();
+
+    EXPECT_GT(stats_after.prefetch_hit_rate * (stats_after.prefetch_hit_rate >= 0.0 ? 1.0 : 0.0), 0.0)
+        << "expected at least one cache hit after the round-trip";
+    (void)stats_before;
+
+    optimizer.free_gathered_parameter(p0);
+    optimizer.unregister_model();
+    (void)first;
+    (void)second;
+}
+
+TEST_F(ZeROStage3Test, GatherBufferCacheEvictsOldestPastMaxCachedParams) {
+    // With max_cached_params=N, releasing the (N+1)th distinct non-pinned param should
+    // force the LRU front (the *first*-released param) out of the cache — its is_gathered
+    // flag flips back to false and its full_param is released to the allocator.
+    auto model = create_multilayer_model(4, 16);
+    auto params = model->parameters();
+    ASSERT_GE(params.size(), 3u) << "need at least 3 distinct params for this test";
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    Stage3Config config = default_stage3_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.max_cached_params = 2;  // cache fits at most 2 buffers
+    // Disable first/last-layer pinning so the test isolates the LRU eviction behaviour.
+    config.pin_first_layer = false;
+    config.pin_last_layer  = false;
+    // Disable speculative prefetch — pre-gathering neighbours would muddy the LRU state.
+    config.prefetch_depth = 0;
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
+
+    Tensor* p0 = &params[0]->tensor();
+    Tensor* p1 = &params[1]->tensor();
+    Tensor* p2 = &params[2]->tensor();
+
+    // Gather + release each in order. After three releases, the LRU is [p0, p1, p2].
+    // max_cached_params=2 means p0 (oldest) should have been evicted.
+    optimizer.gather_parameter(p0);
+    optimizer.free_gathered_parameter(p0);
+    optimizer.gather_parameter(p1);
+    optimizer.free_gathered_parameter(p1);
+    optimizer.gather_parameter(p2);
+    optimizer.free_gathered_parameter(p2);
+
+    EXPECT_FALSE(optimizer.is_parameter_gathered(p0))
+        << "oldest non-pinned param (p0) should have been evicted past max_cached_params=2";
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p1))
+        << "p1 should still be cached (one of the 2 most recently released)";
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p2))
+        << "p2 should still be cached (most recently released)";
+
+    optimizer.unregister_model();
+}
+
+TEST_F(ZeROStage3Test, GatherBufferCacheRespectsPinnedParams) {
+    // Pinned params are kept gathered for the entire training session by design — they must
+    // never enter the LRU list and therefore can never be evicted by it. With max_cached=0
+    // (immediate eviction) and one pinned + one non-pinned param, the non-pinned should be
+    // freed on release while the pinned stays gathered.
+    auto model = create_multilayer_model(2, 32);
+    auto params = model->parameters();
+    ASSERT_GE(params.size(), 2u);
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    Stage3Config config = default_stage3_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.max_cached_params = 0;  // no caching: any non-pinned release triggers eviction
+    // Disable auto-pinning so this test only sees the explicit pin_parameter() call.
+    config.pin_first_layer = false;
+    config.pin_last_layer  = false;
+    // Disable speculative prefetch — would gather extra params we don't want to track.
+    config.prefetch_depth = 0;
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
+
+    Tensor* p_pin = &params[0]->tensor();
+    Tensor* p_unp = &params[1]->tensor();
+
+    optimizer.pin_parameter(p_pin);
+    EXPECT_TRUE(optimizer.is_parameter_pinned(p_pin));
+
+    optimizer.gather_parameter(p_pin);
+    optimizer.free_gathered_parameter(p_pin);
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p_pin))
+        << "pinned param must stay gathered after release";
+
+    optimizer.gather_parameter(p_unp);
+    optimizer.free_gathered_parameter(p_unp);
+    EXPECT_FALSE(optimizer.is_parameter_gathered(p_unp))
+        << "non-pinned param with max_cached_params=0 should be evicted on release";
+
+    optimizer.unpin_parameter(p_pin);
+    optimizer.unregister_model();
+}
+
+// ============================================================================
+// Speculative prefetch (review items #2 + #3, partially)
+// ============================================================================
+
+TEST_F(ZeROStage3Test, SpeculativePrefetchGathersUpcomingLayers) {
+    // The legacy prefetch path was dead — `prefetch_scheduler_` was always null and the
+    // Stage 3 helpers all bailed with "Module doesn't expose modules() so we can't walk
+    // the execution graph." Module::modules() actually exists; with that wired into
+    // build_execution_graph and prefetch_next_parameters_locked, gathering layer N's param
+    // should *also* gather layers N+1..N+prefetch_depth so the next gather_parameter calls
+    // hit the LRU cache instead of running another all-gather.
+    auto model = create_multilayer_model(5, 16);
+    auto params = model->parameters();
+    ASSERT_GE(params.size(), 4u) << "need 4+ params to test prefetch_depth=2";
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    Stage3Config config = default_stage3_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.prefetch_depth = 2;
+    config.max_concurrent_prefetches = 4;
+    config.max_cached_params = 100;  // don't evict during the test
+    // Disable first/last pinning so the test sees pure prefetch behaviour.
+    config.pin_first_layer = false;
+    config.pin_last_layer  = false;
+
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
+
+    Tensor* p0 = &params[0]->tensor();
+    Tensor* p1 = &params[1]->tensor();
+    Tensor* p2 = &params[2]->tensor();
+
+    // Initially nothing is gathered.
+    EXPECT_FALSE(optimizer.is_parameter_gathered(p0));
+    EXPECT_FALSE(optimizer.is_parameter_gathered(p1));
+    EXPECT_FALSE(optimizer.is_parameter_gathered(p2));
+
+    // Gathering p0 should *also* gather p1 and p2 via the speculative prefetch (depth=2).
+    optimizer.gather_parameter(p0);
+
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p0)) << "p0 was just gathered";
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p1))
+        << "speculative prefetch should have gathered p1 (layer 0+1)";
+    EXPECT_TRUE(optimizer.is_parameter_gathered(p2))
+        << "speculative prefetch should have gathered p2 (layer 0+2)";
+
+    // Release everything cleanly.
+    optimizer.free_gathered_parameter(p0);
+    optimizer.unregister_model();
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
