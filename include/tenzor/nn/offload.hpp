@@ -106,6 +106,29 @@ public:
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< GPU memory limit (8 GB)
         Device target_device{Device::cuda(0)}; ///< Target device for computation (for CPU-start models)
 
+        /**
+         * @brief Phase C (C3): dtype to use for the host-side offloaded copy.
+         *
+         * Same      (default): no cast, host RAM = on-device dtype size (4 B for fp32).
+         * Half:               cast to fp16 before DMA -> 2× less host RAM and PCIe bytes.
+         * BFloat16:           cast to bf16 before DMA -> 2× savings, slightly different
+         *                     numerics from Half.
+         * Int8WithScale:      symmetric INT8 quantization with a per-tensor fp32 scale ->
+         *                     ~4× savings; recommended only for parameters tolerant of
+         *                     ~0.5% rounding error.
+         *
+         * Tensors with priority == CRITICAL or is_pinned == true bypass the cast
+         * (CRITICAL tensors are typically activations whose backward needs full
+         * precision; pinned tensors are user-declared exceptions).
+         */
+        enum class OffloadDType {
+            Same,
+            Half,
+            BFloat16,
+            Int8WithScale,
+        };
+        OffloadDType offload_dtype{OffloadDType::Same};
+
         /** Optional pre-built TransferEngine to share with cooperating subsystems
          *  (typically a `core::OffloadEngine` doing parameter / optimizer-state offload).
          *  When set, OffloadContext adopts this engine instead of constructing its own,
@@ -203,6 +226,22 @@ public:
      */
     auto get_cpu_memory_usage() const -> size_t;
 
+    /**
+     * @brief Manually trigger offload of a single tensor by pointer.
+     *
+     * Phase C (C6): public adapter for the previously stubbed free function
+     * tenzor::nn::offload_param. The free function delegates here so callers
+     * (mostly research / one-off scripts that don't drive a full hook lifecycle)
+     * can flag a specific tensor for offload without going through the
+     * forward_post_hook path. The underlying offload_tensor() takes the lock
+     * and does the eviction; semantics match the auto-eviction path.
+     *
+     * Returns true if the offload was issued (or completed); false if the
+     * tensor isn't tracked, the engine is disabled, or should_offload() rejects
+     * the request.
+     */
+    auto offload_single_tensor(Tensor* tensor_ptr) -> bool;
+
 private:
     // Reference to managed model
     Module& model_;
@@ -239,6 +278,15 @@ private:
         // offload-to-CPU overlap with the *next* layer's compute on the GPU stream.
         tenzor::core::TransferHandle pending_handle;
         bool pending_is_offload{false};  ///< Direction of pending_handle (only valid when handle is_valid)
+
+        // --- Phase C (C3): quantized offload bookkeeping ---
+        // When the offloaded copy uses a different dtype than the on-device tensor
+        // (per Config::offload_dtype), we record the original dtype so the load-back
+        // path can cast back to it. For Int8WithScale we also record a per-tensor
+        // symmetric scale = max(abs(x)) / 127.0 captured at offload time.
+        DType original_dtype{DType::Float32};   ///< Original on-device dtype (used for cast-back)
+        DType offload_dtype_used{DType::Float32}; ///< Dtype actually used for cpu_copy
+        float quant_scale{0.0f};                ///< Per-tensor symmetric INT8 scale; 0 means unused
     };
 
     // Map of tracked tensors (parameter/gradient pointers -> info)

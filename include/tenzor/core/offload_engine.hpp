@@ -274,6 +274,18 @@ public:
     auto unregister_auto_offload(Tensor* tensor) -> void;
 
     /**
+     * @brief Mark a registered tensor as recently accessed (LRU bump).
+     *
+     * Phase C (C2): the auto-offload eviction sort key uses last_access_tick to
+     * keep recently-used tensors GPU-resident. Internal sites bump the tick on
+     * register and on the offload/load path; callers performing other
+     * accesses (e.g. their own custom kernel reads) can call this to declare
+     * "this tensor is in use; please don't evict it next." No-op when the
+     * tensor isn't in the registry.
+     */
+    auto mark_accessed(Tensor* tensor) -> void;
+
+    /**
      * @brief Manually trigger auto-offload check
      *
      * Checks GPU memory pressure and offloads registered tensors if needed.
@@ -379,7 +391,11 @@ private:
 
     // Core components
     std::shared_ptr<TransferEngine> transfer_engine_;      ///< Low-level async transfer engine (shared so OffloadContext can adopt the same pool)
-    std::unique_ptr<PinnedMemoryAllocator> pinned_alloc_;  ///< Pinned memory pool
+    // Phase C (C1): pinned_alloc_ was here -- a duplicate 2 GB host-pinned pool that
+    // was never used outside the constructor and the stats getter. TransferEngine
+    // owns the actual pinned-buffer pool used for DMAs. Field removed; the include
+    // of pinned_allocator.hpp is kept because PinnedMemoryStats is still our public
+    // return type for get_pinned_memory_stats().
     std::unique_ptr<MemoryManager> memory_manager_;        ///< Memory pressure tracking
 
     // Default GPU device for transfers
@@ -390,6 +406,15 @@ private:
         Tensor* tensor;
         OffloadPriority priority;
         size_t registration_time;  ///< For FIFO within same priority
+        // Phase C (C2): added for LRU + size-aware eviction. last_access_tick is
+        // bumped on load_to_gpu / offload_to_cpu for the same registered pointer;
+        // size_bytes is captured at registration time (assumed roughly stable for
+        // the lifetime of the registered tensor). Sort key now uses (priority,
+        // -size_bytes, last_access_tick) so high-priority + large + stale evict
+        // first; eliminates the "evict 10 small tensors instead of 1 large" and
+        // the "evict the tensor used every step" thrash classes.
+        size_t last_access_tick{0};
+        size_t size_bytes{0};
     };
 
     std::vector<AutoOffloadEntry> auto_offload_registry_;
@@ -405,6 +430,10 @@ private:
     std::queue<PrefetchRequest> prefetch_queue_;
     std::mutex prefetch_mutex_;
     std::condition_variable prefetch_cv_;
+    // Phase C (C5): notified by the worker after every drain so wait_for_prefetch can
+    // CV-wait instead of polling on a 10 ms sleep loop. Same prefetch_mutex_ so we
+    // don't double the lock count.
+    std::condition_variable prefetch_drained_cv_;
     std::atomic<bool> stop_prefetch_worker_{false};
     std::thread prefetch_worker_thread_;
 

@@ -48,12 +48,11 @@ OffloadEngine::OffloadEngine(const Config& config)
             transfer_engine_ = std::make_shared<TransferEngine>(transfer_config);
         }
 
-        // Initialize PinnedMemoryAllocator
-        PinnedMemoryAllocator::Config pinned_config;
-        pinned_config.pool_size = config_.pinned_memory_size;
-        pinned_config.allow_growth = false;
-        pinned_config.enable_defragmentation = true;
-        pinned_alloc_ = std::make_unique<PinnedMemoryAllocator>(pinned_config);
+        // Phase C (C1): The previous code allocated a separate PinnedMemoryAllocator
+        // here, but it was never used outside this constructor and get_pinned_memory_stats()
+        // -- TransferEngine owns its own pinned-buffer pool (see pinned_buffers_ field at
+        // include/tenzor/core/transfer_engine.hpp:325) and that's what every actual DMA
+        // routes through. The duplicate 2 GB pool was pure waste of host RAM. Removed.
 
         // Initialize MemoryManager
         MemoryManager::Config memory_config;
@@ -93,6 +92,9 @@ OffloadEngine::~OffloadEngine() {
     if (config_.enable_prefetch && prefetch_worker_thread_.joinable()) {
         stop_prefetch_worker_.store(true);
         prefetch_cv_.notify_all();
+        // Phase C (C5): also wake any wait_for_prefetch caller so they can observe
+        // the stop flag instead of waiting forever.
+        prefetch_drained_cv_.notify_all();
         prefetch_worker_thread_.join();
     }
 
@@ -283,12 +285,16 @@ auto OffloadEngine::prefetch_to_gpu(Tensor* tensor) -> void {
 // ============================================================================
 
 auto OffloadEngine::get_pinned_memory_stats() -> core::PinnedMemoryStats {
-    if (!pinned_alloc_) {
-        return core::PinnedMemoryStats{};
-    }
-
-    // Return the stats directly from pinned allocator
-    return pinned_alloc_->get_stats();
+    // Phase C (C1): the stand-alone PinnedMemoryAllocator was removed (it was unused
+    // dead memory). TransferEngine has its own pinned pool but does not currently
+    // expose detailed pinned-pool stats through its public Statistics struct -- only
+    // transfer counters. Return a best-effort populated stats struct with the
+    // configured pool size; runtime counters are zero until the TransferEngine
+    // exposes pinned-pool telemetry.
+    core::PinnedMemoryStats stats{};
+    stats.total_size = config_.pinned_memory_size;
+    stats.free_size = config_.pinned_memory_size;
+    return stats;
 }
 
 auto OffloadEngine::register_auto_offload(Tensor* tensor, OffloadPriority priority) -> void {
@@ -305,16 +311,25 @@ auto OffloadEngine::register_auto_offload(Tensor* tensor, OffloadPriority priori
         [tensor](const AutoOffloadEntry& entry) { return entry.tensor == tensor; }
     );
 
+    const size_t now_tick = registration_counter_.fetch_add(1, std::memory_order_relaxed);
+    const size_t cur_bytes =
+        static_cast<size_t>(tensor->numel()) * dtype_size(tensor->dtype());
+
     if (it != auto_offload_registry_.end()) {
-        // Update existing entry
+        // Update existing entry. Touch last_access_tick too -- a re-registration
+        // is itself an access signal.
         it->priority = priority;
-        it->registration_time = registration_counter_.fetch_add(1, std::memory_order_relaxed);
+        it->registration_time = now_tick;
+        it->last_access_tick = now_tick;
+        if (it->size_bytes == 0) it->size_bytes = cur_bytes;
     } else {
         // Add new entry
         AutoOffloadEntry entry;
         entry.tensor = tensor;
         entry.priority = priority;
-        entry.registration_time = registration_counter_.fetch_add(1, std::memory_order_relaxed);
+        entry.registration_time = now_tick;
+        entry.last_access_tick = now_tick;
+        entry.size_bytes = cur_bytes;
         auto_offload_registry_.push_back(entry);
     }
 
@@ -351,6 +366,20 @@ auto OffloadEngine::unregister_auto_offload(Tensor* tensor) -> void {
     }
 }
 
+auto OffloadEngine::mark_accessed(Tensor* tensor) -> void {
+    if (tensor == nullptr) return;
+    std::lock_guard<std::mutex> lock(registry_mutex_);
+    auto it = std::find_if(
+        auto_offload_registry_.begin(),
+        auto_offload_registry_.end(),
+        [tensor](const AutoOffloadEntry& e) { return e.tensor == tensor; }
+    );
+    if (it != auto_offload_registry_.end()) {
+        it->last_access_tick =
+            registration_counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 auto OffloadEngine::check_and_offload() -> size_t {
     if (!is_over_threshold()) {
         return 0;  // No action needed
@@ -371,11 +400,18 @@ auto OffloadEngine::check_and_offload() -> size_t {
 
     size_t offloaded = 0;
 
-    // Offload tensors until we're under threshold. is_over_threshold() reads from the
+    // Phase C (C2): hysteresis. Once we cross config_.memory_fraction (typically 0.9),
+    // keep evicting until we're under 0.75 * threshold instead of stopping the moment
+    // we dip back under threshold. Without this, the next monitor tick re-fires
+    // immediately because steady-state usage hovers exactly at the threshold ->
+    // evict-load-evict thrash.
+    const float low_water = config_.memory_fraction * 0.75f;
+
+    // Offload tensors until we're under low_water. get_gpu_memory_pressure() reads from
     // memory_manager_ which has its own internal locking, so it's safe to call here.
     for (const auto& entry : snapshot) {
-        if (!is_over_threshold()) {
-            break;  // Pressure relieved
+        if (get_gpu_memory_pressure() <= low_water) {
+            break;  // Pressure dropped below low-water mark; stop hysteresis loop.
         }
 
         Tensor* tensor = entry.tensor;
@@ -445,16 +481,17 @@ auto OffloadEngine::wait_for_prefetch() -> void {
         return;
     }
 
-    // Phase 1: drain the queue. Worker has to pick up every queued request and issue the
-    // async transfer before we can wait on completion.
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lock(prefetch_mutex_);
-            if (prefetch_queue_.empty()) {
-                break;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Phase 1 (Phase C C5): wait for the worker to drain the queue. Previously this
+    // polled with a 10 ms sleep loop, adding up to 10 ms of latency per drain even
+    // when the worker had already finished. Now we CV-wait on prefetch_drained_cv_,
+    // which the worker notifies after every drain. The wait still uses
+    // prefetch_mutex_ so the predicate read is atomic.
+    {
+        std::unique_lock<std::mutex> lock(prefetch_mutex_);
+        prefetch_drained_cv_.wait(lock, [this] {
+            return prefetch_queue_.empty()
+                || stop_prefetch_worker_.load(std::memory_order_relaxed);
+        });
     }
 
     // Phase 2: commit every in-flight handle. Snapshot the list under the in-flight lock
@@ -515,14 +552,15 @@ auto OffloadEngine::reset_statistics() -> void {
 
 auto OffloadEngine::prefetch_worker() -> void {
     while (!stop_prefetch_worker_.load(std::memory_order_relaxed)) {
-        PrefetchRequest request;
-        bool has_request = false;
-
-        // Get next request from queue
+        // Phase C (C4): drain ALL queued requests in one lock acquisition, then issue
+        // them in a tight loop without the lock. The legacy code popped one request per
+        // condvar wake even though TransferEngine has 4 streams -- effectively
+        // serializing the issue side and defeating the multi-stream parallelism. Now a
+        // batch of N queued requests turns into N nearly-simultaneous async DMAs that
+        // round-robin across TransferEngine's stream pool.
+        std::vector<PrefetchRequest> batch;
         {
             std::unique_lock<std::mutex> lock(prefetch_mutex_);
-
-            // Wait for requests or stop signal
             prefetch_cv_.wait(lock, [this] {
                 return !prefetch_queue_.empty() ||
                        stop_prefetch_worker_.load(std::memory_order_relaxed);
@@ -532,36 +570,47 @@ auto OffloadEngine::prefetch_worker() -> void {
                 break;
             }
 
-            if (!prefetch_queue_.empty()) {
-                request = prefetch_queue_.front();
+            batch.reserve(prefetch_queue_.size());
+            while (!prefetch_queue_.empty()) {
+                batch.push_back(prefetch_queue_.front());
                 prefetch_queue_.pop();
-                has_request = true;
             }
         }
 
-        // Process request outside lock
-        if (has_request && request.tensor != nullptr) {
+        // Process the batch outside the lock. Each cpu_to_gpu_async returns quickly
+        // (just enqueues on a stream and returns the handle), so single-threaded issue
+        // is sufficient -- the wins are in (a) not blocking other producers behind the
+        // condvar wait per item, and (b) the multi-stream backend handling concurrent
+        // DMAs.
+        std::vector<std::pair<Tensor*, core::TransferHandle>> issued;
+        issued.reserve(batch.size());
+        for (auto& request : batch) {
+            if (request.tensor == nullptr) continue;
             try {
-                // Only prefetch tensors that are actually on the host. If something else
-                // already moved the tensor (e.g. an unrelated load_to_gpu call between the
-                // queue push and the worker pickup) just drop the request.
                 if (request.tensor->device().type == Device::Type::CPU) {
                     auto handle = transfer_engine_->cpu_to_gpu_async(
                         *request.tensor,
                         request.target_device
                     );
-                    // Stash (target, handle) so wait_for_prefetch / destructor can commit
-                    // the GPU result back into *target. Multiple async transfers can be in
-                    // flight at once on the TransferEngine's stream pool — we don't wait
-                    // here.
-                    std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
-                    in_flight_prefetches_.push_back({request.tensor, std::move(handle)});
+                    issued.emplace_back(request.tensor, std::move(handle));
                 }
             } catch (const std::exception& e) {
-                // Silently skip on error — prefetch is a hint, not a guarantee.
+                // Silently skip on error -- prefetch is a hint, not a guarantee.
                 continue;
             }
         }
+
+        if (!issued.empty()) {
+            std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
+            for (auto& p : issued) {
+                in_flight_prefetches_.push_back({p.first, std::move(p.second)});
+            }
+        }
+
+        // Phase C (C5): notify wait_for_prefetch that the queue is now empty (we just
+        // drained the entire batch above). Cheap notify_all even if no waiter is
+        // present; CV-side spurious wakes are filtered by the predicate.
+        prefetch_drained_cv_.notify_all();
     }
 }
 
@@ -597,17 +646,24 @@ auto OffloadEngine::is_gpu_device(const Device& device) const -> bool {
 }
 
 auto OffloadEngine::sort_auto_offload_registry() -> void {
-    // Sort by priority (LOW first, then HIGH), then by registration time
+    // Phase C (C2): eviction order = (priority asc, size_bytes desc, last_access_tick asc).
+    //   - Lowest-priority evicts first (CRITICAL never evicts unless nothing else exists).
+    //   - Within same priority, largest-size first (one 1 GB tensor instead of 1000 1 MB).
+    //   - Within same priority + size band, oldest-access first (LRU; tensors used every
+    //     step stay resident).
+    // Replaces the legacy (priority, registration_time) order which evicted tensors used
+    // every step before never-used ones of equal priority -- pure thrash on steady state.
     std::sort(
         auto_offload_registry_.begin(),
         auto_offload_registry_.end(),
         [](const AutoOffloadEntry& a, const AutoOffloadEntry& b) {
-            // Priority order: LOW < NORMAL < HIGH < CRITICAL
             if (a.priority != b.priority) {
                 return static_cast<int>(a.priority) < static_cast<int>(b.priority);
             }
-            // Within same priority, use FIFO (older first)
-            return a.registration_time < b.registration_time;
+            if (a.size_bytes != b.size_bytes) {
+                return a.size_bytes > b.size_bytes;
+            }
+            return a.last_access_tick < b.last_access_tick;
         }
     );
 }

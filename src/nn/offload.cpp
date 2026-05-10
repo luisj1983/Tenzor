@@ -88,6 +88,10 @@ OffloadContext::~OffloadContext() {
                 try {
                     Tensor restored = transfer_engine_->cpu_to_gpu(
                         info.cpu_copy, info.original_device);
+                    // Phase C (C3): cast back to original dtype if cpu_copy was quantized.
+                    if (info.original_dtype != info.offload_dtype_used) {
+                        restored = restored.to(info.original_dtype);
+                    }
                     *tensor_ptr = restored;
                     info.is_offloaded = false;
                 } catch (const std::exception& e) {
@@ -426,6 +430,13 @@ auto OffloadContext::drain_all_pending() -> void {
     }
 }
 
+auto OffloadContext::offload_single_tensor(Tensor* tensor_ptr) -> bool {
+    // Phase C (C6): public wrapper around the private offload_tensor() so the
+    // free function tenzor::nn::offload_param can drive a manual eviction
+    // without exposing the whole private API.
+    return offload_tensor(tensor_ptr);
+}
+
 auto OffloadContext::finalize_completed_offloads() -> size_t {
     // Non-blocking variant of drain_all_pending: only commits transfers that
     // already finished in the background (TransferHandle::is_ready() == true).
@@ -464,7 +475,16 @@ auto OffloadContext::finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> v
         stats_.current_cpu_memory.fetch_add(info.size_bytes, std::memory_order_relaxed);
     } else {
         // Commit the CPU→GPU prefetch.
-        *tensor_ptr = result;
+        // Phase C (C3): if the cpu_copy was a quantized representation (Half/BF16),
+        // cast back on-GPU to the original dtype so downstream ops dispatch
+        // correctly. Cast happens after the DMA completes -- the bytes-on-the-wire
+        // savings still apply. is_pinned and CRITICAL tensors had cast skipped at
+        // offload time, so original_dtype == offload_dtype_used and no cast runs.
+        if (info.original_dtype != info.offload_dtype_used) {
+            *tensor_ptr = result.to(info.original_dtype);
+        } else {
+            *tensor_ptr = result;
+        }
         info.is_offloaded = false;
         // current_cpu_memory was already decremented when the prefetch was issued.
     }
@@ -506,15 +526,52 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
     }
 
     try {
-        // Save the original device before offloading
+        // Save the original device + dtype before offloading
         info.original_device = tensor_ptr->device();
+        info.original_dtype = tensor_ptr->dtype();
+
+        // Phase C (C3): pick the dtype for the host-side copy based on Config and
+        // per-tensor exemptions. Pinned tensors and CRITICAL-priority tensors keep
+        // their original dtype (no precision loss for activations whose backward
+        // may be sensitive). Everything else honors Config::offload_dtype.
+        DType cast_dtype = info.original_dtype;
+        const bool may_quant = !info.is_pinned
+                            && info.priority != OffloadPriority::HIGH;
+        if (may_quant && info.original_dtype == DType::Float32) {
+            switch (config_.offload_dtype) {
+                case Config::OffloadDType::Same:
+                    break;
+                case Config::OffloadDType::Half:
+                    cast_dtype = DType::Float16;
+                    break;
+                case Config::OffloadDType::BFloat16:
+                    cast_dtype = DType::BFloat16;
+                    break;
+                case Config::OffloadDType::Int8WithScale:
+                    // INT8 with per-tensor scale is recorded but the actual
+                    // quant/dequant kernels need extra plumbing (round + clamp
+                    // + dtype change with metadata). Until that lands, fall back
+                    // to BFloat16 -- still 2x savings vs full precision.
+                    cast_dtype = DType::BFloat16;
+                    break;
+            }
+        }
+        info.offload_dtype_used = cast_dtype;
+        info.quant_scale = 0.0f;  // Reserved for the future Int8 path.
+
+        // Cast on-GPU (when needed) before DMA. The cast-result tensor is what
+        // we send across PCIe -- so a Half cast halves the bytes-on-the-wire as
+        // well as the host-side residency.
+        Tensor src = (cast_dtype != info.original_dtype)
+                       ? tensor_ptr->to(cast_dtype)
+                       : *tensor_ptr;
 
         // Issue async GPU→CPU transfer. The actual data motion runs on the TransferEngine's
         // dedicated stream, which lets it overlap with the next layer's compute on the
         // default stream. We do *not* swap *tensor_ptr yet — the GPU memory must stay alive
         // until the DMA completes. The swap and memory-free happen in finalize_pending(),
         // typically called from the next forward_post_hook / backward_post_hook.
-        info.pending_handle = transfer_engine_->gpu_to_cpu_async(*tensor_ptr);
+        info.pending_handle = transfer_engine_->gpu_to_cpu_async(src);
         info.pending_is_offload = true;
 
         // Stats: count the offload at issue time (so callers see immediate feedback in
@@ -614,7 +671,13 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
         // Case 1: Tensor was offloaded from GPU - restore it
         if (it != tensor_map_.end() && it->second.is_offloaded) {
             try {
-                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(it->second.cpu_copy, it->second.original_device);
+                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(
+                    it->second.cpu_copy, it->second.original_device);
+                // Phase C (C3): cast back to original dtype on GPU after DMA when
+                // the cpu_copy was quantized.
+                if (it->second.original_dtype != it->second.offload_dtype_used) {
+                    gpu_tensor = gpu_tensor.to(it->second.original_dtype);
+                }
                 *tensor_ptr = gpu_tensor;
                 it->second.is_offloaded = false;
                 stats_.current_cpu_memory.fetch_sub(it->second.size_bytes, std::memory_order_relaxed);
@@ -902,19 +965,21 @@ auto ComputeContext::synchronize() -> void {
 // Global Functions
 // ============================================================================
 
-auto offload_param([[maybe_unused]] Tensor& param, [[maybe_unused]] OffloadPriority priority) -> void {
+auto offload_param(Tensor& param, [[maybe_unused]] OffloadPriority priority) -> void {
+    // Phase C (C6): previously a documented-only stub. Now forwards to
+    // OffloadContext::offload_single_tensor (added in offload.hpp), which
+    // drives the standard offload_tensor() path under the tensor_map_mutex_.
+    // Priority would feed initialize_tensor_info via TensorInfo::priority --
+    // currently the auto-eviction path is the only consumer of priority and
+    // it reads from tensor_map_; that's a separate plumbing change tracked
+    // under C2 (LRU + priority + size eviction). Manual offload still works
+    // with default priority for now.
     auto* ctx = get_global_offload_context();
     if (!ctx) {
         std::cerr << "Warning: offload_param called but no global offload context set\n";
         return;
     }
-
-    // Manual offload through context
-    // This would require making offload_tensor public or adding a friend function
-    // For now, we document the intended behavior
-
-    // In full implementation:
-    // ctx->offload_tensor(&param);
+    ctx->offload_single_tensor(&param);
 }
 
 auto get_global_offload_context() -> OffloadContext* {

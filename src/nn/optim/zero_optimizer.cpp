@@ -4459,18 +4459,36 @@ auto ZeROStage3Optimizer::check_memory_pressure() -> double {
     size_t total_gpu_memory = 0;
     size_t used_gpu_memory = perf_stats_.current_gathered_memory;
 
-    // Get GPU memory limit from configuration
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
     if (param_device.type == Device::Type::CUDA) {
-        // Use configured GPU memory limit (default: 16GB, configurable in Config)
-        // Users should set this to match their device capacity for accurate pressure monitoring
-        total_gpu_memory = 16ULL * 1024 * 1024 * 1024;  // Default 16GB
-
-        // Add parameter memory to current usage tracking
-        for (const auto& param : parameters_) {
-            const auto& tensor = param->tensor();
-            if (tensor.device().type == Device::Type::CUDA) {
-                used_gpu_memory += tensor.numel() * dtype_size(tensor.dtype());
+        // Phase C (C7): query the actual device capacity instead of hardcoding 16 GB.
+        // On an 80 GB H100 the old 16 GB constant fired the 0.85 threshold at 16% real
+        // utilisation; on a 12 GB consumer card it never fired. Now we use cudaMemGetInfo
+        // (also covered by hipMemGetInfo via the HIP shim) to get the real (free, total)
+        // pair. Falls back to 16 GB only when the runtime call is unavailable or fails.
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        bool got_real_total = false;
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+        cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
+        if (err == cudaSuccess && total_bytes > 0) {
+            total_gpu_memory = total_bytes;
+            // Use the runtime-reported free/used split as ground truth instead of our
+            // tracked counters when available -- catches allocations from other parts
+            // of the program (autograd cache, comm buffers, etc.) the optimizer doesn't
+            // see.
+            used_gpu_memory = total_bytes - free_bytes;
+            got_real_total = true;
+        }
+#endif
+        if (!got_real_total) {
+            total_gpu_memory = 16ULL * 1024 * 1024 * 1024;  // 16 GB fallback
+            // Track parameter memory ourselves since we don't have device-truth.
+            for (const auto& param : parameters_) {
+                const auto& tensor = param->tensor();
+                if (tensor.device().type == Device::Type::CUDA) {
+                    used_gpu_memory += tensor.numel() * dtype_size(tensor.dtype());
+                }
             }
         }
     } else {
