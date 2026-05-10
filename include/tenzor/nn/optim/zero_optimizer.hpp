@@ -690,6 +690,15 @@ protected:
      */
     auto update_local_partition() -> void;
 
+    /** ElementLevel-mode replacement for update_local_partition() / update_partition_adam.
+     *  Stages every parameter's gradient into the rank's slice of a global flat buffer,
+     *  then runs the optimizer math on the slice. After the math, writes the updated
+     *  parameter slice back into the rank's slot in the (yet-to-be-all-gathered) global
+     *  param flat buffer. The rank's master copy (if used) is the persistent state that
+     *  carries fp32 precision across steps.
+     */
+    auto update_local_partition_element_mode() -> void;
+
     /**
      * @brief Apply Adam update algorithm to partition
      *

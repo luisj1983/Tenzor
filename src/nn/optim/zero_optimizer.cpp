@@ -311,7 +311,11 @@ auto ZeROStage1Optimizer::step_impl() -> void {
 
     // Step 3: Update local partition of parameters
     auto compute_start = std::chrono::steady_clock::now();
-    update_local_partition();
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        update_local_partition_element_mode();
+    } else {
+        update_local_partition();
+    }
     if (profiling_enabled_) {
         auto compute_end = std::chrono::steady_clock::now();
         auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
@@ -1221,6 +1225,139 @@ auto ZeROStage1Optimizer::update_local_partition() -> void {
 
         // Restore original parameters
         parameters_ = original_params;
+    }
+}
+
+auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
+    auto& partition = local_partition();
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    if (slice_n == 0) return;
+
+    Device dev = partition.device;
+    DType state_dtype = partition.momentum[0].dtype();
+
+    // ---- 1) Build a flat grad slice for this rank from each parameter's grad. ----
+    // For each param entry whose [global_offset, global_offset+numel) intersects
+    // [rs, re), copy the relevant grad sub-range into grad_slice at the right local
+    // offset. Params with no grad contribute zeros.
+    Tensor grad_slice = zeros({slice_n}, state_dtype, dev);
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+
+        const auto& var = parameters_[i];
+        if (!var->has_grad()) continue;
+        const auto& go = var->grad();
+        if (!go.has_value()) continue;
+        Tensor grad_flat = go.value().contiguous().view({-1});
+        if (grad_flat.dtype() != state_dtype) grad_flat = grad_flat.to(state_dtype);
+
+        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
+        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);  // dst is zero, add_ acts as copy
+    }
+
+    // ---- 2) Run Adam/AdamW/SGD math on the rank's slice. ----
+    auto* adam_opt  = dynamic_cast<Adam*>(base_optimizer_.get());
+    auto* adamw_opt = dynamic_cast<AdamW*>(base_optimizer_.get());
+    auto* sgd_opt   = dynamic_cast<SGD*>(base_optimizer_.get());
+
+    Tensor& m = partition.momentum[0];
+    Tensor& v = partition.variance[0];
+    bool has_master = !partition.master_params.empty()
+                   && partition.master_params[0].numel() > 0;
+
+    // For the no-master path we need to gather the current parameter slice from each
+    // param->tensor() into a temporary `param_slice`, do the math in place there, then
+    // scatter back. The master path keeps a persistent fp32 slice and skips the gather.
+    Tensor param_slice;
+    if (!has_master) {
+        param_slice = zeros({slice_n}, state_dtype, dev);
+        for (size_t i = 0; i < L.params.size(); ++i) {
+            const auto& e = L.params[i];
+            int64_t p_start = e.global_offset;
+            int64_t p_end = e.global_offset + e.numel;
+            int64_t lap_start = std::max(p_start, rs);
+            int64_t lap_end = std::min(p_end, re);
+            if (lap_end <= lap_start) continue;
+            Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+            Tensor src = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+            Tensor dst = param_slice.slice(0, lap_start - rs, lap_end - rs);
+            if (src.dtype() != state_dtype) src = src.to(state_dtype);
+            add_(dst, src);
+        }
+    }
+
+    Tensor& target = has_master ? partition.master_params[0] : param_slice;
+
+    if (adam_opt || adamw_opt) {
+        const double lr     = adam_opt ? adam_opt->get_lr()  : adamw_opt->get_lr();
+        const double beta1  = 0.9;
+        const double beta2  = 0.999;
+        const double eps    = 1e-8;
+        const double wd     = adamw_opt ? 0.01 : 0.0;
+        step_count_++;
+
+        // m = beta1*m + (1-beta1)*g
+        mul_(m, scalar_like(beta1, m));
+        Tensor scaled_g = grad_slice * (1.0 - beta1);
+        add_(m, scaled_g);
+        // v = beta2*v + (1-beta2)*g^2
+        mul_(v, scalar_like(beta2, v));
+        Tensor g_sq = grad_slice * grad_slice;
+        mul_(g_sq, scalar_like(1.0 - beta2, g_sq));
+        add_(v, g_sq);
+
+        double bc1 = 1.0 - std::pow(beta1, step_count_);
+        double bc2 = 1.0 - std::pow(beta2, step_count_);
+        Tensor m_hat = m / bc1;
+        Tensor v_hat = v / bc2;
+        Tensor denom = sqrt(v_hat) + eps;
+
+        if (adamw_opt) {
+            // AdamW: decoupled weight decay
+            target = target * (1.0 - lr * wd);
+        }
+        target = target - (m_hat / denom) * lr;
+    } else if (sgd_opt) {
+        const double lr = sgd_opt->get_lr();
+        const double momentum_coef = 0.9;
+        if (momentum_coef != 0.0) {
+            mul_(m, scalar_like(momentum_coef, m));
+            add_(m, grad_slice);
+            target = target - m * lr;
+        } else {
+            target = target - grad_slice * lr;
+        }
+    } else {
+        throw std::runtime_error(
+            "ElementLevel mode currently supports Adam, AdamW, SGD base optimizers only");
+    }
+
+    // ---- 3) Scatter `target` back into per-parameter tensors. ----
+    // For each param overlapping the rank's slice, copy the corresponding slice of
+    // target into the param's flat view at the appropriate offset. Downcast on the
+    // master path back to the param's dtype.
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        Tensor src = target.slice(0, lap_start - rs, lap_end - rs);
+        if (src.dtype() != pflat.dtype()) src = src.to(pflat.dtype());
+        Tensor dst = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+        dst.zero_();
+        add_(dst, src);
     }
 }
 
