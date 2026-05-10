@@ -1986,7 +1986,11 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     // Step 3: Update local partition of parameters
     // Uses the local (reduced-scattered) gradients
     auto compute_start = std::chrono::steady_clock::now();
-    update_local_partition();
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        update_local_partition_element_mode();
+    } else {
+        update_local_partition();
+    }
     if (profiling_enabled_) {
         auto compute_end = std::chrono::steady_clock::now();
         auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
@@ -2009,7 +2013,11 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
         auto gather_start = std::chrono::steady_clock::now();
-        all_gather_parameters();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            all_gather_parameters_element_mode();
+        } else {
+            all_gather_parameters();
+        }
         if (profiling_enabled_) {
             auto gather_end = std::chrono::steady_clock::now();
             auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
@@ -2657,6 +2665,19 @@ auto ZeROStage2Optimizer::build_rank_grad_slice() -> Tensor {
     if (config_.partitioning_mode != PartitioningMode::ElementLevel) {
         return ZeROStage1Optimizer::build_rank_grad_slice();
     }
+
+    // Fallback: if no bucket has stashed grads (autograd hooks didn't fire — typical
+    // when callers use set_grad() directly without backward(), or when bucketing is
+    // disabled), delegate to the base-class path that reads from param->grad()
+    // directly. Mirrors the equivalent fallback in the legacy reduce_scatter_gradients.
+    bool any_bucket_has_data = false;
+    for (const auto& b : element_buckets_) {
+        if (b.flat_buffer.numel() > 0) { any_bucket_has_data = true; break; }
+    }
+    if (!any_bucket_has_data) {
+        return ZeROStage1Optimizer::build_rank_grad_slice();
+    }
+
     const auto& L = partition_layout_;
     const int64_t rs = L.rank_starts[config_.rank];
     const int64_t re = L.rank_starts[config_.rank + 1];
