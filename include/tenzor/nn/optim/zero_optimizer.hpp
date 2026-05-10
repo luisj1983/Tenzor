@@ -596,6 +596,15 @@ protected:
     std::vector<Tensor> gradient_buffers_;          ///< Buffers for gradient all-reduce
     std::vector<Tensor> param_buffers_;             ///< Buffers for parameter all-gather
 
+    // Phase B (B3): persistent scratch buffers for the element-mode hot path.
+    // Lazy-allocated on first use, resized only when shape/dtype/device changes.
+    // Same lazy-realloc pattern as GradientBucket::flat_buffer
+    // (zero_optimizer.cpp:2430-2436). Eliminates 3× per-step zeros() allocations
+    // on the recommended ElementLevel partition path.
+    Tensor element_grad_slice_buf_;                 ///< Reused by build_rank_grad_slice()
+    Tensor element_param_slice_buf_;                ///< Reused by update_local_partition_element_mode (no-master path)
+    Tensor element_local_flat_buf_;                 ///< Reused by all_gather_parameters_element_mode
+
     // Optimizer state
     int64_t step_count_{0};                         ///< Step counter for bias correction
     bool states_on_cpu_{false};                     ///< Whether optimizer states are currently on CPU
@@ -978,6 +987,12 @@ private:
         Tensor flat_partition_buffer;      ///< Reduce-scatter output buffer (size = ceil(total / world_size))
         std::vector<int64_t> param_offsets_elem;  ///< Element offset of each param in flat_buffer
         std::vector<int64_t> param_sizes_elem;    ///< Numel of each param
+
+        // Phase B (B4): set true when gradient_hook copied this step's grads directly
+        // into flat_buffer (instead of stashing Tensor refs in gradient_buffers).
+        // Tells reduce_scatter_gradients to skip its staging-from-gradient_buffers
+        // loop. Reset to false at the bottom of reduce_scatter_gradients.
+        bool flat_pre_staged{false};
 
         // Constructor to initialize mutex
         GradientBucket() : mutex(std::make_unique<std::mutex>()) {}

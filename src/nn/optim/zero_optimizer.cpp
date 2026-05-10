@@ -12,6 +12,10 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/reduction.hpp"
+// Phase B (B1): FusedAdamStep dispatch path -- mirrors src/nn/optim/adam.cpp:20-82.
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
@@ -1176,8 +1180,25 @@ auto ZeROStage1Optimizer::all_gather_parameters() -> void {
             // contiguous buffer containing each param's data back-to-back.
             flat = flatten_tensors(param_tensors);
         } else {
-            // Non-owner: just allocate the receive buffer; broadcast() will overwrite.
-            flat = empty({static_cast<int64_t>(total_elements)}, dt, dev);
+            // Phase B (B2): Non-owner — reuse a persistent receive buffer per source rank
+            // instead of allocating fresh every step. param_buffers_ is declared on the
+            // optimizer (hpp:597) and was never wired up; this is the same lazy-realloc
+            // pattern as GradientBucket::flat_buffer (zero_optimizer.cpp:2430-2436).
+            //
+            // Saves world_size × partition_bytes of allocator churn per step; for an
+            // 8-rank 1B-param fp16 setup that's ~2 GB freed+reallocated per step.
+            if (param_buffers_.size() < static_cast<size_t>(config_.world_size)) {
+                param_buffers_.resize(config_.world_size);
+            }
+            Tensor& slot = param_buffers_[rank];
+            const int64_t needed = static_cast<int64_t>(total_elements);
+            const bool need_realloc = slot.numel() != needed
+                                   || slot.dtype() != dt
+                                   || slot.device() != dev;
+            if (need_realloc) {
+                slot = empty({needed}, dt, dev);
+            }
+            flat = slot;
         }
 
         // Profiling accounting matches the legacy contract (bytes-per-broadcast, summed
@@ -1215,7 +1236,15 @@ auto ZeROStage1Optimizer::all_gather_parameters_element_mode() -> void {
     DType dt = !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32;
 
     // Build the local flat slice from the just-updated parameter tensors.
-    Tensor local_flat = zeros({per_rank}, dt, dev);
+    // Phase B (B3): reuse element_local_flat_buf_ across steps.
+    if (element_local_flat_buf_.numel() != per_rank
+        || element_local_flat_buf_.dtype() != dt
+        || element_local_flat_buf_.device() != dev) {
+        element_local_flat_buf_ = zeros({per_rank}, dt, dev);
+    } else {
+        element_local_flat_buf_.zero_();
+    }
+    Tensor local_flat = element_local_flat_buf_;
     const int64_t rs = L.rank_starts[config_.rank];
     const int64_t re = L.rank_starts[config_.rank + 1];
     for (size_t i = 0; i < L.params.size(); ++i) {
@@ -1354,7 +1383,15 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
     // scatter back. The master path keeps a persistent fp32 slice and skips the gather.
     Tensor param_slice;
     if (!has_master) {
-        param_slice = zeros({slice_n}, state_dtype, dev);
+        // Phase B (B3): reuse element_param_slice_buf_ across steps.
+        if (element_param_slice_buf_.numel() != slice_n
+            || element_param_slice_buf_.dtype() != state_dtype
+            || element_param_slice_buf_.device() != dev) {
+            element_param_slice_buf_ = zeros({slice_n}, state_dtype, dev);
+        } else {
+            element_param_slice_buf_.zero_();
+        }
+        param_slice = element_param_slice_buf_;
         for (size_t i = 0; i < L.params.size(); ++i) {
             const auto& e = L.params[i];
             int64_t p_start = e.global_offset;
@@ -1456,7 +1493,16 @@ auto ZeROStage1Optimizer::build_rank_grad_slice() -> Tensor {
     Device dev = local_partition().device;
     DType state_dtype = local_partition().momentum[0].dtype();
 
-    Tensor grad_slice = zeros({slice_n}, state_dtype, dev);
+    // Phase B (B3): reuse element_grad_slice_buf_ across steps. Saves ~slice_n *
+    // dtype_size bytes of allocator churn per step on the element-mode hot path.
+    if (element_grad_slice_buf_.numel() != slice_n
+        || element_grad_slice_buf_.dtype() != state_dtype
+        || element_grad_slice_buf_.device() != dev) {
+        element_grad_slice_buf_ = zeros({slice_n}, state_dtype, dev);
+    } else {
+        element_grad_slice_buf_.zero_();
+    }
+    Tensor grad_slice = element_grad_slice_buf_;
     for (size_t i = 0; i < L.params.size(); ++i) {
         const auto& e = L.params[i];
         int64_t p_start = e.global_offset;
@@ -1516,6 +1562,43 @@ auto ZeROStage1Optimizer::update_partition_adam(
         const Tensor& raw_grad = grad_opt.value();
         Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
 
+        // Phase B (B1): FusedAdamStep CUDA fast-path. Mirrors src/nn/optim/adam.cpp:30-55.
+        // One kernel instead of ~6 OoP allocations + ops per param. Conditions:
+        //   - target lives on a CUDA device (the fused kernel is CUDA-only today),
+        //   - target dtype is fp32 or fp64 (fused kernel doesn't yet support fp16/bf16),
+        //   - no decoupled weight decay (Adam uses L2 reg via grad mutation, AdamW
+        //     dispatches with Decoupled=true in update_partition_adamw).
+        // The master-FP32 + sync-back-to-param logic still wraps this: the fused
+        // dispatch updates `target` (which IS partition.master_params[i] when has_master),
+        // and the downcast-to-param.tensor() below copies it back to fp16/bf16.
+        if (target.device().type == Device::Type::CUDA &&
+            grad.device().type == Device::Type::CUDA &&
+            (target_dtype == DType::Float32 || target_dtype == DType::Float64)) {
+
+            std::vector<Tensor> inputs = {
+                target, grad, partition.momentum[i], partition.variance[i]
+            };
+
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, lr);
+            attrs.set(AttrKey::Beta1, beta1);
+            attrs.set(AttrKey::Beta2, beta2);
+            attrs.set(AttrKey::Eps, eps);
+            attrs.set(AttrKey::WeightDecay, weight_decay);
+            attrs.set(AttrKey::Step, static_cast<int64_t>(step_count_));
+            attrs.set(AttrKey::Decoupled, false);  // Adam: L2 reg
+            attrs.set(AttrKey::Amsgrad, false);
+
+            dispatch(OpId::FusedAdamStep, inputs, attrs);
+
+            // Sync master → fp16/bf16 user param so the next forward sees the updates.
+            if (has_master) {
+                param->tensor() = target.to(param->tensor().dtype());
+            }
+            continue;
+        }
+
+        // CPU / non-fused fallback path.
         // Apply weight decay (L2 regularization)
         Tensor grad_with_decay = grad;
         if (weight_decay != 0.0) {
@@ -1594,6 +1677,34 @@ auto ZeROStage1Optimizer::update_partition_adamw(
 
         const Tensor& raw_grad = grad_opt.value();
         Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
+
+        // Phase B (B1): FusedAdamStep CUDA fast-path with Decoupled=true (AdamW path).
+        // See update_partition_adam for full rationale.
+        if (target.device().type == Device::Type::CUDA &&
+            grad.device().type == Device::Type::CUDA &&
+            (target_dtype == DType::Float32 || target_dtype == DType::Float64)) {
+
+            std::vector<Tensor> inputs = {
+                target, grad, partition.momentum[i], partition.variance[i]
+            };
+
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, lr);
+            attrs.set(AttrKey::Beta1, beta1);
+            attrs.set(AttrKey::Beta2, beta2);
+            attrs.set(AttrKey::Eps, eps);
+            attrs.set(AttrKey::WeightDecay, weight_decay);
+            attrs.set(AttrKey::Step, static_cast<int64_t>(step_count_));
+            attrs.set(AttrKey::Decoupled, true);   // AdamW: decoupled weight decay
+            attrs.set(AttrKey::Amsgrad, false);
+
+            dispatch(OpId::FusedAdamStep, inputs, attrs);
+
+            if (has_master) {
+                param->tensor() = target.to(param->tensor().dtype());
+            }
+            continue;
+        }
 
         Tensor& momentum = partition.momentum[i];
         Tensor& variance = partition.variance[i];
@@ -2365,6 +2476,16 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
 
     auto scatter_start = std::chrono::steady_clock::now();
 
+    // Phase B (B4): if gradient_hook pre-staged grads directly into bucket.flat_buffer
+    // (the new path that releases param->grad() immediately to halve transient grad
+    // memory), skip the gradient_buffers staging entirely -- flat_buffer is already
+    // populated and ready for the collective.
+    bool pre_staged = false;
+    {
+        std::lock_guard<std::mutex> stash_lock(*bucket.mutex);
+        pre_staged = bucket.flat_pre_staged;
+    }
+
     // Collect all gradients from the bucket. Prefer the per-bucket stash populated by
     // gradient_hook(...) (autograd-driven path), since param->grad() may not be populated yet
     // when the hook for the LAST param fires (engine.cpp accumulates *after* hooks run).
@@ -2374,7 +2495,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
 
     size_t total_bytes = 0;
     bool buffers_have_data = false;
-    {
+    if (!pre_staged) {
         std::lock_guard<std::mutex> stash_lock(*bucket.mutex);
         if (bucket.gradient_buffers.size() == bucket.params.size()) {
             buffers_have_data = std::all_of(
@@ -2390,9 +2511,16 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
                 }
             }
         }
+    } else {
+        // Pre-staged: bytes are already in flat_buffer. We still need to record total
+        // bytes for profiling.
+        if (profiling_enabled_) {
+            total_bytes = static_cast<size_t>(bucket.flat_buffer.numel())
+                        * dtype_size(bucket.flat_buffer.dtype());
+        }
     }
 
-    if (!buffers_have_data) {
+    if (!pre_staged && !buffers_have_data) {
         for (const auto& param : bucket.params) {
             if (!param->has_grad()) {
                 throw std::runtime_error("Parameter missing gradient in reduce-scatter");
@@ -2412,7 +2540,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         }
     }
 
-    if (gradients.empty()) {
+    if (!pre_staged && gradients.empty()) {
         return;
     }
 
@@ -2421,34 +2549,39 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     // first real grad) and reused for the lifetime of the bucket. Per training step this
     // eliminates one full-bucket-sized allocation (the legacy flatten_tensors result) and one
     // partition-sized allocation (the legacy zeros() output of reduce_scatter).
-    int64_t total_elements = 0;
-    for (int64_t n : bucket.param_sizes_elem) total_elements += n;
+    // When pre_staged, flat_buffer is already populated by gradient_hook (no allocation
+    // or staging needed). Otherwise, lazy-alloc + stage from the gradient_buffers stash
+    // (legacy path for callers driving gradient_hook manually without bucket geometry).
+    if (!pre_staged) {
+        int64_t total_elements = 0;
+        for (int64_t n : bucket.param_sizes_elem) total_elements += n;
 
-    DType buf_dtype = gradients.front().dtype();
-    Device buf_device = gradients.front().device();
+        DType buf_dtype = gradients.front().dtype();
+        Device buf_device = gradients.front().device();
 
-    if (bucket.flat_buffer.numel() != total_elements ||
-        bucket.flat_buffer.dtype() != buf_dtype ||
-        bucket.flat_buffer.device() != buf_device) {
-        bucket.flat_buffer = zeros({total_elements}, buf_dtype, buf_device);
-    } else {
-        // Reset stale residue from the previous step before re-staging.
-        bucket.flat_buffer.zero_();
-    }
-
-    // Stage each grad into its slot. The buffer is currently zero everywhere, so add_ acts
-    // as a copy (zero + grad = grad) without needing a public copy_ API.
-    for (size_t i = 0; i < gradients.size(); ++i) {
-        const Tensor& g = gradients[i];
-        if (i >= bucket.param_offsets_elem.size() || g.numel() == 0) continue;
-        int64_t off = bucket.param_offsets_elem[i];
-        int64_t sz  = bucket.param_sizes_elem[i];
-        if (g.numel() != sz) {
-            throw std::runtime_error("reduce_scatter_gradients: gradient size mismatch");
+        if (bucket.flat_buffer.numel() != total_elements ||
+            bucket.flat_buffer.dtype() != buf_dtype ||
+            bucket.flat_buffer.device() != buf_device) {
+            bucket.flat_buffer = zeros({total_elements}, buf_dtype, buf_device);
+        } else {
+            // Reset stale residue from the previous step before re-staging.
+            bucket.flat_buffer.zero_();
         }
-        Tensor slot = bucket.flat_buffer.slice(0, off, off + sz);
-        Tensor flat_grad = g.contiguous().view({-1});
-        add_(slot, flat_grad);
+
+        // Stage each grad into its slot. The buffer is currently zero everywhere, so add_ acts
+        // as a copy (zero + grad = grad) without needing a public copy_ API.
+        for (size_t i = 0; i < gradients.size(); ++i) {
+            const Tensor& g = gradients[i];
+            if (i >= bucket.param_offsets_elem.size() || g.numel() == 0) continue;
+            int64_t off = bucket.param_offsets_elem[i];
+            int64_t sz  = bucket.param_sizes_elem[i];
+            if (g.numel() != sz) {
+                throw std::runtime_error("reduce_scatter_gradients: gradient size mismatch");
+            }
+            Tensor slot = bucket.flat_buffer.slice(0, off, off + sz);
+            Tensor flat_grad = g.contiguous().view({-1});
+            add_(slot, flat_grad);
+        }
     }
 
     Tensor& flat_grads = bucket.flat_buffer;
@@ -2473,29 +2606,44 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     // per-param grads. Non-owner: free per-param grads since this rank is no longer
     // responsible for them in Stage 2 semantics.
     if (bucket.target_rank == config_.rank) {
+        // Build local_grads. For the legacy (non-pre-staged) path each param->grad() is
+        // still alive and we just rebind. For the pre-staged path the hook already cleared
+        // param->grad(), so we slice flat_buffer per-param and create fresh tensors with
+        // the original parameter shape.
         std::vector<Tensor> local_grads;
         local_grads.reserve(bucket.params.size());
 
-        for (const auto& param : bucket.params) {
-            if (param->has_grad()) {
-                auto& grad_opt = param->grad();
-                if (grad_opt.has_value()) {
-                    local_grads.push_back(grad_opt.value());
+        if (pre_staged) {
+            for (size_t i = 0; i < bucket.params.size(); ++i) {
+                if (i >= bucket.param_offsets_elem.size()) continue;
+                int64_t off = bucket.param_offsets_elem[i];
+                int64_t sz  = bucket.param_sizes_elem[i];
+                Tensor flat_slice = flat_grads.slice(0, off, off + sz);
+                // Reshape to the parameter's shape so set_grad gets the right geometry.
+                const auto& param = bucket.params[i];
+                auto shape_span = param->tensor().shape();
+                std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+                local_grads.push_back(flat_slice.view(shape).clone());
+            }
+        } else {
+            for (const auto& param : bucket.params) {
+                if (param->has_grad()) {
+                    auto& grad_opt = param->grad();
+                    if (grad_opt.has_value()) {
+                        local_grads.push_back(grad_opt.value());
+                    }
                 }
+            }
+            if (!local_grads.empty()) {
+                // Sizes now line up: flat_grads.numel() == sum(local_grads numel). The legacy
+                // shape-mismatch crash that #9 in the review flagged is fixed here.
+                unflatten_into(flat_grads, local_grads);
             }
         }
 
         if (!local_grads.empty()) {
-            // Sizes now line up: flat_grads.numel() == sum(local_grads numel). The legacy
-            // shape-mismatch crash that #9 in the review flagged is fixed here.
-            unflatten_into(flat_grads, local_grads);
-
-            size_t grad_idx = 0;
-            for (auto& param : bucket.params) {
-                if (param->has_grad() && grad_idx < local_grads.size()) {
-                    param->set_grad(local_grads[grad_idx]);
-                    grad_idx++;
-                }
+            for (size_t i = 0; i < bucket.params.size() && i < local_grads.size(); ++i) {
+                bucket.params[i]->set_grad(local_grads[i]);
             }
         }
     } else {
@@ -2516,6 +2664,10 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         for (auto& slot : bucket.gradient_buffers) {
             slot = Tensor();
         }
+        // Phase B (B4): reset for next step. flat_buffer itself stays alive (persistent
+        // scratch); only the "ready to use" flag flips so the next first hook of the next
+        // step zero_()s the buffer before re-staging.
+        bucket.flat_pre_staged = false;
     }
 
     // Track profiling stats
@@ -2566,16 +2718,60 @@ auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, size_t param_idx, con
     {
         std::lock_guard<std::mutex> lock(*bucket.mutex);
 
-        // Lazy-grow buffer storage for paths that didn't go through register_backward_hooks
-        // (e.g. callers driving gradient_hook manually without ever installing hooks).
-        if (bucket.gradient_buffers.size() < bucket.params.size()) {
-            bucket.gradient_buffers.resize(bucket.params.size());
+        // Phase B (B4): pre-stage the grad bytes directly into bucket.flat_buffer at this
+        // param's offset, then release the original grad. Without this, gradient_buffers[i]
+        // held a refcount to param->grad() until reduce-scatter -- so each in-flight bucket
+        // had two live copies of every grad in it (Variable's grad slot + bucket stash).
+        // For deep models with bucket size 25 MB, several buckets-worth of duplicate grads
+        // were alive concurrently during backward. Pre-staging at hook time + immediate
+        // zero_grad halves transient grad memory during backward.
+        //
+        // Lazy-alloc the persistent flat_buffer with the proper total size on first hook.
+        if (param_idx < bucket.param_offsets_elem.size()
+            && param_idx < bucket.param_sizes_elem.size()
+            && grad.numel() > 0) {
+
+            int64_t total_elements = 0;
+            for (int64_t n : bucket.param_sizes_elem) total_elements += n;
+
+            DType buf_dtype = grad.dtype();
+            Device buf_device = grad.device();
+            if (bucket.flat_buffer.numel() != total_elements
+                || bucket.flat_buffer.dtype() != buf_dtype
+                || bucket.flat_buffer.device() != buf_device) {
+                bucket.flat_buffer = zeros({total_elements}, buf_dtype, buf_device);
+            } else if (!bucket.flat_pre_staged) {
+                // First param of a new step in a previously-staged buffer: zero residue.
+                bucket.flat_buffer.zero_();
+            }
+
+            int64_t off = bucket.param_offsets_elem[param_idx];
+            int64_t sz  = bucket.param_sizes_elem[param_idx];
+            if (grad.numel() == sz) {
+                Tensor slot = bucket.flat_buffer.slice(0, off, off + sz);
+                Tensor flat_grad = grad.contiguous().view({-1});
+                // The slot is zero (either freshly-allocated or zero_()'d above on the
+                // first param), so add_ behaves as a copy.
+                add_(slot, flat_grad);
+                bucket.flat_pre_staged = true;
+            }
+
+            // Release the param's grad now that we've copied its bytes -- this drops the
+            // duplicate live copy. The hook's `grad` arg keeps the storage alive until
+            // this function returns, after which it goes to refcount 0.
+            auto& param = bucket.params[param_idx];
+            if (param) {
+                param->zero_grad();
+            }
+        } else {
+            // Fallback: still stash a Tensor ref for paths where bucket geometry isn't set
+            // (manual callers that haven't called create_gradient_buckets yet).
+            if (bucket.gradient_buffers.size() < bucket.params.size()) {
+                bucket.gradient_buffers.resize(bucket.params.size());
+            }
+            bucket.gradient_buffers[param_idx] = grad;
         }
 
-        // Stash the grad. Storing the Tensor directly is cheap (refcounted Storage); we don't
-        // clone, but we do rely on the autograd hook's contract that `grad` outlives accumulation
-        // and that the next backward will produce a fresh tensor (so we don't alias across steps).
-        bucket.gradient_buffers[param_idx] = grad;
         bucket.gradients_received++;
 
         if (bucket.gradients_received >= bucket.params.size()) {
