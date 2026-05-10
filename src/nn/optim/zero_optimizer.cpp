@@ -803,6 +803,67 @@ auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
 }
 
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        auto& partition = local_partition();
+        const int64_t slice_n = partition_layout_.rank_size(config_.rank);
+
+        Device dev = partition.device;
+        // For element-mode, the rank's optimizer state is a single flat slice covering
+        // every parameter's contribution. This is exactly the global flat buffer slice
+        // [rank_starts[rank], rank_starts[rank+1]). Use the dtype of the first param as
+        // the state dtype unless overridden — same rule as ParamLevel.
+        DType state_dtype = config_.state_dtype.value_or(
+            !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32);
+
+        partition.momentum.assign(1, zeros({slice_n}, state_dtype, dev));
+        partition.variance.assign(1, zeros({slice_n}, state_dtype, dev));
+
+        if (config_.use_master_fp32) {
+            // The master is a fp32 copy of the rank's parameter slice. We populate it
+            // by gathering each param's portion of the rank's slice; for now zero-init
+            // it (the all-gather of params at the end of the FIRST step copies real
+            // values into the master via the same code path used for legacy Stage 1).
+            //
+            // NOTE: master is meaningful only when training in fp16/bf16; if all params
+            // are already fp32 the master is wasteful and we skip allocation.
+            bool any_low_precision = false;
+            for (const auto& e : partition_layout_.params) {
+                if (e.dtype != DType::Float32) { any_low_precision = true; break; }
+            }
+            if (any_low_precision) {
+                partition.master_params.assign(1, zeros({slice_n}, DType::Float32, dev));
+            } else {
+                partition.master_params.assign(1, Tensor());  // no master needed
+            }
+        }
+
+        partition.memory_bytes =
+            slice_n * dtype_size(state_dtype) * 2 +  // momentum + variance
+            (partition.master_params.empty() ? 0
+                : (partition.master_params[0].numel() * dtype_size(DType::Float32)));
+
+        // CPU offload + NVMe + quantization: re-use the existing per-tensor offload
+        // path on the single slice. This is intentional — we get all the offload knobs
+        // for free since the slice is just another Tensor.
+        const bool should_cpu_offload = config_.offload_to_cpu && offload_engine_;
+        if (should_cpu_offload) {
+            partition.momentum[0] = offload_engine_->offload_to_cpu(partition.momentum[0]);
+            partition.variance[0] = offload_engine_->offload_to_cpu(partition.variance[0]);
+            if (!partition.master_params.empty() && partition.master_params[0].numel() > 0) {
+                partition.master_params[0] =
+                    offload_engine_->offload_to_cpu(partition.master_params[0]);
+            }
+            states_on_cpu_ = true;
+        }
+
+        // NVMe path for ElementLevel is added in Task 9.1 (NVMe interaction).
+        if (config_.offload_to_nvme) {
+            throw std::runtime_error(
+                "ElementLevel + offload_to_nvme is not yet supported (planned: Task 9.1)");
+        }
+        return;
+    }
+
     // Initialize states for local partition only
     auto& partition = local_partition();
 
