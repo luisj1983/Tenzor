@@ -105,3 +105,59 @@ TEST_P(ZeROStage1MultiDTypeTest, WithSGD) {
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ZeROStage1MultiDTypeTest);
+
+// ============================================================================
+// CPU-only, dtype-specific tests that don't fit the parameterized fixture
+// (the parameterized fixture skips CPU, so these use a plain TEST_F fixture).
+// ============================================================================
+
+class ZeROStage1CPUDTypeTest : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() {
+        tenzor::initialize();
+    }
+
+    auto create_fp16_params(size_t count, const std::vector<int64_t>& shape)
+        -> std::vector<std::shared_ptr<Variable>> {
+        std::vector<std::shared_ptr<Variable>> params;
+        params.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            auto t = tenzor::ones(shape, DType::Float16, Device::cpu());
+            params.push_back(std::make_shared<Variable>(t, true));
+        }
+        return params;
+    }
+};
+
+TEST_F(ZeROStage1CPUDTypeTest, ElementLevel_MasterFP32_FP16Param) {
+    auto params = create_fp16_params(2, {16, 16});
+    auto base = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config cfg;
+    cfg.world_size = 1;
+    cfg.rank = 0;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.use_master_fp32 = true;
+    cfg.state_dtype = DType::Float32;
+
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < 5; ++step) {
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * 0.01f;
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+
+    // Sanity: param dtype preserved after fp16 round-trip through master-fp32.
+    EXPECT_EQ(params[0]->tensor().dtype(), DType::Float16);
+
+    // Spot-check param is finite (the fp16 round-trip + Adam math should
+    // produce valid fp16 values after 5 steps of lr=0.001, grad=0.01).
+    Tensor flat = params[0]->tensor().contiguous().view({-1}).to(DType::Float32).to(Device::cpu());
+    const float* d = flat.data<float>();
+    for (int64_t i = 0; i < flat.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(d[i])) << "non-finite value at index " << i;
+    }
+}
