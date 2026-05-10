@@ -2062,6 +2062,24 @@ auto ZeROStage2Optimizer::register_backward_hooks() -> void {
         return;  // Hooks disabled in config
     }
 
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        // One hook per parameter; routes into element_gradient_hook.
+        element_hook_ids_.assign(parameters_.size(), 0);
+        for (size_t i = 0; i < parameters_.size(); ++i) {
+            auto& p = parameters_[i];
+            if (!p) continue;
+            element_hook_ids_[i] = p->register_hook(
+                [this, i](const Tensor& grad) -> Tensor {
+                    this->element_gradient_hook(i, grad);
+                    return grad;
+                });
+        }
+        hooks_registered_ = true;
+        return;
+    }
+
+    // ... existing ParamLevel code unchanged below ...
+
     // Register a hook on every parameter Variable. The autograd engine calls these
     // during backward, *before* gradient accumulation, with the freshly-computed grad.
     // We stash the grad into the bucket's per-param slot and, once the bucket is full,
@@ -2102,6 +2120,21 @@ auto ZeROStage2Optimizer::unregister_backward_hooks() -> void {
     if (!hooks_registered_) {
         return;
     }
+
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        for (size_t i = 0; i < parameters_.size() && i < element_hook_ids_.size(); ++i) {
+            if (parameters_[i]) parameters_[i]->unregister_hook(element_hook_ids_[i]);
+        }
+        element_hook_ids_.clear();
+        for (auto& b : element_buckets_) {
+            b.flat_buffer = Tensor();
+            b.hooks_received = 0;
+        }
+        hooks_registered_ = false;
+        return;
+    }
+
+    // ... existing ParamLevel code unchanged below ...
 
     for (auto& bucket : gradient_buckets_) {
         for (size_t i = 0; i < bucket.params.size() && i < bucket.hook_ids.size(); ++i) {
@@ -2532,6 +2565,81 @@ auto ZeROStage2Optimizer::unflatten_into(
 ) -> void {
     // Use the gradient_utils implementation
     tenzor::optim::unflatten_into(flattened, targets);
+}
+
+// =============================================================================
+// Stage 2: ElementLevel gradient hook and reduce-scatter
+// =============================================================================
+
+auto ZeROStage2Optimizer::element_gradient_hook(size_t param_idx, const Tensor& grad) -> void {
+    const auto& L = partition_layout_;
+    const auto& e = L.params[param_idx];
+    int64_t p_start = e.global_offset;
+    int64_t p_end = e.global_offset + e.numel;
+    DType dt = e.dtype;
+    Device dev = grad.device();
+
+    Tensor grad_flat = grad.contiguous().view({-1});
+    if (grad_flat.dtype() != dt) grad_flat = grad_flat.to(dt);
+
+    for (auto& b : element_buckets_) {
+        int64_t lap_start = std::max(p_start, b.global_start);
+        int64_t lap_end = std::min(p_end, b.global_end);
+        if (lap_end <= lap_start) continue;
+
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        if (b.flat_buffer.numel() != b.global_end - b.global_start
+            || b.flat_buffer.dtype() != dt
+            || b.flat_buffer.device() != dev) {
+            b.flat_buffer = zeros({b.global_end - b.global_start}, dt, dev);
+        }
+        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
+        Tensor dst = b.flat_buffer.slice(0, lap_start - b.global_start,
+                                            lap_end - b.global_start);
+        add_(dst, src);
+    }
+
+    // Mark this param's contribution to each overlapping bucket. Fire reduce_scatter
+    // when a bucket has all its params' grads in.
+    for (auto& b : element_buckets_) {
+        bool in_bucket = std::find(b.param_indices.begin(), b.param_indices.end(),
+                                    param_idx) != b.param_indices.end();
+        if (!in_bucket) continue;
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        b.hooks_received++;
+        if (b.hooks_received == b.param_indices.size()) {
+            reduce_scatter_element_bucket(b);
+        }
+    }
+}
+
+auto ZeROStage2Optimizer::reduce_scatter_element_bucket(ElementBucket& bucket) -> void {
+    // Caller holds bucket.mutex.
+    if (config_.world_size <= 1 || !config_.process_group) {
+        // Single-rank path: nothing to scatter; the optimizer step picks up the
+        // bucket's flat_buffer directly during update_local_partition_element_mode.
+        return;
+    }
+
+    const int64_t bucket_n = bucket.global_end - bucket.global_start;
+    const int64_t per_rank = bucket_n / config_.world_size;
+    DType dt = bucket.flat_buffer.dtype();
+    Device dev = bucket.flat_buffer.device();
+
+    // Split bucket.flat_buffer into world_size contiguous chunks (slices). Pass them
+    // as the input to reduce_scatter; the output is this rank's slice.
+    std::vector<Tensor> chunks(config_.world_size);
+    for (int r = 0; r < config_.world_size; ++r) {
+        chunks[r] = bucket.flat_buffer.slice(0, r * per_rank, (r + 1) * per_rank);
+    }
+
+    Tensor output = zeros({per_rank}, dt, dev);
+    config_.process_group->reduce_scatter(chunks, output);
+
+    // Replace bucket.flat_buffer with just our slice. Frees the other ranks' slices —
+    // that's the actual memory win this whole refactor exists to deliver.
+    bucket.flat_buffer = output;
+    bucket.hooks_received = 0;  // ready for next backward
 }
 
 // =============================================================================

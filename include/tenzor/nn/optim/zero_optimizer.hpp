@@ -1002,6 +1002,7 @@ private:
 
     // Hook management
     bool hooks_registered_{false};
+    std::vector<size_t> element_hook_ids_;  ///< register_hook handles for ElementLevel mode, one per parameter
 
     // Initialization
 
@@ -1052,6 +1053,13 @@ private:
      * bucket has received all of its gradients.
      */
     auto gradient_hook(size_t bucket_idx, size_t param_idx, const Tensor& grad) -> void;
+
+    /** Handler for the autograd register_hook callback in ElementLevel mode. Stages grad
+     *  into every overlapping ElementBucket's flat_buffer, fires reduce_scatter when a
+     *  bucket has received all its params' grads.
+     */
+    auto element_gradient_hook(size_t param_idx, const Tensor& grad) -> void;
+    auto reduce_scatter_element_bucket(ElementBucket& bucket) -> void;
 
     /**
      * @brief Check if bucket is ready for reduce-scatter
