@@ -621,6 +621,12 @@ protected:
      */
     auto partition_parameters() -> void;
 
+    /** Compute the element-level partition layout for `parameters_`. Pure function of
+     *  parameter shapes/dtypes and `world_size` — does not allocate any optimizer state
+     *  itself. Called by `partition_parameters()` when in ElementLevel mode.
+     */
+    auto compute_element_partition_layout() -> void;
+
     /**
      * @brief Initialize optimizer states for local partition
      *

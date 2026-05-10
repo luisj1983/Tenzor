@@ -748,6 +748,42 @@ auto ZeROStage1Optimizer::partition_parameters() -> void {
     }
 }
 
+auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
+    PartitionLayout& L = partition_layout_;
+    L.params.clear();
+    L.rank_starts.clear();
+
+    // Walk every parameter, recording (global offset, numel, shape, dtype).
+    int64_t total = 0;
+    L.params.reserve(parameters_.size());
+    for (const auto& p : parameters_) {
+        const Tensor& t = p->tensor();
+        PartitionLayout::ParamEntry entry;
+        entry.global_offset = total;
+        entry.numel = t.numel();
+        auto sh = t.shape();
+        entry.original_shape.assign(sh.begin(), sh.end());
+        entry.dtype = t.dtype();
+        L.params.push_back(std::move(entry));
+        total += entry.numel;
+    }
+
+    // Round total up to a multiple of world_size so reduce_scatter / all_gather can
+    // hand each rank an equal-sized slice. The padding bytes are zeros and contribute
+    // nothing to the optimizer math (no parameter touches them).
+    const int64_t W = static_cast<int64_t>(config_.world_size);
+    int64_t padded = ((total + W - 1) / W) * W;
+    L.total_elements_padded = padded;
+
+    // Equal split. rank_starts has world_size + 1 entries so rank_size(R) is just a
+    // subtraction.
+    L.rank_starts.assign(config_.world_size + 1, 0);
+    int64_t per_rank = padded / W;
+    for (int r = 0; r <= config_.world_size; ++r) {
+        L.rank_starts[r] = std::min<int64_t>(per_rank * r, padded);
+    }
+}
+
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
     // Initialize states for local partition only
     auto& partition = local_partition();
