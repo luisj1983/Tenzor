@@ -533,21 +533,9 @@ protected:
     std::vector<StatePartition> partitions_;        ///< State partitions for all ranks
     std::shared_ptr<core::OffloadEngine> offload_engine_;  ///< CPU offload engine
 
-    /** Element-level partition layout (only populated when
-     *  config_.partitioning_mode == PartitioningMode::ElementLevel).
-     *
-     *  Conceptually: every parameter is concatenated into a single global flat buffer of
-     *  total_elements rounded up to a multiple of world_size. That buffer is then split
-     *  into `world_size` equal slices; rank R owns slice R. For each parameter we record:
-     *
-     *    - global_offset: starting position in the global flat buffer (in elements).
-     *    - numel:         total element count.
-     *    - original_shape: shape to restore after the all-gather rebinding step.
-     *
-     *  And per-rank we record:
-     *    - rank_start, rank_end: half-open element range of the global flat buffer this
-     *      rank owns. rank_end - rank_start == ceil(total_elements / world_size) for all
-     *      ranks except possibly the last (which may be shorter on uneven divides).
+    /** Layout metadata describing element-level partitioning of all parameters across
+     *  ranks. Populated by the element-mode partitioner; consumed by the optimizer step,
+     *  reduce-scatter, and all-gather paths. See `partition_layout_` for full semantics.
      */
     struct PartitionLayout {
         struct ParamEntry {
@@ -565,7 +553,25 @@ protected:
         }
     };
 
-    PartitionLayout partition_layout_;  // empty in ParamLevel mode
+    /** Element-level partition layout (only populated when
+     *  config_.partitioning_mode == PartitioningMode::ElementLevel).
+     *
+     *  Conceptually: every parameter is concatenated into a single global flat buffer of
+     *  total_elements rounded up to a multiple of world_size. That buffer is then split
+     *  into `world_size` equal slices; rank R owns slice R. For each parameter we record:
+     *
+     *    - global_offset: starting position in the global flat buffer (in elements).
+     *    - numel:         total element count.
+     *    - original_shape: shape to restore after the all-gather rebinding step.
+     *
+     *  And per-rank we record:
+     *    - rank_starts: CSR-style boundary vector (size == world_size + 1); rank R's
+     *      half-open element range is [rank_starts[R], rank_starts[R+1]). All ranks
+     *      have the same size except possibly the last on uneven divides.
+     *
+     *  Empty when partitioning_mode == PartitioningMode::ParamLevel.
+     */
+    PartitionLayout partition_layout_;
 
     // Communication handles for async operations
     std::vector<Tensor> gradient_buffers_;          ///< Buffers for gradient all-reduce
