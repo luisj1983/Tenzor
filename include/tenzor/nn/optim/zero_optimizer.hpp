@@ -1092,6 +1092,12 @@ private:
      * @param targets Target tensors to write into
      */
     auto unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void;
+
+public:
+    /** Test-only accessor: borrow the element-mode bucket layout. Empty in ParamLevel mode. */
+    auto test_element_buckets() const -> const std::vector<ElementBucket>& {
+        return element_buckets_;
+    }
 };
 
 /**

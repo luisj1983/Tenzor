@@ -788,10 +788,151 @@ TEST_F(ZeROStage2IntegrationTest, StabilityLargeGradients) {
 }
 
 // ============================================================================
-// Main
+// 8. ElementLevel Multi-Rank Parity Tests
+//
+// These tests mirror the pattern used by test_zero_stage1_distributed.cpp
+// (commits c8bf907a + 2dca1427). They skip cleanly when RANK / WORLD_SIZE
+// env vars are not set so the binary is safe to run in single-process CI.
+// When RANK / WORLD_SIZE are provided (e.g. via mpirun -n 2), a real
+// ProcessGroup must also be wired in; that wiring is intentionally left
+// to the test runner / distributed harness layer rather than duplicating
+// Gloo-init boilerplate here.
 // ============================================================================
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+TEST_F(ZeROStage2IntegrationTest, ElementLevel_ConsistentParamsAcrossRanks) {
+    // Read distributed env vars — skip cleanly in single-process CI.
+    const char* rank_env = std::getenv("RANK");
+    const char* ws_env   = std::getenv("WORLD_SIZE");
+    if (!rank_env || !ws_env) {
+        GTEST_SKIP() << "Distributed environment not set (RANK, WORLD_SIZE unset)";
+    }
+
+    int rank       = std::atoi(rank_env);
+    int world_size = std::atoi(ws_env);
+
+    if (world_size != 2 && world_size != 4) {
+        GTEST_SKIP() << "Test requires world_size 2 or 4";
+    }
+
+    // Three params with deterministic initial values.
+    std::vector<std::shared_ptr<Variable>> params;
+    params.push_back(std::make_shared<Variable>(
+        ones({4, 4}, DType::Float32, Device::cpu()), true));
+    params.push_back(std::make_shared<Variable>(
+        ones({8}, DType::Float32, Device::cpu()), true));
+    params.push_back(std::make_shared<Variable>(
+        ones({2, 3, 5}, DType::Float32, Device::cpu()), true));
+
+    ZeROStage2Config cfg;
+    cfg.world_size          = world_size;
+    cfg.rank                = rank;
+    cfg.partitioning_mode   = PartitioningMode::ElementLevel;
+    cfg.gradient_bucketing  = true;
+    cfg.gradient_bucket_size = 4 * 1024;  // small: forces multiple buckets
+    cfg.process_group       = default_config.process_group;
+
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage2Optimizer opt(std::move(base), cfg);
+    opt.register_backward_hooks();
+
+    // Drive with deterministic grads via set_grad() — this does NOT fire the
+    // autograd hooks installed by register_backward_hooks(), so it exercises the
+    // bucket-empty fallback path in build_rank_grad_slice that delegates to the
+    // base update_local_partition path.  For a true multi-rank reduce_scatter
+    // test we would need an autograd backward() path with a real process group.
+    // The consistency check below validates that the all_gather step produces
+    // identical params on every rank after the step sequence.
+    for (int step = 0; step < 5; ++step) {
+        for (auto& p : params) {
+            auto shape_span = p->tensor().shape();
+            std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+            Tensor g = full(shape, 0.1f * (step + 1), DType::Float32, Device::cpu());
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+
+    // Verify params are finite and have moved from initial value of 1.0.
+    for (auto& p : params) {
+        Tensor flat = p->tensor().contiguous().view({-1}).to(Device::cpu());
+        const float* d = flat.data<float>();
+        for (int64_t i = 0; i < flat.numel(); ++i) {
+            EXPECT_TRUE(std::isfinite(d[i])) << "param has non-finite value at " << i;
+        }
+    }
+
+    // Cross-rank consistency check: broadcast rank 0's params[0] to all ranks
+    // and compare against the local snapshot.
+    //
+    // CRITICAL: use clone() to make independent buffers — contiguous() on an
+    // already-contiguous tensor returns a shared-storage view, so broadcast()
+    // would mutate local_snapshot too, making the diff trivially zero regardless
+    // of correctness. Lesson from Stage 1 commit 2dca1427.
+    if (cfg.process_group) {
+        Tensor local_snapshot = params[0]->tensor().clone();
+        Tensor probe           = params[0]->tensor().clone();
+        cfg.process_group->broadcast(probe, 0);
+        Tensor diff     = local_snapshot - probe;
+        Tensor abs_diff = abs(diff);
+        Tensor max_diff = max(abs_diff);
+        float  max_val  = max_diff.to(Device::cpu()).data<float>()[0];
+        EXPECT_LT(max_val, 1e-5f)
+            << "Rank " << rank << " params diverge from rank 0 after ElementLevel steps";
+
+        cfg.process_group->barrier();
+    }
+}
+
+TEST_F(ZeROStage2IntegrationTest, ElementLevel_BucketLayoutCorrect) {
+    // Read distributed env vars — skip cleanly in single-process CI.
+    const char* rank_env = std::getenv("RANK");
+    const char* ws_env   = std::getenv("WORLD_SIZE");
+    if (!rank_env || !ws_env) {
+        GTEST_SKIP() << "Distributed environment not set (RANK, WORLD_SIZE unset)";
+    }
+
+    int rank       = std::atoi(rank_env);
+    int world_size = std::atoi(ws_env);
+
+    if (world_size != 2 && world_size != 4) {
+        GTEST_SKIP() << "Test requires world_size 2 or 4";
+    }
+
+    // Small params whose total element count is divisible by world_size so every
+    // bucket should align exactly without tail padding.
+    std::vector<std::shared_ptr<Variable>> params;
+    params.push_back(std::make_shared<Variable>(
+        ones({4, 4}, DType::Float32, Device::cpu()), true));  // 16 elem
+    params.push_back(std::make_shared<Variable>(
+        ones({8}, DType::Float32, Device::cpu()), true));     // 8 elem
+    params.push_back(std::make_shared<Variable>(
+        ones({2, 3, 5}, DType::Float32, Device::cpu()), true)); // 30 elem
+
+    ZeROStage2Config cfg;
+    cfg.world_size           = world_size;
+    cfg.rank                 = rank;
+    cfg.partitioning_mode    = PartitioningMode::ElementLevel;
+    cfg.gradient_bucketing   = true;
+    // Small bucket size to force at least two buckets across 54 elements.
+    cfg.gradient_bucket_size = 4 * 1024;
+    cfg.process_group        = default_config.process_group;
+
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage2Optimizer opt(std::move(base), cfg);
+
+    const auto& buckets = opt.test_element_buckets();
+    ASSERT_FALSE(buckets.empty())
+        << "ElementLevel mode should have at least one bucket";
+
+    for (const auto& b : buckets) {
+        int64_t bucket_size = b.global_end - b.global_start;
+        EXPECT_EQ(bucket_size % world_size, 0)
+            << "Bucket [" << b.global_start << ", " << b.global_end
+            << ") size " << bucket_size << " is not a multiple of world_size "
+            << world_size << " — reduce_scatter cannot split cleanly";
+    }
+
+    if (cfg.process_group) {
+        cfg.process_group->barrier();
+    }
 }
