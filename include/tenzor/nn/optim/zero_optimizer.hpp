@@ -553,6 +553,13 @@ protected:
         }
     };
 
+public:
+    /** Test-only accessor: borrow the element partition layout. Empty in ParamLevel mode. */
+    auto test_partition_layout() const -> const PartitionLayout& {
+        return partition_layout_;
+    }
+
+protected:
     /** Element-level partition layout (only populated when
      *  config_.partitioning_mode == PartitioningMode::ElementLevel).
      *
