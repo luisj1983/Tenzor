@@ -62,3 +62,6 @@ docs/api/xml/
 fuzz-*.log
 crash-*
 .bench-mkl-shim/
+
+# Local git worktrees
+.worktrees/
