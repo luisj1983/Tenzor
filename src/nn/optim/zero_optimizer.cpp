@@ -678,6 +678,24 @@ auto ZeROStage1Optimizer::get_memory_stats() const -> MemoryStats {
 // =============================================================================
 
 auto ZeROStage1Optimizer::partition_parameters() -> void {
+    // ElementLevel: compute layout, then build a single "partition" per rank holding
+    // the rank's flat slice (one Variable per parameter, but its tensor is a slice of
+    // the global flat buffer). The rest of the function (ParamLevel path) is skipped.
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        compute_element_partition_layout();
+
+        partitions_.resize(config_.world_size);
+        Device dev = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
+        for (int r = 0; r < config_.world_size; ++r) {
+            partitions_[r].rank = r;
+            partitions_[r].device = dev;
+            // params is intentionally empty in ElementLevel mode — element slices are
+            // tracked via partition_layout_, not via per-rank Variable lists. The
+            // existing `params` field is reused only by the ParamLevel path.
+        }
+        return;
+    }
+
     const auto& params = parameters_;
     size_t total_params = params.size();
 
