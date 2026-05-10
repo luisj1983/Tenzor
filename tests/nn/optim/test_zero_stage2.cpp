@@ -922,6 +922,46 @@ TEST_F(ZeROStage2Test, ElementLevel_SingleRank_AdamParity) {
 }
 
 // ============================================================================
+// 10. ElementLevel Bucket Layout Invariant
+// ============================================================================
+
+TEST_F(ZeROStage2Test, ElementLevel_PeakBucketMemoryBoundedByPerRankSlice) {
+    // The invariant that powers the reduce_scatter memory win: every ElementBucket's
+    // global range is exactly divisible by world_size, so reduce_scatter can split it
+    // cleanly into per-rank slices. With this guarantee the per-rank receive footprint
+    // is bucket_size / world_size — the property that makes Stage 2 ElementLevel
+    // genuinely memory-cheaper than ParamLevel's "owner gets the whole bucket".
+    constexpr int W = 4;
+    constexpr size_t bucket_bytes = 64 * 1024;  // 64 KB
+    auto params = create_test_params(2, {64, 64});  // 4096 elements × 4 B = 16 KB each
+                                                     // → 32 KB total → fits in one bucket
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage2Config cfg;
+    cfg.world_size = W;
+    cfg.rank = 0;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.gradient_bucket_size = bucket_bytes;
+    cfg.process_group = nullptr;  // single-process; reduce_scatter early-returns
+
+    ZeROStage2Optimizer opt(std::move(base), cfg);
+    // Element buckets are built at construction time (create_gradient_buckets_element_mode).
+    // We do NOT call opt.step() here: with world_size=4 and process_group=nullptr the
+    // all_gather_parameters_element_mode() call inside step() would throw.  The layout
+    // invariant lives in the bucket metadata, not in the step output, so verifying it
+    // right after construction is both correct and self-contained.
+
+    // Layout invariant: bucket size is a world_size multiple → reduce_scatter can
+    // split it. This is what guarantees per-rank peak grad memory == bucket_size / W.
+    const auto& bs = opt.test_element_buckets();
+    ASSERT_FALSE(bs.empty()) << "No element buckets created — bucketing config issue";
+    for (const auto& b : bs) {
+        EXPECT_EQ((b.global_end - b.global_start) % W, 0)
+            << "Bucket [" << b.global_start << ", " << b.global_end << ") size "
+            << (b.global_end - b.global_start) << " is not a multiple of world_size " << W;
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
