@@ -151,6 +151,27 @@ public:
     virtual auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op) -> void = 0;
 
     /**
+     * @brief Phase E (E1): Asynchronous reduce-scatter on a caller-provided CUDA stream.
+     *
+     * Schedules a reduce-scatter on `stream` without blocking the caller. Backends
+     * that support stream-based collectives (NCCL, RCCL) override this to launch
+     * directly on the user's stream -- pairs with `comm_stream_` in subsystems that
+     * want grad reduction to overlap with default-stream compute (Stage-2 backward,
+     * Stage-3 grad scatter). The default fallback is the synchronous reduce_scatter,
+     * so non-GPU backends keep working unchanged.
+     *
+     * @param tensors Per-rank inputs (`world_size` of them).
+     * @param output This rank's reduced slice.
+     * @param op Reduction operation.
+     * @param stream CUDA stream (as void*) to launch on; ignored by sync backends.
+     */
+    virtual auto reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
+                                      ReduceOp op, void* stream) -> void {
+        (void)stream;
+        reduce_scatter(tensors, output, op);
+    }
+
+    /**
      * @brief Point-to-point send to a specific rank.
      *
      * Sends the tensor to the destination rank. Blocks until the send
@@ -312,6 +333,17 @@ public:
      * @param op Reduction operation
      */
     auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op = ReduceOp::SUM) -> void;
+
+    /**
+     * @brief Phase E (E1): Asynchronous reduce-scatter on a caller-provided CUDA stream.
+     *
+     * Forwards to the backend's reduce_scatter_async; default backend impl is a sync
+     * fallback. NCCL backends override to launch on the user's stream so grad reduction
+     * can overlap with default-stream compute. Caller must synchronize the stream
+     * before reading `output`.
+     */
+    auto reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
+                              ReduceOp op, void* stream) -> void;
 
     /**
      * @brief Point-to-point send to a specific rank.

@@ -437,6 +437,91 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
 #endif
 }
 
+// Phase E (E1): async on caller stream. Mirrors all_reduce_async pattern --
+// launch on cuda_stream, do NOT cudaDeviceSynchronize. Caller is responsible
+// for synchronization (cudaStreamSynchronize / cudaStreamWaitEvent on a
+// downstream consumer stream).
+auto NCCLBackend::reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
+                                       ReduceOp op, void* stream) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    if (tensors.empty()) {
+        throw std::invalid_argument("reduce_scatter_async: tensors cannot be empty");
+    }
+    validate_gpu_tensor(tensors[0]);
+    int device_id = get_device_id(tensors[0]);
+    ncclComm_t comm = get_communicator(device_id);
+
+    ncclDataType_t nccl_dtype = to_nccl_datatype(tensors[0].dtype());
+    ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
+
+    std::vector<Tensor> concat_list(tensors.begin(), tensors.end());
+    Tensor concatenated = cat(concat_list, 0);
+
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    NCCL_CHECK(ncclReduceScatter(
+        concatenated.data_ptr(),
+        output.data_ptr(),
+        output.numel(),
+        nccl_dtype,
+        nccl_op,
+        comm,
+        cuda_stream
+    ));
+    // No cudaDeviceSynchronize -- caller owns the wait.
+#else
+    (void)stream;
+    (void)tensors;
+    (void)output;
+    (void)op;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
+}
+
+// Phase E (E1): NCCL all_gather_async override. Default base impl falls back
+// to sync all_gather. Real async launches on caller stream so gather can
+// overlap with default-stream compute.
+auto NCCLBackend::all_gather_async(const Tensor& tensor, std::vector<Tensor>& output,
+                                    void* stream) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(tensor);
+
+    if (output.size() != static_cast<size_t>(world_size_)) {
+        throw std::invalid_argument(
+            "all_gather_async: output size must equal world_size");
+    }
+
+    int device_id = get_device_id(tensor);
+    ncclComm_t comm = get_communicator(device_id);
+    ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
+
+    // NCCL all-gather expects a contiguous output of world_size * input.numel().
+    // Allocate that, launch async, then expose per-rank views via output[].
+    // The slice operations themselves are metadata-only; safe before stream
+    // completion as long as the consumer waits on the event before reading.
+    int64_t per_rank = tensor.numel();
+    std::vector<int64_t> out_shape{static_cast<int64_t>(world_size_) * per_rank};
+    Tensor full = empty(out_shape, tensor.dtype(), tensor.device());
+
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    NCCL_CHECK(ncclAllGather(
+        tensor.data_ptr(),
+        full.data_ptr(),
+        per_rank,
+        nccl_dtype,
+        comm,
+        cuda_stream
+    ));
+
+    for (int r = 0; r < world_size_; ++r) {
+        output[r] = full.slice(0, r * per_rank, (r + 1) * per_rank);
+    }
+#else
+    (void)stream;
+    // Sync fallback
+    all_gather(tensor, output);
+#endif
+}
+
 auto NCCLBackend::send(const Tensor& tensor, int dst_rank) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     validate_gpu_tensor(tensor);

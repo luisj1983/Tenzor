@@ -127,6 +127,16 @@ auto ProcessGroup::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& ou
     backend_->reduce_scatter(tensors, output, op);
 }
 
+// Phase E (E1): async stream-based reduce-scatter wrapper. Backend default
+// impl is the sync fallback (ignores stream); NCCL/RCCL backends override
+// to launch on the user-provided stream so the collective overlaps with
+// default-stream compute.
+auto ProcessGroup::reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
+                                        ReduceOp op, void* stream) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->reduce_scatter_async(tensors, output, op, stream);
+}
+
 auto ProcessGroup::send(const Tensor& tensor, int dst_rank) -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     backend_->send(tensor, dst_rank);

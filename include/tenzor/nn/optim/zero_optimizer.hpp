@@ -1541,6 +1541,27 @@ public:
      */
     auto free_gathered_parameter(Tensor* param) -> void;
 
+    // ============================================================================
+    // Phase E (E2): activation-checkpoint integration
+    // ============================================================================
+    /**
+     * @brief Re-gather every currently-partitioned parameter for the duration
+     * of a recompute pass. Called via autograd::RecomputeHooks::on_begin from
+     * CheckpointFunction::recompute_forward when
+     * config.gradient_checkpointing_aware is set. Records which params it
+     * gathered (in recompute_gathered_) so release_recompute_gathered() can
+     * undo exactly the right set without touching params that were already
+     * gathered for legitimate reasons (e.g. pinned first/last layer).
+     */
+    auto gather_for_recompute() -> void;
+
+    /**
+     * @brief Free the parameters re-gathered by gather_for_recompute() and
+     * restore each Variable's tensor back to its 1-D partition slice.
+     * Called via autograd::RecomputeHooks::on_end after recompute completes.
+     */
+    auto release_recompute_gathered() -> void;
+
     /**
      * @brief Prefetch parameters for upcoming layers
      *
@@ -1881,6 +1902,12 @@ private:
     // the owning Module so we leave the model in a clean state.
     std::vector<std::pair<Module*, size_t>> installed_forward_hook_ids_;
     std::vector<std::pair<Module*, size_t>> installed_backward_hook_ids_;
+
+    // Phase E (E2): set of parameter pointers re-gathered by
+    // gather_for_recompute() so release_recompute_gathered() can undo exactly
+    // those (and not touch params that were already gathered for legitimate
+    // reasons like pin_first_layer).
+    std::vector<Tensor*> recompute_gathered_;
 
     /** Communication streams for async operations
      * Note: CUDA stream support for gather/scatter operations is planned for future enhancement.

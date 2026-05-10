@@ -639,5 +639,39 @@ auto enable_auto_checkpoint(
     int every_n = 0,
     size_t memory_budget_bytes = 0) -> std::shared_ptr<AutoCheckpointPolicy>;
 
+// ============================================================================
+// Phase E (E2): Recompute hooks for activation-checkpoint + ZeRO-3 integration
+// ============================================================================
+// Stage-3 partitions parameters across ranks; only the "gathered" full-shape
+// param is valid in forward. When activation checkpointing recomputes a
+// forward segment, the gathered buffer was already freed by the
+// backward_post_hook of the original forward -- recompute would see the 1-D
+// partition slice and crash. These hooks let Stage-3 re-gather at the
+// recompute boundary.
+//
+// Global registry (single recompute consumer expected: the active Stage-3
+// optimizer). Set by ZeROStage3Optimizer::register_model when
+// gradient_checkpointing_aware is true; cleared by unregister_model.
+
+class CheckpointFunction;
+
+struct RecomputeHooks {
+    /// Called BEFORE forward_fn_(inputs) runs in CheckpointFunction::recompute_forward.
+    /// Implementations should re-gather any state needed by the recompute (Stage-3
+    /// gathers all currently-partitioned parameters).
+    std::function<void(CheckpointFunction*)> on_begin;
+    /// Called AFTER recompute completes. Implementations should release whatever
+    /// they gathered in on_begin.
+    std::function<void(CheckpointFunction*)> on_end;
+};
+
+/// Set the global recompute hooks. Returns the previously-set hooks so the
+/// caller can chain or restore. Pass a default-constructed RecomputeHooks{}
+/// to clear.
+auto set_recompute_hooks(RecomputeHooks hooks) -> RecomputeHooks;
+
+/// Get the current global recompute hooks (default-constructed if none set).
+auto get_recompute_hooks() -> const RecomputeHooks&;
+
 } // namespace autograd
 } // namespace tenzor

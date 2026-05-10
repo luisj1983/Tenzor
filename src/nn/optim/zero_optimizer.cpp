@@ -16,6 +16,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+// Phase E (E2): activation-checkpoint integration -- recompute hook registry.
+#include "tenzor/autograd/checkpoint.hpp"
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
@@ -2596,10 +2598,43 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     // strictly less network traffic on the owner side: each non-owner sends its bucket
     // once, the owner receives + sums, instead of all-to-all chunk distribution.
     if (config_.world_size > 1 && config_.process_group) {
-        config_.process_group->reduce(flat_grads, bucket.target_rank,
-                                      distributed::ReduceOp::SUM);
+        // Phase E (E4): apply the optional gradient compressor before the
+        // collective. Stage 1 already supports this for all-reduce
+        // (zero_optimizer.cpp:1083); Stage 2's reduce path now mirrors the
+        // shape: compress flat_grads, reduce the (smaller) compressed payload,
+        // decompress on the owner. Saves bandwidth proportional to the
+        // compression ratio.
+        //
+        // Caveat: this assumes the compressor is sum-additive
+        // (sum(compress(x_i)) == compress(sum(x_i))). Lossy schemes that
+        // don't satisfy this should leave grad_compressor unset for Stage 2.
+        if (config_.grad_compressor) {
+            auto compressed = config_.grad_compressor->compress(flat_grads);
+            config_.process_group->reduce(compressed.data, bucket.target_rank,
+                                          distributed::ReduceOp::SUM);
+            if (bucket.target_rank == config_.rank) {
+                Tensor decompressed = config_.grad_compressor->decompress(compressed);
+                if (decompressed.numel() == flat_grads.numel()) {
+                    // Write decompressed bytes into flat_grads via the
+                    // zero+add trick (no public copy_).
+                    flat_grads.zero_();
+                    add_(flat_grads, decompressed.contiguous().view({-1}));
+                }
+            }
+        } else {
+            config_.process_group->reduce(flat_grads, bucket.target_rank,
+                                          distributed::ReduceOp::SUM);
+        }
         // After this call only `target_rank` has valid data in flat_grads. Non-owners read
         // nothing from it below — they zero their per-param grads instead.
+        //
+        // Phase E (E3): NOT switched to reduce_scatter here -- the ParamLevel
+        // bucket layout assigns each bucket entirely to one owner, which is
+        // semantically `reduce`. Switching to `reduce_scatter` would require
+        // restructuring buckets so each contains striped slices across all
+        // ranks (the element-mode path at reduce_scatter_element_bucket
+        // already does this). That layout change is deferred -- the existing
+        // ParamLevel callers depend on the per-bucket ownership model.
     }
 
     // Owner: flat_grads contains the bucket's full reduced sum. Slice + reshape back into
@@ -3064,6 +3099,12 @@ auto ZeROStage3Optimizer::unregister_model() -> void {
     }
     installed_backward_hook_ids_.clear();
 
+    // Phase E (E2): clear the global recompute hooks if we set them.
+    if (stage3_config_.gradient_checkpointing_aware) {
+        autograd::set_recompute_hooks(autograd::RecomputeHooks{});
+    }
+    recompute_gathered_.clear();
+
     // Clear all hooks
     forward_hooks_.clear();
     backward_hooks_.clear();
@@ -3319,6 +3360,71 @@ auto ZeROStage3Optimizer::free_gathered_parameter(Tensor* param) -> void {
         } catch (const std::exception& e) {
             std::cerr << "ZeROStage3Optimizer: partition CPU offload failed: "
                       << e.what() << " -- continuing with GPU-resident partition\n";
+        }
+    }
+}
+
+// Phase E (E2): Re-gather every currently-partitioned parameter for the
+// duration of a recompute pass. Tracks the gathered set in
+// recompute_gathered_ so release_recompute_gathered() can undo exactly that
+// set without disturbing params that were already gathered for legitimate
+// reasons (e.g. pinned first/last layer).
+auto ZeROStage3Optimizer::gather_for_recompute() -> void {
+    std::lock_guard<std::mutex> lock(param_states_mutex_);
+    recompute_gathered_.clear();
+
+    // Snapshot which params we'll touch under the lock, but issue gathers
+    // outside since gather_parameter takes the same mutex.
+    std::vector<Tensor*> to_gather;
+    to_gather.reserve(param_states_.size());
+    for (auto& [tensor_ptr, state] : param_states_) {
+        if (tensor_ptr == nullptr) continue;
+        // Skip already-gathered (pinned or in-cache) -- don't double-gather.
+        if (state.is_gathered) continue;
+        // Skip params we own no slice of (multi-rank: numel == 0).
+        if (state.local_partition.numel() == 0) continue;
+        to_gather.push_back(tensor_ptr);
+    }
+
+    for (Tensor* p : to_gather) {
+        auto it = param_states_.find(p);
+        if (it == param_states_.end()) continue;
+        auto& state = it->second;
+        try {
+            gather_parameter_impl(state);
+            // gather_parameter_impl sets is_gathered=true and acquire()s.
+            // Replace *p with the gathered full-shape tensor so the recomputed
+            // forward sees full weights.
+            *p = state.full_param;
+            recompute_gathered_.push_back(p);
+        } catch (const std::exception& e) {
+            std::cerr << "ZeROStage3Optimizer::gather_for_recompute: " << e.what() << "\n";
+        }
+    }
+}
+
+// Phase E (E2): Free the buffers re-gathered above and restore each Variable's
+// tensor to its 1-D partition slice. Mirrors the lifecycle of backward_post_hook.
+auto ZeROStage3Optimizer::release_recompute_gathered() -> void {
+    std::vector<Tensor*> to_release;
+    {
+        std::lock_guard<std::mutex> lock(param_states_mutex_);
+        to_release.swap(recompute_gathered_);
+    }
+
+    for (Tensor* p : to_release) {
+        // Snapshot local_partition under lock for restore-after-free.
+        Tensor slice;
+        {
+            std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+            auto it = param_states_.find(p);
+            if (it != param_states_.end() && it->second.local_partition.numel() > 0) {
+                slice = it->second.local_partition;
+            }
+        }
+        free_gathered_parameter(p);
+        if (slice.numel() > 0) {
+            *p = slice;
         }
     }
 }
@@ -3724,6 +3830,23 @@ auto ZeROStage3Optimizer::register_gather_scatter_hooks(Module& model) -> void {
     };
 
     install(&model);
+
+    // Phase E (E2): if the user opted in via gradient_checkpointing_aware,
+    // register the recompute begin/end hooks so the autograd checkpoint
+    // recompute path triggers a re-gather of partitioned params before
+    // running forward_fn_ and frees them after. Without this, recompute
+    // sees 1-D partition slices instead of full-shape weights and crashes
+    // (or produces wrong outputs).
+    if (stage3_config_.gradient_checkpointing_aware) {
+        autograd::RecomputeHooks rh;
+        rh.on_begin = [this](autograd::CheckpointFunction*) {
+            this->gather_for_recompute();
+        };
+        rh.on_end = [this](autograd::CheckpointFunction*) {
+            this->release_recompute_gathered();
+        };
+        autograd::set_recompute_hooks(std::move(rh));
+    }
 
     // Also keep the legacy single-root entries in forward_hooks_/backward_hooks_
     // for any consumer that still iterates them (tests, profiling). Their hook_fn

@@ -78,11 +78,21 @@ public:
 
     auto all_gather(const Tensor& tensor, std::vector<Tensor>& output) -> void override;
 
+    // Phase E (E1): NCCL all_gather_async / reduce_scatter_async overrides --
+    // launch on caller's stream without cudaDeviceSynchronize so the collective
+    // can overlap with default-stream compute. Caller responsible for
+    // cudaStreamWaitEvent / cudaStreamSynchronize before reading output.
+    auto all_gather_async(const Tensor& tensor, std::vector<Tensor>& output,
+                          void* stream) -> void override;
+
     auto gather(const Tensor& tensor, std::vector<Tensor>& output, int dst_rank) -> void override;
 
     auto scatter(const std::vector<Tensor>& tensors, Tensor& output, int src_rank) -> void override;
 
     auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op) -> void override;
+
+    auto reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
+                              ReduceOp op, void* stream) -> void override;
 
     auto send(const Tensor& tensor, int dst_rank) -> void override;
 

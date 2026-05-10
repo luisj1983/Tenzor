@@ -143,8 +143,24 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
         return cached_recompute_outputs_;
     }
 
+    // Phase E (E2): notify the recompute-begin hook before forward_fn_ runs.
+    // ZeROStage3Optimizer registers a hook that re-gathers all currently-
+    // partitioned parameters so the recomputed forward sees full-shape weights
+    // instead of 1-D partition slices.
+    const auto& hooks = get_recompute_hooks();
+    if (hooks.on_begin) {
+        hooks.on_begin(this);
+    }
+
     // Recompute forward function with gradient tracking enabled
     auto outputs = forward_fn_(inputs);
+
+    // Phase E (E2): notify the recompute-end hook so the consumer can release
+    // whatever it gathered in on_begin (Stage-3 frees the gathered buffers
+    // and restores partitions).
+    if (hooks.on_end) {
+        hooks.on_end(this);
+    }
 
     // Verify determinism on first recomputation
     if (verify_ && !verification_done_) {
@@ -555,6 +571,36 @@ auto enable_auto_checkpoint(
         strategy, every_n, memory_budget_bytes);
     policy->apply(module);
     return policy;
+}
+
+// Phase E (E2): global recompute hooks registry. Single owner expected
+// (the active Stage-3 optimizer). Plain global with mutex; the alternative
+// (passing the optimizer through every checkpoint() lambda capture) would
+// break the existing std::function-based API.
+namespace {
+    std::mutex& recompute_hooks_mutex() {
+        static std::mutex m;
+        return m;
+    }
+    RecomputeHooks& recompute_hooks_storage() {
+        static RecomputeHooks hooks;
+        return hooks;
+    }
+}
+
+auto set_recompute_hooks(RecomputeHooks hooks) -> RecomputeHooks {
+    std::lock_guard<std::mutex> lock(recompute_hooks_mutex());
+    RecomputeHooks prev = recompute_hooks_storage();
+    recompute_hooks_storage() = std::move(hooks);
+    return prev;
+}
+
+auto get_recompute_hooks() -> const RecomputeHooks& {
+    // No lock on read: the typical access pattern is "set once at register_model,
+    // clear once at unregister_model, read many times during recompute". A torn
+    // read of std::function is theoretically possible but only between set/clear
+    // events that aren't concurrent in practice.
+    return recompute_hooks_storage();
 }
 
 } // namespace autograd
