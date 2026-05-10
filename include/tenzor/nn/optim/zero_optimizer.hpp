@@ -8,6 +8,18 @@
  * @see https://arxiv.org/abs/1910.02054
  */
 
+/**
+ * Partitioning modes:
+ *   - ParamLevel (default): each rank owns whole parameters. Simpler, checkpoint-
+ *     compatible with all prior versions of this code.
+ *   - ElementLevel: every parameter is split element-wise across world_size ranks.
+ *     Required for true reduce_scatter memory savings in Stage 2 (the owner rank
+ *     no longer holds the whole bucket). Opt in via ZeROStage1Config::partitioning_mode.
+ *
+ * See docs/superpowers/plans/2026-05-10-element-level-zero-partitioning.md for the
+ * design rationale and trade-off discussion.
+ */
+
 #pragma once
 
 #include "optimizer.hpp"
@@ -40,6 +52,32 @@ namespace optim {
 
 // Bring Module into this namespace for convenience
 using nn::Module;
+
+/** Partitioning strategy for optimizer states and gradients.
+ *
+ *  - ParamLevel (default): each rank owns a set of WHOLE parameters. Optimizer state
+ *    for those parameters lives only on the owner rank; gradients are reduced to the
+ *    owner. Owner-rank peak grad memory == bucket size. Legacy behaviour, preserved
+ *    for checkpoint compatibility.
+ *
+ *  - ElementLevel: every parameter is logically split into world_size contiguous
+ *    element slices (the same partitioning Stage 3 uses for its on-the-fly gather).
+ *    Each rank stores momentum / variance / master only for its slice; gradients are
+ *    reduce-scattered so each rank receives bucket_size / world_size bytes regardless
+ *    of which "owner" the bucket nominally belongs to. Per-rank peak grad memory ==
+ *    bucket_size / world_size. Required to make a true reduce_scatter give memory
+ *    savings — without element-level partition the owner still needs the whole bucket
+ *    to run the optimizer step.
+ *
+ *  Switching modes invalidates checkpoints saved in the other mode (the on-disk
+ *  layout differs: ParamLevel saves whole-tensor state; ElementLevel saves per-slice
+ *  state). The mode is recorded in checkpoint metadata so cross-mode loads fail with
+ *  a clear error rather than silently producing garbage.
+ */
+enum class PartitioningMode {
+    ParamLevel,
+    ElementLevel,
+};
 
 /**
  * @brief Configuration for ZeRO Stage 1 Optimizer
@@ -188,6 +226,11 @@ struct ZeROStage1Config {
      *  the flag value once at the start of training and don't toggle it.
      */
     bool balanced_partitioning{false};
+
+    /** Partitioning strategy. See PartitioningMode docs above for the trade-offs.
+     *  Default ParamLevel preserves legacy behaviour and existing checkpoints.
+     */
+    PartitioningMode partitioning_mode{PartitioningMode::ParamLevel};
 
     ZeROStage1Config() = default;
 };
@@ -502,6 +545,53 @@ protected:
     std::vector<StatePartition> partitions_;        ///< State partitions for all ranks
     std::shared_ptr<core::OffloadEngine> offload_engine_;  ///< CPU offload engine
 
+    /** Layout metadata describing element-level partitioning of all parameters across
+     *  ranks. Populated by the element-mode partitioner; consumed by the optimizer step,
+     *  reduce-scatter, and all-gather paths. See `partition_layout_` for full semantics.
+     */
+    struct PartitionLayout {
+        struct ParamEntry {
+            int64_t global_offset{0};
+            int64_t numel{0};
+            std::vector<int64_t> original_shape;
+            DType dtype{DType::Float32};
+        };
+        std::vector<ParamEntry> params;          // one entry per parameter, lockstep with parameters_
+        std::vector<int64_t> rank_starts;        // size == world_size + 1; rank R owns [rank_starts[R], rank_starts[R+1])
+        int64_t total_elements_padded{0};        // rounded up to world_size multiple
+
+        auto rank_size(int rank) const -> int64_t {
+            return rank_starts[rank + 1] - rank_starts[rank];
+        }
+    };
+
+public:
+    /** Test-only accessor: borrow the element partition layout. Empty in ParamLevel mode. */
+    auto test_partition_layout() const -> const PartitionLayout& {
+        return partition_layout_;
+    }
+
+protected:
+    /** Element-level partition layout (only populated when
+     *  config_.partitioning_mode == PartitioningMode::ElementLevel).
+     *
+     *  Conceptually: every parameter is concatenated into a single global flat buffer of
+     *  total_elements rounded up to a multiple of world_size. That buffer is then split
+     *  into `world_size` equal slices; rank R owns slice R. For each parameter we record:
+     *
+     *    - global_offset: starting position in the global flat buffer (in elements).
+     *    - numel:         total element count.
+     *    - original_shape: shape to restore after the all-gather rebinding step.
+     *
+     *  And per-rank we record:
+     *    - rank_starts: CSR-style boundary vector (size == world_size + 1); rank R's
+     *      half-open element range is [rank_starts[R], rank_starts[R+1]). All ranks
+     *      have the same size except possibly the last on uneven divides.
+     *
+     *  Empty when partitioning_mode == PartitioningMode::ParamLevel.
+     */
+    PartitionLayout partition_layout_;
+
     // Communication handles for async operations
     std::vector<Tensor> gradient_buffers_;          ///< Buffers for gradient all-reduce
     std::vector<Tensor> param_buffers_;             ///< Buffers for parameter all-gather
@@ -550,6 +640,12 @@ protected:
      */
     auto partition_parameters() -> void;
 
+    /** Compute the element-level partition layout for `parameters_`. Pure function of
+     *  parameter shapes/dtypes and `world_size` — does not allocate any optimizer state
+     *  itself. Called by `partition_parameters()` when in ElementLevel mode.
+     */
+    auto compute_element_partition_layout() -> void;
+
     /**
      * @brief Initialize optimizer states for local partition
      *
@@ -597,6 +693,14 @@ protected:
      */
     auto all_gather_parameters() -> void;
 
+    /** ElementLevel-mode replacement for all_gather_parameters().
+     *  After update_local_partition_element_mode wrote each rank's slice into the
+     *  per-param tensors, we still need the OTHER ranks' slices. Issues a single
+     *  all_gather of a global flat buffer of size world_size * rank_size, then scatters
+     *  per-param ranges back to each parameter's tensor.
+     */
+    auto all_gather_parameters_element_mode() -> void;
+
     // State management
 
     /**
@@ -605,6 +709,22 @@ protected:
      * Calls base optimizer step() on local partition only.
      */
     auto update_local_partition() -> void;
+
+    /** ElementLevel-mode replacement for update_local_partition() / update_partition_adam.
+     *  Stages every parameter's gradient into the rank's slice of a global flat buffer,
+     *  then runs the optimizer math on the slice. After the math, writes the updated
+     *  parameter slice back into the rank's slot in the (yet-to-be-all-gathered) global
+     *  param flat buffer. The rank's master copy (if used) is the persistent state that
+     *  carries fp32 precision across steps.
+     */
+    auto update_local_partition_element_mode() -> void;
+
+    /** Hook for derived classes to provide a rank-local flat grad slice in ElementLevel
+     *  mode. Stage 1 default: walk parameters_[i]->grad() and stage into a fresh
+     *  rank-sized buffer. Stage 2 overrides: assemble from element_buckets_, which already
+     *  hold the post-reduce_scatter slices.
+     */
+    virtual auto build_rank_grad_slice() -> Tensor;
 
     /**
      * @brief Apply Adam update algorithm to partition
@@ -871,15 +991,37 @@ private:
         GradientBucket& operator=(const GradientBucket&) = delete;
     };
 
+    /** Gradient bucket for ElementLevel mode.
+     *  Represents a contiguous range of the global flat-grad buffer. Each rank receives
+     *  its 1/world_size slice of the bucket via reduce_scatter; non-owner ranks NEVER
+     *  hold the whole bucket on receive (the memory win that motivated this whole mode).
+     */
+    struct ElementBucket {
+        int64_t global_start{0};
+        int64_t global_end{0};
+        std::vector<size_t> param_indices;
+        Tensor flat_buffer;
+        size_t hooks_received{0};
+        std::unique_ptr<std::mutex> mutex{std::make_unique<std::mutex>()};
+
+        ElementBucket() = default;
+        ElementBucket(ElementBucket&&) = default;
+        ElementBucket& operator=(ElementBucket&&) = default;
+        ElementBucket(const ElementBucket&) = delete;
+        ElementBucket& operator=(const ElementBucket&) = delete;
+    };
+
     // Configuration
     ZeROStage2Config stage2_config_;
 
     // Gradient buckets
     std::vector<GradientBucket> gradient_buckets_;
+    std::vector<ElementBucket> element_buckets_;
     mutable std::mutex buckets_mutex_;  // Mutable so const methods can lock
 
     // Hook management
     bool hooks_registered_{false};
+    std::vector<size_t> element_hook_ids_;  ///< register_hook handles for ElementLevel mode, one per parameter
 
     // Initialization
 
@@ -892,6 +1034,7 @@ private:
      * - Memory alignment
      */
     auto create_gradient_buckets() -> void;
+    auto create_gradient_buckets_element_mode() -> void;
 
     // Communication
 
@@ -930,6 +1073,14 @@ private:
      */
     auto gradient_hook(size_t bucket_idx, size_t param_idx, const Tensor& grad) -> void;
 
+    /** Handler for the autograd register_hook callback in ElementLevel mode. Stages grad
+     *  into every overlapping ElementBucket's flat_buffer, fires reduce_scatter when a
+     *  bucket has received all its params' grads.
+     */
+    auto element_gradient_hook(size_t param_idx, const Tensor& grad) -> void;
+    auto reduce_scatter_element_bucket(ElementBucket& bucket) -> void;
+    auto build_rank_grad_slice() -> Tensor override;
+
     /**
      * @brief Check if bucket is ready for reduce-scatter
      *
@@ -953,6 +1104,12 @@ private:
      * @param targets Target tensors to write into
      */
     auto unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void;
+
+public:
+    /** Test-only accessor: borrow the element-mode bucket layout. Empty in ParamLevel mode. */
+    auto test_element_buckets() const -> const std::vector<ElementBucket>& {
+        return element_buckets_;
+    }
 };
 
 /**

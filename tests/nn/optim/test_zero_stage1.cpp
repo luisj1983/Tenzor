@@ -1255,3 +1255,134 @@ TEST_F(ZeROStage1Test, BalancedPartitioningEvensOutMemoryAcrossRanks) {
     size_t balanced_total = balanced[0] + balanced[1];
     EXPECT_EQ(legacy_total, balanced_total);
 }
+
+// =========================================================================
+// ElementLevel-mode parity tests
+// =========================================================================
+
+namespace {
+// Run N Adam steps, return the final parameter values flattened.
+auto run_n_adam_steps(
+    std::vector<std::shared_ptr<Variable>> params,
+    PartitioningMode mode,
+    int num_steps,
+    int world_size = 1,
+    int rank = 0
+) -> std::vector<float> {
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage1Config cfg;
+    cfg.world_size = world_size;
+    cfg.rank = rank;
+    cfg.partitioning_mode = mode;
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < num_steps; ++step) {
+        // Synthetic gradient: g = 0.1 * (step + 1) — nonzero from step 0
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * (0.1f * (step + 1));
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+
+    std::vector<float> out;
+    for (auto& p : params) {
+        Tensor flat = p->tensor().contiguous().view({-1}).to(DType::Float32).to(Device::cpu());
+        const float* d = flat.data<float>();
+        for (int64_t i = 0; i < flat.numel(); ++i) out.push_back(d[i]);
+    }
+    return out;
+}
+}  // namespace
+
+TEST_F(ZeROStage1Test, ElementLevel_SingleRank_AdamParity) {
+    // ParamLevel and ElementLevel must produce bitwise-identical parameters at
+    // world_size=1 (no actual distribution happens; only the bookkeeping differs).
+    auto params_a = create_test_params(3, {16, 16});  // 3 × 256 = 768 elements
+    auto params_b = create_test_params(3, {16, 16});
+
+    auto out_param  = run_n_adam_steps(params_a, PartitioningMode::ParamLevel,   5);
+    auto out_elem   = run_n_adam_steps(params_b, PartitioningMode::ElementLevel, 5);
+
+    ASSERT_EQ(out_param.size(), out_elem.size());
+    for (size_t i = 0; i < out_param.size(); ++i) {
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6)
+            << "Mismatch at element " << i;
+    }
+}
+
+TEST_F(ZeROStage1Test, ElementLevel_SingleRank_NonDivisibleShape) {
+    // Param numel not a multiple of world_size — exercises padding.
+    auto params_a = create_test_params(1, {17});
+    auto params_b = create_test_params(1, {17});
+
+    auto out_param = run_n_adam_steps(params_a, PartitioningMode::ParamLevel,   3);
+    auto out_elem  = run_n_adam_steps(params_b, PartitioningMode::ElementLevel, 3);
+
+    ASSERT_EQ(out_param.size(), out_elem.size());
+    for (size_t i = 0; i < out_param.size(); ++i) {
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6)
+            << "Mismatch at element " << i;
+    }
+}
+
+// ============================================================================
+// 15. Cross-partitioning-mode checkpoint load error
+// ============================================================================
+
+TEST_F(ZeROStage1Test, CheckpointCrossModeLoadThrows) {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "tenzor_zero_xmode_test";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    auto path_prefix = (tmp / "ckpt").string();
+
+    {
+        // Save in ParamLevel.
+        auto params = create_test_params(2);
+        auto base = std::make_unique<Adam>(params, 0.001);
+        ZeROStage1Config cfg = default_config;
+        cfg.partitioning_mode = PartitioningMode::ParamLevel;
+        ZeROStage1Optimizer opt(std::move(base), cfg);
+        opt.save_checkpoint(path_prefix);
+    }
+    {
+        // Try to load in ElementLevel — must throw.
+        auto params = create_test_params(2);
+        auto base = std::make_unique<Adam>(params, 0.001);
+        ZeROStage1Config cfg = default_config;
+        cfg.partitioning_mode = PartitioningMode::ElementLevel;
+        ZeROStage1Optimizer opt(std::move(base), cfg);
+        EXPECT_THROW(opt.load_checkpoint(path_prefix), std::runtime_error);
+    }
+    fs::remove_all(tmp);
+}
+
+// ============================================================================
+// 16. ElementLevel + CPU offload smoke test
+// ============================================================================
+
+TEST_F(ZeROStage1Test, ElementLevel_CPUOffload_StepRuns) {
+    // Smoke test: element-mode + CPU offload doesn't crash and produces finite values.
+    if (!cuda_available()) GTEST_SKIP() << "Requires CUDA";
+    auto params = create_test_params(2, {32, 32}, Device::cuda(0));
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage1Config cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.offload_to_cpu = true;
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < 3; ++step) {
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * 0.01f;
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+    // Spot-check finite.
+    auto cpu_param = params[0]->tensor().to(Device::cpu()).contiguous().view({-1});
+    const float* d = cpu_param.data<float>();
+    for (int64_t i = 0; i < cpu_param.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(d[i]));
+    }
+}

@@ -311,7 +311,11 @@ auto ZeROStage1Optimizer::step_impl() -> void {
 
     // Step 3: Update local partition of parameters
     auto compute_start = std::chrono::steady_clock::now();
-    update_local_partition();
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        update_local_partition_element_mode();
+    } else {
+        update_local_partition();
+    }
     if (profiling_enabled_) {
         auto compute_end = std::chrono::steady_clock::now();
         auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
@@ -334,7 +338,11 @@ auto ZeROStage1Optimizer::step_impl() -> void {
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
         auto gather_start = std::chrono::steady_clock::now();
-        all_gather_parameters();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            all_gather_parameters_element_mode();
+        } else {
+            all_gather_parameters();
+        }
         if (profiling_enabled_) {
             auto gather_end = std::chrono::steady_clock::now();
             auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
@@ -501,6 +509,9 @@ auto ZeROStage1Optimizer::save_checkpoint(const std::string& path_prefix) const 
             meta_file << "num_partitions=" << partitions_.size() << "\n";
             meta_file << "offload_to_cpu=" << (config_.offload_to_cpu ? "true" : "false") << "\n";
             meta_file << "total_parameters=" << parameters_.size() << "\n";
+            meta_file << "partitioning_mode=" <<
+                (config_.partitioning_mode == PartitioningMode::ElementLevel
+                    ? "element_level" : "param_level") << "\n";
 
             // Write partition sizes for verification
             for (int rank = 0; rank < config_.world_size; ++rank) {
@@ -578,6 +589,23 @@ auto ZeROStage1Optimizer::load_checkpoint(const std::string& path_prefix) -> voi
                         "Partition count mismatch: checkpoint=" + std::to_string(saved_partitions) +
                         ", current=" + std::to_string(partitions_.size())
                     );
+                }
+            }
+
+            // Verify partitioning_mode matches (older checkpoints without the field default to param_level)
+            {
+                const std::string saved_mode = metadata.count("partitioning_mode")
+                    ? metadata["partitioning_mode"]
+                    : "param_level";  // older checkpoints had no mode → assumed ParamLevel
+                const std::string current_mode =
+                    config_.partitioning_mode == PartitioningMode::ElementLevel
+                        ? "element_level" : "param_level";
+                if (saved_mode != current_mode) {
+                    throw std::runtime_error(
+                        "Partitioning mode mismatch: checkpoint was saved with '" + saved_mode +
+                        "' but optimizer is configured for '" + current_mode + "'. Cross-mode loads "
+                        "are not supported (the on-disk layout differs). Recreate the optimizer with "
+                        "the matching partitioning_mode, or re-save the checkpoint after switching.");
                 }
             }
 
@@ -678,6 +706,25 @@ auto ZeROStage1Optimizer::get_memory_stats() const -> MemoryStats {
 // =============================================================================
 
 auto ZeROStage1Optimizer::partition_parameters() -> void {
+    // ElementLevel: compute the element-level partition layout, then initialise one
+    // StatePartition per rank with its rank/device. params is left empty in this mode
+    // — element slices are tracked via partition_layout_, not via per-rank Variable
+    // lists. The ParamLevel code below is skipped.
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        compute_element_partition_layout();
+
+        partitions_.resize(config_.world_size);
+        Device dev = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
+        for (int r = 0; r < config_.world_size; ++r) {
+            partitions_[r].rank = r;
+            partitions_[r].device = dev;
+            // params is intentionally empty in ElementLevel mode — element slices are
+            // tracked via partition_layout_, not via per-rank Variable lists. The
+            // existing `params` field is reused only by the ParamLevel path.
+        }
+        return;
+    }
+
     const auto& params = parameters_;
     size_t total_params = params.size();
 
@@ -748,7 +795,116 @@ auto ZeROStage1Optimizer::partition_parameters() -> void {
     }
 }
 
+auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
+    partition_layout_ = PartitionLayout{};   // reset every field to defaults
+    PartitionLayout& L = partition_layout_;
+
+    // Walk every parameter, recording (global offset, numel, shape, dtype).
+    int64_t total = 0;
+    L.params.reserve(parameters_.size());
+    for (const auto& p : parameters_) {
+        const Tensor& t = p->tensor();
+        PartitionLayout::ParamEntry entry;
+        entry.global_offset = total;
+        entry.numel = t.numel();
+        auto sh = t.shape();
+        entry.original_shape.assign(sh.begin(), sh.end());
+        entry.dtype = t.dtype();
+        total += entry.numel;
+        L.params.push_back(std::move(entry));
+    }
+
+    // Round total up to a multiple of world_size so reduce_scatter / all_gather can
+    // hand each rank an equal-sized slice. The padding bytes are zeros and contribute
+    // nothing to the optimizer math (no parameter touches them).
+    const int64_t W = static_cast<int64_t>(config_.world_size);
+    int64_t padded = ((total + W - 1) / W) * W;
+    L.total_elements_padded = padded;
+
+    // Equal split. rank_starts has world_size + 1 entries so rank_size(R) is just a
+    // subtraction.
+    L.rank_starts.assign(config_.world_size + 1, 0);
+    int64_t per_rank = padded / W;
+    for (int r = 0; r <= config_.world_size; ++r) {
+        L.rank_starts[r] = std::min<int64_t>(per_rank * r, padded);
+    }
+}
+
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        auto& partition = local_partition();
+        const int64_t slice_n = partition_layout_.rank_size(config_.rank);
+
+        Device dev = partition.device;
+        // For element-mode, the rank's optimizer state is a single flat slice covering
+        // every parameter's contribution. This is exactly the global flat buffer slice
+        // [rank_starts[rank], rank_starts[rank+1]). Use the dtype of the first param as
+        // the state dtype unless overridden — same rule as ParamLevel.
+        DType state_dtype = config_.state_dtype.value_or(
+            !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32);
+
+        partition.momentum.assign(1, zeros({slice_n}, state_dtype, dev));
+        partition.variance.assign(1, zeros({slice_n}, state_dtype, dev));
+
+        if (config_.use_master_fp32) {
+            // The master is a fp32 copy of the rank's parameter slice. We populate it
+            // by gathering each param's portion of the rank's slice; for now zero-init
+            // it (the all-gather of params at the end of the FIRST step copies real
+            // values into the master via the same code path used for legacy Stage 1).
+            //
+            // NOTE: master is meaningful only when training in fp16/bf16; if all params
+            // are already fp32 the master is wasteful and we skip allocation.
+            bool any_low_precision = false;
+            for (const auto& e : partition_layout_.params) {
+                if (e.dtype != DType::Float32) { any_low_precision = true; break; }
+            }
+            if (any_low_precision) {
+                partition.master_params.assign(1, zeros({slice_n}, DType::Float32, dev));
+            } else {
+                partition.master_params.assign(1, Tensor());  // no master needed
+            }
+        }
+
+        partition.memory_bytes =
+            slice_n * dtype_size(state_dtype) * 2 +  // momentum + variance
+            ((partition.master_params.empty() || partition.master_params[0].numel() == 0)
+                ? 0
+                : partition.master_params[0].numel() * dtype_size(DType::Float32));
+
+        // If we're going to int8-quantize fp32 optimizer states on CPU, the offload path
+        // (offload_states_to_cpu / fetch_states_to_gpu) writes/reads per-tensor scale
+        // tensors out of partition.momentum_scales / variance_scales. In ElementLevel mode
+        // each of momentum and variance is a single flat slice, so we allocate exactly one
+        // scale slot per state, default-constructed. They are populated lazily on the first
+        // quantize-and-offload pass — same pattern as ParamLevel (see line ~782).
+        if (config_.offload_to_cpu && config_.quantize_offloaded_states_int8) {
+            partition.momentum_scales.assign(1, Tensor());
+            partition.variance_scales.assign(1, Tensor());
+        }
+
+        // CPU offload: pull each freshly-zeroed slice to CPU now to keep peak GPU memory
+        // minimal during initialization. Subsequent offload cycles (step-time) go through
+        // offload_states_to_cpu() which handles int8 quantization when configured — the
+        // scale slots above were just allocated for that path.
+        const bool should_cpu_offload = config_.offload_to_cpu && offload_engine_;
+        if (should_cpu_offload) {
+            partition.momentum[0] = offload_engine_->offload_to_cpu(partition.momentum[0]);
+            partition.variance[0] = offload_engine_->offload_to_cpu(partition.variance[0]);
+            if (!partition.master_params.empty() && partition.master_params[0].numel() > 0) {
+                partition.master_params[0] =
+                    offload_engine_->offload_to_cpu(partition.master_params[0]);
+            }
+            states_on_cpu_ = true;
+        }
+
+        // NVMe path for ElementLevel is added in Task 9.1 (NVMe interaction).
+        if (config_.offload_to_nvme) {
+            throw std::runtime_error(
+                "ElementLevel + offload_to_nvme is not yet supported (planned: Task 9.1)");
+        }
+        return;
+    }
+
     // Initialize states for local partition only
     auto& partition = local_partition();
 
@@ -1046,6 +1202,76 @@ auto ZeROStage1Optimizer::all_gather_parameters() -> void {
     }
 }
 
+auto ZeROStage1Optimizer::all_gather_parameters_element_mode() -> void {
+    if (config_.world_size <= 1) return;  // nothing to gather
+    if (!config_.process_group) {
+        throw std::runtime_error("Process group not initialized");
+    }
+
+    const auto& L = partition_layout_;
+    const int64_t per_rank = L.rank_starts[1] - L.rank_starts[0];
+    const int64_t total = L.total_elements_padded;
+    Device dev = local_partition().device;
+    DType dt = !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32;
+
+    // Build the local flat slice from the just-updated parameter tensors.
+    Tensor local_flat = zeros({per_rank}, dt, dev);
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        Tensor src = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+        if (src.dtype() != dt) src = src.to(dt);
+        Tensor dst = local_flat.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);  // dst is zero
+    }
+
+    // Single all_gather: world_size × per_rank → global flat buffer.
+    // distributed::ProcessGroup::all_gather(input, output): parts is sized world_size,
+    // empty slots are populated by the collective with one tensor per rank.
+    std::vector<Tensor> parts(config_.world_size);
+    config_.process_group->all_gather(local_flat, parts);
+
+    if (profiling_enabled_) {
+        // Each rank sends per_rank elements and receives world_size * per_rank elements.
+        // Account it the same way the legacy path does: total bytes-on-the-wire summed.
+        const size_t bytes = static_cast<size_t>(per_rank) * static_cast<size_t>(config_.world_size)
+                           * dtype_size(dt);
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.transferred_bytes += bytes;
+    }
+
+    // Distribute back: for each parameter, read its global range from the gathered parts.
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        if (!parameters_[i]->tensor().is_contiguous()) {
+            throw std::runtime_error(
+                "ElementLevel all-gather requires contiguous parameter tensors; "
+                "non-contiguous param at index " + std::to_string(i));
+        }
+        Tensor pflat = parameters_[i]->tensor().view({-1});
+        for (int r = 0; r < config_.world_size; ++r) {
+            int64_t r_start = L.rank_starts[r];
+            int64_t r_end = L.rank_starts[r + 1];
+            int64_t lap_start = std::max(e.global_offset, r_start);
+            int64_t lap_end = std::min(e.global_offset + e.numel, r_end);
+            if (lap_end <= lap_start) continue;
+            Tensor src = parts[r].slice(0, lap_start - r_start, lap_end - r_start);
+            if (src.dtype() != pflat.dtype()) src = src.to(pflat.dtype());
+            Tensor dst = pflat.slice(0, lap_start - e.global_offset, lap_end - e.global_offset);
+            dst.zero_();
+            add_(dst, src);
+        }
+    }
+    (void)total;  // padding bytes are inert
+}
+
 // =============================================================================
 // Private: State Management
 // =============================================================================
@@ -1094,6 +1320,163 @@ auto ZeROStage1Optimizer::update_local_partition() -> void {
         // Restore original parameters
         parameters_ = original_params;
     }
+}
+
+auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
+    auto& partition = local_partition();
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    if (slice_n == 0) return;
+
+    Device dev = partition.device;
+    DType state_dtype = partition.momentum[0].dtype();
+
+    // ---- 1) Build a flat grad slice for this rank. ----
+    // Delegates to build_rank_grad_slice() which Stage 2 overrides to read from
+    // element_buckets_ (post-reduce_scatter slices) instead of param->grad().
+    Tensor grad_slice = build_rank_grad_slice();
+
+    // ---- 2) Run Adam/AdamW/SGD math on the rank's slice. ----
+    auto* adam_opt  = dynamic_cast<Adam*>(base_optimizer_.get());
+    auto* adamw_opt = dynamic_cast<AdamW*>(base_optimizer_.get());
+    auto* sgd_opt   = dynamic_cast<SGD*>(base_optimizer_.get());
+
+    Tensor& m = partition.momentum[0];
+    Tensor& v = partition.variance[0];
+    bool has_master = config_.use_master_fp32
+                   && !partition.master_params.empty()
+                   && partition.master_params[0].numel() > 0;
+
+    // For the no-master path we need to gather the current parameter slice from each
+    // param->tensor() into a temporary `param_slice`, do the math in place there, then
+    // scatter back. The master path keeps a persistent fp32 slice and skips the gather.
+    Tensor param_slice;
+    if (!has_master) {
+        param_slice = zeros({slice_n}, state_dtype, dev);
+        for (size_t i = 0; i < L.params.size(); ++i) {
+            const auto& e = L.params[i];
+            int64_t p_start = e.global_offset;
+            int64_t p_end = e.global_offset + e.numel;
+            int64_t lap_start = std::max(p_start, rs);
+            int64_t lap_end = std::min(p_end, re);
+            if (lap_end <= lap_start) continue;
+            Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+            Tensor src = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+            Tensor dst = param_slice.slice(0, lap_start - rs, lap_end - rs);
+            if (src.dtype() != state_dtype) src = src.to(state_dtype);
+            add_(dst, src);
+        }
+    }
+
+    Tensor& target = has_master ? partition.master_params[0] : param_slice;
+
+    if (adam_opt || adamw_opt) {
+        const double lr     = adam_opt ? adam_opt->get_lr()  : adamw_opt->get_lr();
+        const double beta1  = 0.9;
+        const double beta2  = 0.999;
+        const double eps    = 1e-8;
+        const double wd     = adamw_opt ? 0.01 : 0.0;
+        step_count_++;
+
+        // m = beta1*m + (1-beta1)*g
+        mul_(m, scalar_like(beta1, m));
+        Tensor scaled_g = grad_slice * (1.0 - beta1);
+        add_(m, scaled_g);
+        // v = beta2*v + (1-beta2)*g^2
+        mul_(v, scalar_like(beta2, v));
+        Tensor g_sq = grad_slice * grad_slice;
+        mul_(g_sq, scalar_like(1.0 - beta2, g_sq));
+        add_(v, g_sq);
+
+        double bc1 = 1.0 - std::pow(beta1, step_count_);
+        double bc2 = 1.0 - std::pow(beta2, step_count_);
+        Tensor m_hat = m / bc1;
+        Tensor v_hat = v / bc2;
+        Tensor denom = sqrt(v_hat) + eps;
+
+        if (adamw_opt) {
+            // AdamW: decoupled weight decay
+            target = target * (1.0 - lr * wd);
+        }
+        target = target - (m_hat / denom) * lr;
+    } else if (sgd_opt) {
+        const double lr = sgd_opt->get_lr();
+        const double momentum_coef = 0.9;
+        if (momentum_coef != 0.0) {
+            mul_(m, scalar_like(momentum_coef, m));
+            add_(m, grad_slice);
+            target = target - m * lr;
+        } else {
+            target = target - grad_slice * lr;
+        }
+    } else {
+        throw std::runtime_error(
+            "ElementLevel mode currently supports Adam, AdamW, SGD base optimizers only");
+    }
+
+    // ---- 3) Scatter `target` back into per-parameter tensors. ----
+    // For each param overlapping the rank's slice, copy the corresponding slice of
+    // target into the param's flat view at the appropriate offset. Downcast on the
+    // master path back to the param's dtype.
+    //
+    // Invariant: every parameter overlapping the rank's slice MUST be contiguous.
+    // We write through `pflat = tensor().contiguous().view({-1})`, which only shares
+    // storage with `tensor()` when `tensor()` is already contiguous; otherwise
+    // contiguous() copies and our writes are silently lost. Parameters are always
+    // contiguous at construction in typical optimizer use, but we assert here to
+    // catch future regressions before they become silent data-corruption bugs.
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+        if (!parameters_[i]->tensor().is_contiguous()) {
+            throw std::runtime_error(
+                "ElementLevel scatter-back requires contiguous parameter tensors; "
+                "non-contiguous param at index " + std::to_string(i));
+        }
+        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        Tensor src = target.slice(0, lap_start - rs, lap_end - rs);
+        if (src.dtype() != pflat.dtype()) src = src.to(pflat.dtype());
+        Tensor dst = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+        dst.zero_();
+        add_(dst, src);
+    }
+}
+
+auto ZeROStage1Optimizer::build_rank_grad_slice() -> Tensor {
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    Device dev = local_partition().device;
+    DType state_dtype = local_partition().momentum[0].dtype();
+
+    Tensor grad_slice = zeros({slice_n}, state_dtype, dev);
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+
+        const auto& var = parameters_[i];
+        if (!var->has_grad()) continue;
+        const auto& go = var->grad();
+        if (!go.has_value()) continue;
+        Tensor grad_flat = go.value().contiguous().view({-1});
+        if (grad_flat.dtype() != state_dtype) grad_flat = grad_flat.to(state_dtype);
+
+        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
+        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);
+    }
+    return grad_slice;
 }
 
 auto ZeROStage1Optimizer::update_partition_adam(
@@ -1578,7 +1961,11 @@ ZeROStage2Optimizer::ZeROStage2Optimizer(
     stage2_config_(config) {
 
     if (stage2_config_.gradient_bucketing) {
-        create_gradient_buckets();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            create_gradient_buckets_element_mode();
+        } else {
+            create_gradient_buckets();
+        }
     }
 }
 
@@ -1619,7 +2006,11 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     // Step 3: Update local partition of parameters
     // Uses the local (reduced-scattered) gradients
     auto compute_start = std::chrono::steady_clock::now();
-    update_local_partition();
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        update_local_partition_element_mode();
+    } else {
+        update_local_partition();
+    }
     if (profiling_enabled_) {
         auto compute_end = std::chrono::steady_clock::now();
         auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
@@ -1642,7 +2033,11 @@ auto ZeROStage2Optimizer::step_impl() -> void {
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
         auto gather_start = std::chrono::steady_clock::now();
-        all_gather_parameters();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            all_gather_parameters_element_mode();
+        } else {
+            all_gather_parameters();
+        }
         if (profiling_enabled_) {
             auto gather_end = std::chrono::steady_clock::now();
             auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
@@ -1706,6 +2101,24 @@ auto ZeROStage2Optimizer::register_backward_hooks() -> void {
         return;  // Hooks disabled in config
     }
 
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        // One hook per parameter; routes into element_gradient_hook.
+        element_hook_ids_.assign(parameters_.size(), 0);
+        for (size_t i = 0; i < parameters_.size(); ++i) {
+            auto& p = parameters_[i];
+            if (!p) continue;
+            element_hook_ids_[i] = p->register_hook(
+                [this, i](const Tensor& grad) -> Tensor {
+                    this->element_gradient_hook(i, grad);
+                    return grad;
+                });
+        }
+        hooks_registered_ = true;
+        return;
+    }
+
+    // ... existing ParamLevel code unchanged below ...
+
     // Register a hook on every parameter Variable. The autograd engine calls these
     // during backward, *before* gradient accumulation, with the freshly-computed grad.
     // We stash the grad into the bucket's per-param slot and, once the bucket is full,
@@ -1746,6 +2159,21 @@ auto ZeROStage2Optimizer::unregister_backward_hooks() -> void {
     if (!hooks_registered_) {
         return;
     }
+
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        for (size_t i = 0; i < parameters_.size() && i < element_hook_ids_.size(); ++i) {
+            if (parameters_[i]) parameters_[i]->unregister_hook(element_hook_ids_[i]);
+        }
+        element_hook_ids_.clear();
+        for (auto& b : element_buckets_) {
+            b.flat_buffer = Tensor();
+            b.hooks_received = 0;
+        }
+        hooks_registered_ = false;
+        return;
+    }
+
+    // ... existing ParamLevel code unchanged below ...
 
     for (auto& bucket : gradient_buckets_) {
         for (size_t i = 0; i < bucket.params.size() && i < bucket.hook_ids.size(); ++i) {
@@ -1886,6 +2314,43 @@ auto ZeROStage2Optimizer::create_gradient_buckets() -> void {
             bucket.param_sizes_elem.push_back(n);
             offset += n;
         }
+    }
+}
+
+auto ZeROStage2Optimizer::create_gradient_buckets_element_mode() -> void {
+    std::lock_guard<std::mutex> lock(buckets_mutex_);
+    element_buckets_.clear();
+
+    const auto& L = partition_layout_;
+    if (L.params.empty()) return;
+
+    DType dt = parameters_.empty() ? DType::Float32 : parameters_[0]->tensor().dtype();
+    const size_t bytes_per_elem = dtype_size(dt);
+    const size_t target_bucket_bytes = stage2_config_.gradient_bucket_size;
+    const int64_t W = config_.world_size;
+
+    // Bucket by GLOBAL element range. Round each bucket size DOWN to a world_size
+    // multiple so reduce_scatter cleanly splits it.
+    const int64_t bucket_elems = std::max<int64_t>(
+        W,  // bucket must hold at least one element per rank
+        ((static_cast<int64_t>(target_bucket_bytes / bytes_per_elem)) / W) * W);
+    int64_t cursor = 0;
+    int64_t total = L.total_elements_padded;
+    while (cursor < total) {
+        ElementBucket b;
+        b.global_start = cursor;
+        b.global_end = std::min(cursor + bucket_elems, total);
+
+        // Find which param indices have any element in [global_start, global_end).
+        for (size_t i = 0; i < L.params.size(); ++i) {
+            const auto& e = L.params[i];
+            int64_t p_end = e.global_offset + e.numel;
+            if (p_end <= b.global_start) continue;
+            if (e.global_offset >= b.global_end) break;
+            b.param_indices.push_back(i);
+        }
+        element_buckets_.push_back(std::move(b));
+        cursor = element_buckets_.back().global_end;
     }
 }
 
@@ -2139,6 +2604,131 @@ auto ZeROStage2Optimizer::unflatten_into(
 ) -> void {
     // Use the gradient_utils implementation
     tenzor::optim::unflatten_into(flattened, targets);
+}
+
+// =============================================================================
+// Stage 2: ElementLevel gradient hook and reduce-scatter
+// =============================================================================
+
+auto ZeROStage2Optimizer::element_gradient_hook(size_t param_idx, const Tensor& grad) -> void {
+    const auto& L = partition_layout_;
+    const auto& e = L.params[param_idx];
+    int64_t p_start = e.global_offset;
+    int64_t p_end = e.global_offset + e.numel;
+    DType dt = e.dtype;
+    Device dev = grad.device();
+
+    Tensor grad_flat = grad.contiguous().view({-1});
+    if (grad_flat.dtype() != dt) grad_flat = grad_flat.to(dt);
+
+    for (auto& b : element_buckets_) {
+        int64_t lap_start = std::max(p_start, b.global_start);
+        int64_t lap_end = std::min(p_end, b.global_end);
+        if (lap_end <= lap_start) continue;
+
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        if (b.flat_buffer.numel() != b.global_end - b.global_start
+            || b.flat_buffer.dtype() != dt
+            || b.flat_buffer.device() != dev) {
+            b.flat_buffer = zeros({b.global_end - b.global_start}, dt, dev);
+        }
+        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
+        Tensor dst = b.flat_buffer.slice(0, lap_start - b.global_start,
+                                            lap_end - b.global_start);
+        add_(dst, src);
+    }
+
+    // Mark this param's contribution to each overlapping bucket. Fire reduce_scatter
+    // when a bucket has all its params' grads in.
+    for (auto& b : element_buckets_) {
+        bool in_bucket = std::find(b.param_indices.begin(), b.param_indices.end(),
+                                    param_idx) != b.param_indices.end();
+        if (!in_bucket) continue;
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        b.hooks_received++;
+        if (b.hooks_received == b.param_indices.size()) {
+            reduce_scatter_element_bucket(b);
+        }
+    }
+}
+
+auto ZeROStage2Optimizer::reduce_scatter_element_bucket(ElementBucket& bucket) -> void {
+    // Caller holds bucket.mutex.
+    if (config_.world_size <= 1 || !config_.process_group) {
+        // Single-rank path: nothing to scatter; the optimizer step picks up the
+        // bucket's flat_buffer directly during update_local_partition_element_mode.
+        return;
+    }
+
+    const int64_t bucket_n = bucket.global_end - bucket.global_start;
+    const int64_t per_rank = bucket_n / config_.world_size;
+    DType dt = bucket.flat_buffer.dtype();
+    Device dev = bucket.flat_buffer.device();
+
+    // Split bucket.flat_buffer into world_size contiguous chunks (slices). Pass them
+    // as the input to reduce_scatter; the output is this rank's slice.
+    std::vector<Tensor> chunks(config_.world_size);
+    for (int r = 0; r < config_.world_size; ++r) {
+        chunks[r] = bucket.flat_buffer.slice(0, r * per_rank, (r + 1) * per_rank);
+    }
+
+    Tensor output = zeros({per_rank}, dt, dev);
+    config_.process_group->reduce_scatter(chunks, output);
+
+    // Replace bucket.flat_buffer with just our slice. Frees the other ranks' slices —
+    // that's the actual memory win this whole refactor exists to deliver.
+    bucket.flat_buffer = output;
+    bucket.hooks_received = 0;  // ready for next backward
+}
+
+auto ZeROStage2Optimizer::build_rank_grad_slice() -> Tensor {
+    if (config_.partitioning_mode != PartitioningMode::ElementLevel) {
+        return ZeROStage1Optimizer::build_rank_grad_slice();
+    }
+
+    // Fallback: if no bucket has stashed grads (autograd hooks didn't fire — typical
+    // when callers use set_grad() directly without backward(), or when bucketing is
+    // disabled), delegate to the base-class path that reads from param->grad()
+    // directly. Mirrors the equivalent fallback in the legacy reduce_scatter_gradients.
+    bool any_bucket_has_data = false;
+    for (const auto& b : element_buckets_) {
+        if (b.flat_buffer.numel() > 0) { any_bucket_has_data = true; break; }
+    }
+    if (!any_bucket_has_data) {
+        return ZeROStage1Optimizer::build_rank_grad_slice();
+    }
+
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    Device dev = local_partition().device;
+    DType dt = local_partition().momentum[0].dtype();
+
+    Tensor grad_slice = zeros({slice_n}, dt, dev);
+    // Each bucket's flat_buffer post-reduce_scatter is per_rank-in-bucket sized; copy
+    // each bucket's contribution to the right offset in grad_slice. The bucket's slice
+    // corresponds to global range [b.global_start + rank*per_rank_in_bucket,
+    // b.global_start + (rank+1)*per_rank_in_bucket).
+    for (auto& b : element_buckets_) {
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        if (b.flat_buffer.numel() == 0) continue;
+        const int64_t bucket_n = b.global_end - b.global_start;
+        const int64_t per_rank_bucket = bucket_n / config_.world_size;
+        const int64_t bucket_rank_start = b.global_start + config_.rank * per_rank_bucket;
+        const int64_t bucket_rank_end = bucket_rank_start + per_rank_bucket;
+
+        int64_t lap_start = std::max(bucket_rank_start, rs);
+        int64_t lap_end = std::min(bucket_rank_end, re);
+        if (lap_end <= lap_start) continue;
+
+        Tensor src = b.flat_buffer.slice(0, lap_start - bucket_rank_start,
+                                            lap_end - bucket_rank_start);
+        if (src.dtype() != dt) src = src.to(dt);
+        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);
+    }
+    return grad_slice;
 }
 
 // =============================================================================

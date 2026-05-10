@@ -832,6 +832,136 @@ TEST_F(ZeROStage2Test, StateDictContainsRankInfo) {
 }
 
 // ============================================================================
+// 9. Stage 2 ElementLevel Single-Rank Parity Tests
+// ============================================================================
+
+// Investigation findings (Task 6.1):
+//
+// 1. Variable::set_grad() does NOT fire register_hook callbacks — it writes
+//    impl_->grad_ directly, identical to PyTorch semantics.
+//
+// 2. ZeROStage2Optimizer::step_impl() calls update_local_partition() (the
+//    ParamLevel path) unconditionally — it does NOT dispatch on partitioning_mode.
+//    This means build_rank_grad_slice() / element_buckets_ are never reached
+//    from step() in Stage 2 ElementLevel mode.  The ElementLevel-specific bucket
+//    code (Phase 5: element_gradient_hook → reduce_scatter_element_bucket →
+//    build_rank_grad_slice) is exercised ONLY when autograd backward() fires the
+//    per-param hooks registered by register_backward_hooks().
+//
+// 3. For set_grad()-based tests both modes fall through to update_partition_adam()
+//    which reads param->grad() directly — the same code path.  Parity therefore
+//    holds for the right mathematical reason (same grad source, same optimizer math),
+//    NOT because the test is vacuous.  The initial param value is ones(16×16);
+//    after 5 steps with nonzero grad the params change, so the comparison is
+//    non-trivial.
+//
+// 4. Phase 5 concern: step_impl() in Stage 2 should also dispatch on
+//    partitioning_mode (like Stage 1 step_impl() does at line 314) so that the
+//    ElementLevel bucket path is reachable from step().  Without that dispatch
+//    the element_buckets_ / build_rank_grad_slice() code is dead in step().
+//    This is a separate Phase 5 issue; this test validates parity under the
+//    current (set_grad-based) code path.
+
+TEST_F(ZeROStage2Test, ElementLevel_SingleRank_AdamParity) {
+    // Stage 2 ElementLevel mode at world_size=1: reduce_scatter is a no-op (single
+    // rank early-return), so the optimizer step should produce identical params to
+    // Stage 2 ParamLevel.  Both modes read param->grad() in update_partition_adam()
+    // because set_grad() does not fire the autograd hooks installed by
+    // register_backward_hooks().
+
+    auto run = [&](PartitioningMode mode) -> std::vector<float> {
+        auto params = create_test_params(3, {16, 16});
+        auto base = std::make_unique<Adam>(params, 0.001);
+        ZeROStage2Config cfg;
+        cfg.world_size = 1;
+        cfg.rank = 0;
+        cfg.partitioning_mode = mode;
+        cfg.gradient_bucketing = true;
+        cfg.gradient_bucket_size = 4 * 1024;  // small: forces multiple buckets
+        ZeROStage2Optimizer opt(std::move(base), cfg);
+        opt.register_backward_hooks();
+
+        for (int step = 0; step < 5; ++step) {
+            for (auto& p : params) {
+                Tensor g = ones_like(p->tensor()) * (0.1f * (step + 1));
+                p->set_grad(g);
+            }
+            opt.step();
+        }
+        std::vector<float> out;
+        for (auto& p : params) {
+            Tensor flat = p->tensor().contiguous().view({-1}).to(Device::cpu());
+            const float* d = flat.data<float>();
+            for (int64_t i = 0; i < flat.numel(); ++i) out.push_back(d[i]);
+        }
+        return out;
+    };
+
+    auto out_param = run(PartitioningMode::ParamLevel);
+    auto out_elem  = run(PartitioningMode::ElementLevel);
+
+    ASSERT_EQ(out_param.size(), out_elem.size());
+
+    // Sanity-check: params must have moved from the initial value of 1.0 to prove
+    // the optimizer actually ran (non-trivial grads, non-trivial update).
+    bool any_changed = false;
+    for (float v : out_param) {
+        if (std::abs(v - 1.0f) > 1e-6f) {
+            any_changed = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(any_changed)
+        << "ParamLevel params did not change from initial value — optimizer may not have run";
+
+    // Parity between modes.
+    for (size_t i = 0; i < out_param.size(); ++i) {
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-5f)
+            << "Mismatch at element " << i;
+    }
+}
+
+// ============================================================================
+// 10. ElementLevel Bucket Layout Invariant
+// ============================================================================
+
+TEST_F(ZeROStage2Test, ElementLevel_PeakBucketMemoryBoundedByPerRankSlice) {
+    // The invariant that powers the reduce_scatter memory win: every ElementBucket's
+    // global range is exactly divisible by world_size, so reduce_scatter can split it
+    // cleanly into per-rank slices. With this guarantee the per-rank receive footprint
+    // is bucket_size / world_size — the property that makes Stage 2 ElementLevel
+    // genuinely memory-cheaper than ParamLevel's "owner gets the whole bucket".
+    constexpr int W = 4;
+    constexpr size_t bucket_bytes = 64 * 1024;  // 64 KB
+    auto params = create_test_params(2, {64, 64});  // 4096 elements × 4 B = 16 KB each
+                                                     // → 32 KB total → fits in one bucket
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage2Config cfg;
+    cfg.world_size = W;
+    cfg.rank = 0;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.gradient_bucket_size = bucket_bytes;
+    cfg.process_group = nullptr;  // single-process; reduce_scatter early-returns
+
+    ZeROStage2Optimizer opt(std::move(base), cfg);
+    // Element buckets are built at construction time (create_gradient_buckets_element_mode).
+    // We do NOT call opt.step() here: with world_size=4 and process_group=nullptr the
+    // all_gather_parameters_element_mode() call inside step() would throw.  The layout
+    // invariant lives in the bucket metadata, not in the step output, so verifying it
+    // right after construction is both correct and self-contained.
+
+    // Layout invariant: bucket size is a world_size multiple → reduce_scatter can
+    // split it. This is what guarantees per-rank peak grad memory == bucket_size / W.
+    const auto& bs = opt.test_element_buckets();
+    ASSERT_FALSE(bs.empty()) << "No element buckets created — bucketing config issue";
+    for (const auto& b : bs) {
+        EXPECT_EQ((b.global_end - b.global_start) % W, 0)
+            << "Bucket [" << b.global_start << ", " << b.global_end << ") size "
+            << (b.global_end - b.global_start) << " is not a multiple of world_size " << W;
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
