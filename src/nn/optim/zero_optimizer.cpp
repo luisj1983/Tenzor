@@ -839,12 +839,25 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
 
         partition.memory_bytes =
             slice_n * dtype_size(state_dtype) * 2 +  // momentum + variance
-            (partition.master_params.empty() ? 0
-                : (partition.master_params[0].numel() * dtype_size(DType::Float32)));
+            ((partition.master_params.empty() || partition.master_params[0].numel() == 0)
+                ? 0
+                : partition.master_params[0].numel() * dtype_size(DType::Float32));
 
-        // CPU offload + NVMe + quantization: re-use the existing per-tensor offload
-        // path on the single slice. This is intentional — we get all the offload knobs
-        // for free since the slice is just another Tensor.
+        // If we're going to int8-quantize fp32 optimizer states on CPU, the offload path
+        // (offload_states_to_cpu / fetch_states_to_gpu) writes/reads per-tensor scale
+        // tensors out of partition.momentum_scales / variance_scales. In ElementLevel mode
+        // each of momentum and variance is a single flat slice, so we allocate exactly one
+        // scale slot per state, default-constructed. They are populated lazily on the first
+        // quantize-and-offload pass — same pattern as ParamLevel (see line ~782).
+        if (config_.offload_to_cpu && config_.quantize_offloaded_states_int8) {
+            partition.momentum_scales.assign(1, Tensor());
+            partition.variance_scales.assign(1, Tensor());
+        }
+
+        // CPU offload: pull each freshly-zeroed slice to CPU now to keep peak GPU memory
+        // minimal during initialization. Subsequent offload cycles (step-time) go through
+        // offload_states_to_cpu() which handles int8 quantization when configured — the
+        // scale slots above were just allocated for that path.
         const bool should_cpu_offload = config_.offload_to_cpu && offload_engine_;
         if (should_cpu_offload) {
             partition.momentum[0] = offload_engine_->offload_to_cpu(partition.momentum[0]);
