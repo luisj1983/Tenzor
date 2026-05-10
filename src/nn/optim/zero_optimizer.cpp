@@ -338,7 +338,11 @@ auto ZeROStage1Optimizer::step_impl() -> void {
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
         auto gather_start = std::chrono::steady_clock::now();
-        all_gather_parameters();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            all_gather_parameters_element_mode();
+        } else {
+            all_gather_parameters();
+        }
         if (profiling_enabled_) {
             auto gather_end = std::chrono::steady_clock::now();
             auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
@@ -1176,6 +1180,66 @@ auto ZeROStage1Optimizer::all_gather_parameters() -> void {
             }
         }
     }
+}
+
+auto ZeROStage1Optimizer::all_gather_parameters_element_mode() -> void {
+    if (config_.world_size <= 1) return;  // nothing to gather
+    if (!config_.process_group) {
+        throw std::runtime_error("Process group not initialized");
+    }
+
+    const auto& L = partition_layout_;
+    const int64_t per_rank = L.rank_starts[1] - L.rank_starts[0];
+    const int64_t total = L.total_elements_padded;
+    Device dev = local_partition().device;
+    DType dt = !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32;
+
+    // Build the local flat slice from the just-updated parameter tensors.
+    Tensor local_flat = zeros({per_rank}, dt, dev);
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        Tensor src = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+        if (src.dtype() != dt) src = src.to(dt);
+        Tensor dst = local_flat.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);  // dst is zero
+    }
+
+    // Single all_gather: world_size × per_rank → global flat buffer.
+    // ProcessGroup::all_gather(output, input): output must be pre-sized to world_size.
+    std::vector<Tensor> parts(config_.world_size);
+    config_.process_group->all_gather(local_flat, parts);
+
+    // Distribute back: for each parameter, read its global range from the gathered parts.
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        if (!parameters_[i]->tensor().is_contiguous()) {
+            throw std::runtime_error(
+                "ElementLevel all-gather requires contiguous parameter tensors; "
+                "non-contiguous param at index " + std::to_string(i));
+        }
+        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        for (int r = 0; r < config_.world_size; ++r) {
+            int64_t r_start = L.rank_starts[r];
+            int64_t r_end = L.rank_starts[r + 1];
+            int64_t lap_start = std::max(e.global_offset, r_start);
+            int64_t lap_end = std::min(e.global_offset + e.numel, r_end);
+            if (lap_end <= lap_start) continue;
+            Tensor src = parts[r].slice(0, lap_start - r_start, lap_end - r_start);
+            if (src.dtype() != pflat.dtype()) src = src.to(pflat.dtype());
+            Tensor dst = pflat.slice(0, lap_start - e.global_offset, lap_end - e.global_offset);
+            dst.zero_();
+            add_(dst, src);
+        }
+    }
+    (void)total;  // padding bytes are inert
 }
 
 // =============================================================================

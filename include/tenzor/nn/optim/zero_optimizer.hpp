@@ -681,6 +681,14 @@ protected:
      */
     auto all_gather_parameters() -> void;
 
+    /** ElementLevel-mode replacement for all_gather_parameters().
+     *  After update_local_partition_element_mode wrote each rank's slice into the
+     *  per-param tensors, we still need the OTHER ranks' slices. Issues a single
+     *  all_gather of a global flat buffer of size world_size * rank_size, then scatters
+     *  per-param ranges back to each parameter's tensor.
+     */
+    auto all_gather_parameters_element_mode() -> void;
+
     // State management
 
     /**
