@@ -190,6 +190,7 @@ tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DI
 tenzor_discover_tests(test_pooling LABELS "nn\;smoke" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_schedulers LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1 LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_zero_partitioning LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1_distributed LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradient_utils LABELS "nn" DISCOVERY_TIMEOUT 60)
