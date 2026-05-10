@@ -719,10 +719,15 @@ TEST_F(ZeROGlooTest, ElementLevel_ConsistentParamsAcrossRanks) {
 
     // Cross-rank consistency check: broadcast rank 0's final param[0] to all ranks
     // and assert local match. The broadcast uses the same process group.
-    Tensor probe = params[0]->tensor().contiguous();
+    //
+    // Snapshot the local param BEFORE the broadcast modifies it. We need an
+    // independent copy (clone()) because contiguous() on an already-contiguous
+    // tensor returns a shared-storage view — broadcast(probe, 0) would otherwise
+    // mutate the underlying param and make local_snapshot == probe trivially.
+    Tensor local_snapshot = params[0]->tensor().clone();
+    Tensor probe = params[0]->tensor().clone();
     default_config.process_group->broadcast(probe, 0);
-    Tensor local = params[0]->tensor().contiguous();
-    Tensor diff = local - probe;
+    Tensor diff = local_snapshot - probe;
     Tensor abs_diff = abs(diff);
     Tensor max_diff = max(abs_diff);
     float max_val = max_diff.to(Device::cpu()).data<float>()[0];
