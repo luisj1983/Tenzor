@@ -707,6 +707,13 @@ protected:
      */
     auto update_local_partition_element_mode() -> void;
 
+    /** Hook for derived classes to provide a rank-local flat grad slice in ElementLevel
+     *  mode. Stage 1 default: walk parameters_[i]->grad() and stage into a fresh
+     *  rank-sized buffer. Stage 2 overrides: assemble from element_buckets_, which already
+     *  hold the post-reduce_scatter slices.
+     */
+    virtual auto build_rank_grad_slice() -> Tensor;
+
     /**
      * @brief Apply Adam update algorithm to partition
      *
@@ -1060,6 +1067,7 @@ private:
      */
     auto element_gradient_hook(size_t param_idx, const Tensor& grad) -> void;
     auto reduce_scatter_element_bucket(ElementBucket& bucket) -> void;
+    auto build_rank_grad_slice() -> Tensor override;
 
     /**
      * @brief Check if bucket is ready for reduce-scatter

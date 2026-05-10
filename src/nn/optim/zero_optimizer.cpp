@@ -1313,30 +1313,10 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
     Device dev = partition.device;
     DType state_dtype = partition.momentum[0].dtype();
 
-    // ---- 1) Build a flat grad slice for this rank from each parameter's grad. ----
-    // For each param entry whose [global_offset, global_offset+numel) intersects
-    // [rs, re), copy the relevant grad sub-range into grad_slice at the right local
-    // offset. Params with no grad contribute zeros.
-    Tensor grad_slice = zeros({slice_n}, state_dtype, dev);
-    for (size_t i = 0; i < L.params.size(); ++i) {
-        const auto& e = L.params[i];
-        int64_t p_start = e.global_offset;
-        int64_t p_end = e.global_offset + e.numel;
-        int64_t lap_start = std::max(p_start, rs);
-        int64_t lap_end = std::min(p_end, re);
-        if (lap_end <= lap_start) continue;
-
-        const auto& var = parameters_[i];
-        if (!var->has_grad()) continue;
-        const auto& go = var->grad();
-        if (!go.has_value()) continue;
-        Tensor grad_flat = go.value().contiguous().view({-1});
-        if (grad_flat.dtype() != state_dtype) grad_flat = grad_flat.to(state_dtype);
-
-        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
-        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
-        add_(dst, src);  // dst is zero, add_ acts as copy
-    }
+    // ---- 1) Build a flat grad slice for this rank. ----
+    // Delegates to build_rank_grad_slice() which Stage 2 overrides to read from
+    // element_buckets_ (post-reduce_scatter slices) instead of param->grad().
+    Tensor grad_slice = build_rank_grad_slice();
 
     // ---- 2) Run Adam/AdamW/SGD math on the rank's slice. ----
     auto* adam_opt  = dynamic_cast<Adam*>(base_optimizer_.get());
@@ -1446,6 +1426,37 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
         dst.zero_();
         add_(dst, src);
     }
+}
+
+auto ZeROStage1Optimizer::build_rank_grad_slice() -> Tensor {
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    Device dev = local_partition().device;
+    DType state_dtype = local_partition().momentum[0].dtype();
+
+    Tensor grad_slice = zeros({slice_n}, state_dtype, dev);
+    for (size_t i = 0; i < L.params.size(); ++i) {
+        const auto& e = L.params[i];
+        int64_t p_start = e.global_offset;
+        int64_t p_end = e.global_offset + e.numel;
+        int64_t lap_start = std::max(p_start, rs);
+        int64_t lap_end = std::min(p_end, re);
+        if (lap_end <= lap_start) continue;
+
+        const auto& var = parameters_[i];
+        if (!var->has_grad()) continue;
+        const auto& go = var->grad();
+        if (!go.has_value()) continue;
+        Tensor grad_flat = go.value().contiguous().view({-1});
+        if (grad_flat.dtype() != state_dtype) grad_flat = grad_flat.to(state_dtype);
+
+        Tensor src = grad_flat.slice(0, lap_start - p_start, lap_end - p_start);
+        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);
+    }
+    return grad_slice;
 }
 
 auto ZeROStage1Optimizer::update_partition_adam(
@@ -2640,6 +2651,43 @@ auto ZeROStage2Optimizer::reduce_scatter_element_bucket(ElementBucket& bucket) -
     // that's the actual memory win this whole refactor exists to deliver.
     bucket.flat_buffer = output;
     bucket.hooks_received = 0;  // ready for next backward
+}
+
+auto ZeROStage2Optimizer::build_rank_grad_slice() -> Tensor {
+    if (config_.partitioning_mode != PartitioningMode::ElementLevel) {
+        return ZeROStage1Optimizer::build_rank_grad_slice();
+    }
+    const auto& L = partition_layout_;
+    const int64_t rs = L.rank_starts[config_.rank];
+    const int64_t re = L.rank_starts[config_.rank + 1];
+    const int64_t slice_n = re - rs;
+    Device dev = local_partition().device;
+    DType dt = local_partition().momentum[0].dtype();
+
+    Tensor grad_slice = zeros({slice_n}, dt, dev);
+    // Each bucket's flat_buffer post-reduce_scatter is per_rank-in-bucket sized; copy
+    // each bucket's contribution to the right offset in grad_slice. The bucket's slice
+    // corresponds to global range [b.global_start + rank*per_rank_in_bucket,
+    // b.global_start + (rank+1)*per_rank_in_bucket).
+    for (auto& b : element_buckets_) {
+        std::lock_guard<std::mutex> bl(*b.mutex);
+        if (b.flat_buffer.numel() == 0) continue;
+        const int64_t bucket_n = b.global_end - b.global_start;
+        const int64_t per_rank_bucket = bucket_n / config_.world_size;
+        const int64_t bucket_rank_start = b.global_start + config_.rank * per_rank_bucket;
+        const int64_t bucket_rank_end = bucket_rank_start + per_rank_bucket;
+
+        int64_t lap_start = std::max(bucket_rank_start, rs);
+        int64_t lap_end = std::min(bucket_rank_end, re);
+        if (lap_end <= lap_start) continue;
+
+        Tensor src = b.flat_buffer.slice(0, lap_start - bucket_rank_start,
+                                            lap_end - bucket_rank_start);
+        if (src.dtype() != dt) src = src.to(dt);
+        Tensor dst = grad_slice.slice(0, lap_start - rs, lap_end - rs);
+        add_(dst, src);
+    }
+    return grad_slice;
 }
 
 // =============================================================================
