@@ -46,6 +46,7 @@ TEST_F(ZeROPartitioningTest, SingleRankCoversEverything) {
 
     const auto& L = opt.test_partition_layout();
     ASSERT_EQ(L.params.size(), 3u);
+    ASSERT_GE(L.rank_starts.size(), 2u);
     EXPECT_EQ(L.params[0].global_offset, 0);
     EXPECT_EQ(L.params[0].numel, 16);
     EXPECT_EQ(L.params[1].global_offset, 16);
@@ -54,7 +55,6 @@ TEST_F(ZeROPartitioningTest, SingleRankCoversEverything) {
     EXPECT_EQ(L.params[2].numel, 30);
     EXPECT_EQ(L.total_elements_padded, 54);
     EXPECT_EQ(L.rank_starts, (std::vector<int64_t>{0, 54}));
-    ASSERT_FALSE(L.rank_starts.empty());
     EXPECT_EQ(L.rank_size(0), 54);
 }
 
@@ -72,17 +72,14 @@ TEST_F(ZeROPartitioningTest, FourRanksEvenSplit) {
 
     const auto& L = opt.test_partition_layout();
     EXPECT_EQ(L.total_elements_padded, 60);
+    ASSERT_EQ(L.rank_starts.size(), 5u);
     EXPECT_EQ(L.rank_starts, (std::vector<int64_t>{0, 15, 30, 45, 60}));
-    if (L.rank_starts.size() == 5) {
-        for (int r = 0; r < 4; ++r) EXPECT_EQ(L.rank_size(r), 15);
-    } else {
-        ADD_FAILURE() << "rank_starts.size() == " << L.rank_starts.size() << ", expected 5";
-    }
+    for (int r = 0; r < 4; ++r) EXPECT_EQ(L.rank_size(r), 15);
 }
 
 // Padding when total_elements is not divisible by world_size.
 TEST_F(ZeROPartitioningTest, UnevenSplitPadsToWorldSizeMultiple) {
-    auto params = make_params({{17}});  // 17 elements, world_size=4, expect padded=20
+    auto params = make_params({{17}});  // 17 elements; ceil(17/4)*4 == 20 padded
     auto base = std::make_unique<Adam>(params, 0.001);
 
     ZeROStage1Config config;
@@ -94,13 +91,10 @@ TEST_F(ZeROPartitioningTest, UnevenSplitPadsToWorldSizeMultiple) {
 
     const auto& L = opt.test_partition_layout();
     EXPECT_EQ(L.total_elements_padded, 20);
-    if (L.rank_starts.size() == 5) {
-        EXPECT_EQ(L.rank_size(0), 5);
-        EXPECT_EQ(L.rank_size(1), 5);
-        EXPECT_EQ(L.rank_size(2), 5);
-        EXPECT_EQ(L.rank_size(3), 5);
-    } else {
-        ADD_FAILURE() << "rank_starts.size() == " << L.rank_starts.size() << ", expected 5";
+    ASSERT_EQ(L.rank_starts.size(), 5u);
+    EXPECT_EQ(L.rank_starts, (std::vector<int64_t>{0, 5, 10, 15, 20}));
+    for (int r = 0; r < 4; ++r) {
+        EXPECT_EQ(L.rank_size(r), 5);
     }
 }
 
