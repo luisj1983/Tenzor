@@ -1255,3 +1255,72 @@ TEST_F(ZeROStage1Test, BalancedPartitioningEvensOutMemoryAcrossRanks) {
     size_t balanced_total = balanced[0] + balanced[1];
     EXPECT_EQ(legacy_total, balanced_total);
 }
+
+// =========================================================================
+// ElementLevel-mode parity tests
+// =========================================================================
+
+namespace {
+// Run N Adam steps, return the final parameter values flattened.
+auto run_n_adam_steps(
+    std::vector<std::shared_ptr<Variable>> params,
+    PartitioningMode mode,
+    int num_steps,
+    int world_size = 1,
+    int rank = 0
+) -> std::vector<float> {
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage1Config cfg;
+    cfg.world_size = world_size;
+    cfg.rank = rank;
+    cfg.partitioning_mode = mode;
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < num_steps; ++step) {
+        // Synthetic gradient: g = 0.1 * step
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * (0.1f * (step + 1));
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+
+    std::vector<float> out;
+    for (auto& p : params) {
+        Tensor flat = p->tensor().contiguous().view({-1}).to(DType::Float32).to(Device::cpu());
+        const float* d = flat.data<float>();
+        for (int64_t i = 0; i < flat.numel(); ++i) out.push_back(d[i]);
+    }
+    return out;
+}
+}  // namespace
+
+TEST_F(ZeROStage1Test, ElementLevel_SingleRank_AdamParity) {
+    // ParamLevel and ElementLevel must produce bitwise-identical parameters at
+    // world_size=1 (no actual distribution happens; only the bookkeeping differs).
+    auto params_a = create_test_params(3, {16, 16});  // 3 × 256 = 768 elements
+    auto params_b = create_test_params(3, {16, 16});
+
+    auto out_param  = run_n_adam_steps(params_a, PartitioningMode::ParamLevel,   5);
+    auto out_elem   = run_n_adam_steps(params_b, PartitioningMode::ElementLevel, 5);
+
+    ASSERT_EQ(out_param.size(), out_elem.size());
+    for (size_t i = 0; i < out_param.size(); ++i) {
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6)
+            << "Mismatch at element " << i;
+    }
+}
+
+TEST_F(ZeROStage1Test, ElementLevel_SingleRank_NonDivisibleShape) {
+    // Param numel not a multiple of world_size — exercises padding.
+    auto params_a = create_test_params(1, {17});
+    auto params_b = create_test_params(1, {17});
+
+    auto out_param = run_n_adam_steps(params_a, PartitioningMode::ParamLevel,   3);
+    auto out_elem  = run_n_adam_steps(params_b, PartitioningMode::ElementLevel, 3);
+
+    ASSERT_EQ(out_param.size(), out_elem.size());
+    for (size_t i = 0; i < out_param.size(); ++i) {
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6);
+    }
+}
