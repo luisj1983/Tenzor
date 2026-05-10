@@ -1325,3 +1325,35 @@ TEST_F(ZeROStage1Test, ElementLevel_SingleRank_NonDivisibleShape) {
             << "Mismatch at element " << i;
     }
 }
+
+// ============================================================================
+// 15. Cross-partitioning-mode checkpoint load error
+// ============================================================================
+
+TEST_F(ZeROStage1Test, CheckpointCrossModeLoadThrows) {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "tenzor_zero_xmode_test";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    auto path_prefix = (tmp / "ckpt").string();
+
+    {
+        // Save in ParamLevel.
+        auto params = create_test_params(2);
+        auto base = std::make_unique<Adam>(params, 0.001);
+        ZeROStage1Config cfg = default_config;
+        cfg.partitioning_mode = PartitioningMode::ParamLevel;
+        ZeROStage1Optimizer opt(std::move(base), cfg);
+        opt.save_checkpoint(path_prefix);
+    }
+    {
+        // Try to load in ElementLevel — must throw.
+        auto params = create_test_params(2);
+        auto base = std::make_unique<Adam>(params, 0.001);
+        ZeROStage1Config cfg = default_config;
+        cfg.partitioning_mode = PartitioningMode::ElementLevel;
+        ZeROStage1Optimizer opt(std::move(base), cfg);
+        EXPECT_THROW(opt.load_checkpoint(path_prefix), std::runtime_error);
+    }
+    fs::remove_all(tmp);
+}
