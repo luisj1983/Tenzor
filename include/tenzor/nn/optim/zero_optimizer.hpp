@@ -41,6 +41,32 @@ namespace optim {
 // Bring Module into this namespace for convenience
 using nn::Module;
 
+/** Partitioning strategy for optimizer states and gradients.
+ *
+ *  - ParamLevel (default): each rank owns a set of WHOLE parameters. Optimizer state
+ *    for those parameters lives only on the owner rank; gradients are reduced to the
+ *    owner. Owner-rank peak grad memory == bucket size. Legacy behaviour, preserved
+ *    for checkpoint compatibility.
+ *
+ *  - ElementLevel: every parameter is logically split into world_size contiguous
+ *    element slices (the same partitioning Stage 3 uses for its on-the-fly gather).
+ *    Each rank stores momentum / variance / master only for its slice; gradients are
+ *    reduce-scattered so each rank receives bucket_size / world_size bytes regardless
+ *    of which "owner" the bucket nominally belongs to. Per-rank peak grad memory ==
+ *    bucket_size / world_size. Required to make a true reduce_scatter give memory
+ *    savings — without element-level partition the owner still needs the whole bucket
+ *    to run the optimizer step.
+ *
+ *  Switching modes invalidates checkpoints saved in the other mode (the on-disk
+ *  layout differs: ParamLevel saves whole-tensor state; ElementLevel saves per-slice
+ *  state). The mode is recorded in checkpoint metadata so cross-mode loads fail with
+ *  a clear error rather than silently producing garbage.
+ */
+enum class PartitioningMode {
+    ParamLevel,
+    ElementLevel,
+};
+
 /**
  * @brief Configuration for ZeRO Stage 1 Optimizer
  */
@@ -188,6 +214,11 @@ struct ZeROStage1Config {
      *  the flag value once at the start of training and don't toggle it.
      */
     bool balanced_partitioning{false};
+
+    /** Partitioning strategy. See PartitioningMode docs above for the trade-offs.
+     *  Default ParamLevel preserves legacy behaviour and existing checkpoints.
+     */
+    PartitioningMode partitioning_mode{PartitioningMode::ParamLevel};
 
     ZeROStage1Config() = default;
 };
