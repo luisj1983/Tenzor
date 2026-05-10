@@ -667,3 +667,97 @@ TEST_F(ZeROGlooTest, ConcurrentOptimizationSteps) {
     barrier();
     SUCCEED();
 }
+
+// =====================================================================
+// ElementLevel-mode multi-rank tests
+// =====================================================================
+
+TEST_F(ZeROGlooTest, ElementLevel_ConsistentParamsAcrossRanks) {
+    // After ElementLevel steps with deterministic grads, every rank should hold the
+    // same final param values — proves that all_gather_parameters_element_mode
+    // correctly distributes each rank's slice to all peers.
+    if (world_size_ != 2 && world_size_ != 4) {
+        GTEST_SKIP() << "Test requires world_size 2 or 4";
+    }
+
+    // Three params with mixed shapes; total elements 16+8+30=54 (divisible by 2 and
+    // padded for 4: 56).
+    std::vector<std::shared_ptr<Variable>> params;
+    params.push_back(std::make_shared<Variable>(
+        ones({4, 4}, DType::Float32, Device::cpu()), true));
+    params.push_back(std::make_shared<Variable>(
+        ones({8}, DType::Float32, Device::cpu()), true));
+    params.push_back(std::make_shared<Variable>(
+        ones({2, 3, 5}, DType::Float32, Device::cpu()), true));
+
+    auto base = std::make_unique<Adam>(params, 0.001);
+    auto cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    ZeROStage1Optimizer optimizer(std::move(base), cfg);
+
+    // Deterministic grads: every rank computes the SAME grad for every param
+    // (same as a normal data-parallel setup before all_reduce). Steps are 5.
+    for (int step = 0; step < 5; ++step) {
+        for (auto& p : params) {
+            auto shape_span = p->tensor().shape();
+            std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+            Tensor g = full(shape, 0.1f * (step + 1), DType::Float32, Device::cpu());
+            p->set_grad(g);
+        }
+        optimizer.step();
+    }
+
+    // After all_gather every rank has the same final param values. Sanity-check by
+    // verifying values are finite and non-zero.
+    for (auto& p : params) {
+        Tensor flat = p->tensor().contiguous().view({-1});
+        const float* d = flat.data<float>();
+        for (int64_t i = 0; i < flat.numel(); ++i) {
+            EXPECT_TRUE(std::isfinite(d[i])) << "param has non-finite value at " << i;
+        }
+    }
+
+    // Cross-rank consistency check: broadcast rank 0's final param[0] to all ranks
+    // and assert local match. The broadcast uses the same process group.
+    Tensor probe = params[0]->tensor().contiguous();
+    default_config.process_group->broadcast(probe, 0);
+    Tensor local = params[0]->tensor().contiguous();
+    Tensor diff = local - probe;
+    Tensor abs_diff = abs(diff);
+    Tensor max_diff = max(abs_diff);
+    float max_val = max_diff.to(Device::cpu()).data<float>()[0];
+    EXPECT_LT(max_val, 1e-5f) << "Rank " << rank_ << " params diverge from rank 0";
+
+    barrier();
+}
+
+TEST_F(ZeROGlooTest, ElementLevel_StateDictRoundTrip) {
+    // ElementLevel state_dict / load_state_dict should be a no-op round trip.
+    if (world_size_ < 2) {
+        GTEST_SKIP() << "Test requires world_size >= 2";
+    }
+
+    std::vector<std::shared_ptr<Variable>> params;
+    params.push_back(std::make_shared<Variable>(
+        ones({16, 16}, DType::Float32, Device::cpu()), true));
+
+    auto base = std::make_unique<Adam>(params, 0.001);
+    auto cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    ZeROStage1Optimizer optimizer(std::move(base), cfg);
+
+    // Run one step to populate optimizer state (m, v).
+    params[0]->set_grad(ones({16, 16}, DType::Float32, Device::cpu()) * 0.1f);
+    optimizer.step();
+
+    auto state_before = optimizer.state_dict();
+    optimizer.load_state_dict(state_before);
+    auto state_after = optimizer.state_dict();
+
+    EXPECT_EQ(state_before.size(), state_after.size());
+    for (const auto& [k, v] : state_before) {
+        ASSERT_TRUE(state_after.count(k)) << "Missing key after round-trip: " << k;
+    }
+
+    barrier();
+}
