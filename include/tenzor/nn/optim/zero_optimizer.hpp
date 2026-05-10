@@ -972,11 +972,32 @@ private:
         GradientBucket& operator=(const GradientBucket&) = delete;
     };
 
+    /** Gradient bucket for ElementLevel mode.
+     *  Represents a contiguous range of the global flat-grad buffer. Each rank receives
+     *  its 1/world_size slice of the bucket via reduce_scatter; non-owner ranks NEVER
+     *  hold the whole bucket on receive (the memory win that motivated this whole mode).
+     */
+    struct ElementBucket {
+        int64_t global_start{0};
+        int64_t global_end{0};
+        std::vector<size_t> param_indices;
+        Tensor flat_buffer;
+        size_t hooks_received{0};
+        std::unique_ptr<std::mutex> mutex{std::make_unique<std::mutex>()};
+
+        ElementBucket() = default;
+        ElementBucket(ElementBucket&&) = default;
+        ElementBucket& operator=(ElementBucket&&) = default;
+        ElementBucket(const ElementBucket&) = delete;
+        ElementBucket& operator=(const ElementBucket&) = delete;
+    };
+
     // Configuration
     ZeROStage2Config stage2_config_;
 
     // Gradient buckets
     std::vector<GradientBucket> gradient_buckets_;
+    std::vector<ElementBucket> element_buckets_;
     mutable std::mutex buckets_mutex_;  // Mutable so const methods can lock
 
     // Hook management
@@ -993,6 +1014,7 @@ private:
      * - Memory alignment
      */
     auto create_gradient_buckets() -> void;
+    auto create_gradient_buckets_element_mode() -> void;
 
     // Communication
 

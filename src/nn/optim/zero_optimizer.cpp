@@ -1930,7 +1930,11 @@ ZeROStage2Optimizer::ZeROStage2Optimizer(
     stage2_config_(config) {
 
     if (stage2_config_.gradient_bucketing) {
-        create_gradient_buckets();
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            create_gradient_buckets_element_mode();
+        } else {
+            create_gradient_buckets();
+        }
     }
 }
 
@@ -2238,6 +2242,43 @@ auto ZeROStage2Optimizer::create_gradient_buckets() -> void {
             bucket.param_sizes_elem.push_back(n);
             offset += n;
         }
+    }
+}
+
+auto ZeROStage2Optimizer::create_gradient_buckets_element_mode() -> void {
+    std::lock_guard<std::mutex> lock(buckets_mutex_);
+    element_buckets_.clear();
+
+    const auto& L = partition_layout_;
+    if (L.params.empty()) return;
+
+    DType dt = parameters_.empty() ? DType::Float32 : parameters_[0]->tensor().dtype();
+    const size_t bytes_per_elem = dtype_size(dt);
+    const size_t target_bucket_bytes = stage2_config_.gradient_bucket_size;
+    const int64_t W = config_.world_size;
+
+    // Bucket by GLOBAL element range. Round each bucket size DOWN to a world_size
+    // multiple so reduce_scatter cleanly splits it.
+    const int64_t bucket_elems = std::max<int64_t>(
+        W,  // bucket must hold at least one element per rank
+        ((static_cast<int64_t>(target_bucket_bytes / bytes_per_elem)) / W) * W);
+    int64_t cursor = 0;
+    int64_t total = L.total_elements_padded;
+    while (cursor < total) {
+        ElementBucket b;
+        b.global_start = cursor;
+        b.global_end = std::min(cursor + bucket_elems, total);
+
+        // Find which param indices have any element in [global_start, global_end).
+        for (size_t i = 0; i < L.params.size(); ++i) {
+            const auto& e = L.params[i];
+            int64_t p_end = e.global_offset + e.numel;
+            if (p_end <= b.global_start) continue;
+            if (e.global_offset >= b.global_end) break;
+            b.param_indices.push_back(i);
+        }
+        element_buckets_.push_back(std::move(b));
+        cursor = element_buckets_.back().global_end;
     }
 }
 
