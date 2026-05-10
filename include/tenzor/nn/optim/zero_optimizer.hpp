@@ -8,6 +8,18 @@
  * @see https://arxiv.org/abs/1910.02054
  */
 
+/**
+ * Partitioning modes:
+ *   - ParamLevel (default): each rank owns whole parameters. Simpler, checkpoint-
+ *     compatible with all prior versions of this code.
+ *   - ElementLevel: every parameter is split element-wise across world_size ranks.
+ *     Required for true reduce_scatter memory savings in Stage 2 (the owner rank
+ *     no longer holds the whole bucket). Opt in via ZeROStage1Config::partitioning_mode.
+ *
+ * See docs/superpowers/plans/2026-05-10-element-level-zero-partitioning.md for the
+ * design rationale and trade-off discussion.
+ */
+
 #pragma once
 
 #include "optimizer.hpp"
