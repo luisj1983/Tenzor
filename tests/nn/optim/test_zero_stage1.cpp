@@ -1277,7 +1277,7 @@ auto run_n_adam_steps(
     ZeROStage1Optimizer opt(std::move(base), cfg);
 
     for (int step = 0; step < num_steps; ++step) {
-        // Synthetic gradient: g = 0.1 * step
+        // Synthetic gradient: g = 0.1 * (step + 1) — nonzero from step 0
         for (auto& p : params) {
             Tensor g = ones_like(p->tensor()) * (0.1f * (step + 1));
             p->set_grad(g);
@@ -1321,6 +1321,7 @@ TEST_F(ZeROStage1Test, ElementLevel_SingleRank_NonDivisibleShape) {
 
     ASSERT_EQ(out_param.size(), out_elem.size());
     for (size_t i = 0; i < out_param.size(); ++i) {
-        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6);
+        EXPECT_NEAR(out_param[i], out_elem[i], 1e-6)
+            << "Mismatch at element " << i;
     }
 }
