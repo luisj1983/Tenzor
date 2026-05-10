@@ -1271,7 +1271,8 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
 
     Tensor& m = partition.momentum[0];
     Tensor& v = partition.variance[0];
-    bool has_master = !partition.master_params.empty()
+    bool has_master = config_.use_master_fp32
+                   && !partition.master_params.empty()
                    && partition.master_params[0].numel() > 0;
 
     // For the no-master path we need to gather the current parameter slice from each
@@ -1345,6 +1346,13 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
     // For each param overlapping the rank's slice, copy the corresponding slice of
     // target into the param's flat view at the appropriate offset. Downcast on the
     // master path back to the param's dtype.
+    //
+    // Invariant: every parameter overlapping the rank's slice MUST be contiguous.
+    // We write through `pflat = tensor().contiguous().view({-1})`, which only shares
+    // storage with `tensor()` when `tensor()` is already contiguous; otherwise
+    // contiguous() copies and our writes are silently lost. Parameters are always
+    // contiguous at construction in typical optimizer use, but we assert here to
+    // catch future regressions before they become silent data-corruption bugs.
     for (size_t i = 0; i < L.params.size(); ++i) {
         const auto& e = L.params[i];
         int64_t p_start = e.global_offset;
@@ -1352,6 +1360,11 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
         int64_t lap_start = std::max(p_start, rs);
         int64_t lap_end = std::min(p_end, re);
         if (lap_end <= lap_start) continue;
+        if (!parameters_[i]->tensor().is_contiguous()) {
+            throw std::runtime_error(
+                "ElementLevel scatter-back requires contiguous parameter tensors; "
+                "non-contiguous param at index " + std::to_string(i));
+        }
         Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
         Tensor src = target.slice(0, lap_start - rs, lap_end - rs);
         if (src.dtype() != pflat.dtype()) src = src.to(pflat.dtype());
