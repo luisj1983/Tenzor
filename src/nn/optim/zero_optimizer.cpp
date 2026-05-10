@@ -509,6 +509,9 @@ auto ZeROStage1Optimizer::save_checkpoint(const std::string& path_prefix) const 
             meta_file << "num_partitions=" << partitions_.size() << "\n";
             meta_file << "offload_to_cpu=" << (config_.offload_to_cpu ? "true" : "false") << "\n";
             meta_file << "total_parameters=" << parameters_.size() << "\n";
+            meta_file << "partitioning_mode=" <<
+                (config_.partitioning_mode == PartitioningMode::ElementLevel
+                    ? "element_level" : "param_level") << "\n";
 
             // Write partition sizes for verification
             for (int rank = 0; rank < config_.world_size; ++rank) {
@@ -586,6 +589,23 @@ auto ZeROStage1Optimizer::load_checkpoint(const std::string& path_prefix) -> voi
                         "Partition count mismatch: checkpoint=" + std::to_string(saved_partitions) +
                         ", current=" + std::to_string(partitions_.size())
                     );
+                }
+            }
+
+            // Verify partitioning_mode matches (older checkpoints without the field default to param_level)
+            {
+                const std::string saved_mode = metadata.count("partitioning_mode")
+                    ? metadata["partitioning_mode"]
+                    : "param_level";  // older checkpoints had no mode → assumed ParamLevel
+                const std::string current_mode =
+                    config_.partitioning_mode == PartitioningMode::ElementLevel
+                        ? "element_level" : "param_level";
+                if (saved_mode != current_mode) {
+                    throw std::runtime_error(
+                        "Partitioning mode mismatch: checkpoint was saved with '" + saved_mode +
+                        "' but optimizer is configured for '" + current_mode + "'. Cross-mode loads "
+                        "are not supported (the on-disk layout differs). Recreate the optimizer with "
+                        "the matching partitioning_mode, or re-save the checkpoint after switching.");
                 }
             }
 
