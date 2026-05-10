@@ -1213,9 +1213,19 @@ auto ZeROStage1Optimizer::all_gather_parameters_element_mode() -> void {
     }
 
     // Single all_gather: world_size × per_rank → global flat buffer.
-    // ProcessGroup::all_gather(output, input): output must be pre-sized to world_size.
+    // distributed::ProcessGroup::all_gather(input, output): parts is sized world_size,
+    // empty slots are populated by the collective with one tensor per rank.
     std::vector<Tensor> parts(config_.world_size);
     config_.process_group->all_gather(local_flat, parts);
+
+    if (profiling_enabled_) {
+        // Each rank sends per_rank elements and receives world_size * per_rank elements.
+        // Account it the same way the legacy path does: total bytes-on-the-wire summed.
+        const size_t bytes = static_cast<size_t>(per_rank) * static_cast<size_t>(config_.world_size)
+                           * dtype_size(dt);
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.transferred_bytes += bytes;
+    }
 
     // Distribute back: for each parameter, read its global range from the gathered parts.
     for (size_t i = 0; i < L.params.size(); ++i) {
@@ -1225,7 +1235,7 @@ auto ZeROStage1Optimizer::all_gather_parameters_element_mode() -> void {
                 "ElementLevel all-gather requires contiguous parameter tensors; "
                 "non-contiguous param at index " + std::to_string(i));
         }
-        Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+        Tensor pflat = parameters_[i]->tensor().view({-1});
         for (int r = 0; r < config_.world_size; ++r) {
             int64_t r_start = L.rank_starts[r];
             int64_t r_end = L.rank_starts[r + 1];
