@@ -1357,3 +1357,32 @@ TEST_F(ZeROStage1Test, CheckpointCrossModeLoadThrows) {
     }
     fs::remove_all(tmp);
 }
+
+// ============================================================================
+// 16. ElementLevel + CPU offload smoke test
+// ============================================================================
+
+TEST_F(ZeROStage1Test, ElementLevel_CPUOffload_StepRuns) {
+    // Smoke test: element-mode + CPU offload doesn't crash and produces finite values.
+    if (!cuda_available()) GTEST_SKIP() << "Requires CUDA";
+    auto params = create_test_params(2, {32, 32}, Device::cuda(0));
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage1Config cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.offload_to_cpu = true;
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < 3; ++step) {
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * 0.01f;
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+    // Spot-check finite.
+    auto cpu_param = params[0]->tensor().to(Device::cpu()).contiguous().view({-1});
+    const float* d = cpu_param.data<float>();
+    for (int64_t i = 0; i < cpu_param.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(d[i]));
+    }
+}
