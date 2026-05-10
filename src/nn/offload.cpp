@@ -58,18 +58,54 @@ OffloadContext::OffloadContext(Module& model, const Config& config)
 }
 
 OffloadContext::~OffloadContext() {
-    // Disable hooks
+    // Disable hooks first so no new transfers are issued during teardown.
     disable();
 
-    // Synchronize all pending transfers
+    // Drain any in-flight async transfers (per-tensor wait) and restore offloaded
+    // tensors to their original device on best-effort basis. Tensor::Storage is
+    // IntrusiveRefCounted so the storage referenced by *tensor_ptr survives the
+    // map's destruction either way -- but if we leave is_offloaded tensors
+    // pointing at info.cpu_copy, the user's Variable silently sees CPU-resident
+    // data even though it was originally on GPU. That's a correctness bug
+    // (downstream ops dispatch to the wrong backend).
+    //
+    // We do this BEFORE engine.synchronize() so that finalize_pending() can use
+    // the engine's per-handle wait path; the final synchronize() catches any
+    // restore-side cpu_to_gpu DMAs that we issue here.
     if (transfer_engine_) {
+        try {
+            std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+
+            // Drain pending handles first.
+            drain_all_pending();
+
+            // Restore is_offloaded tensors to original_device. On alloc failure,
+            // leave *tensor_ptr pointing at info.cpu_copy -- the IntrusiveRefCount
+            // on Storage keeps the data alive (no UAF), but the device will be
+            // wrong; we log so the user knows.
+            for (auto& [tensor_ptr, info] : tensor_map_) {
+                if (!info.is_offloaded || tensor_ptr == nullptr) continue;
+                try {
+                    Tensor restored = transfer_engine_->cpu_to_gpu(
+                        info.cpu_copy, info.original_device);
+                    *tensor_ptr = restored;
+                    info.is_offloaded = false;
+                } catch (const std::exception& e) {
+                    std::cerr << "OffloadContext: failed to restore offloaded "
+                              << "tensor to " << info.original_device.to_string()
+                              << " on shutdown: " << e.what()
+                              << " -- tensor will remain on CPU\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "OffloadContext: error draining pending transfers on "
+                      << "shutdown: " << e.what() << "\n";
+        }
+
+        // Final sync to catch the restore-side DMAs (and anything finalize_pending
+        // re-issued).
         transfer_engine_->synchronize();
     }
-
-    // Restore all offloaded tensors to their original device
-    // NOTE: During cleanup, we don't strictly need to restore - the tensors will be
-    // destroyed anyway. Skip restoration to avoid potential allocation failures.
-    // The CPU copies will be cleaned up when tensor_map_ is destroyed.
 }
 
 auto OffloadContext::enable() -> void {
@@ -390,6 +426,25 @@ auto OffloadContext::drain_all_pending() -> void {
     }
 }
 
+auto OffloadContext::finalize_completed_offloads() -> size_t {
+    // Non-blocking variant of drain_all_pending: only commits transfers that
+    // already finished in the background (TransferHandle::is_ready() == true).
+    // Critical for releasing GPU memory after forward_post_hook-issued offloads
+    // -- without this, the GPU storage stays alive until the same tensor is
+    // touched next step.
+    if (!is_enabled()) return 0;
+
+    std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+    size_t finalized = 0;
+    for (auto& [tensor_ptr, info] : tensor_map_) {
+        if (info.pending_handle.is_valid() && info.pending_handle.is_ready()) {
+            finalize_pending(info, tensor_ptr);
+            ++finalized;
+        }
+    }
+    return finalized;
+}
+
 auto OffloadContext::finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> void {
     if (!info.pending_handle.is_valid() || tensor_ptr == nullptr) {
         return;
@@ -537,6 +592,13 @@ auto OffloadContext::should_offload(const TensorInfo& info) const -> bool {
 auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     if (!is_enabled()) return;
 
+    // Drain any offloads from previous layers that completed in the background.
+    // Without this, forward_post_hook-issued gpu_to_cpu_async transfers stay
+    // half-committed (GPU memory still resident) until the same tensor is
+    // touched again next step. Non-blocking: only commits transfers whose
+    // TransferHandle::is_ready() returns true.
+    finalize_completed_offloads();
+
     // Helper lambda to load a tensor to GPU
     auto load_tensor_to_gpu = [&](Tensor* tensor_ptr) {
         std::lock_guard<std::mutex> lock(tensor_map_mutex_);
@@ -621,6 +683,10 @@ auto OffloadContext::forward_post_hook(Module* layer) -> void {
 
 auto OffloadContext::backward_pre_hook(Module* layer) -> void {
     if (!is_enabled()) return;
+
+    // Same drain rationale as forward_pre_hook -- release GPU storage of any
+    // tensor whose async offload completed since the last hook fire.
+    finalize_completed_offloads();
 
     // Prefetch parameters for this layer
     prefetch_layer(layer);
@@ -718,33 +784,45 @@ auto OffloadContext::check_memory_pressure() -> void {
     float gpu_pressure = memory_manager_->get_memory_pressure(Device::Type::CUDA);
 
     if (gpu_pressure > 0.85f) {  // High memory pressure
-        // Find candidates for offloading
-        std::vector<Tensor*> candidates;
+        // Capture (sort_key, tensor_ptr) pairs UNDER the lock. Previously this
+        // collected only pointers, dropped the lock, and then sorted using a
+        // lambda that read tensor_map_[a] -- racing with concurrent inserts in
+        // forward_pre_hook (initialize_tensor_info), which can rehash the map
+        // and invalidate the references. Computing sort keys eagerly while
+        // holding the lock removes the race entirely; sort runs against the
+        // captured POD values.
+        struct Candidate {
+            int priority;
+            size_t size_bytes;
+            Tensor* tensor_ptr;
+        };
+        std::vector<Candidate> candidates;
 
         {
             std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+            candidates.reserve(tensor_map_.size());
             for (auto& [tensor_ptr, info] : tensor_map_) {
                 if (!info.is_offloaded && should_offload(info)) {
-                    candidates.push_back(tensor_ptr);
+                    candidates.push_back(Candidate{
+                        static_cast<int>(info.priority),
+                        info.size_bytes,
+                        tensor_ptr});
                 }
             }
         }
 
-        // Sort by priority and size (offload large, high-priority tensors first)
+        // Sort by priority then size (offload large, high-priority tensors first).
         std::sort(candidates.begin(), candidates.end(),
-                  [this](Tensor* a, Tensor* b) {
-                      auto& info_a = tensor_map_[a];
-                      auto& info_b = tensor_map_[b];
-
-                      if (info_a.priority != info_b.priority) {
-                          return static_cast<int>(info_a.priority) > static_cast<int>(info_b.priority);
+                  [](const Candidate& a, const Candidate& b) {
+                      if (a.priority != b.priority) {
+                          return a.priority > b.priority;
                       }
-                      return info_a.size_bytes > info_b.size_bytes;
+                      return a.size_bytes > b.size_bytes;
                   });
 
-        // Offload tensors until pressure is reduced
-        for (auto* tensor : candidates) {
-            offload_tensor(tensor);
+        // Offload tensors until pressure is reduced.
+        for (const auto& c : candidates) {
+            offload_tensor(c.tensor_ptr);
 
             // Recheck pressure
             gpu_pressure = memory_manager_->get_memory_pressure(Device::Type::CUDA);

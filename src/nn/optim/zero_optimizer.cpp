@@ -3260,14 +3260,25 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
         state.original_shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
 
         if (overlap_end > overlap_start) {
-            // This rank owns part of this parameter
-            // Flatten tensor to 1D for element-wise partitioning
-            Tensor flat_param = param_tensor.flatten();
+            // This rank owns part of this parameter.
+            // CRITICAL: flatten() and slice() both return *views* sharing storage
+            // with the original parameter (Tensor::flatten/slice declared at
+            // include/tenzor/core/tensor.hpp:694,754; Storage is IntrusiveRefCounted
+            // at include/tenzor/core/storage.hpp:32). If we keep the slice as a
+            // view, the original full-shape allocation is never reclaimed -- the
+            // unowned (W-1)/W of the parameter stays GPU-resident on every rank,
+            // defeating the entire purpose of ZeRO-3 partitioning.
+            // .clone() makes an independent contiguous allocation; the original
+            // storage drops to refcount 0 once param_tensor is rebound below.
+            state.local_partition = param_tensor.flatten()
+                                        .slice(0, overlap_start - param_start,
+                                               overlap_end - param_start)
+                                        .clone();
 
-            // Extract local partition using element indices
-            state.local_partition = flat_param.slice(0, overlap_start - param_start, overlap_end - param_start);
-
-            // Replace full parameter with partition (kept flat)
+            // Replace full parameter with partition (kept flat). After this
+            // assignment the original full tensor's storage has no references
+            // (the local `param_tensor` reference at this scope is overwritten,
+            // and there are no other holders), so it is freed.
             param_tensor = state.local_partition;
         } else {
             // This rank owns no part of this parameter
@@ -3279,6 +3290,72 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
         param_states_[&param_tensor] = std::move(state);
 
         current_offset += param_size;
+    }
+
+    // FIX (A5): Stage-1's initialize_optimizer_states (called during base-class
+    // construction) sized momentum / variance / master_params against each
+    // parameter's ORIGINAL full shape, because partition_model_parameters had
+    // not yet run. Now that we've replaced every owned-slice param with a 1-D
+    // tensor, those state tensors are the wrong shape -- update_local_partition
+    // will either crash on shape-mismatch or silently mutate wrong-shaped
+    // masters and then `param->tensor() = target.to(...)` would re-inflate the
+    // param to the master's full shape, undoing partitioning.
+    //
+    // Re-allocate the states for THIS rank's Stage-1 partition.params, sized to
+    // the now-current param shape. We only touch params that:
+    //   (a) actually had their tensor replaced with a 1-D slice by the loop
+    //       above (i.e. exist in param_states_ with non-zero partition_size), and
+    //   (b) belong to this rank's Stage-1 partition.
+    //
+    // The interaction between Stage-1 ParamLevel partitioning and Stage-3
+    // element-level slicing is tracked further in Phase D — this fix gets the
+    // shapes consistent so the existing Stage-1 update path runs without
+    // crashing on the slices Stage-3 produces.
+    if (config_.world_size > 1) {
+        auto& partition = local_partition();
+        for (size_t i = 0; i < partition.params.size(); ++i) {
+            const auto& var = partition.params[i];
+            if (!var) continue;
+            Tensor& current = var->tensor();
+            // Skip params that weren't partitioned (small params below threshold,
+            // or params this rank owns nothing of -- their tensor would be empty).
+            if (current.numel() == 0) continue;
+
+            const auto current_shape = current.shape();
+            std::vector<int64_t> shape(current_shape.begin(), current_shape.end());
+            const Device dev = current.device();
+
+            // Resize momentum / variance to match current (sliced) shape if the
+            // existing allocation is mis-sized.
+            if (i < partition.momentum.size()
+                && partition.momentum[i].numel() != current.numel()) {
+                DType state_dtype = config_.state_dtype.value_or(current.dtype());
+                partition.momentum[i] = zeros(shape, state_dtype, dev);
+            }
+            if (i < partition.variance.size()
+                && partition.variance[i].numel() != current.numel()) {
+                DType state_dtype = config_.state_dtype.value_or(current.dtype());
+                partition.variance[i] = zeros(shape, state_dtype, dev);
+            }
+
+            // Master FP32: resize to slice shape (only meaningful when param
+            // dtype is non-fp32, matching the Stage-1 alloc rule).
+            if (config_.use_master_fp32
+                && i < partition.master_params.size()
+                && current.dtype() != DType::Float32) {
+                if (partition.master_params[i].numel() != current.numel()) {
+                    // Seed with the current sliced param values cast to fp32 --
+                    // matches the Stage-1 init pattern (p.to(fp32).to(device)).
+                    partition.master_params[i] =
+                        current.to(DType::Float32).to(dev);
+                }
+            } else if (config_.use_master_fp32
+                       && i < partition.master_params.size()
+                       && current.dtype() == DType::Float32) {
+                // Param is fp32: master is wasteful, leave it empty.
+                partition.master_params[i] = Tensor();
+            }
+        }
     }
 }
 

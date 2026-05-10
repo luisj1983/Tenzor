@@ -351,6 +351,22 @@ private:
      */
     auto drain_all_pending() -> void;
 
+    /**
+     * @brief Walk tensor_map_ and finalize every pending offload whose handle is
+     * already complete (TransferHandle::is_ready() == true). Never blocks.
+     *
+     * This is the non-blocking sibling of drain_all_pending(). Call from the top
+     * of forward_pre_hook / backward_pre_hook so the GPU memory of any layer
+     * whose forward_post_hook-issued offload has finished in the background
+     * gets actually released, instead of sitting until that same tensor is
+     * re-touched next training step. Without this, peak GPU residency stays
+     * close to "all params resident" — defeating the point of layer offload.
+     *
+     * Takes tensor_map_mutex_ itself; caller must NOT hold it. Returns the
+     * number of transfers committed.
+     */
+    auto finalize_completed_offloads() -> size_t;
+
     // ========================================================================
     // Hook Callbacks
     // ========================================================================
