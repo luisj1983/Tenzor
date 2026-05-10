@@ -749,9 +749,8 @@ auto ZeROStage1Optimizer::partition_parameters() -> void {
 }
 
 auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
+    partition_layout_ = PartitionLayout{};   // reset every field to defaults
     PartitionLayout& L = partition_layout_;
-    L.params.clear();
-    L.rank_starts.clear();
 
     // Walk every parameter, recording (global offset, numel, shape, dtype).
     int64_t total = 0;
@@ -764,8 +763,8 @@ auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
         auto sh = t.shape();
         entry.original_shape.assign(sh.begin(), sh.end());
         entry.dtype = t.dtype();
-        L.params.push_back(std::move(entry));
         total += entry.numel;
+        L.params.push_back(std::move(entry));
     }
 
     // Round total up to a multiple of world_size so reduce_scatter / all_gather can
