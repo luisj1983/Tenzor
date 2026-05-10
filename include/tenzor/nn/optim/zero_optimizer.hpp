@@ -1749,6 +1749,14 @@ private:
         size_t partition_size;              ///< Size of local partition (in elements)
         std::vector<int64_t> original_shape; ///< Original shape before flattening
 
+        // Phase D (D2): per-param local gradient slice. Previously
+        // scatter_parameter_gradient stored the reduce-scatter result into
+        // local_partition (the field that holds the param's 1-D slice), which
+        // OVERWROTE the param data with grad data after one backward call --
+        // major correctness bug. Now we stash the slice here and call
+        // param_var->set_grad on it; local_partition stays untouched.
+        Tensor local_grad;
+
         // Gathered state
         Tensor full_param;                  ///< Full parameter (temporarily gathered)
         bool is_gathered{false};            ///< Is the full parameter available?
@@ -1866,6 +1874,13 @@ private:
     std::vector<ForwardPreHook> forward_hooks_;
     std::vector<BackwardPostHook> backward_hooks_;
     int next_hook_id_{0};
+
+    // Phase D (D1): hook IDs returned by Module::register_forward_pre_hook /
+    // Module::register_backward_post_hook for each leaf submodule we attached
+    // gather/free hooks to. unregister_model walks these to call remove_hook on
+    // the owning Module so we leave the model in a clean state.
+    std::vector<std::pair<Module*, size_t>> installed_forward_hook_ids_;
+    std::vector<std::pair<Module*, size_t>> installed_backward_hook_ids_;
 
     /** Communication streams for async operations
      * Note: CUDA stream support for gather/scatter operations is planned for future enhancement.

@@ -3051,6 +3051,19 @@ auto ZeROStage3Optimizer::unregister_model() -> void {
         return;
     }
 
+    // Phase D (D1): remove the per-leaf hooks we installed via Module API.
+    // The Stage-3 forward_hooks_/backward_hooks_ vectors are private bookkeeping
+    // and merely need clearing; the real hooks live in each leaf Module's
+    // forward_pre_hooks_/backward_post_hooks_ map and need explicit remove_hook.
+    for (auto& [mod, hid] : installed_forward_hook_ids_) {
+        if (mod) mod->remove_hook(hid);
+    }
+    installed_forward_hook_ids_.clear();
+    for (auto& [mod, hid] : installed_backward_hook_ids_) {
+        if (mod) mod->remove_hook(hid);
+    }
+    installed_backward_hook_ids_.clear();
+
     // Clear all hooks
     forward_hooks_.clear();
     backward_hooks_.clear();
@@ -3087,6 +3100,35 @@ auto ZeROStage3Optimizer::step_impl() -> void {
     // Step 4: Offload states back to CPU if enabled
     if ((config_.offload_to_cpu && offload_engine_) || config_.offload_to_nvme) {
         offload_states_to_cpu();
+    }
+
+    // Phase D (D1+D4): the Stage-1 update path REBINDS param->tensor() to a fresh
+    // Tensor (target = target - lr * m_hat / v_hat allocates new storage). After
+    // the step, state.local_partition still references the OLD storage and any
+    // cached state.full_param view references that same old storage. Without
+    // re-syncing, the next forward would gather a view onto the pre-update
+    // weights and silently throw away every step's worth of training.
+    //
+    // Sync local_partition to the post-update tensor and invalidate the
+    // gathered-buffer cache so the next forward rebuilds it from the fresh data.
+    {
+        std::lock_guard<std::mutex> lock(param_states_mutex_);
+        for (auto& [tensor_ptr, state] : param_states_) {
+            if (tensor_ptr == nullptr) continue;
+            // Only sync params we actually own a slice of (multi-rank: empty for
+            // params not on this rank; single-rank: always populated).
+            if (state.local_partition.numel() > 0) {
+                state.local_partition = *tensor_ptr;
+            }
+            // Drop any cached full_param view -- it references the pre-update
+            // storage. Free LRU entry too so the cap accounting stays correct.
+            if (state.is_gathered) {
+                state.full_param = Tensor();
+                state.is_gathered = false;
+                state.ref_count = 0;
+                lru_release_order_.remove(tensor_ptr);
+            }
+        }
     }
 
     // Note: Unlike Stage 1/2, we do NOT all-gather parameters here
@@ -3189,10 +3231,62 @@ auto ZeROStage3Optimizer::free_gathered_parameter(Tensor* param) -> void {
         lru_release_order_.remove(param);
         lru_release_order_.push_back(param);
 
+        // Phase D (D3): true LRU eviction by last_access_time, with prefetch-window
+        // pinning. The legacy code evicted lru_release_order_.front() (release
+        // order). With prefetch_depth >= 2, the speculative gather of layer N+2
+        // could push layer N+1 out of cache before forward of N+1 ran -- 1 redundant
+        // all-gather per layer per step. Now we (a) pick victims by oldest
+        // last_access_time across the whole list, and (b) refuse to evict any param
+        // whose layer_index is within prefetch_depth of the most recently accessed
+        // layer index (= "in the active prefetch window").
         const size_t cap = static_cast<size_t>(std::max(0, stage3_config_.max_cached_params));
+        // Compute the active-window pin: highest layer_index across is_gathered params.
+        int active_layer = -1;
+        for (auto& [_, ps] : param_states_) {
+            if (ps.is_gathered && ps.layer_index > active_layer) {
+                active_layer = ps.layer_index;
+            }
+        }
+        const int pf_depth = stage3_config_.prefetch_depth;
+
         while (lru_release_order_.size() > cap) {
-            Tensor* victim = lru_release_order_.front();
-            lru_release_order_.pop_front();
+            // Find oldest-access victim that is NOT in the active prefetch window
+            // (layer_index in [active_layer - pf_depth, active_layer + pf_depth]).
+            Tensor* victim = nullptr;
+            std::chrono::steady_clock::time_point victim_time =
+                std::chrono::steady_clock::time_point::max();
+            for (Tensor* candidate : lru_release_order_) {
+                auto c_it = param_states_.find(candidate);
+                if (c_it == param_states_.end()) continue;
+                const auto& cs = c_it->second;
+                if (cs.pinned_in_memory || !cs.is_gathered) continue;
+                // Skip params in the active prefetch window unless we have no choice.
+                if (active_layer >= 0 && pf_depth > 0
+                    && cs.layer_index >= active_layer - pf_depth
+                    && cs.layer_index <= active_layer + pf_depth) {
+                    continue;
+                }
+                if (cs.last_access_time < victim_time) {
+                    victim = candidate;
+                    victim_time = cs.last_access_time;
+                }
+            }
+            // Fall back to oldest-overall (incl. window) if nothing else qualified --
+            // we MUST evict something to honor the cap.
+            if (!victim) {
+                for (Tensor* candidate : lru_release_order_) {
+                    auto c_it = param_states_.find(candidate);
+                    if (c_it == param_states_.end()) continue;
+                    const auto& cs = c_it->second;
+                    if (cs.pinned_in_memory || !cs.is_gathered) continue;
+                    if (cs.last_access_time < victim_time) {
+                        victim = candidate;
+                        victim_time = cs.last_access_time;
+                    }
+                }
+            }
+            if (!victim) break;  // Nothing evictable left; cap can't be honored.
+            lru_release_order_.remove(victim);
             auto v_it = param_states_.find(victim);
             if (v_it == param_states_.end()) continue;
             auto& v_state = v_it->second;
@@ -3206,10 +3300,26 @@ auto ZeROStage3Optimizer::free_gathered_parameter(Tensor* param) -> void {
         }
     }
 
-    // Optionally offload local partition to CPU
-    if (config_.offload_to_cpu && offload_engine_ && !state.partition_on_cpu) {
-        offload_engine_->offload_to_cpu_async(state.local_partition);
-        state.partition_on_cpu = true;
+    // Phase D (D4): the legacy code called offload_to_cpu_async and discarded
+    // the returned Tensor -- which made the call a no-op (state.local_partition
+    // stayed GPU-resident, defeating the offload). Now we synchronously offload
+    // and rebind state.local_partition to the CPU copy. The gather path below
+    // (gather_parameter_impl, step_impl, fetch_states_to_gpu) is responsible for
+    // reloading to GPU when the partition is needed.
+    //
+    // Synchronous (rather than async) for now because no consumer is currently
+    // overlapping this with anything; trivially upgradable to async + handle
+    // tracking once we have a stable pipeline.
+    const bool wants_offload = (config_.offload_to_cpu || stage3_config_.offload_params_to_cpu)
+                            && offload_engine_;
+    if (wants_offload && !state.partition_on_cpu && state.local_partition.numel() > 0) {
+        try {
+            state.local_partition = offload_engine_->offload_to_cpu(state.local_partition);
+            state.partition_on_cpu = true;
+        } catch (const std::exception& e) {
+            std::cerr << "ZeROStage3Optimizer: partition CPU offload failed: "
+                      << e.what() << " -- continuing with GPU-resident partition\n";
+        }
     }
 }
 
@@ -3556,44 +3666,78 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
 }
 
 auto ZeROStage3Optimizer::register_gather_scatter_hooks(Module& model) -> void {
-    // Register forward pre-hook and backward post-hook for the model
-    // Note: Module doesn't expose a modules() method, so we just register for the root model
-    // In a full implementation, this would recursively register hooks on all submodules
+    // Phase D (D1): install per-leaf-module hooks into Module::forward_pre_hooks_
+    // and Module::backward_post_hooks_ via the public Module API. Previously the
+    // Stage-3 hooks lived in the private forward_hooks_/backward_hooks_ vectors
+    // and NEVER actually fired during forward/backward -- only manual callers of
+    // forward_pre_hook() ran the gather. With per-leaf hooks the gather happens
+    // automatically when each submodule's forward begins, and peak gathered
+    // memory drops from |model| (root-only single hook would gather everything)
+    // to ~max(layer_size) * (prefetch_depth + 1).
+    //
+    // We walk the submodule tree recursively. A "leaf" for our purposes is a
+    // module that has its OWN parameters (own_parameters() non-empty); we attach
+    // hooks there. Container-only modules (Sequential, ModuleList, ModuleDict)
+    // typically have no own params but contain leaves -- we recurse through them.
 
     auto params = model.parameters();
     if (params.empty()) {
         return;
     }
 
-    // Create forward pre-hook for the model
-    ForwardPreHook forward_hook;
-    forward_hook.module = &model;
-    // Convert shared_ptr<Variable> to Tensor* for storage
-    forward_hook.params.reserve(params.size());
-    for (const auto& param_ptr : params) {
-        forward_hook.params.push_back(&param_ptr->tensor());
-    }
-    forward_hook.hook_fn = [this, &model](Module*, const std::vector<Tensor>&) {
-        this->forward_pre_hook(&model, {});
+    // Recursive walker. Captures `this` for hook closures and the installed-id
+    // tracking vectors.
+    std::function<void(Module*)> install = [this, &install](Module* m) {
+        if (!m) return;
+
+        // Attach hooks if this module owns any parameters directly.
+        auto own = m->own_parameters();
+        bool has_own_params = std::any_of(own.begin(), own.end(),
+                                          [](const std::shared_ptr<Variable>& v) {
+                                              return v && v->tensor().numel() > 0;
+                                          });
+        if (has_own_params) {
+            // Forward pre-hook: gather this module's own parameters before
+            // forward executes. The closure captures `this` (the optimizer)
+            // and the module pointer; the per-call work just delegates to
+            // forward_pre_hook(module, ...).
+            Module* mod_ptr = m;
+            size_t fid = m->register_forward_pre_hook(
+                [this, mod_ptr](Module*, const Variable&) {
+                    this->forward_pre_hook(mod_ptr, {});
+                });
+            installed_forward_hook_ids_.emplace_back(mod_ptr, fid);
+
+            // Backward post-hook: scatter gradients + free gathered params for
+            // this module after backward executes.
+            size_t bid = m->register_backward_post_hook(
+                [this, mod_ptr](Module*, const Variable&, const Variable&) {
+                    this->backward_post_hook(mod_ptr, {}, {});
+                });
+            installed_backward_hook_ids_.emplace_back(mod_ptr, bid);
+        }
+
+        // Recurse through named submodules.
+        for (const auto& [name, child] : m->get_submodules()) {
+            install(child.get());
+        }
     };
-    forward_hook.hook_id = next_hook_id_++;
 
-    forward_hooks_.push_back(std::move(forward_hook));
+    install(&model);
 
-    // Create backward post-hook for the model
-    BackwardPostHook backward_hook;
-    backward_hook.module = &model;
-    // Convert shared_ptr<Variable> to Tensor* for storage
-    backward_hook.params.reserve(params.size());
-    for (const auto& param_ptr : params) {
-        backward_hook.params.push_back(&param_ptr->tensor());
-    }
-    backward_hook.hook_fn = [this, &model](Module*, const std::vector<Tensor>& inputs, const std::vector<Tensor>& grad_outputs) {
-        this->backward_post_hook(&model, inputs, grad_outputs);
-    };
-    backward_hook.hook_id = next_hook_id_++;
+    // Also keep the legacy single-root entries in forward_hooks_/backward_hooks_
+    // for any consumer that still iterates them (tests, profiling). Their hook_fn
+    // is a no-op forwarder that doesn't double-fire because the leaf hooks above
+    // already do the real work.
+    ForwardPreHook root_fp{};
+    root_fp.module = &model;
+    root_fp.hook_id = next_hook_id_++;
+    forward_hooks_.push_back(std::move(root_fp));
 
-    backward_hooks_.push_back(std::move(backward_hook));
+    BackwardPostHook root_bp{};
+    root_bp.module = &model;
+    root_bp.hook_id = next_hook_id_++;
+    backward_hooks_.push_back(std::move(root_bp));
 }
 
 auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
@@ -3602,6 +3746,32 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
     // Only multi-rank gathers actually call the collective.
     if (config_.world_size > 1 && !config_.process_group) {
         throw std::runtime_error("Process group not initialized");
+    }
+
+    // Phase D (D4): if the partition was offloaded to CPU after the previous step,
+    // pull it back to GPU before the gather. The offload path
+    // (free_gathered_parameter -> partition_on_cpu = true) rebinds local_partition
+    // to a CPU tensor; the gather needs it on the right device. The destination
+    // device is the param's original device (recorded at registration time via
+    // state.param->device(); for the moment use the parameter pointer's current
+    // device as a safe default since the param tensor was rebound to local_partition
+    // and its device may already be CPU).
+    if (state.partition_on_cpu && offload_engine_
+        && state.local_partition.numel() > 0
+        && state.local_partition.device().type == Device::Type::CPU) {
+        try {
+            // Default to CUDA(0) if we have no better hint -- partition_model_parameters
+            // ran in a CUDA context originally. Long-term we should record the original
+            // device on ParameterInfo at registration time.
+            Device target = (state.param && state.param->device().type != Device::Type::CPU)
+                              ? state.param->device()
+                              : Device::cuda(0);
+            state.local_partition = offload_engine_->load_to_gpu(state.local_partition, target);
+            state.partition_on_cpu = false;
+        } catch (const std::exception& e) {
+            std::cerr << "ZeROStage3Optimizer: partition CPU->GPU reload failed: "
+                      << e.what() << "\n";
+        }
     }
 
     auto start_time = std::chrono::steady_clock::now();
@@ -3714,9 +3884,27 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
             stage_chunk_into_full(gathered_parts, 0, partition_n);
         }
     } else {
-        // Single rank: stage the local partition straight into the buffer.
-        flat_view.zero_();
-        add_(flat_view, src.contiguous().view({-1}));
+        // Single rank: state.local_partition is already the full parameter; alias it
+        // into state.full_param (view sharing storage). The legacy code copied src
+        // into a fresh buffer here, but with the Phase D D1 forward_pre_hook now
+        // doing `*param = full_param` (replacing the Variable's tensor with the
+        // gathered version), copying causes a divergence: the optimizer step would
+        // modify the gathered COPY while leaving local_partition untouched, then the
+        // backward_post_hook would restore *param to the unmodified local_partition,
+        // silently throwing away every weight update. Aliasing keeps both views
+        // pointing at the same storage so the update lands in local_partition too.
+        // For single-rank mode the gathered shape == local_partition shape (full
+        // param), so a reshape view is correct.
+        if (need_alloc) {
+            // Drop the freshly-allocated buffer; we'll alias instead.
+            state.full_param = src.view(full_shape);
+        } else {
+            // Buffer was reused from a previous gather. Stage data in (write-through
+            // since it shares storage with state.local_partition is what we want, but
+            // we don't have copy_ public; just rebind to the alias).
+            state.full_param = src.view(full_shape);
+        }
+        flat_view = state.full_param.view({-1});  // refresh the local handle
     }
 
     // Update state
@@ -3759,6 +3947,38 @@ auto ZeROStage3Optimizer::forward_pre_hook(Module* module, [[maybe_unused]] cons
         Tensor* param = &param_ptr->tensor();
         auto it = param_states_.find(param);
         if (it != param_states_.end()) {
+            // Phase D (D1+D4): refresh state.local_partition from the Variable's
+            // current tensor BEFORE gather. The Variable's tensor may have been
+            // rebound externally since the last forward (e.g.
+            // model.load_state_dict, manual user assignment). Without this
+            // refresh, gather_parameter would alias the stale local_partition
+            // and forward would see pre-load weights -- silently breaking
+            // checkpoint restore.
+            //
+            // We detect "rebound externally" by storage identity: if the Tensor's
+            // current storage handle differs from local_partition's, the param
+            // was updated outside our control and we re-snapshot it.
+            // Cheap: this runs on a tight inner loop; per-call cost is just a
+            // couple of pointer compares. We always refresh in single-rank mode
+            // (where local_partition shares storage with the param tensor) so
+            // the next gather alias picks up the new data.
+            {
+                std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+                auto& state = it->second;
+                if (state.local_partition.numel() > 0
+                    && state.local_partition.numel() == param->numel()
+                    && state.local_partition.dtype() == param->dtype()) {
+                    state.local_partition = *param;
+                    // Also drop stale gathered cache; rebuild on the gather below.
+                    if (state.is_gathered) {
+                        state.full_param = Tensor();
+                        state.is_gathered = false;
+                        state.ref_count = 0;
+                        lru_release_order_.remove(param);
+                    }
+                }
+            }
+
             // Gather parameter (handles prefetch hits)
             Tensor full_param = gather_parameter(param);
 
@@ -3780,10 +4000,40 @@ auto ZeROStage3Optimizer::backward_post_hook(Module* module, [[maybe_unused]] co
         }
     }
 
-    // Free gathered parameters
+    // Phase D (D1 + D4): free gathered parameters AND restore each Variable's
+    // tensor to its 1-D local partition slice.
+    //
+    // forward_pre_hook does `*param = full_param` to replace the Variable's
+    // tensor with the gathered full-shape buffer for forward+backward. After
+    // backward, the optimizer step expects param->tensor() to be the 1-D
+    // partition slice (so update_local_partition's shape-aligned momentum/
+    // variance/master arithmetic works). Restoring here keeps that contract.
+    //
+    // free_gathered_parameter() decrements the refcount and (if 0) optionally
+    // caches the full_param in the LRU. The Variable's tensor is now back to
+    // the slice; if the LRU cached the full buffer, the next forward's
+    // gather_parameter() returns that cached buffer (cache hit -> no
+    // re-allocation).
     for (const auto& param_ptr : params) {
         Tensor* param = &param_ptr->tensor();
+        // Snapshot the local_partition BEFORE free_gathered_parameter (which
+        // may re-arrange state). We only restore for params we actually own
+        // (local_partition.numel() > 0). On rank that owns nothing of this
+        // param, local_partition is empty -- the Variable's tensor stays as
+        // whatever it was post-forward, which is fine because that rank's
+        // step_impl doesn't touch it.
+        Tensor slice;
+        {
+            std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+            auto it = param_states_.find(param);
+            if (it != param_states_.end() && it->second.local_partition.numel() > 0) {
+                slice = it->second.local_partition;
+            }
+        }
         free_gathered_parameter(param);
+        if (slice.numel() > 0) {
+            *param = slice;
+        }
     }
 }
 
@@ -3878,12 +4128,26 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
     config_.process_group->reduce_scatter(gradient_chunks, local_grad,
                                          distributed::ReduceOp::SUM);
 
-    // Store the local gradient partition
-    state.local_partition = local_grad;
+    // Phase D (D2): store the local gradient slice in state.local_grad (a new
+    // dedicated field), NOT in state.local_partition. The latter is the param's
+    // 1-D slice -- overwriting it with the grad slice (as the legacy code did)
+    // silently destroyed the parameter data after every backward.
+    //
+    // For master-FP32 + non-FP32 param, also produce an FP32 grad slice so the
+    // Stage-1 update_local_partition's master path sees a precision-aligned
+    // gradient. (The reduce was done at flat_grad.dtype() so the network-side
+    // is what it always was; the upcast happens after.)
+    Tensor grad_slice = local_grad;
+    if (config_.use_master_fp32 && grad_slice.dtype() != DType::Float32) {
+        grad_slice = grad_slice.to(DType::Float32);
+    }
+    state.local_grad = grad_slice;
 
-    // Update the Variable's gradient with local partition
-    // This frees the full gradient and saves memory
-    param_var->set_grad(local_grad);
+    // Update the Variable's gradient with local partition. This frees the full
+    // gradient (the previous owner) and saves memory: the full gradient was the
+    // only thing holding the storage that's now `flat_grad` (a view), so when
+    // set_grad rebinds, the full storage drops to refcount 0.
+    param_var->set_grad(grad_slice);
 }
 
 auto ZeROStage3Optimizer::prefetch_next_parameters_locked() -> void {
