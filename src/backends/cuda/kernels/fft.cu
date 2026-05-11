@@ -186,6 +186,10 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                      const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     // Determine transform parameters
@@ -344,6 +348,10 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("IFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -468,6 +476,10 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("RFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];
@@ -561,6 +573,10 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("IRFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     if (dim != ndim - 1) {
@@ -1709,6 +1725,10 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                      const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -1823,6 +1843,10 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("IFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -1924,6 +1948,10 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("RFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];
@@ -2093,6 +2121,10 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("IRFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     if (dim != ndim - 1) {

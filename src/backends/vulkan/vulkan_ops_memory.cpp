@@ -528,7 +528,7 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
 /**
  * @brief Fill tensor with scalar value using compute shader
  */
-auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
+auto VulkanBackend::dispatchFill(const Tensor& input, double value) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
@@ -559,7 +559,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
 
         push_constants.n_elements = static_cast<uint32_t>(output.numel());
         push_constants.padding = 0;
-        push_constants.fill_value = static_cast<double>(value);
+        push_constants.fill_value = value;
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

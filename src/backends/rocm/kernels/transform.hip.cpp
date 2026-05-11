@@ -1844,7 +1844,7 @@ __global__ void strided_fill_kernel_device(
     }
 }
 
-auto strided_fill_kernel(Tensor& self, float value, hipStream_t stream) -> void {
+auto strided_fill_kernel(Tensor& self, double value, hipStream_t stream) -> void {
     int64_t n = self.numel();
     if (n == 0) return;
 
@@ -1876,20 +1876,20 @@ auto strided_fill_kernel(Tensor& self, float value, hipStream_t stream) -> void 
     if (self.dtype() == DType::Float32) {
         launch(self.data<float>(), static_cast<float>(value));
     } else if (self.dtype() == DType::Float64) {
-        launch(self.data<double>(), static_cast<double>(value));
+        launch(self.data<double>(), value);
     } else if (self.dtype() == DType::Int32) {
         launch(self.data<int32_t>(), static_cast<int32_t>(value));
     } else if (self.dtype() == DType::Int64) {
         launch(self.data<int64_t>(), static_cast<int64_t>(value));
     } else if (self.dtype() == DType::Float16) {
-        __half h_value = __float2half(value);
+        __half h_value = __float2half(static_cast<float>(value));
         launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
     } else if (self.dtype() == DType::Int8) {
         launch(self.data<int8_t>(), static_cast<int8_t>(value));
     } else if (self.dtype() == DType::UInt8) {
         launch(self.data<uint8_t>(), static_cast<uint8_t>(value));
     } else if (self.dtype() == DType::Bool) {
-        launch(self.data<bool>(), value != 0.0f);
+        launch(self.data<bool>(), value != 0.0);
     } else {
         HIP_CHECK(hipFree(d_meta));
         throw std::runtime_error("strided_fill: unsupported dtype");

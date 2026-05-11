@@ -130,10 +130,10 @@ void* VulkanCachingAllocator::allocate(size_t size, int device,
         device_alloc.stats.peak_allocated = device_alloc.stats.allocated_bytes;
     }
 
-    // Only subtract from cached_bytes if we got the block from cache
-    if (from_cache && device_alloc.stats.cached_bytes >= block->size) {
-        device_alloc.stats.cached_bytes -= block->size;
-    }
+    // Note: cached_bytes is now updated inside try_allocate_from_cache()
+    // (subtract for the block we took) and split_block() (add for the
+    // remainder), so no additional adjustment is needed here.
+    (void)from_cache;
 
     return block->mapped_ptr;
 }
@@ -163,8 +163,11 @@ void VulkanCachingAllocator::free(void* ptr, int device) {
     // Find the block
     auto it = device_alloc.all_blocks.find(ptr);
     if (it == device_alloc.all_blocks.end()) {
-        // Block not found - might have been cleaned up during shutdown
-        return;
+        // Active device but unknown pointer - programmer error.
+        // (The post-shutdown silent path is handled by the `shutdown`
+        // check above, so reaching here always means the pointer is
+        // genuinely not owned by this allocator.)
+        throw std::runtime_error("VulkanCachingAllocator: Attempted to free pointer not owned by allocator");
     }
 
     VulkanBlock* block = it->second.get();
@@ -462,8 +465,17 @@ VulkanBlock* VulkanCachingAllocator::try_allocate_from_cache(size_t size, int de
         // - If HOST_VISIBLE is not requested, any block is acceptable
         //   (DEVICE_LOCAL is always suitable for non-HOST_VISIBLE requests)
         if (!need_host_visible || block->is_host_visible) {
-            // Found compatible block, remove from free blocks
+            // Found compatible block, remove from free blocks.
+            // Pair the free_blocks erase with the cached_bytes accounting
+            // to keep them in sync. split_block (if it runs) will add the
+            // remainder back to cached_bytes.
+            const size_t original_size = block->size;
             device_alloc.free_blocks.erase(it);
+            if (device_alloc.stats.cached_bytes >= original_size) {
+                device_alloc.stats.cached_bytes -= original_size;
+            } else {
+                device_alloc.stats.cached_bytes = 0;
+            }
 
             // Try to split if block is too large (reclaim unused portion)
             if (block->size >= size + min_split_size_) {

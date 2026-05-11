@@ -134,9 +134,21 @@ TEST_F(GradientCompressionTest, TopK_ErrorFeedback_AccumulatesDroppedMagnitude) 
     auto grad_orig = randn({64}, DType::Float32, Device::cpu()) * 0.1f;
     TopKCompressor compressor(/*ratio=*/0.1f);
 
+    // Mimic the real training-loop usage pattern: the gradient buffer is
+    // allocated ONCE per parameter and refreshed in-place each step. The
+    // compressor keys its error-feedback residual on the buffer's
+    // `data_ptr()`, so re-allocating the gradient tensor every iteration
+    // (via clone()) would defeat the residual cache. Allocate the buffer
+    // once and refresh its contents from grad_orig in-place.
+    Tensor grad = grad_orig.clone();
+    const float* orig_data = grad_orig.contiguous().data<float>();
+
     Tensor running_kept = full({64}, 0.0, DType::Float32, Device::cpu());
     for (int iter = 0; iter < 10; ++iter) {
-        auto grad = grad_orig.clone();
+        // Restore grad to grad_orig values (compress() sparsifies in-place).
+        float* grad_data = grad.data<float>();
+        for (int64_t i = 0; i < grad.numel(); ++i) grad_data[i] = orig_data[i];
+
         auto compressed = compressor.compress(grad);
         // grad is now sparsified in-place; its non-zero entries are this
         // iteration's "transmission" and we accumulate them.

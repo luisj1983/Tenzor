@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include "../../include/tenzor/tenzor.hpp"
 #include "../../include/tenzor/nn/compression/pruning.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <memory>
 #include <cmath>
 #include <algorithm>
@@ -986,7 +987,8 @@ TEST_F(PruningTest, PrunedModelGradients) {
 
     // Forward pass with gradients enabled
     Tensor input = create_random_tensor({8, 64});
-    auto output = linear->forward(Variable(input, true));
+    auto input_var = Variable(input, true);
+    auto output = linear->forward(input_var);
 
     // backward() requires either a scalar output or an explicit gradient
     // tensor; reduce to a scalar via sum() before invoking it.
@@ -994,6 +996,7 @@ TEST_F(PruningTest, PrunedModelGradients) {
     EXPECT_NO_THROW({
         loss.backward();
     });
+    EXPECT_GRAD_FLOWS(input_var);
 }
 
 // ============================================================================

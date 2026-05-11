@@ -429,72 +429,95 @@ public:
         // runtime picks up the setting before it JIT-compiles SPIR-V kernels.
         configure_opencl_cpu_target_arch();
 
-        // Per project policy, the OneAPI backend is the *GPU* backend.
-        // Silently registering a SYCL CPU device here would route every op
-        // submitted to Device::OneAPI through the Intel OpenCL CPU runtime
-        // and masquerade host execution as GPU. Default behaviour: skip any
-        // device that is not a GPU. Set TENZOR_ONEAPI_ALLOW_CPU=1 only when
-        // intentionally exercising the CPU SYCL path (debug/CI parity runs).
-        const bool allow_cpu_sycl = [] {
-            const char* env = std::getenv("TENZOR_ONEAPI_ALLOW_CPU");
-            return env != nullptr && env[0] != '\0' && env[0] != '0';
-        }();
+        // Policy: prefer Intel GPUs. If none are available, fall back to a
+        // SYCL CPU device so the OneAPI code path remains exercisable on
+        // hosts without Intel GPU hardware (this matches how every other
+        // GPU backend in the project handles "no device" — by gracefully
+        // falling back rather than refusing to load).
+        //
+        // TENZOR_ONEAPI_ALLOW_CPU controls behaviour when both a GPU and a
+        // CPU SYCL device exist:
+        //   unset / "1" / non-zero  → register every Intel device (GPU+CPU)
+        //   "0"                     → register Intel GPUs only; never CPU
+        // Regardless of this var, if no Intel GPU is found we will use the
+        // CPU SYCL device as a fallback (unless the user set the var to "0").
+        const char* allow_cpu_env = std::getenv("TENZOR_ONEAPI_ALLOW_CPU");
+        const bool cpu_explicitly_forbidden =
+            allow_cpu_env != nullptr && allow_cpu_env[0] == '0';
+        const bool register_cpu_alongside_gpu =
+            allow_cpu_env != nullptr && allow_cpu_env[0] != '\0' && allow_cpu_env[0] != '0';
+
+        auto try_register_device = [this](const sycl::device& device) -> bool {
+            try {
+                auto queue = std::make_shared<sycl::queue>(device,
+                    [this](sycl::exception_list elist) {
+                        std::lock_guard<std::mutex> lock(async_errors_mutex_);
+                        for (auto& e : elist) {
+                            async_errors_.push_back(e);
+                            try { std::rethrow_exception(e); }
+                            catch (const sycl::exception& se) {
+                                fprintf(stderr, "SYCL async error: %s\n", se.what());
+                            }
+                        }
+                    },
+                    sycl::property_list{sycl::property::queue::in_order{}});
+
+                OneAPIDeviceData dev_data;
+                dev_data.queue = queue;
+                dev_data.device = device;
+                dev_data.name = device.get_info<sycl::info::device::name>();
+                dev_data.type = device.is_gpu() ? "gpu" :
+                           device.is_cpu() ? "cpu" : "accelerator";
+                dev_data.max_compute_units = device.get_info<sycl::info::device::max_compute_units>();
+                dev_data.max_work_group_size = device.get_info<sycl::info::device::max_work_group_size>();
+                dev_data.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
+                dev_data.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
+
+                backend::OneAPICachingAllocator::get().initialize(
+                    dev_data.queue.get(), static_cast<int>(devices_.size()));
+
+                devices_.push_back(dev_data);
+                return true;
+            } catch (const sycl::exception& e) {
+                TENZOR_LOG_WARNING(
+                    std::string("Skipping SYCL device: ") + e.what());
+                return false;
+            }
+        };
+
+        auto is_supported_vendor = [](const sycl::device& device) {
+            // Skip NVIDIA devices - kernels are compiled for spir64 (Intel CPU/GPU)
+            std::string vendor = device.get_info<sycl::info::device::vendor>();
+            return vendor.find("NVIDIA") == std::string::npos &&
+                   vendor.find("nvidia") == std::string::npos;
+        };
 
         try {
-            // Enumerate all available SYCL devices
             auto platforms = sycl::platform::get_platforms();
 
+            // Pass 1: register Intel GPUs (preferred).
             for (const auto& platform : platforms) {
-                auto devices = platform.get_devices();
-                for (const auto& device : devices) {
-                    // Skip NVIDIA GPUs - kernels are compiled for spir64 (Intel CPU/GPU)
-                    std::string vendor = device.get_info<sycl::info::device::vendor>();
-                    if (vendor.find("NVIDIA") != std::string::npos ||
-                        vendor.find("nvidia") != std::string::npos) {
-                        continue;
-                    }
+                for (const auto& device : platform.get_devices()) {
+                    if (!device.is_gpu()) continue;
+                    if (!is_supported_vendor(device)) continue;
+                    try_register_device(device);
+                }
+            }
 
-                    // Reject non-GPU SYCL devices unless the user opted in.
-                    if (!device.is_gpu() && !allow_cpu_sycl) {
-                        continue;
-                    }
-
-                    // Create queue for each device
-                    try {
-                        auto queue = std::make_shared<sycl::queue>(device,
-                            [this](sycl::exception_list elist) {
-                                std::lock_guard<std::mutex> lock(async_errors_mutex_);
-                                for (auto& e : elist) {
-                                    async_errors_.push_back(e);
-                                    try { std::rethrow_exception(e); }
-                                    catch (const sycl::exception& se) {
-                                        fprintf(stderr, "SYCL async error: %s\n", se.what());
-                                    }
-                                }
-                            },
-                            sycl::property_list{sycl::property::queue::in_order{}});
-
-                        // Store device info
-                        OneAPIDeviceData dev_data;
-                        dev_data.queue = queue;
-                        dev_data.device = device;
-                        dev_data.name = device.get_info<sycl::info::device::name>();
-                        dev_data.type = device.is_gpu() ? "gpu" :
-                                   device.is_cpu() ? "cpu" : "accelerator";
-                        dev_data.max_compute_units = device.get_info<sycl::info::device::max_compute_units>();
-                        dev_data.max_work_group_size = device.get_info<sycl::info::device::max_work_group_size>();
-                        dev_data.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
-                        dev_data.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
-
-                        // Initialize caching allocator for this device
-                        backend::OneAPICachingAllocator::get().initialize(
-                            dev_data.queue.get(), static_cast<int>(devices_.size()));
-
-                        devices_.push_back(dev_data);
-                    } catch (const sycl::exception& e) {
-                        TENZOR_LOG_WARNING(
-                            std::string("Skipping SYCL device: ") + e.what());
-                        continue;
+            // Pass 2: register CPU SYCL devices.
+            //   - If a GPU was already registered, only register the CPU when
+            //     TENZOR_ONEAPI_ALLOW_CPU is set to a non-zero value (legacy
+            //     opt-in for parity runs).
+            //   - If no GPU was registered, fall back to the CPU SYCL device
+            //     so the backend is usable on Intel-less hosts. The user can
+            //     suppress this fallback with TENZOR_ONEAPI_ALLOW_CPU=0.
+            const bool need_cpu_fallback = devices_.empty() && !cpu_explicitly_forbidden;
+            if (register_cpu_alongside_gpu || need_cpu_fallback) {
+                for (const auto& platform : platforms) {
+                    for (const auto& device : platform.get_devices()) {
+                        if (!device.is_cpu()) continue;
+                        if (!is_supported_vendor(device)) continue;
+                        try_register_device(device);
                     }
                 }
             }

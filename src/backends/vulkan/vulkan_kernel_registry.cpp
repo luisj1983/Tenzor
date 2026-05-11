@@ -560,12 +560,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Full, [](std::span<const Tensor>, const OpAttributes& attrs) {
+        // Pass value as double so Float64 subnormals are preserved.
         return std::vector<Tensor>{get_vulkan_backend()->dispatchFull(attrs.get_int_list(AttrKey::Shape),
-            static_cast<float>(attrs.get_float(AttrKey::Value, 0.0)), dtype_from_string(attrs.get_string(AttrKey::Dtype)))};
+            attrs.get_float(AttrKey::Value, 0.0), dtype_from_string(attrs.get_string(AttrKey::Dtype)))};
     });
 
     table.register_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchFill(inputs[0], static_cast<float>(attrs.get_float(AttrKey::Value, 0.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchFill(inputs[0], attrs.get_float(AttrKey::Value, 0.0))};
     });
 
     table.register_kernel(OpId::Clone, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -2692,7 +2693,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::SparseSpMM, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
-        int64_t N = attrs.get_int(AttrKey::N, 0);
+        // Infer N from the dense operand's trailing dim if the caller did not
+        // supply it — matches the CPU dispatch where N is read off the dense
+        // shape rather than from the attribute set. Older callers that pass
+        // N explicitly still win because the attribute takes precedence.
+        int64_t default_N = (inputs.size() >= 4 && inputs[3].ndim() == 2)
+                                ? inputs[3].shape()[1] : 0;
+        int64_t N = attrs.get_int(AttrKey::N, default_N);
         return {get_vulkan_backend()->dispatchSparseSpMM(inputs[0], inputs[1], inputs[2], inputs[3], M, K, N)};
     });
 

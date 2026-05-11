@@ -14,6 +14,8 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -153,8 +155,44 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
     result.compression_ratio = static_cast<float>(k) /
                                static_cast<float>(numel);
 
-    // Update the input gradient in-place to the compressed version
-    gradient = result.data;
+    // Update the input gradient in-place to the compressed version.
+    //
+    // Important: we must NOT reassign `gradient` to a freshly-allocated
+    // tensor here. The error-feedback residual is keyed on
+    // `gradient.data_ptr()`; if compress() swaps the caller's buffer out
+    // for a new allocation, the next call sees a different pointer and the
+    // residual cache misses. Instead, copy the compressed values into the
+    // caller's existing storage so data_ptr() stays stable across calls.
+    {
+        Tensor compressed_reshaped = compressed.reshape(result.original_shape);
+        if (gradient.is_contiguous() &&
+            gradient.dtype() == compressed_reshaped.dtype() &&
+            gradient.numel() == compressed_reshaped.numel() &&
+            gradient.device() == compressed_reshaped.device()) {
+            // In-place memcpy via the backend's copy primitive.
+            auto* backend = backend_registry().get_backend(gradient.device().type);
+            if (backend) {
+                CopyKind kind = (gradient.device().type == Device::Type::CPU)
+                                    ? CopyKind::HostToHost
+                                    : CopyKind::DeviceToDevice;
+                backend->copy(
+                    gradient.data_ptr(),
+                    compressed_reshaped.data_ptr(),
+                    gradient.numel() * gradient.dtype_size(),
+                    kind);
+            } else {
+                // No backend — fall back to assignment (loses residual
+                // tracking, but at least we don't crash).
+                gradient = compressed_reshaped;
+            }
+        } else {
+            // Shape/dtype/device mismatch — caller will see the new buffer
+            // and the residual cache is effectively reset, which is the
+            // best we can do here.
+            gradient = compressed_reshaped;
+        }
+    }
+    result.data = gradient;
 
     return result;
 }

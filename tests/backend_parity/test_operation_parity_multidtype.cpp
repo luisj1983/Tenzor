@@ -165,14 +165,17 @@ TEST_P(MultiDTypeParity, BatchNorm2d_Float32) {
         attrs.set(AttrKey::Eps, 1e-5);
         attrs.set(AttrKey::Momentum, 0.1);
         attrs.set(AttrKey::Training, false);
+        // BatchNorm2dForwardAffine signature is (input, mean, var, gamma, beta).
+        // In inference (Training=false) PyTorch maps:
+        //   mean  ← running_mean, var ← running_var, gamma ← weight, beta ← bias
         std::vector<Tensor> ins = {
             inputs[0],
-            weight.to(inputs[0].device()),
-            bias.to(inputs[0].device()),
             running_mean.to(inputs[0].device()),
-            running_var.to(inputs[0].device())
+            running_var.to(inputs[0].device()),
+            weight.to(inputs[0].device()),
+            bias.to(inputs[0].device())
         };
-        return dispatch<OpId::BatchNorm2dForward>(ins, attrs)[0];
+        return dispatch<OpId::BatchNorm2dForwardAffine>(ins, attrs)[0];
     }, {input}, 1e-4f, 1e-6f, "BatchNorm2d_Float32");
 }
 
@@ -213,12 +216,12 @@ TEST_P(MultiDTypeParity, BatchNorm2d_Float64) {
         attrs.set(AttrKey::Training, false);
         std::vector<Tensor> ins = {
             inputs[0],
-            weight.to(inputs[0].device()),
-            bias.to(inputs[0].device()),
             running_mean.to(inputs[0].device()),
-            running_var.to(inputs[0].device())
+            running_var.to(inputs[0].device()),
+            weight.to(inputs[0].device()),
+            bias.to(inputs[0].device())
         };
-        return dispatch<OpId::BatchNorm2dForward>(ins, attrs)[0];
+        return dispatch<OpId::BatchNorm2dForwardAffine>(ins, attrs)[0];
     }, {input}, 1e-10f, 1e-12f, "BatchNorm2d_Float64");
 }
 
@@ -236,12 +239,12 @@ TEST_P(MultiDTypeParity, BatchNorm2d_Float16) {
         attrs.set(AttrKey::Training, false);
         std::vector<Tensor> ins = {
             inputs[0],
-            weight.to(inputs[0].device()),
-            bias.to(inputs[0].device()),
             running_mean.to(inputs[0].device()),
-            running_var.to(inputs[0].device())
+            running_var.to(inputs[0].device()),
+            weight.to(inputs[0].device()),
+            bias.to(inputs[0].device())
         };
-        return dispatch<OpId::BatchNorm2dForward>(ins, attrs)[0];
+        return dispatch<OpId::BatchNorm2dForwardAffine>(ins, attrs)[0];
     }, {input}, 1e-1f, 1e-2f, "BatchNorm2d_Float16");
 }
 

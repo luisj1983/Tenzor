@@ -159,26 +159,26 @@ TEST_F(ROCmBackendTest, TransformOperations) {
 }
 
 TEST_F(ROCmBackendTest, UnimplementedOperations) {
+    // Originally this test verified that matmul/sum/mean threw because they
+    // were stubbed for ROCm. Those ops are now implemented; verify they work.
     try {
         auto device = Device::rocm(0);
 
         auto a = ones({2, 3}, DType::Float32, device);
         auto b = ones({3, 4}, DType::Float32, device);
 
-        // Matmul is stubbed - should throw
-        EXPECT_THROW({
-            auto c = matmul(a, b);
-        }, std::runtime_error);
+        auto c = matmul(a, b);
+        ASSERT_EQ(c.shape().size(), 2u);
+        EXPECT_EQ(c.shape()[0], 2);
+        EXPECT_EQ(c.shape()[1], 4);
 
-        // Reduction operations are stubbed
-        EXPECT_THROW({
-            auto s = sum(a, 0, false);
-        }, std::runtime_error);
+        auto s = sum(a, 0, false);
+        EXPECT_EQ(s.shape().size(), 1u);
+        EXPECT_EQ(s.shape()[0], 3);
 
-        EXPECT_THROW({
-            auto m = mean(a, 0, false);
-        }, std::runtime_error);
-
+        auto m = mean(a, 0, false);
+        EXPECT_EQ(m.shape().size(), 1u);
+        EXPECT_EQ(m.shape()[0], 3);
     } catch (const std::exception& e) {
         GTEST_SKIP() << "ROCm device not available: " << e.what();
     }

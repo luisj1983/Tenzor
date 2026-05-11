@@ -12,7 +12,7 @@
 namespace tenzor {
 // ============================================================================
 
-auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor {
+auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype) -> Tensor {
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
@@ -83,7 +83,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 
         push_constants.n_elements = static_cast<uint32_t>(output.numel());
         push_constants.padding = 0;
-        push_constants.fill_value = static_cast<double>(value);
+        push_constants.fill_value = value;
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -113,7 +113,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         push_constants.n_elements = static_cast<uint32_t>(output.numel());
 
         // Convert float to Float16 bits
-        Float16 f16_value(value);
+        Float16 f16_value(static_cast<float>(value));
         push_constants.fill_value_f16 = static_cast<uint32_t>(f16_value.bits);
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

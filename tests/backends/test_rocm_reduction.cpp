@@ -16,9 +16,14 @@ using namespace tenzor;
 class ROCmReductionTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Ensure backends are registered before any tensor work
+        tenzor::initialize();
+
         // Check if ROCm device is available
         try {
             Device rocm_device = Device::rocm(0);
+            // Probe the backend - device handle alone proves nothing
+            auto probe = ones({1}, DType::Float32, rocm_device);
             rocm_available = true;
         } catch (...) {
             rocm_available = false;
@@ -27,7 +32,7 @@ protected:
     }
 
     bool rocm_available = false;
-};
+};;
 
 // ============================================================================
 // Full Reduction Tests (dim = -1)
@@ -315,7 +320,9 @@ TEST_F(ROCmReductionTest, SumInt32) {
     Tensor result = sum(rocm_tensor);
     Tensor cpu_result = result.to(Device::cpu());
 
-    EXPECT_EQ(cpu_result.data<int32_t>()[0], 21);
+    // sum() promotes integer types smaller than Int64 to Int64 (matches PyTorch)
+    ASSERT_EQ(cpu_result.dtype(), DType::Int64);
+    EXPECT_EQ(cpu_result.data<int64_t>()[0], 21);
 }
 
 int main(int argc, char** argv) {

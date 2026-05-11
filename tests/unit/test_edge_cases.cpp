@@ -27,6 +27,7 @@
 using namespace tenzor;
 using tenzor::test::BackendConfig;
 using tenzor::test::is_backend_available;
+using tenzor::test::backend_has_runtime_devices;
 using tenzor::test::get_available_backends;
 
 // ============================================================================
@@ -293,7 +294,7 @@ TEST_P(EdgeCaseTest, CrossDevice_Operations_SameType) {
 }
 
 TEST_P(EdgeCaseTest, DeviceNotAvailable_CUDA) {
-    if (is_backend_available(Device::Type::CUDA)) {
+    if (backend_has_runtime_devices(Device::Type::CUDA)) {
         GTEST_SKIP() << "CUDA is available, cannot test unavailability";
     }
 
@@ -304,7 +305,7 @@ TEST_P(EdgeCaseTest, DeviceNotAvailable_CUDA) {
 }
 
 TEST_P(EdgeCaseTest, DeviceNotAvailable_ROCm) {
-    if (is_backend_available(Device::Type::ROCm)) {
+    if (backend_has_runtime_devices(Device::Type::ROCm)) {
         GTEST_SKIP() << "ROCm is available, cannot test unavailability";
     }
 

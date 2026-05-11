@@ -165,7 +165,7 @@ namespace cuda {
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, cudaStream_t stream) -> Tensor;
-    auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tensor;
+    auto fill_kernel(const Tensor& tensor, double value, cudaStream_t stream) -> Tensor;
 
     // Random operations
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;

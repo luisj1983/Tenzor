@@ -406,8 +406,8 @@ namespace oneapi {
     auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim, sycl::queue& queue) -> Tensor;
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
-    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor;
-    auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tensor;
 
     // ---- Creation operations (kernels/creation.cpp) ----
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
@@ -1870,7 +1870,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Fill,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+            double value = attrs.get_float(AttrKey::Value, 0.0);
             return {oneapi::fill_kernel(inputs[0], value, get_q(inputs))};
         });
 
@@ -2477,7 +2477,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Full,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto shape = attrs.get_int_list(AttrKey::Shape);
-            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+            // Read as double so Float64 subnormals survive — narrowing to
+            // float would collapse them to zero.
+            double value = attrs.get_float(AttrKey::Value, 0.0);
             DType dtype = parse_dtype(attrs);
             int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();

@@ -402,6 +402,10 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -487,6 +491,10 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -560,6 +568,10 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("RFFT/IRFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];
@@ -1836,6 +1848,10 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                      const std::string& norm, hipStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -1943,6 +1959,10 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("FFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -2044,6 +2064,10 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("RFFT/IRFFT: dimension out of range");
+    }
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];

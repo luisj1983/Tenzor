@@ -685,7 +685,18 @@ LayerNorm::LayerNorm(std::vector<int64_t> normalized_shape,
     reset_parameters();
 }
 
-auto LayerNorm::forward_impl(const Variable& input) -> Variable {
+auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
+    // Every kernel below — the SIMD CPU fast path, the GPU FusedLayerNorm
+    // path, and the generic STANDARD path — reads with shape-derived
+    // offsets and requires contiguous storage. Materialize a contiguous
+    // copy once when the caller passed a non-contig view; downstream code
+    // refers to `input` from here on (the variable name shadows
+    // `input_orig` deliberately so the rest of the body is untouched).
+    Variable input = input_orig;
+    if (!input_orig.tensor().is_contiguous()) {
+        input = Variable(input_orig.tensor().contiguous(), input_orig.requires_grad());
+    }
+
     auto shape = input.shape();
 
     // Verify that input shape matches normalized_shape at the end
@@ -725,7 +736,10 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     if (!needs_input_grad &&
         input.tensor().device().type != Device::Type::CPU &&
         input.tensor().dtype() == DType::Float32) {
-        const Tensor& x = input.tensor();
+        // Backend FusedLayerNorm kernels assume contiguous input — non-
+        // contig views (transpose / narrow) read with the wrong stride.
+        Tensor x = input.tensor().is_contiguous() ? input.tensor()
+                                                  : input.tensor().contiguous();
         Device dev = x.device();
 
         Tensor weight_dev = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();

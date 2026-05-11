@@ -366,8 +366,8 @@ namespace rocm {
     // Tensor creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
-    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, hipStream_t stream) -> Tensor;
-    auto fill_kernel(const Tensor& input, float value, hipStream_t stream) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto fill_kernel(const Tensor& input, double value, hipStream_t stream) -> Tensor;
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
 
@@ -877,7 +877,7 @@ namespace rocm {
 
     // Cast, StridedFill, ToMemoryFormat (transform.hip.cpp)
     auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor;
-    auto strided_fill_kernel(Tensor& self, float value, hipStream_t stream) -> void;
+    auto strided_fill_kernel(Tensor& self, double value, hipStream_t stream) -> void;
     auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor;
 
     // Any/All reductions (reduction.hip.cpp)
@@ -1216,7 +1216,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Full, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        // Read as double so Float64 subnormals survive — narrowing to float
+        // here would collapse them to zero.
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::rocm(device_id);
@@ -2607,7 +2609,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // StridedFill Operation (in-place)
     // ========================================================================
     table.register_inplace_kernel(OpId::StridedFill, [](Tensor& self, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         rocm::strided_fill_kernel(self, value, get_hip_stream(attrs));
         return self;
     });
@@ -3474,7 +3476,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Creation Operations ---------------------------------------------------
     table.register_single_output_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         return rocm::fill_kernel(inputs[0], value, get_hip_stream(attrs));
     });
 

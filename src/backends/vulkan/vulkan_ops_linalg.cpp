@@ -2158,7 +2158,7 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
 auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor {
     if (sorted.numel() == 0 || values.numel() == 0) {
         return Tensor(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
-                      DType::Int32, values.device());
+                      DType::Int64, values.device());
     }
 
     // Float16/BFloat16: native packed shader path
@@ -2198,7 +2198,7 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, dev_id);
 
-        return output_f16;
+        return output_f16.to(DType::Int64);
     }
 
     int32_t device_id = sorted.device().index;
@@ -2243,7 +2243,10 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return output;
+    // Match the CPU/CUDA convention: searchsorted returns Int64 by default.
+    // The shader writes Int32 for shader-side simplicity; widen before
+    // returning so downstream consumers (and parity tests) see Int64.
+    return output.to(DType::Int64);
 }
 
 // ===========================================================================

@@ -631,7 +631,11 @@ auto lstm_forward_miopen(
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
-    int64_t hidden = h0.shape()[1];
+    // h0 may be empty (caller passed Tensor{} for no initial state). Derive
+    // `hidden` from W_hh which is always (4*hidden, hidden) for LSTM.
+    int64_t hidden = (h0.numel() > 0 && h0.ndim() >= 2)
+                         ? h0.shape()[1]
+                         : W_hh.shape()[1];
 
     // Allocate output tensors
     Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
@@ -798,7 +802,11 @@ auto lstm_forward_kernel(
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
-    int64_t hidden = h0.shape()[1];
+    // h0 may be empty (caller passed Tensor{} for no initial state). Derive
+    // `hidden` from W_hh which is always (4*hidden, hidden) for LSTM.
+    int64_t hidden = (h0.numel() > 0 && h0.ndim() >= 2)
+                         ? h0.shape()[1]
+                         : W_hh.shape()[1];
 
     // Allocate output tensors
     Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());

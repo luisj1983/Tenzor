@@ -192,7 +192,17 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    Device original_device = input.tensor().device();
+    // Pool kernels on every backend (CPU's pointer-arithmetic loop, cuDNN,
+    // Vulkan, etc.) read with shape-derived offsets and assume the input is
+    // contiguous NCHW. Materialize a contiguous copy once at the entry
+    // point when the caller passed a non-contig view (slice, transpose,
+    // narrow). This is cheaper than each backend re-doing it.
+    Variable contig_input = input;
+    if (!input.tensor().is_contiguous()) {
+        contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
+    }
+
+    Device original_device = contig_input.tensor().device();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H_in = input_shape[2];
@@ -202,7 +212,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
     if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {input.tensor()};
+        std::vector<Tensor> inputs = {contig_input.tensor()};
         OpAttributes fwd_attrs;
         fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
         fwd_attrs.set(AttrKey::Stride, stride_);
@@ -218,14 +228,14 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_, ceil_mode_);
 
         // Create output tensor and indices tensor on CPU
-        auto dtype = input.tensor().dtype();
+        auto dtype = contig_input.tensor().dtype();
         output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
         // Always store indices as Int64 for precision (Float16 can't represent large indices)
         indices = zeros({N, C, H_out, W_out}, DType::Int64, Device::cpu());
 
         // Perform max pooling with proper dtype handling
         if (dtype == DType::Float32) {
-            const float* input_data = input.tensor().data<float>();
+            const float* input_data = contig_input.tensor().data<float>();
             float* output_data = output.data<float>();
             int64_t* indices_data = indices.data<int64_t>();
 
@@ -261,7 +271,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (dtype == DType::Float64) {
-            const double* input_data = input.tensor().data<double>();
+            const double* input_data = contig_input.tensor().data<double>();
             double* output_data = output.data<double>();
             int64_t* indices_data = indices.data<int64_t>();
 
@@ -297,7 +307,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (dtype == DType::Float16) {
-            const Float16* input_data = input.tensor().data<Float16>();
+            const Float16* input_data = contig_input.tensor().data<Float16>();
             Float16* output_data = output.data<Float16>();
             int64_t* indices_data = indices.data<int64_t>();
 
@@ -334,7 +344,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (dtype == DType::BFloat16) {
-            const BFloat16* input_data = input.tensor().data<BFloat16>();
+            const BFloat16* input_data = contig_input.tensor().data<BFloat16>();
             BFloat16* output_data = output.data<BFloat16>();
             int64_t* indices_data = indices.data<int64_t>();
 
@@ -380,7 +390,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Setup backward function if gradient is required
     if (input.requires_grad()) {
-        std::vector<Tensor> tensors_to_save = {input.tensor(), indices, output};
+        std::vector<Tensor> tensors_to_save = {contig_input.tensor(), indices, output};
 
         auto backward_fn = std::make_shared<MaxPool2dBackward>(
             kernel_size_, stride_, padding_, std::move(tensors_to_save)
@@ -604,7 +614,14 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::runtime_error("AvgPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    Device original_device = input.tensor().device();
+    // Materialize contiguous NCHW once at the top — every kernel below
+    // (CPU pointer arithmetic, cuDNN, Vulkan) assumes contiguous storage.
+    Variable contig_input = input;
+    if (!input.tensor().is_contiguous()) {
+        contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
+    }
+
+    Device original_device = contig_input.tensor().device();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H_in = input_shape[2];
@@ -614,7 +631,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
     if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {input.tensor()};
+        std::vector<Tensor> inputs = {contig_input.tensor()};
         OpAttributes fwd_attrs;
         fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
         fwd_attrs.set(AttrKey::Stride, stride_);
@@ -629,11 +646,11 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
         int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
 
         // Create output tensor on CPU
-        auto dtype = input.tensor().dtype();
+        auto dtype = contig_input.tensor().dtype();
         output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
 
         if (dtype == DType::Float32) {
-            const float* input_data = input.tensor().data<float>();
+            const float* input_data = contig_input.tensor().data<float>();
             float* output_data = output.data<float>();
 
             // Perform average pooling
@@ -666,7 +683,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (dtype == DType::Float64) {
-            const double* input_data = input.tensor().data<double>();
+            const double* input_data = contig_input.tensor().data<double>();
             double* output_data = output.data<double>();
 
             for (int64_t n = 0; n < N; ++n) {
@@ -698,7 +715,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (dtype == DType::Float16) {
-            const Float16* input_data = input.tensor().data<Float16>();
+            const Float16* input_data = contig_input.tensor().data<Float16>();
             Float16* output_data = output.data<Float16>();
 
             for (int64_t n = 0; n < N; ++n) {

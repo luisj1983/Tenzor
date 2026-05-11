@@ -20,6 +20,8 @@
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/tenzor.hpp>
 
+#include "../grad_flow_helpers.hpp"
+
 namespace tenzor {
 namespace {
 
@@ -83,6 +85,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeIsNoopForLDL) {
     auto loss = tenzor::sum(LD);
     // LDL has a real backward; strict mode no longer throws for it.
     EXPECT_NO_THROW(loss.backward());
+    EXPECT_GRAD_FLOWS(A);
 }
 
 TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {

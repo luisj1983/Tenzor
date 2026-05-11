@@ -7,6 +7,7 @@
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:57:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:89:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_stubs_regression.cpp:187:
+/home/lee/Projects/Tenzor/tests/backend_parity/test_performance_regression.cpp:564:
 /home/lee/Projects/Tenzor/tests/core/test_inplace_version_detection.cpp:70:
 /home/lee/Projects/Tenzor/tests/core/test_inplace_version_detection_multidtype.cpp:46:
 /home/lee/Projects/Tenzor/tests/nn/layers/test_conv2d_multidtype.cpp:544:
@@ -55,7 +56,6 @@
 /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:727:
 /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:741:
 /home/lee/Projects/Tenzor/tests/unit/test_lstm.cpp:327:
-/home/lee/Projects/Tenzor/tests/unit/test_pruning.cpp:991:
 /home/lee/Projects/Tenzor/tests/unit/test_pruning_multidtype.cpp:897:
 /home/lee/Projects/Tenzor/tests/unit/test_rnn.cpp:311:
 /home/lee/Projects/Tenzor/tests/unit/test_roberta.cpp:252:

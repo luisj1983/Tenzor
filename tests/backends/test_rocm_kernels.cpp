@@ -1099,8 +1099,9 @@ TEST(ROCmKernelsTest, MixedDTypes_Error) {
     auto a = ones({10, 10}, DType::Float32, Device::rocm());
     auto b = ones({10, 10}, DType::Float64, Device::rocm());
 
-    // This should throw an error
-    EXPECT_THROW(add(a, b), std::runtime_error);
+    // NumPy/PyTorch-style type promotion: Float32 + Float64 → Float64
+    auto c = add(a, b);
+    EXPECT_EQ(c.dtype(), DType::Float64);
 }
 
 // ============================================================================

@@ -73,6 +73,23 @@ inline bool is_backend_available(Device::Type type) {
 }
 
 /**
+ * @brief Like is_backend_available() but without the TENZOR_TEST_ROCM env-var
+ * gate. Useful for the small number of tests that need to know whether a
+ * backend would *actually* work on this host (e.g. DeviceNotAvailable_* tests
+ * that intentionally exercise the unavailable-device error path and must skip
+ * when the hardware is genuinely present).
+ */
+inline bool backend_has_runtime_devices(Device::Type type) {
+    try {
+        auto backend = backend_registry().get_backend(type);
+        if (!backend) return false;
+        return backend->device_count() > 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+/**
  * @brief Get all available backends for testing
  *
  * Returns all possible backend configs without initializing the library.

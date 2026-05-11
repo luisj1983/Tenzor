@@ -786,7 +786,18 @@ __global__ void exp_kernel_f64(const double* input, double* output, int64_t n) {
  */
 __global__ void log_kernel_f32(const float* input, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = logf(input[idx]);
+        float x = input[idx];
+        // AMD device libm's logf returns implementation-defined garbage at
+        // x == 0 (observed ~-4.76 for Float64; Float32 is also unreliable
+        // at the pole). Enforce the IEEE-754 contract explicitly: log(0)
+        // is -inf, log(<0) is NaN, only positive x goes through libm.
+        if (x == 0.0f) {
+            output[idx] = -__int_as_float(0x7f800000);  // -INF
+        } else if (x < 0.0f) {
+            output[idx] = __int_as_float(0x7fc00000);   // NaN
+        } else {
+            output[idx] = logf(x);
+        }
     }
 }
 
@@ -795,7 +806,17 @@ __global__ void log_kernel_f32(const float* input, float* output, int64_t n) {
  */
 __global__ void log_kernel_f64(const double* input, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = log(input[idx]);
+        double x = input[idx];
+        // See log_kernel_f32 — AMD device libm's log() doesn't honour the
+        // IEEE-754 pole behaviour for Float64 either (observed ~-4.76 at
+        // x=0). Handle x <= 0 explicitly with the IEEE-754 result.
+        if (x == 0.0) {
+            output[idx] = -__longlong_as_double(0x7ff0000000000000LL);  // -INF
+        } else if (x < 0.0) {
+            output[idx] = __longlong_as_double(0x7ff8000000000000LL);    // NaN
+        } else {
+            output[idx] = log(x);
+        }
     }
 }
 
@@ -3239,7 +3260,7 @@ __global__ void fill_strided_kernel(T* output, T value, int64_t n, int64_t strid
  * @param stream HIP stream for asynchronous execution
  * @return Filled tensor
  */
-auto fill_kernel(const Tensor& tensor, float value, hipStream_t stream) -> Tensor {
+auto fill_kernel(const Tensor& tensor, double value, hipStream_t stream) -> Tensor {
     int64_t n = tensor.numel();
 
     if (n == 0) {
@@ -3256,8 +3277,10 @@ auto fill_kernel(const Tensor& tensor, float value, hipStream_t stream) -> Tenso
         hipLaunchKernelGGL(fill_kernel_device<float>, grid, block, 0, stream,
             result.data<float>(), static_cast<float>(value), n);
     } else if (tensor.dtype() == DType::Float64) {
+        // Pass the double value directly — narrowing to float here would
+        // collapse Float64 subnormals (~5e-324) to zero.
         hipLaunchKernelGGL(fill_kernel_device<double>, grid, block, 0, stream,
-            result.data<double>(), static_cast<double>(value), n);
+            result.data<double>(), value, n);
     } else if (tensor.dtype() == DType::Int32) {
         hipLaunchKernelGGL(fill_kernel_device<int32_t>, grid, block, 0, stream,
             result.data<int32_t>(), static_cast<int32_t>(value), n);
@@ -3424,7 +3447,7 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
  * @param stream HIP stream for asynchronous execution
  * @return Filled tensor
  */
-auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, hipStream_t stream) -> Tensor {
+auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, Device device, hipStream_t stream) -> Tensor {
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
 
@@ -3439,8 +3462,9 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         hipLaunchKernelGGL(fill_kernel_device<float>, grid, block, 0, stream,
             result.data<float>(), static_cast<float>(value), n);
     } else if (dtype == DType::Float64) {
+        // Pass the double value directly to preserve Float64 subnormals.
         hipLaunchKernelGGL(fill_kernel_device<double>, grid, block, 0, stream,
-            result.data<double>(), static_cast<double>(value), n);
+            result.data<double>(), value, n);
     } else if (dtype == DType::Int32) {
         hipLaunchKernelGGL(fill_kernel_device<int32_t>, grid, block, 0, stream,
             result.data<int32_t>(), static_cast<int32_t>(value), n);
@@ -3458,10 +3482,10 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
             result.data<int8_t>(), static_cast<int8_t>(value), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(value), n);
+            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(static_cast<float>(value)), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
-            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(value), n);
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }

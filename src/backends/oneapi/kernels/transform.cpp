@@ -896,33 +896,35 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 }
 
 // Full kernel - fill with specific value using memcpy
-auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor {
+auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, Device device, sycl::queue& queue) -> Tensor {
     Tensor output(shape, dtype, device);
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        float val = value;
+        float val = static_cast<float>(value);
         float* device_ptr = get_data_ptr<float>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = val;
         }).wait();
     }
     else if (dtype == DType::Float64) {
-        double val = static_cast<double>(value);
+        // Pass through the double value unchanged — Float64 subnormals
+        // (~5e-324) would be lost if we narrowed through float first.
+        double val = value;
         double* device_ptr = get_data_ptr<double>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = val;
         }).wait();
     }
     else if (dtype == DType::Float16) {
-        const sycl::half value_h(value);
+        const sycl::half value_h(static_cast<float>(value));
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_h;
         }).wait();
     }
     else if (dtype == DType::BFloat16) {
-        const uint16_t value_bf16 = f32_to_bf16(value);
+        const uint16_t value_bf16 = f32_to_bf16(static_cast<float>(value));
         uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<FullKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_bf16;
@@ -1003,7 +1005,7 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
 // via queue.memcpy — that's host compute followed by an H2D transfer, i.e.
 // silent CPU work. SYCL's queue.fill() does the same thing as a device-side
 // parallel_for and avoids the host loop / staging buffer.
-auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor {
+auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tensor {
     Tensor output(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
                   tensor.dtype(), tensor.device());
 
@@ -1016,13 +1018,15 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
     };
 
     if (tensor.dtype() == DType::Float32) {
-        fill_simple(value);
+        fill_simple(static_cast<float>(value));
     }
     else if (tensor.dtype() == DType::Float64) {
-        fill_simple(static_cast<double>(value));
+        // Pass the double directly — Float64 subnormals would not survive
+        // a float intermediate.
+        fill_simple(value);
     }
     else if (tensor.dtype() == DType::Float16) {
-        const sycl::half value_h(value);
+        const sycl::half value_h(static_cast<float>(value));
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<FillKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_h;
@@ -1030,7 +1034,7 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
     }
     else if (tensor.dtype() == DType::BFloat16) {
         // BFloat16 is stored as raw uint16_t; fill the bit pattern directly.
-        fill_simple(f32_to_bf16(value));
+        fill_simple(f32_to_bf16(static_cast<float>(value)));
     }
     else if (tensor.dtype() == DType::Int32) {
         fill_simple(static_cast<int32_t>(value));
@@ -1981,7 +1985,7 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
             double* ptr = get_data_ptr<double>(self);
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = value; }).wait();
         } else {
-            Tensor filled = fill_kernel(self, static_cast<float>(value), queue);
+            Tensor filled = fill_kernel(self, value, queue);
             queue.memcpy(const_cast<void*>(self.data_ptr()), filled.data_ptr(),
                          numel * self.dtype_size()).wait();
         }

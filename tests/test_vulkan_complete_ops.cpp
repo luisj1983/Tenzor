@@ -92,7 +92,7 @@ TEST_F(VulkanOpsTest, MaxPool2dForward) {
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("max_pool2d", inputs_vec, attrs);
+    auto outputs = backend->dispatch("maxpool2d_forward", inputs_vec, attrs);
 
     ASSERT_EQ(outputs.size(), 2);  // output and indices
     auto output = outputs[0].to(cpu_device);
@@ -130,7 +130,7 @@ TEST_F(VulkanOpsTest, AvgPool2dForward) {
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("avg_pool2d", inputs_vec, attrs);
+    auto outputs = backend->dispatch("avgpool2d_forward", inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -163,7 +163,7 @@ TEST_F(VulkanOpsTest, AdaptiveMaxPool2d) {
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("adaptive_max_pool2d", inputs_vec, attrs);
+    auto outputs = backend->dispatch("adaptive_maxpool2d", inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -190,7 +190,7 @@ TEST_F(VulkanOpsTest, AdaptiveAvgPool2d) {
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("adaptive_avg_pool2d", inputs_vec, attrs);
+    auto outputs = backend->dispatch("adaptive_avgpool2d", inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -287,7 +287,8 @@ TEST_F(VulkanOpsTest, Argmax) {
     auto outputs = backend->dispatch("argmax", inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
-    auto out_data = output.data<int32_t>();
+    ASSERT_EQ(output.dtype(), DType::Int64);
+    auto out_data = output.data<int64_t>();
 
     EXPECT_EQ(out_data[0], 1);  // index of max in first row
     EXPECT_EQ(out_data[1], 2);  // index of max in second row
@@ -311,7 +312,8 @@ TEST_F(VulkanOpsTest, Argmin) {
     auto outputs = backend->dispatch("argmin", inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
-    auto out_data = output.data<int32_t>();
+    ASSERT_EQ(output.dtype(), DType::Int64);
+    auto out_data = output.data<int64_t>();
 
     EXPECT_EQ(out_data[0], 1);  // index of min in first row
     EXPECT_EQ(out_data[1], 2);  // index of min in second row
@@ -528,7 +530,7 @@ TEST_F(VulkanOpsTest, BenchmarkLargeConv2d) {
 
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<Tensor> inputs_vec = {input, weight};
-    auto outputs = backend->dispatch("conv2d", inputs_vec, attrs);
+    auto outputs = backend->dispatch("conv2d_forward", inputs_vec, attrs);
     backend->synchronize(vulkan_device.index);
     auto end = std::chrono::high_resolution_clock::now();
 

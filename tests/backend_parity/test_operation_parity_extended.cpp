@@ -270,7 +270,7 @@ auto input = randn({16, 16}, DType::Float32, Device::cpu());
 }
 
 TEST_P(ExtendedParity, Sinc) {
-auto input = randn({16, 16}, DType::Float32, Device::cpu());
+    auto input = randn({16, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return tenzor::sinc(inputs[0]);
@@ -337,38 +337,61 @@ TEST_P(ExtendedParity, Add_Float64) {
 // ============================================================================
 
 TEST_P(ExtendedParity, FFT) {
-    auto input = randn({16}, DType::Float32, Device::cpu());
+    // FFT kernels expect complex input. The public tenzor::fft::fft op
+    // promotes Float32/Float64 to Complex64/Complex128 and normalises dim
+    // before dispatch — when calling dispatch<OpId::FFT> directly we have
+    // to provide complex input and a valid dim ourselves.
+    auto input = randn({16}, DType::Complex64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        std::vector<Tensor> ins = {inputs[0]};
-        return dispatch<OpId::FFT>(ins)[0];
+        std::vector<Tensor> ins = {inputs[0].contiguous()};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(0));
+        attrs.set(AttrKey::N, int64_t(16));
+        attrs.set(AttrKey::Norm, std::string("backward"));
+        return dispatch<OpId::FFT>(ins, attrs)[0];
     }, {input}, 1e-4f, 1e-6f, "FFT");
 }
 
 TEST_P(ExtendedParity, IFFT) {
-    auto input = randn({16}, DType::Float32, Device::cpu());
+    auto input = randn({16}, DType::Complex64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        std::vector<Tensor> ins = {inputs[0]};
-        return dispatch<OpId::IFFT>(ins)[0];
+        std::vector<Tensor> ins = {inputs[0].contiguous()};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(0));
+        attrs.set(AttrKey::N, int64_t(16));
+        attrs.set(AttrKey::Norm, std::string("backward"));
+        return dispatch<OpId::IFFT>(ins, attrs)[0];
     }, {input}, 1e-4f, 1e-6f, "IFFT");
 }
 
 TEST_P(ExtendedParity, RFFT) {
+    // RFFT consumes a real tensor and produces complex output.
     auto input = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        std::vector<Tensor> ins = {inputs[0]};
-        return dispatch<OpId::RFFT>(ins)[0];
+        std::vector<Tensor> ins = {inputs[0].contiguous()};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(0));
+        attrs.set(AttrKey::N, int64_t(16));
+        attrs.set(AttrKey::Norm, std::string("backward"));
+        return dispatch<OpId::RFFT>(ins, attrs)[0];
     }, {input}, 1e-4f, 1e-6f, "RFFT");
 }
 
 TEST_P(ExtendedParity, IRFFT) {
-    auto input = randn({16}, DType::Float32, Device::cpu());
+    // IRFFT consumes a complex tensor (the half-spectrum) and produces real output.
+    // For length N=16, the RFFT output has 9 complex bins.
+    auto input = randn({9}, DType::Complex64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        std::vector<Tensor> ins = {inputs[0]};
-        return dispatch<OpId::IRFFT>(ins)[0];
+        std::vector<Tensor> ins = {inputs[0].contiguous()};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(0));
+        attrs.set(AttrKey::N, int64_t(16));
+        attrs.set(AttrKey::Norm, std::string("backward"));
+        return dispatch<OpId::IRFFT>(ins, attrs)[0];
     }, {input}, 1e-4f, 1e-6f, "IRFFT");
 }
 
@@ -409,7 +432,20 @@ TEST_P(ExtendedParity, SparseSpMM) {
 TEST_P(ExtendedParity, Scatter) {
     auto input = randn({4, 8}, DType::Float32, Device::cpu());
     auto src = randn({4, 3}, DType::Float32, Device::cpu());
-    auto index = randint(0, 8, {4, 3}, DType::Int64, Device::cpu());
+
+    // Scatter behaviour with duplicate indices in the same row is
+    // implementation-defined (which write "wins" is order-dependent and
+    // differs across CPU/CUDA/Vulkan/ROCm). For a parity check we need
+    // unique indices per row so that every backend deterministically
+    // produces the same output.
+    auto index = zeros({4, 3}, DType::Int64, Device::cpu());
+    int64_t* idx_ptr = index.data<int64_t>();
+    int64_t unique_cols[3] = {0, 3, 6};  // disjoint, in-range columns
+    for (int64_t r = 0; r < 4; ++r) {
+        for (int64_t c = 0; c < 3; ++c) {
+            idx_ptr[r * 3 + c] = unique_cols[c];
+        }
+    }
 
     test_operation_parity([&src, &index](const std::vector<Tensor>& inputs) {
         OpAttributes attrs;

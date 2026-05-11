@@ -590,9 +590,9 @@ public:
 
     // Memory operations
     auto dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto dispatchFill(const Tensor& input, float value) -> Tensor;
+    auto dispatchFill(const Tensor& input, double value) -> Tensor;
     auto dispatchClone(const Tensor& input) -> Tensor;
-    auto dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor;
+    auto dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype) -> Tensor;
     auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;

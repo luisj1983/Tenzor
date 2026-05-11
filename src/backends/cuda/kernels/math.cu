@@ -3023,7 +3023,7 @@ __global__ void fill_kernel_device(T* output, T value, int64_t n) {
 }
 
 // Fill kernel launcher - fills tensor with constant value
-auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tensor {
+auto fill_kernel(const Tensor& tensor, double value, cudaStream_t stream) -> Tensor {
     int64_t n = tensor.numel();
 
     if (n == 0) {
@@ -3041,8 +3041,11 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
             result.data<float>(), static_cast<float>(value), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::Float64) {
+        // Take the double value directly — narrowing to float here would
+        // collapse Float64 subnormals (~5e-324) to zero because the
+        // smallest Float32 subnormal is ~1.4e-45.
         fill_kernel_device<<<grid, block, 0, stream>>>(
-            result.data<double>(), static_cast<double>(value), n);
+            result.data<double>(), value, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::Int32) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
@@ -3053,12 +3056,12 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
             result.data<int64_t>(), static_cast<int64_t>(value), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::Float16) {
-        __half h_value = __float2half(value);
+        __half h_value = __float2half(static_cast<float>(value));
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<__half*>(result.data<Float16>()), h_value, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::BFloat16) {
-        __nv_bfloat16 bf_value = __float2bfloat16(value);
+        __nv_bfloat16 bf_value = __float2bfloat16(static_cast<float>(value));
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), bf_value, n);
         CUDA_CHECK(cudaGetLastError());
@@ -3072,10 +3075,10 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::Bool) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
-            result.data<bool>(), static_cast<bool>(value != 0.0f), n);
+            result.data<bool>(), static_cast<bool>(value != 0.0), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (tensor.dtype() == DType::Complex64) {
-        cuFloatComplex c = make_cuFloatComplex(value, 0.0f);
+        cuFloatComplex c = make_cuFloatComplex(static_cast<float>(value), 0.0f);
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<cuFloatComplex*>(result.data_ptr()), c, n);
         CUDA_CHECK(cudaGetLastError());
@@ -3113,7 +3116,7 @@ __global__ void strided_fill_kernel_device(
 }
 
 // Strided fill for non-contiguous tensors. Asynchronous on the given stream.
-auto strided_fill_kernel(Tensor& self, float value, cudaStream_t stream) -> void {
+auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> void {
     int64_t n = self.numel();
     if (n == 0) return;
 
@@ -3145,16 +3148,16 @@ auto strided_fill_kernel(Tensor& self, float value, cudaStream_t stream) -> void
     if (self.dtype() == DType::Float32) {
         launch(self.data<float>(), static_cast<float>(value));
     } else if (self.dtype() == DType::Float64) {
-        launch(self.data<double>(), static_cast<double>(value));
+        launch(self.data<double>(), value);
     } else if (self.dtype() == DType::Int32) {
         launch(self.data<int32_t>(), static_cast<int32_t>(value));
     } else if (self.dtype() == DType::Int64) {
         launch(self.data<int64_t>(), static_cast<int64_t>(value));
     } else if (self.dtype() == DType::Float16) {
-        __half h_value = __float2half(value);
+        __half h_value = __float2half(static_cast<float>(value));
         launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
     } else if (self.dtype() == DType::BFloat16) {
-        __nv_bfloat16 bf_value = __float2bfloat16(value);
+        __nv_bfloat16 bf_value = __float2bfloat16(static_cast<float>(value));
         launch(reinterpret_cast<__nv_bfloat16*>(self.data<BFloat16>()), bf_value);
     } else if (self.dtype() == DType::Int8) {
         launch(self.data<int8_t>(), static_cast<int8_t>(value));

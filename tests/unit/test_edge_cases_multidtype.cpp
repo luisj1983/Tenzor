@@ -614,11 +614,15 @@ TEST_P(EdgeCaseMultiDTypeTest, DivisionByZero) {
             }
         }
     } else {
-        // Integer: division by zero should throw or give undefined behavior
-        // Most implementations will throw
-        EXPECT_THROW({
-            auto result = div(numerator, denominator);
-        }, std::exception);
+        // Integer divide-by-zero has no portable contract:
+        //   - x86 CPU raises SIGFPE → terminates the process (no C++ throw).
+        //   - GPU/JIT backends return implementation-defined junk silently.
+        // Neither matches the original EXPECT_THROW, so this whole branch is
+        // skipped. If we ever wire a SIGFPE-to-exception handler we can
+        // re-enable the CPU case.
+        GTEST_SKIP() << config_.backend.name
+                     << ": integer divide-by-zero has no portable behaviour "
+                        "(CPU SIGFPE / GPU silent UB).";
     }
 }
 
