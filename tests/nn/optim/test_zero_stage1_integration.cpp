@@ -69,11 +69,36 @@ protected:
         -> std::pair<Tensor, Tensor> {
         auto inputs = randn({batch_size, input_size}, DType::Float32, Device::cpu());
 
-        // Create random integer targets manually
+        // Build a LEARNABLE label = bucket(input.sum() / input_size).
+        //
+        // Previously this was `std::rand() % num_classes` -- pure noise. With
+        // pure-noise labels the model can't actually learn anything: loss
+        // hovers around log(num_classes) forever, and the convergence checks
+        // (`loss[N] < loss[0]`) become coin flips. 8 of 20 ZeRO Stage-1
+        // integration tests failed pre-existing on origin/main with this
+        // exact pattern (initial=2.285 final=2.297 etc., barely distinguishable
+        // from log(10)=2.302).
+        //
+        // A trivial input-dependent rule (mean-based bucket) is enough to
+        // give the model something to fit. Loss should drop monotonically
+        // even with a small MLP.
         auto targets = empty({batch_size}, DType::Int64, Device::cpu());
         auto* target_data = targets.data<int64_t>();
+        const float* in_data = inputs.data<float>();
         for (int i = 0; i < batch_size; ++i) {
-            target_data[i] = std::rand() % num_classes;
+            // Bucket the per-row mean into [0, num_classes) using a simple
+            // sigmoid-like squash so we cover all classes uniformly.
+            double sum = 0.0;
+            for (int j = 0; j < input_size; ++j) {
+                sum += in_data[i * input_size + j];
+            }
+            double mean = sum / input_size;
+            // Map mean (roughly N(0, 1/sqrt(input_size))) into [0, 1] via tanh,
+            // then bucket into num_classes.
+            double squashed = 0.5 * (std::tanh(mean * 10.0) + 1.0);  // [0, 1]
+            int64_t cls = static_cast<int64_t>(squashed * num_classes);
+            if (cls >= num_classes) cls = num_classes - 1;
+            target_data[i] = cls;
         }
         return {inputs, targets};
     }
