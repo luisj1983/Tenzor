@@ -240,19 +240,32 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
 
     push_constants.n_elements = static_cast<uint32_t>(output.numel());
 
-    // Convert value to bits based on dtype
+    // Convert value to bits based on dtype.
+    //
+    // `value` is a double (changed from float earlier so Float64 subnormals
+    // survive the trip through dispatchFull). The 32-bit push-constant
+    // bit-image slot is Float32 / Int32 sized, so we must narrow the double
+    // to the target type BEFORE memcpy'ing — directly memcpy'ing 4 bytes of
+    // the double would copy the lower half of the IEEE-754 double bit
+    // pattern, which for typical values (e.g. 0.5, 1.0, 2.0) is zero. That
+    // bug previously zeroed out Vulkan-side scalar fills used as
+    // normalization factors (IRFFT post-IFFT 0.5 correction, etc.) and
+    // turned the IRFFT round-trip into all zeros.
     if (dtype == DType::Int32) {
         int32_t int_value = static_cast<int32_t>(value);
         std::memcpy(&push_constants.fill_value_bits, &int_value, sizeof(uint32_t));
     } else if (dtype == DType::BFloat16) {
         // BFloat16 is the upper 16 bits of float32 with round-to-nearest-even
+        float float_value = static_cast<float>(value);
         uint32_t float_bits;
-        std::memcpy(&float_bits, &value, sizeof(uint32_t));
+        std::memcpy(&float_bits, &float_value, sizeof(uint32_t));
         uint32_t bf16_bits = (float_bits + 0x7FFFu + ((float_bits >> 16) & 1u)) >> 16;
         push_constants.fill_value_bits = bf16_bits;
     } else {
-        // For float types, use the float bits directly
-        std::memcpy(&push_constants.fill_value_bits, &value, sizeof(uint32_t));
+        // For Float32 (and any other 32-bit float type), narrow to float
+        // first so the bit pattern is the Float32 representation of value.
+        float float_value = static_cast<float>(value);
+        std::memcpy(&push_constants.fill_value_bits, &float_value, sizeof(uint32_t));
     }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

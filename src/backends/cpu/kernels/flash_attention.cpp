@@ -242,6 +242,23 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     // seed/offset are Int64 scalar tensors and are empty when dropout_p == 0.
     //
     // Q, K, V: [batch, num_heads, seq_len, head_dim]
+    //
+    // Callers commonly pass Q/K/V as the output of `permute({0,2,1,3})` on a
+    // freshly reshaped [B, Sq, H, head_dim] projection — that's a strided view,
+    // not a contiguous tensor. The kernel below uses raw pointer arithmetic
+    // (bh_offset = (b*H + h)*L*D) which assumes a contiguous [B,H,L,D] layout,
+    // so non-contiguous inputs silently produce wrong outputs (matched the
+    // GPU FlashAttention path which goes through `reshape(...)` and implicitly
+    // contiguises). Materialise contiguous copies up front to keep the
+    // CPU/GPU SDPA paths in agreement.
+    if (!Q.is_contiguous() || !K.is_contiguous() || !V.is_contiguous()) {
+        return flash_attention_forward(
+            Q.is_contiguous() ? Q : Q.contiguous(),
+            K.is_contiguous() ? K : K.contiguous(),
+            V.is_contiguous() ? V : V.contiguous(),
+            scale, causal, dropout_p, is_training, seed_in);
+    }
+
     auto shape = Q.shape();
     int64_t batch = shape[0];
     int64_t num_heads = shape[1];

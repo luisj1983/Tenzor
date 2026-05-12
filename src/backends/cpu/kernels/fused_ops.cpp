@@ -1405,6 +1405,22 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
     // Q, K, V: (batch_heads, seq_len, head_dim) for 3D (no GQA — H_q == H_kv)
     //          (batch, num_heads, seq_len, head_dim) for 4D (GQA when K/V have
     //          fewer heads than Q; per attention-contract.md kv_h = h_q*H_kv/H_q).
+    //
+    // Callers commonly hand us Q/K/V as the output of `permute({0,2,1,3})` on
+    // freshly reshaped projections — strided views, not contiguous tensors.
+    // attention_online_f32 below reads via raw pointer arithmetic assuming
+    // contiguous [B*H, L, D] / [B, H, L, D] layout, so non-contiguous inputs
+    // silently produce wrong outputs. The cuDNN-SDPA / FlashAttention sibling
+    // paths in MultiheadAttention already contiguise upstream; mirror that so
+    // the CPU fused path agrees with the GPU paths.
+    if (!Q.is_contiguous() || !K.is_contiguous() || !V.is_contiguous()) {
+        return fused_attention_kernel(
+            Q.is_contiguous() ? Q : Q.contiguous(),
+            K.is_contiguous() ? K : K.contiguous(),
+            V.is_contiguous() ? V : V.contiguous(),
+            scale, causal);
+    }
+
     const auto& q_shape = Q.shape();
     const int64_t ndim = Q.ndim();
 

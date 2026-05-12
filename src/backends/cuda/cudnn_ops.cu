@@ -2,6 +2,7 @@
 
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_config.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 #include "cuda_error.hpp"
@@ -513,7 +514,9 @@ auto cudnn_conv2d_forward(
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
         stride, padding, dilation, groups,
-        cudnn_dtype, TensorFormat::NCHW
+        cudnn_dtype, TensorFormat::NCHW,
+        /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
+                                !::tenzor::cuda::matmul::allow_tf32()
     };
 
     cudnnConvolutionFwdAlgo_t algo;
@@ -581,6 +584,19 @@ auto cudnn_conv2d_forward(
 
             bool is_half_precision = (cudnn_dtype == CUDNN_DATA_HALF ||
                                        cudnn_dtype == CUDNN_DATA_BFLOAT16);
+            // When the user has explicitly disabled TF32 (and the input is
+            // Float32) they're asking for the most accurate math available.
+            // Winograd-based convolutions transform inputs/filters into a
+            // different domain before doing the multiply-add chain — that
+            // accumulator order differs from the implicit-GEMM ("im2col +
+            // sgemm") order used by CPU oneDNN, and the resulting per-
+            // element abs diff in the 1e-5 range exceeds tight Float32
+            // parity tolerances. Skip the Winograd variants in that mode
+            // so cuDNN falls back to an implicit-GEMM-family algorithm
+            // whose accumulator order matches what every other backend
+            // does.
+            bool prefer_precise_f32 = (cudnn_dtype == CUDNN_DATA_FLOAT) &&
+                                       !::tenzor::cuda::matmul::allow_tf32();
 
             for (int i = 0; i < returned_algo_count; ++i) {
                 if (perf_results[i].status != CUDNN_STATUS_SUCCESS ||
@@ -597,11 +613,29 @@ auto cudnn_conv2d_forward(
                     }
                 }
 
+                if (prefer_precise_f32) {
+                    cudnnConvolutionFwdAlgo_t candidate = perf_results[i].algo;
+                    if (candidate == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD ||
+                        candidate == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED) {
+                        continue;
+                    }
+                }
+
                 if (perf_results[i].time < best_time) {
                     best_time = perf_results[i].time;
                     algo = perf_results[i].algo;
                     workspace_size = perf_results[i].memory;
                 }
+            }
+            // If we eliminated everything (only Winograd was viable for
+            // this shape), fall back to IMPLICIT_PRECOMP_GEMM which is
+            // available for any Conv2d shape and has the canonical
+            // accumulator order.
+            if (prefer_precise_f32 && best_time == std::numeric_limits<float>::max()) {
+                algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+                CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                    handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
+                    output_desc.get(), algo, &workspace_size));
             }
         }
 
@@ -1081,7 +1115,9 @@ auto cudnn_conv2d_backward(
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
         stride, padding, dilation, groups,
-        cudnn_dtype, TensorFormat::NCHW
+        cudnn_dtype, TensorFormat::NCHW,
+        /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
+                                !::tenzor::cuda::matmul::allow_tf32()
     };
 
     const float alpha = 1.0f;
@@ -1608,7 +1644,9 @@ auto cudnn_conv2d_forward_nhwc(
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
         stride, padding, dilation, groups,
-        cudnn_dtype, TensorFormat::NHWC
+        cudnn_dtype, TensorFormat::NHWC,
+        /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
+                                !::tenzor::cuda::matmul::allow_tf32()
     };
 
     cudnnConvolutionFwdAlgo_t algo;
@@ -1900,7 +1938,9 @@ auto cudnn_conv2d_backward_nhwc(
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
         stride, padding, dilation, groups,
-        cudnn_dtype, TensorFormat::NHWC
+        cudnn_dtype, TensorFormat::NHWC,
+        /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
+                                !::tenzor::cuda::matmul::allow_tf32()
     };
 
     const float alpha = 1.0f;
@@ -2838,53 +2878,52 @@ __global__ void optimized_layer_norm_kernel(
     const int64_t vec_norm_size = norm_size / vec_size;
     const int64_t remainder_start = vec_norm_size * vec_size;
 
-    // ===== First pass: Compute sum and sum_sq simultaneously =====
+    // ===== Pass 1: Compute mean =====
+    // The previous one-pass `E[x²] - E[x]²` variance formula is numerically
+    // unstable: when mean² is close to E[x²], the subtraction cancels and
+    // we lose precision. The stable two-pass `Σ(x - mean)²` form matches
+    // every other LayerNorm backend (CPU oneDNN, ROCm) bit-for-bit at
+    // Float32 precision.
     float sum = 0.0f;
-    float sum_sq = 0.0f;
-
-    // Vectorized portion (float4 loads)
     const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
     for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
         float4 v = batch_in_vec[i];
         sum += v.x + v.y + v.z + v.w;
-        sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
     }
-
-    // Handle remainder elements
     for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
-        float val = batch_in[i];
-        sum += val;
-        sum_sq += val * val;
+        sum += batch_in[i];
     }
-
-    // Reduce across block
     sum = blockReduceSum<BLOCK_SIZE>(sum, shared);
-    __syncthreads();
-    sum_sq = blockReduceSum<BLOCK_SIZE>(sum_sq, shared);
 
-    // Compute mean and inverse standard deviation
-    float mean, inv_std;
+    __shared__ float mean_shared;
     if (threadIdx.x == 0) {
-        mean = sum / static_cast<float>(norm_size);
-        float variance = (sum_sq / static_cast<float>(norm_size)) - (mean * mean);
-        inv_std = rsqrtf(variance + eps);
+        mean_shared = sum / static_cast<float>(norm_size);
+    }
+    __syncthreads();
+    float mean = mean_shared;
+
+    // ===== Pass 2: Compute variance via Σ(x - mean)² =====
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
+        float4 v = batch_in_vec[i];
+        float dx = v.x - mean, dy = v.y - mean, dz = v.z - mean, dw = v.w - mean;
+        var_sum += dx * dx + dy * dy + dz * dz + dw * dw;
+    }
+    for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
+        float diff = batch_in[i] - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = blockReduceSum<BLOCK_SIZE>(var_sum, shared);
+
+    __shared__ float inv_std_shared;
+    if (threadIdx.x == 0) {
+        float variance = var_sum / static_cast<float>(norm_size);
+        inv_std_shared = rsqrtf(variance + eps);
         mean_out[b] = mean;
-        inv_std_out[b] = inv_std;
-    }
-
-    // Broadcast mean and inv_std to all threads
-    mean = __shfl_sync(0xffffffff, mean, 0);
-    inv_std = __shfl_sync(0xffffffff, inv_std, 0);
-    __syncthreads();
-
-    // Read mean and inv_std from thread 0's register (broadcast)
-    if (threadIdx.x == 0) {
-        shared[0] = mean;
-        shared[1] = inv_std;
+        inv_std_out[b] = inv_std_shared;
     }
     __syncthreads();
-    mean = shared[0];
-    inv_std = shared[1];
+    float inv_std = inv_std_shared;
 
     // ===== Second pass: Normalize and apply affine transform =====
     // Vectorized writes
@@ -3188,35 +3227,42 @@ __global__ void layer_norm_fp64_kernel(
 
     __shared__ double shared[BLOCK_SIZE / 32];
 
+    // Pass 1: compute mean.
     double sum = 0.0;
-    double sum_sq = 0.0;
-
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        double val = batch_in[i];
-        sum += val;
-        sum_sq += val * val;
+        sum += batch_in[i];
     }
-
     sum = blockReduceSumDouble<BLOCK_SIZE>(sum, shared);
-    __syncthreads();
-    sum_sq = blockReduceSumDouble<BLOCK_SIZE>(sum_sq, shared);
 
-    double mean, inv_std;
+    __shared__ double mean_shared;
     if (threadIdx.x == 0) {
-        mean = sum / static_cast<double>(norm_size);
-        double variance = (sum_sq / static_cast<double>(norm_size)) - (mean * mean);
-        inv_std = rsqrt(variance + eps);
+        mean_shared = sum / static_cast<double>(norm_size);
+    }
+    __syncthreads();
+    const double mean = mean_shared;
+
+    // Pass 2: compute variance via the numerically stable Σ(x - mean)²
+    // form (Welford-style). The previous one-pass `E[x²] - E[x]²` formula
+    // suffers catastrophic cancellation whenever the mean's magnitude is
+    // comparable to the standard deviation — for Float64 inputs around
+    // N(0,1) this lost ~1e-7 of relative precision and broke parity with
+    // backends that use the stable form (CPU oneDNN, ROCm).
+    double var_sum = 0.0;
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        double diff = batch_in[i] - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = blockReduceSumDouble<BLOCK_SIZE>(var_sum, shared);
+
+    __shared__ double inv_std_shared;
+    if (threadIdx.x == 0) {
+        double variance = var_sum / static_cast<double>(norm_size);
+        inv_std_shared = rsqrt(variance + eps);
         mean_out[b] = mean;
-        inv_std_out[b] = inv_std;
-    }
-
-    if (threadIdx.x == 0) {
-        shared[0] = mean;
-        shared[1] = inv_std;
+        inv_std_out[b] = inv_std_shared;
     }
     __syncthreads();
-    mean = shared[0];
-    inv_std = shared[1];
+    const double inv_std = inv_std_shared;
 
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         double normalized = (batch_in[i] - mean) * inv_std;
@@ -3783,6 +3829,19 @@ auto cudnn_conv3d_forward(
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
         CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
+        // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
+        // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
+        // Float32 parity tests against backends that compute in true FP32
+        // (CPU oneDNN, Vulkan, ROCm). Honour the project-wide
+        // allow_tf32 flag (and the TENZOR_DISABLE_TF32 env var that drives
+        // it) by forcing CUDNN_FMA_MATH (full FP32, no TF32 conversion)
+        // when the user has disabled TF32. When TF32 is allowed we leave
+        // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
+        // pick TF32 for speed.
+        if (!::tenzor::cuda::matmul::allow_tf32()) {
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+        }
     }
     #endif
 
@@ -3917,6 +3976,19 @@ auto cudnn_conv3d_backward(
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
         CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
+        // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
+        // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
+        // Float32 parity tests against backends that compute in true FP32
+        // (CPU oneDNN, Vulkan, ROCm). Honour the project-wide
+        // allow_tf32 flag (and the TENZOR_DISABLE_TF32 env var that drives
+        // it) by forcing CUDNN_FMA_MATH (full FP32, no TF32 conversion)
+        // when the user has disabled TF32. When TF32 is allowed we leave
+        // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
+        // pick TF32 for speed.
+        if (!::tenzor::cuda::matmul::allow_tf32()) {
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+        }
     }
     #endif
 
@@ -4096,6 +4168,19 @@ auto cudnn_conv_transpose3d_forward(
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
         CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
+        // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
+        // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
+        // Float32 parity tests against backends that compute in true FP32
+        // (CPU oneDNN, Vulkan, ROCm). Honour the project-wide
+        // allow_tf32 flag (and the TENZOR_DISABLE_TF32 env var that drives
+        // it) by forcing CUDNN_FMA_MATH (full FP32, no TF32 conversion)
+        // when the user has disabled TF32. When TF32 is allowed we leave
+        // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
+        // pick TF32 for speed.
+        if (!::tenzor::cuda::matmul::allow_tf32()) {
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+        }
     }
     #endif
 
@@ -4231,6 +4316,19 @@ auto cudnn_conv_transpose3d_backward(
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
         CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
+        // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
+        // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
+        // Float32 parity tests against backends that compute in true FP32
+        // (CPU oneDNN, Vulkan, ROCm). Honour the project-wide
+        // allow_tf32 flag (and the TENZOR_DISABLE_TF32 env var that drives
+        // it) by forcing CUDNN_FMA_MATH (full FP32, no TF32 conversion)
+        // when the user has disabled TF32. When TF32 is allowed we leave
+        // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
+        // pick TF32 for speed.
+        if (!::tenzor::cuda::matmul::allow_tf32()) {
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+        }
     }
     #endif
 

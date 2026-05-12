@@ -257,10 +257,40 @@ float erfinv_impl(float x) {
 }
 
 // ----- Sinc -----
+// sin(πx) loses precision for x near a non-zero integer (the argument is
+// near a multiple of π where sin cancels to ~0); GLSL `sin()` on NVIDIA
+// maps to `sin.approx.f32` which has ~32 LSB error globally. To match CPU
+// libm sin (~1 ULP) we:
+//   1. Reduce: sin(πx) = (-1)^round(x) * sin(π*frac), frac = x - round(x)
+//      so |π*frac| ≤ π/2 (well-conditioned domain).
+//   2. Evaluate sin via an explicit Taylor series rather than the built-in
+//      `sin()` — for |t| ≤ π/2 the 8-term series is accurate to ~1 ULP.
+float sin_taylor(float t) {
+    // sin(t) = t - t^3/3! + t^5/5! - t^7/7! + t^9/9! - t^11/11! + t^13/13! - t^15/15!
+    float t2 = t * t;
+    // Horner form on the polynomial in t^2:
+    //   sin(t)/t = 1 - t^2/6 + t^4/120 - t^6/5040 + t^8/362880 - t^10/39916800
+    //            + t^12/6227020800 - t^14/1307674368000
+    float poly = 1.0
+        - t2 * (1.0/6.0
+        - t2 * (1.0/120.0
+        - t2 * (1.0/5040.0
+        - t2 * (1.0/362880.0
+        - t2 * (1.0/39916800.0
+        - t2 * (1.0/6227020800.0
+        - t2 * (1.0/1307674368000.0)))))));
+    return t * poly;
+}
+
 float sinc_impl(float x) {
     if (x == 0.0f) return 1.0f;
-    float px = PI * x;
-    return sin(px) / px;
+    float n = round(x);
+    float frac = x - n;
+    // For |frac| < epsilon, sin(π*frac) ≈ π*frac, so sinc(x) ≈ ±π*frac/(π*x).
+    // The Taylor series handles this correctly without extra logic.
+    float sin_pi_frac = sin_taylor(PI * frac);
+    float sign = (mod(n, 2.0) == 0.0) ? 1.0 : -1.0;
+    return sign * sin_pi_frac / (PI * x);
 }
 
 // ----- I0e: exp(-|x|) * BesselI0(x) -----

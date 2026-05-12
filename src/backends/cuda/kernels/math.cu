@@ -386,19 +386,16 @@ template<> __device__ inline __nv_bfloat16 MulOp::operator()(const __nv_bfloat16
 }
 
 struct DivOp {
+    // Floating-point div delegates to hardware so IEEE 754 semantics hold:
+    // x/0 → ±Inf for x≠0, 0/0 → NaN. The earlier `if (b == 0) return INF;`
+    // shortcut silently turned 0/0 into +Inf and broke NaN_Propagation on
+    // CUDA (test_numerical_stability). Integer specializations below still
+    // need an explicit check because integer div-by-zero is UB in C++.
     template<typename T>
     __device__ T operator()(T a, T b) const {
-        if (b == T(0)) {
-            // For floating-point types, return INFINITY (IEEE 754 semantics).
-            // Integer specializations below return 0 to avoid UB from T(INFINITY).
-            return T(INFINITY);
-        }
         return a / b;
     }
 };
-// Integer specializations: return 0 on division by zero (host-side pre-check
-// normally throws before we get here, but when TENZOR_SKIP_INTEGER_DIV_CHECK
-// is defined the kernel must still produce a defined value, not UB).
 template<> __device__ inline int32_t DivOp::operator()(int32_t a, int32_t b) const {
     if (b == 0) return 0;
     return a / b;
@@ -408,14 +405,13 @@ template<> __device__ inline int64_t DivOp::operator()(int64_t a, int64_t b) con
     return a / b;
 }
 template<> __device__ inline __half DivOp::operator()(const __half a, const __half b) const {
-    float fb = __half2float(b);
-    if (fb == 0.0f) return __float2half(INFINITY);
-    return float2half_sat(__half2float(a) / fb);
+    // FP16 path computes in Float32; hardware Float32 divide produces
+    // NaN for 0/0 and ±Inf for x/0. float2half_sat passes NaN/Inf
+    // through unchanged.
+    return float2half_sat(__half2float(a) / __half2float(b));
 }
 template<> __device__ inline __nv_bfloat16 DivOp::operator()(const __nv_bfloat16 a, const __nv_bfloat16 b) const {
-    float fb = __bfloat162float(b);
-    if (fb == 0.0f) return __float2bfloat16(INFINITY);
-    return float2bfloat16_sat(__bfloat162float(a) / fb);
+    return float2bfloat16_sat(__bfloat162float(a) / __bfloat162float(b));
 }
 
 // Generic in-place broadcast kernel - works for all in-place binary operations
@@ -7717,7 +7713,13 @@ __device__ inline double digamma_dev_f64(double x) {
 __device__ inline float sinc_dev_f32(float x) {
     if (x == 0.0f) return 1.0f;
     float px = 3.14159265358979f * x;
-    return __sinf(px) / px;
+    // Use sinf (1-ULP accurate) rather than __sinf (fast intrinsic).
+    // sinc is numerically delicate near x = ±1, ±2, ... where π·x is a
+    // multiple of π and sin saturates to zero — __sinf's error grows
+    // sharply at those points, producing ~1e-5 cross-backend diffs vs
+    // CPU std::sin. The accuracy/perf trade-off favours accuracy for
+    // special-math ops, which are rarely a hot path.
+    return sinf(px) / px;
 }
 __device__ inline double sinc_dev_f64(double x) {
     if (x == 0.0) return 1.0;

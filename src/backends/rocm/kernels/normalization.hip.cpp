@@ -237,7 +237,15 @@ auto layer_norm_kernel(
     Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
 
-    int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), normalized_size);
+    // Always launch a power-of-2 thread count that is at least a full
+    // wave. warp_reduce_sum() does __shfl_down across all `warpSize` lanes;
+    // if we launch only `min(BLOCK_SIZE, normalized_size)` threads and
+    // normalized_size < warpSize, the inactive lanes return undefined
+    // values from __shfl_down and the reduction sums garbage. Rounding up
+    // to BLOCK_SIZE matches what the equivalent CUDA path does and lets
+    // threads with idx >= normalized_size start with sum=0 (since the
+    // for-loop simply doesn't execute for them).
+    int threads = BLOCK_SIZE;
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {

@@ -51,15 +51,21 @@ void writeF16Element(uint idx, float val) {
 void main() {
     uint out_x = gl_GlobalInvocationID.x;
     uint out_y = gl_GlobalInvocationID.y;
-    uint c = gl_GlobalInvocationID.z;
+    // z packs (batch, channel) — see the Float32 variant.
+    uint bc = gl_GlobalInvocationID.z;
+    uint c = bc % params.channels;
+    uint b = bc / params.channels;
 
     if (out_x >= params.out_width || out_y >= params.out_height ||
-        c >= params.channels) {
+        c >= params.channels || b >= params.batch) {
         return;
     }
 
     float max_val = -1.0 / 0.0; // -infinity
     int max_idx = -1;
+
+    uint input_batch_base  = b * params.channels * params.in_height  * params.in_width;
+    uint output_batch_base = b * params.channels * params.out_height * params.out_width;
 
     for (uint kh = 0; kh < params.kernel_h; kh++) {
         for (uint kw = 0; kw < params.kernel_w; kw++) {
@@ -68,7 +74,8 @@ void main() {
 
             if (in_y >= 0 && in_y < int(params.in_height) &&
                 in_x >= 0 && in_x < int(params.in_width)) {
-                uint input_idx = c * params.in_height * params.in_width +
+                uint input_idx = input_batch_base +
+                                c * params.in_height * params.in_width +
                                 uint(in_y) * params.in_width + uint(in_x);
                 float value = readF16Element(input_idx);
 
@@ -81,7 +88,8 @@ void main() {
     }
 
     // Write output
-    uint output_idx = c * params.out_height * params.out_width +
+    uint output_idx = output_batch_base +
+                     c * params.out_height * params.out_width +
                      out_y * params.out_width + out_x;
     writeF16Element(output_idx, max_val);
     max_indices[output_idx] = max_idx;

@@ -592,9 +592,16 @@ auto VulkanBackend::dispatchFill(const Tensor& input, double value) -> Tensor {
             uint32_t value_bits;
         } push_f16;
         push_f16.n = static_cast<uint32_t>(output.numel());
-        // Convert float32 to float16 bits on CPU
+        // Convert float32 to float16 bits on CPU.
+        //
+        // Narrow value (double) to float FIRST before pulling bits — the
+        // previous direct memcpy of 4 bytes from a double pulled the low
+        // half of the IEEE-754 double layout, which is zero for typical
+        // values and silently produced f16 = 0.0 for every non-special
+        // fill value.
+        float float_value = static_cast<float>(value);
         uint32_t f32_bits;
-        std::memcpy(&f32_bits, &value, sizeof(uint32_t));
+        std::memcpy(&f32_bits, &float_value, sizeof(uint32_t));
         uint32_t sign = (f32_bits >> 16) & 0x8000u;
         int32_t exponent = static_cast<int32_t>((f32_bits >> 23) & 0xFF) - 127 + 15;
         uint32_t mantissa = (f32_bits >> 13) & 0x3FFu;
@@ -634,13 +641,26 @@ auto VulkanBackend::dispatchFill(const Tensor& input, double value) -> Tensor {
 
     push_constants.n = static_cast<uint32_t>(output.numel());
 
-    // Convert value to bits based on dtype
+    // Convert value to bits based on dtype.
+    //
+    // `value` is a double (widened from float so Float64 subnormals survive
+    // — same rationale as dispatchFull). The push-constant slot is 32 bits;
+    // we must narrow to the target type FIRST, then memcpy. Directly
+    // memcpy'ing 4 bytes of the double would copy the low half of the
+    // IEEE-754 double bit pattern, which for most values (0.0, 1.0, 256.0,
+    // 60000.0, …) is zero. That bug previously turned every Vulkan
+    // dispatchFill(<float-tensor>, <non-trivial-value>) into a fill with
+    // 0.0f and produced NaN downstream (e.g. BatchNorm2dMeanVar fills
+    // `normalizer_tensor = batch * H * W = 256` and then divides
+    // temp_sum / normalizer — with the bug normalizer was 0 so the whole
+    // BatchNorm2d output became NaN).
     if (input.dtype() == DType::Int32) {
         int32_t int_value = static_cast<int32_t>(value);
         std::memcpy(&push_constants.value_bits, &int_value, sizeof(uint32_t));
     } else {
-        // For float types, use the float bits directly
-        std::memcpy(&push_constants.value_bits, &value, sizeof(uint32_t));
+        // For float types, narrow to Float32 before copying the bits.
+        float float_value = static_cast<float>(value);
+        std::memcpy(&push_constants.value_bits, &float_value, sizeof(uint32_t));
     }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

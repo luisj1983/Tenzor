@@ -1634,12 +1634,32 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // Full-sequence RNN operations
-    // inputs: [input, W_ih, W_hh, bias, h0, c0] for LSTM
+    // inputs: [input, W_ih, W_hh, bias_ih, bias_hh, h0, c0] for LSTM
+    //   This 7-arg signature matches CPU and Vulkan dispatch (see
+    //   cpu_kernel_registry + vulkan_kernel_registry). The previous comment
+    //   claimed a 6-arg "combined-bias" signature and read inputs[3..5] as
+    //   (bias, h0, c0); against the 7-arg caller in src/nn/layers/lstm.cpp
+    //   that silently took bias_hh in the `h0` slot and h0 in the `c0` slot,
+    //   producing 0.1–0.2 max-abs divergence from CPU in
+    //   AllBackends/NNRNNParity.LSTM_Dropout_Eval. The ROCm kernel still
+    //   takes a single `bias`, so combine bias_ih+bias_hh up front; if only
+    //   one is non-empty use it as-is, and if both are empty pass through.
     // inputs: [input, W_ih, W_hh, bias, h0] for GRU
     table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // bias may be empty tensor if not provided
+        const Tensor& bias_ih = inputs[3];
+        const Tensor& bias_hh = inputs[4];
+        Tensor bias_combined;
+        if (bias_ih.numel() > 0 && bias_hh.numel() > 0) {
+            bias_combined = ::tenzor::add(bias_ih, bias_hh);
+        } else if (bias_ih.numel() > 0) {
+            bias_combined = bias_ih;
+        } else if (bias_hh.numel() > 0) {
+            bias_combined = bias_hh;
+        } else {
+            bias_combined = bias_ih;  // empty
+        }
         return rocm::lstm_forward_kernel(inputs[0], inputs[1], inputs[2],
-                                         inputs[3], inputs[4], inputs[5],
+                                         bias_combined, inputs[5], inputs[6],
                                          get_hip_stream(attrs));
     });
 

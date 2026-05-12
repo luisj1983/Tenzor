@@ -381,18 +381,27 @@ TEST_P(ExtendedParity, RFFT) {
 }
 
 TEST_P(ExtendedParity, IRFFT) {
-    // IRFFT consumes a complex tensor (the half-spectrum) and produces real output.
-    // For length N=16, the RFFT output has 9 complex bins.
-    auto input = randn({9}, DType::Complex64, Device::cpu());
+    // IRFFT requires a Hermitian-symmetric half-spectrum AND the spectrum
+    // representation must match the backend's RFFT convention. Round-trip
+    // RFFT then IRFFT per-backend exposes any normalization mismatch and
+    // exercises the IRFFT path on every backend uniformly.
+    auto real_signal = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        std::vector<Tensor> ins = {inputs[0].contiguous()};
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, int64_t(0));
-        attrs.set(AttrKey::N, int64_t(16));
-        attrs.set(AttrKey::Norm, std::string("backward"));
-        return dispatch<OpId::IRFFT>(ins, attrs)[0];
-    }, {input}, 1e-4f, 1e-6f, "IRFFT");
+        std::vector<Tensor> rfft_ins = {inputs[0].contiguous()};
+        OpAttributes rfft_attrs;
+        rfft_attrs.set(AttrKey::Dim, int64_t(0));
+        rfft_attrs.set(AttrKey::N, int64_t(16));
+        rfft_attrs.set(AttrKey::Norm, std::string("backward"));
+        auto half_spectrum = dispatch<OpId::RFFT>(rfft_ins, rfft_attrs)[0];
+
+        std::vector<Tensor> irfft_ins = {half_spectrum.contiguous()};
+        OpAttributes irfft_attrs;
+        irfft_attrs.set(AttrKey::Dim, int64_t(0));
+        irfft_attrs.set(AttrKey::N, int64_t(16));
+        irfft_attrs.set(AttrKey::Norm, std::string("backward"));
+        return dispatch<OpId::IRFFT>(irfft_ins, irfft_attrs)[0];
+    }, {real_signal}, 1e-4f, 1e-5f, "IRFFT");
 }
 
 // ============================================================================

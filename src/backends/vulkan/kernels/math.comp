@@ -16,6 +16,115 @@ layout(push_constant) uniform PushConstants {
     float param;     // Parameter for operations like pow (exponent), addcmul/addcdiv (value)
 } params;
 
+// ----- High-accuracy Float32 erf -----
+// Port of fdlibm's `erff.c` (single-precision rational approximations).
+// Achieves ~1 ULP accuracy across the full range, vs ~3-5e-7 for the
+// previous A&S 7.1.26 5-coefficient polynomial. Needed so cross-backend
+// parity tests against CPU oneDNN's libm erf pass within tight Float32
+// tolerances (atol ~1e-7).
+//
+// Four sub-ranges:
+//   |x| < 0.84375    — series for erf
+//   |x| < 1.25       — rational on (|x|-1)
+//   |x| < 3.75       — erfc rational, range a
+//   |x| <= ~10       — erfc rational, range b (then erf = 1 - erfc)
+//   |x| > ~3.92      — saturate to ±1
+float erf_f32(float x) {
+    if (isnan(x)) return x;
+    float sgn = (x < 0.0) ? -1.0 : 1.0;
+    float ax = abs(x);
+
+    // Saturation: erf(x) is ±1 to within Float32 for |x| > ~3.92.
+    if (ax >= 3.92) return sgn;
+
+    // Range 1: |x| < 0.84375 — series for erf
+    if (ax < 0.84375) {
+        // Below ~1e-4 the higher-order terms are below Float32 precision;
+        // first-term linearisation is correct.
+        if (ax < 9.7656250e-4) {
+            return sgn * ax * 1.1283791670955126; // 2/sqrt(pi)
+        }
+        float z = ax * ax;
+        // fdlibm float-precision P,Q for |x| < 0.84375
+        float p = 1.28379166e-01 + z * (-3.25042114e-01 + z * (-2.84817555e-02 +
+                  z * (-5.77027030e-03 + z * (-2.37630166e-05))));
+        float q = 1.0 + z * (3.97917223e-01 + z * (6.50222499e-02 +
+                  z * (5.08130628e-03 + z * (1.32494738e-04 + z * (-3.96022827e-06)))));
+        return sgn * (ax + ax * (p / q));
+    }
+
+    // Range 2: 0.84375 <= |x| < 1.25 — rational on (|x| - 1)
+    if (ax < 1.25) {
+        float s = ax - 1.0;
+        float P = -2.36211856e-03 + s * (4.14856118e-01 + s * (-3.72207876e-01 +
+                  s * (3.18346619e-01 + s * (-1.10894694e-01 + s * (3.54783043e-02 +
+                  s * (-2.16637559e-03))))));
+        float Q = 1.0 + s * (1.06420880e-01 + s * (5.40397917e-01 + s * (7.18286544e-02 +
+                  s * (1.26171219e-01 + s * (1.36370839e-02 + s * 1.19844998e-02)))));
+        const float erx = 8.45062911e-01; // erf(1)
+        return sgn * (erx + P / Q);
+    }
+
+    // Range 3 & 4: 1.25 <= |x| < 3.92 — use erfc-rational form.
+    //   erfc(x) ≈ (1/x) * exp(-x*x - 0.5625) * R(1/x²) / S(1/x²)
+    float s = 1.0 / (ax * ax);
+    float R, S;
+    if (ax < 2.857142857) {
+        // Range a: 1.25 <= |x| < ~2.857
+        R = -9.86494403e-03 + s * (-6.93858572e-01 + s * (-1.05586262e+01 +
+            s * (-6.23753324e+01 + s * (-1.62396669e+02 + s * (-1.84605092e+02 +
+            s * (-8.12874355e+01 + s * (-9.81432934e+00)))))));
+        S = 1.0 + s * (1.96512716e+01 + s * (1.37657754e+02 + s * (4.34565877e+02 +
+            s * (6.45387271e+02 + s * (4.29008140e+02 + s * (1.08635005e+02 +
+            s * (6.57024977e+00 + s * (-6.04244152e-02))))))));
+    } else {
+        // Range b: 2.857 <= |x| < 3.92
+        R = -9.86494292e-03 + s * (-7.99283237e-01 + s * (-1.77579549e+01 +
+            s * (-1.60636384e+02 + s * (-6.37566443e+02 + s * (-1.25029579e+03 +
+            s * (-1.05089413e+03 + s * (-3.70319441e+02 + s * (-3.56042851e+01))))))));
+        S = 1.0 + s * (3.03380607e+01 + s * (3.25792510e+02 + s * (1.53672857e+03 +
+            s * (3.19985824e+03 + s * (2.55305040e+03 + s * (4.74528542e+02 +
+            s * (-2.24409525e+01)))))));
+    }
+    // fdlibm: r = exp(-x²-0.5625) * exp(R/S) / x, then erfc = r, erf = 1 - r.
+    // The two-stage exp keeps both factors representable; merging them via
+    // exp((-x²-0.5625) + R/S) is also fine but composes the rounding errors.
+    float erfc_val = exp(-ax * ax - 0.5625) * exp(R / S) / ax;
+    return sgn * (1.0 - erfc_val);
+}
+
+// High-accuracy Float32 erfc = 1 - erf, but for large |x| use the erfc rational
+// directly (avoids cancellation when erf(x) ≈ 1).
+float erfc_f32(float x) {
+    if (isnan(x)) return x;
+    float ax = abs(x);
+    if (ax >= 3.92) return (x < 0.0) ? 2.0 : 0.0;
+    // For |x| < 1.25, 1 - erf(x) has no catastrophic cancellation.
+    if (ax < 1.25) {
+        return 1.0 - erf_f32(x);
+    }
+    // Direct erfc rational for |x| >= 1.25.
+    float s = 1.0 / (ax * ax);
+    float R, S;
+    if (ax < 2.857142857) {
+        R = -9.86494403e-03 + s * (-6.93858572e-01 + s * (-1.05586262e+01 +
+            s * (-6.23753324e+01 + s * (-1.62396669e+02 + s * (-1.84605092e+02 +
+            s * (-8.12874355e+01 + s * (-9.81432934e+00)))))));
+        S = 1.0 + s * (1.96512716e+01 + s * (1.37657754e+02 + s * (4.34565877e+02 +
+            s * (6.45387271e+02 + s * (4.29008140e+02 + s * (1.08635005e+02 +
+            s * (6.57024977e+00 + s * (-6.04244152e-02))))))));
+    } else {
+        R = -9.86494292e-03 + s * (-7.99283237e-01 + s * (-1.77579549e+01 +
+            s * (-1.60636384e+02 + s * (-6.37566443e+02 + s * (-1.25029579e+03 +
+            s * (-1.05089413e+03 + s * (-3.70319441e+02 + s * (-3.56042851e+01))))))));
+        S = 1.0 + s * (3.03380607e+01 + s * (3.25792510e+02 + s * (1.53672857e+03 +
+            s * (3.19985824e+03 + s * (2.55305040e+03 + s * (4.74528542e+02 +
+            s * (-2.24409525e+01)))))));
+    }
+    float erfc_pos = exp(-ax * ax - 0.5625) * exp(R / S) / ax;
+    return (x < 0.0) ? (2.0 - erfc_pos) : erfc_pos;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -176,21 +285,12 @@ void main() {
         case 20: // expm1 (unary)
             result[idx] = floatBitsToUint(exp(val_a) - 1.0);
             break;
-        case 21: { // erf (unary) - Abramowitz & Stegun approximation
-            float x = val_a;
-            float ax = abs(x);
-            float t = 1.0 / (1.0 + 0.3275911 * ax);
-            float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
-            result[idx] = floatBitsToUint(x < 0.0 ? -y : y);
+        case 21: { // erf — fdlibm-style float-precision rational, ~1 ULP
+            result[idx] = floatBitsToUint(erf_f32(val_a));
             break;
         }
-        case 22: { // erfc (unary)
-            float x = val_a;
-            float ax = abs(x);
-            float t = 1.0 / (1.0 + 0.3275911 * ax);
-            float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
-            float erf_val = x < 0.0 ? -y : y;
-            result[idx] = floatBitsToUint(1.0 - erf_val);
+        case 22: { // erfc — fdlibm-style float-precision rational, ~1 ULP
+            result[idx] = floatBitsToUint(erfc_f32(val_a));
             break;
         }
         case 23: // atan2 (binary)

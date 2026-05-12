@@ -24,6 +24,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <ranges>
 #include <string>
@@ -510,12 +511,30 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
         b_cpu = b_cpu.to(DType::Float32);
     }
 
+    // Per-element float diff that mirrors tensors_close: matching NaN counts
+    // as 0 diff, matching same-sign Inf counts as 0 diff (otherwise +Inf-Inf
+    // would silently produce NaN through std::abs and poison std::max).
+    // Mixed Inf / NaN positions report +inf so callers see real divergence.
+    auto float_diff = [](double va, double vb) -> double {
+        if (std::isnan(va) && std::isnan(vb)) return 0.0;
+        if (std::isnan(va) || std::isnan(vb)) {
+            return std::numeric_limits<double>::infinity();
+        }
+        if (std::isinf(va) && std::isinf(vb)) {
+            return ((va > 0) == (vb > 0))
+                ? 0.0
+                : std::numeric_limits<double>::infinity();
+        }
+        return std::abs(va - vb);
+    };
+
     if (a_cpu.dtype() == DType::Float64) {
         const double* a_data = a_cpu.data<double>();
         const double* b_data = b_cpu.data<double>();
         double max_diff = 0.0;
         for (int64_t i = 0; i < a_cpu.numel(); ++i) {
-            max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+            double d = float_diff(a_data[i], b_data[i]);
+            if (d > max_diff) max_diff = d;
         }
         return static_cast<float>(max_diff);
     }
@@ -584,7 +603,8 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
             const float* b_data = reinterpret_cast<const float*>(b_cpu.data_ptr());
             float max_diff = 0.0f;
             for (int64_t i = 0; i < n; ++i) {
-                max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+                double d = float_diff(a_data[i], b_data[i]);
+                if (d > max_diff) max_diff = static_cast<float>(d);
             }
             return max_diff;
         } else {
@@ -592,7 +612,8 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
             const double* b_data = reinterpret_cast<const double*>(b_cpu.data_ptr());
             double max_diff = 0.0;
             for (int64_t i = 0; i < n; ++i) {
-                max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+                double d = float_diff(a_data[i], b_data[i]);
+                if (d > max_diff) max_diff = d;
             }
             return static_cast<float>(max_diff);
         }
@@ -603,7 +624,8 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
     const float* b_data = b_cpu.data<float>();
     float max_diff = 0.0f;
     for (int64_t i = 0; i < a_cpu.numel(); ++i) {
-        max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+        double d = float_diff(a_data[i], b_data[i]);
+        if (d > max_diff) max_diff = static_cast<float>(d);
     }
     return max_diff;
 }

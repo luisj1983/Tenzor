@@ -45,6 +45,7 @@ TEST_P(NNTransformerParity, TransformerEncoderLayer) {
             auto input_dev = input.to(backends[i]);
             auto output = layer_dev.forward(Variable(input_dev, false), Tensor{}, Tensor{}).tensor();
             backends[i].synchronize();
+
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         }
     } catch (...) {

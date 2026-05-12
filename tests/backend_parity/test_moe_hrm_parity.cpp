@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/moe.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
+#include <unordered_map>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
@@ -103,6 +104,22 @@ TEST_P(MoEHRMParity, HRM_Forward) {
             auto dev_params = hrm_dev.parameters();
             for (size_t p = 0; p < params.size(); ++p) {
                 dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            // HRM registers h_init_state / l_init_state as non-trainable
+            // buffers (random truncated-normal init kept fixed during
+            // training). They are NOT in parameters() and differ between
+            // fresh HRM(cfg) constructions, so the parameter-clone loop
+            // above doesn't sync them — copy buffers too, by name, so the
+            // CPU reference and the dev instance share initial state.
+            auto cpu_bufs = hrm_cpu.named_buffers();
+            auto dev_bufs = hrm_dev.named_buffers();
+            std::unordered_map<std::string, std::shared_ptr<Variable>> dev_buf_map;
+            for (auto& [name, var] : dev_bufs) dev_buf_map[name] = var;
+            for (auto& [name, var] : cpu_bufs) {
+                auto it = dev_buf_map.find(name);
+                if (it != dev_buf_map.end()) {
+                    it->second->tensor() = var->tensor().clone();
+                }
             }
             hrm_dev.to(backends[i]);
             auto input_dev = input.to(backends[i]);

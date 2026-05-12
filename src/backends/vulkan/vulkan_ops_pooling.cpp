@@ -101,14 +101,20 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Dispatch with (16, 16) local size shader - x = out_width, y = out_height, z = channels
-    // Process each batch separately
-    for (int64_t b = 0; b < batch; ++b) {
-        uint32_t workgroups_x = (out_width + 15) / 16;
-        uint32_t workgroups_y = (out_height + 15) / 16;
-        uint32_t workgroups_z = static_cast<uint32_t>(channels);
-        vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
-    }
+    // Dispatch with (16, 16) local size shader.
+    //   x = out_width chunks
+    //   y = out_height chunks
+    //   z = batch * channels (the shader decodes z back into (b, c))
+    // The previous code looped over batch on the host and issued
+    // `vkCmdDispatch` per batch, but every iteration used the SAME
+    // descriptor set bindings (no offset), so iterations 1..N-1 overwrote
+    // batch 0's output region and batches 1..N-1 were left uninitialized
+    // — silent batch>1 correctness bug. A single packed-z dispatch with
+    // the shader doing the (b, c) split is the right model.
+    uint32_t workgroups_x = static_cast<uint32_t>((out_width + 15) / 16);
+    uint32_t workgroups_y = static_cast<uint32_t>((out_height + 15) / 16);
+    uint32_t workgroups_z = static_cast<uint32_t>(batch * channels);
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
     // Add memory barrier
     insertComputeOnlyBarrier(cmdBuffer);

@@ -588,18 +588,32 @@ auto layer_norm(const Variable& input,
     // inputs[1] (weight) and inputs[2] (bias) unconditionally. Synthesize an
     // identity affine here when weight/bias are absent so the inputs span
     // always has 3 elements regardless of which backend dispatches.
-    std::vector<Tensor> inputs_vec = {input.tensor()};
+    //
+    // Every FusedLayerNorm kernel reads the input with shape-derived flat
+    // offsets, so it requires contiguous storage. Materialize a contiguous
+    // copy when the caller passed a non-contig view (slice / permute /
+    // narrow / transpose). The LayerNorm Module's forward_impl does the
+    // same — keep this functional entry-point consistent.
+    Tensor input_tensor = input.tensor();
+    if (!input_tensor.is_contiguous()) {
+        input_tensor = input_tensor.contiguous();
+    }
+    std::vector<Tensor> inputs_vec = {input_tensor};
     if (weight.has_value()) {
-        inputs_vec.push_back(weight->tensor());
+        Tensor w = weight->tensor();
+        if (!w.is_contiguous()) w = w.contiguous();
+        inputs_vec.push_back(w);
     } else {
         inputs_vec.push_back(::tenzor::ones(
-            normalized_shape, input.tensor().dtype(), input.tensor().device()));
+            normalized_shape, input_tensor.dtype(), input_tensor.device()));
     }
     if (bias.has_value()) {
-        inputs_vec.push_back(bias->tensor());
+        Tensor b = bias->tensor();
+        if (!b.is_contiguous()) b = b.contiguous();
+        inputs_vec.push_back(b);
     } else {
         inputs_vec.push_back(::tenzor::zeros(
-            normalized_shape, input.tensor().dtype(), input.tensor().device()));
+            normalized_shape, input_tensor.dtype(), input_tensor.device()));
     }
 
     // Build normalized_shape as comma-separated string attribute

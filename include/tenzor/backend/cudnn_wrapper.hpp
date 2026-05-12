@@ -154,6 +154,11 @@ struct Conv2dCacheKey {
     int64_t groups;
     cudnnDataType_t dtype;
     TensorFormat format;  // NCHW or NHWC
+    // Track whether the cached algo was picked under the "prefer precise
+    // FP32" policy (TF32 disabled). A Winograd algo cached when TF32 was
+    // allowed must not be reused when the caller has since disabled TF32,
+    // and vice versa.
+    bool prefer_precise_f32 = false;
 
     bool operator==(const Conv2dCacheKey& other) const {
         return batch == other.batch &&
@@ -168,7 +173,8 @@ struct Conv2dCacheKey {
                dilation == other.dilation &&
                groups == other.groups &&
                dtype == other.dtype &&
-               format == other.format;
+               format == other.format &&
+               prefer_precise_f32 == other.prefer_precise_f32;
     }
 };
 
@@ -193,6 +199,7 @@ struct Conv2dCacheKeyHash {
         hash_combine(k.groups);
         hash_combine(static_cast<int>(k.dtype));
         hash_combine(static_cast<int>(k.format));
+        hash_combine(static_cast<int>(k.prefer_precise_f32));
         return h;
     }
 };

@@ -283,17 +283,28 @@ struct MulOp {
 };
 
 /**
- * @brief Division operation functor with zero-division handling
+ * @brief Division operation functor.
+ *
+ * Floating-point div delegates to hardware so IEEE 754 semantics hold:
+ * x/0 → ±Inf for x ≠ 0, and 0/0 → NaN. The previous
+ * `if (b == 0) return huge_valf();` shortcut turned 0/0 into +Inf and broke
+ * NaN_Propagation on ROCm (test_numerical_stability). Integer specializations
+ * below still need an explicit check because integer div-by-zero is UB in C++.
  */
 struct DivOp {
     template<typename T>
     __device__ T operator()(T a, T b) const {
-        if (b == T(0)) {
-            return T(__builtin_huge_valf());
-        }
         return a / b;
     }
 };
+template<> __device__ inline int32_t DivOp::operator()(int32_t a, int32_t b) const {
+    if (b == 0) return 0;
+    return a / b;
+}
+template<> __device__ inline int64_t DivOp::operator()(int64_t a, int64_t b) const {
+    if (b == 0) return 0;
+    return a / b;
+}
 
 /**
  * @brief Element-wise subtraction kernel (same shape tensors)
@@ -323,13 +334,10 @@ __global__ void mul_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  */
 template<typename T>
 __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
+    // Hardware float divide gives IEEE 754 semantics (0/0 → NaN, x/0 → ±Inf
+    // for x ≠ 0). The previous explicit branch silently mapped 0/0 to +Inf.
     HIP_KERNEL_LOOP(idx, n) {
-        T divisor = b[idx];
-        if (divisor == T(0)) {
-            c[idx] = __builtin_huge_valf();  // Handle division by zero
-        } else {
-            c[idx] = a[idx] / divisor;
-        }
+        c[idx] = a[idx] / b[idx];
     }
 }
 
@@ -338,14 +346,10 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  * Uses float conversion for correct division and infinity handling
  */
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
+    // Float divide returns NaN for 0/0 and ±Inf for x/0 with x ≠ 0 per IEEE 754.
+    // __float2half preserves NaN/Inf through conversion.
     HIP_KERNEL_LOOP(idx, n) {
-        float divisor = __half2float(b[idx]);
-        if (divisor == 0.0f) {
-            c[idx] = __float2half(__builtin_huge_valf());
-        } else {
-            float result = __half2float(a[idx]) / divisor;
-            c[idx] = __float2half(result);
-        }
+        c[idx] = __float2half(__half2float(a[idx]) / __half2float(b[idx]));
     }
 }
 
@@ -371,13 +375,8 @@ __global__ void broadcast_div_kernel_f16(
             idx_b += coord * strides_b[i];
         }
 
-        float divisor = __half2float(b[idx_b]);
-        if (divisor == 0.0f) {
-            c[out_idx] = __float2half(__builtin_huge_valf());
-        } else {
-            float result = __half2float(a[idx_a]) / divisor;
-            c[out_idx] = __float2half(result);
-        }
+        // IEEE 754 div semantics: 0/0 → NaN, x/0 → ±Inf for x ≠ 0.
+        c[out_idx] = __float2half(__half2float(a[idx_a]) / __half2float(b[idx_b]));
     }
 }
 
@@ -386,14 +385,9 @@ __global__ void broadcast_div_kernel_f16(
  * Uses float conversion for correct division and infinity handling
  */
 __global__ void div_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* c, int64_t n) {
+    // IEEE 754 hardware divide: 0/0 → NaN, x/0 → ±Inf for x ≠ 0.
     HIP_KERNEL_LOOP(idx, n) {
-        float divisor = static_cast<float>(b[idx]);
-        if (divisor == 0.0f) {
-            c[idx] = hip_bfloat16(__builtin_huge_valf());
-        } else {
-            float result = static_cast<float>(a[idx]) / divisor;
-            c[idx] = hip_bfloat16(result);
-        }
+        c[idx] = hip_bfloat16(static_cast<float>(a[idx]) / static_cast<float>(b[idx]));
     }
 }
 
@@ -417,11 +411,9 @@ __global__ void broadcast_div_kernel_bf16(
             idx_b += coord * strides_b[i];
         }
 
-        float divisor = static_cast<float>(b[idx_b]);
-        if (divisor == 0.0f) {
-            c[out_idx] = hip_bfloat16(__builtin_huge_valf());
-        } else {
-            float result = static_cast<float>(a[idx_a]) / divisor;
+        // IEEE 754 div semantics handled by hardware (0/0 → NaN, x/0 → ±Inf).
+        {
+            float result = static_cast<float>(a[idx_a]) / static_cast<float>(b[idx_b]);
             c[out_idx] = hip_bfloat16(result);
         }
     }

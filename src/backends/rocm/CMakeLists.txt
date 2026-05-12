@@ -87,6 +87,15 @@ set_source_files_properties(kernels/sort.hip.cpp kernels/nms.hip.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math"
 )
 
+# Disable -ffast-math for normalization kernels: -ffp-contract=fast and the
+# approximate rsqrt implied by -ffast-math break Float64 LayerNorm/BatchNorm
+# parity (observed 1e-7 abs diff vs CPU/CUDA/Vulkan/OneAPI). The performance
+# cost of strict IEEE math here is negligible since these ops are not on the
+# critical training path of typical workloads.
+set_source_files_properties(kernels/normalization.hip.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math"
+)
+
 # Create HIP kernels library (static, internal use only)
 add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 

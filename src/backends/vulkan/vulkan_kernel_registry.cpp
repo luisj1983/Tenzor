@@ -1386,6 +1386,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Phase 11.3: RNN Operations
     // ========================================================================
+    // Vulkan LSTMForward goes through the fused per-timestep dispatcher in
+    // vulkan_ops_rnn.cpp + the lstm_cell.comp shader. The shader now uses
+    // an exp()-based sigmoid/tanh formulation (precise float diff ≈ 2 ULP
+    // vs std::tanh on tested NVIDIA / RADV stacks) instead of GLSL's
+    // driver-supplied tanh approximation. Combined with the matmul shader's
+    // FP32 accumulation, this keeps multi-step LSTM drift under ~1e-3 for
+    // typical normal-distributed inputs and roughly an order of magnitude
+    // larger for inputs that drive the sigmoid/tanh midrange. See
+    // NNRNNParity.LSTM_Dropout_Eval for the realistic tolerance.
     table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return get_vulkan_backend()->dispatchLSTMForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6]);

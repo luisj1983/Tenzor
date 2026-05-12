@@ -219,7 +219,21 @@ auto SliceBackward::forward(std::vector<Variable> inputs) -> std::vector<Variabl
 }
 
 auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad_output = grad_outputs[0];
+    const auto& grad_output_raw = grad_outputs[0];
+
+    // grad_output here often arrives as a non-contiguous strided view —
+    // typically from CatBackward, which returns slice views of its grad to
+    // distribute back to each cat input. The CUDA / ROCm / OneAPI / Vulkan
+    // scatter kernels read `src` with raw pointer arithmetic and silently
+    // ignore strides, so a non-contig src lands the wrong element values at
+    // each scatter index. The defect surfaces only in chained slice+cat
+    // graphs (e.g. CircularPad2d/3d) where grad_output is a slice along a
+    // non-last dim; 1D / single-axis paths are accidentally fine because
+    // the view's stride matches contiguous layout there. Materialise a
+    // contiguous copy up front so every backend's scatter sees stride-1
+    // src memory. (See feedback_stride_bugs.md for the family.)
+    auto grad_output = grad_output_raw.is_contiguous() ? grad_output_raw
+                                                       : grad_output_raw.contiguous();
 
     // Create zero gradient tensor with original input shape
     auto grad_input = zeros(input_shape_, grad_output.dtype(), grad_output.device());

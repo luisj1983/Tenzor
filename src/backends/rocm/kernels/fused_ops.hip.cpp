@@ -698,7 +698,10 @@ __global__ void fused_layer_norm_kernel(
     }
 
     T variance = shared_data[0] / norm_size;
-    T inv_std = rsqrtf(variance + eps);
+    // Use the type-overloaded `rsqrt` — `rsqrtf` is Float32-only and would
+    // silently downcast variance+eps to Float32 when T=double, dropping
+    // ~7 decimal digits of precision and breaking Float64 parity.
+    T inv_std = rsqrt(variance + eps);
 
     // Normalize and scale
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -714,8 +717,12 @@ auto fused_layer_norm_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back. Float64
+    // computes natively in double precision below — previously Float64 was
+    // also routed through Float32, which silently dropped the input to
+    // single precision and produced ~1e-7 absolute error vs CPU/CUDA's
+    // native-FP64 LayerNorm.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
@@ -746,10 +753,23 @@ auto fused_layer_norm_hip(
             output.data<float>(),
             batch_size,
             norm_size,
-            eps
+            static_cast<float>(eps)
+        );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_layer_norm_kernel<double, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            input.data<double>(),
+            weight.data<double>(),
+            bias.data<double>(),
+            output.data<double>(),
+            batch_size,
+            norm_size,
+            static_cast<double>(eps)
         );
     } else {
-        throw std::runtime_error("fused_layer_norm_hip: Only Float32 supported");
+        throw std::runtime_error("fused_layer_norm_hip: unsupported dtype " +
+                                 std::string(dtype_name(input.dtype())));
     }
 
     HIP_CHECK(hipGetLastError());

@@ -1910,7 +1910,7 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     // For norm=="forward": target = 1, applied = 2/N, correction = N/2
 
     if (std::abs(correction - 1.0) > 1e-15) {
-        auto scale_tensor = dispatchFull({1}, static_cast<float>(correction), real_dtype);
+        auto scale_tensor = dispatchFull({1}, correction, real_dtype);
         output = dispatchBinaryOp("mul", output,
             dispatchExpand(scale_tensor, std::vector<int64_t>(out_shape.begin(), out_shape.end())));
     }

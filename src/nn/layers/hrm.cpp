@@ -702,7 +702,12 @@ HRM::HRM(const HRMConfig& config) : config_(config) {
     l_init_proj_ = std::make_shared<Linear>(config.d_model, config.d_model, true);
 
     // Initialize fixed hidden state templates with truncated normal
-    // These are kept fixed during training (as per HRM paper)
+    // These are kept fixed during training (as per HRM paper). Register as
+    // buffers so they're surfaced through named_buffers() / state-dict and
+    // get moved to the right device by Module::to(...) — without this,
+    // backend-parity tests that copy only `parameters()` see different random
+    // h/l_init values on each fresh HRM(cfg) instance, producing huge
+    // CPU-vs-GPU divergence in HRM forward output.
     h_init_state_ = zeros({1, 1, config.d_model}, DType::Float32, Device::cpu());
     l_init_state_ = zeros({1, 1, config.d_model}, DType::Float32, Device::cpu());
 
@@ -712,6 +717,9 @@ HRM::HRM(const HRMConfig& config) : config_(config) {
         truncated_normal_init(l_init_state_, 0.0, config.init_std,
                               config.truncated_a, config.truncated_b);
     }
+
+    register_buffer("h_init_state", Variable(h_init_state_, false));
+    register_buffer("l_init_state", Variable(l_init_state_, false));
 
     // Output layers
     output_norm_ = std::make_shared<RMSNorm>(config.d_model);
@@ -803,13 +811,20 @@ auto HRM::init_states(const Variable& x)
     int64_t seq_len = shape[1];
     auto device = x.tensor().device();
 
-    // Broadcast fixed initial states to match input batch/seq dimensions
-    // h_init_state_ and l_init_state_ are (1, 1, d_model)
-    // We manually broadcast by repeating the tensor
-
-    // Create expanded tensors by tiling
-    auto h_device = h_init_state_.to(device);
-    auto l_device = l_init_state_.to(device);
+    // Broadcast fixed initial states to match input batch/seq dimensions.
+    // h_init_state_ / l_init_state_ are registered as buffers so they get
+    // moved by Module::to(device); fetch the buffer's current Tensor here
+    // instead of using the (possibly stale-device) cpp members. The buffer's
+    // tensor is also what backend-parity tests copy from the CPU reference
+    // model, so this is the single source of truth for the random init.
+    auto h_buf = this->get_buffer("h_init_state");
+    auto l_buf = this->get_buffer("l_init_state");
+    auto h_device = (h_buf && h_buf->tensor().device() == device)
+        ? h_buf->tensor()
+        : (h_buf ? h_buf->tensor().to(device) : h_init_state_.to(device));
+    auto l_device = (l_buf && l_buf->tensor().device() == device)
+        ? l_buf->tensor()
+        : (l_buf ? l_buf->tensor().to(device) : l_init_state_.to(device));
 
     // Broadcast via repeat: (1, 1, d_model) -> (batch, seq_len, d_model)
     auto h_expanded = tenzor::repeat(h_device, {batch, seq_len, 1});

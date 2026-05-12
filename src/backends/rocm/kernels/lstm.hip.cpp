@@ -791,9 +791,20 @@ auto lstm_forward_kernel(
     hipStream_t stream) -> std::vector<Tensor> {
 
 #ifdef USE_MIOPEN
-    // Use MIOpen for Float32 LSTM forward (optimized fused kernels)
+    // MIOpen LSTM disabled by default: lstm_forward_miopen below packs W_ih
+    // and W_hh as single 4H-row chunks, but MIOpen's RNN API expects 4
+    // separate per-gate weight matrices in MIOpen's own gate order plus 8
+    // bias vectors (ih + hh per gate). The mismatched layout silently
+    // produces ~0.1–0.2 max-abs divergence vs CPU in
+    // AllBackends/NNRNNParity.LSTM_Dropout_Eval. Fall through to the
+    // rocBLAS gemm + lstm_cell_forward_fused path below, which computes
+    // the same gate math as CPU and CUDA. Opt in with
+    // TENZOR_USE_MIOPEN_LSTM=1 once the packing is fixed.
     if (input.dtype() == DType::Float32) {
-        return lstm_forward_miopen(input, W_ih, W_hh, bias, h0, c0, stream);
+        const char* opt_in = std::getenv("TENZOR_USE_MIOPEN_LSTM");
+        if (opt_in && opt_in[0] == '1') {
+            return lstm_forward_miopen(input, W_ih, W_hh, bias, h0, c0, stream);
+        }
     }
 #endif
 
