@@ -1,0 +1,372 @@
+{
+  "tests": 60,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/NanStatsParity",
+      "tests": 60,
+      "testsuite": [
+        {
+          "name": "NanVar_ReduceAll\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 44
+        },
+        {
+          "name": "NanVar_ReduceAll\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 44
+        },
+        {
+          "name": "NanVar_ReduceAll\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 44
+        },
+        {
+          "name": "NanVar_ReduceAll\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 44
+        },
+        {
+          "name": "NanVar_ReduceAll\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 44
+        },
+        {
+          "name": "NanVar_AlongDim\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 51
+        },
+        {
+          "name": "NanVar_AlongDim\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 51
+        },
+        {
+          "name": "NanVar_AlongDim\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 51
+        },
+        {
+          "name": "NanVar_AlongDim\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 51
+        },
+        {
+          "name": "NanVar_AlongDim\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 51
+        },
+        {
+          "name": "NanStd_ReduceAll\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 65
+        },
+        {
+          "name": "NanStd_ReduceAll\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 65
+        },
+        {
+          "name": "NanStd_ReduceAll\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 65
+        },
+        {
+          "name": "NanStd_ReduceAll\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 65
+        },
+        {
+          "name": "NanStd_ReduceAll\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 65
+        },
+        {
+          "name": "Nanmedian_All\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 76
+        },
+        {
+          "name": "Nanmedian_All\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 76
+        },
+        {
+          "name": "Nanmedian_All\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 76
+        },
+        {
+          "name": "Nanmedian_All\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 76
+        },
+        {
+          "name": "Nanmedian_All\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 76
+        },
+        {
+          "name": "Quantile_AllValues\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 97
+        },
+        {
+          "name": "Quantile_AllValues\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 97
+        },
+        {
+          "name": "Quantile_AllValues\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 97
+        },
+        {
+          "name": "Quantile_AllValues\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 97
+        },
+        {
+          "name": "Quantile_AllValues\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 97
+        },
+        {
+          "name": "Quantile_AlongDim_Median\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 104
+        },
+        {
+          "name": "Quantile_AlongDim_Median\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 104
+        },
+        {
+          "name": "Quantile_AlongDim_Median\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 104
+        },
+        {
+          "name": "Quantile_AlongDim_Median\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 104
+        },
+        {
+          "name": "Quantile_AlongDim_Median\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 104
+        },
+        {
+          "name": "Nanquantile_WithNaNs\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 111
+        },
+        {
+          "name": "Nanquantile_WithNaNs\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 111
+        },
+        {
+          "name": "Nanquantile_WithNaNs\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 111
+        },
+        {
+          "name": "Nanquantile_WithNaNs\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 111
+        },
+        {
+          "name": "Nanquantile_WithNaNs\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 111
+        },
+        {
+          "name": "Histc_FixedRange\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 131
+        },
+        {
+          "name": "Histc_FixedRange\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 131
+        },
+        {
+          "name": "Histc_FixedRange\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 131
+        },
+        {
+          "name": "Histc_FixedRange\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 131
+        },
+        {
+          "name": "Histc_FixedRange\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 131
+        },
+        {
+          "name": "Kthvalue_Values_Dim1\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 142
+        },
+        {
+          "name": "Kthvalue_Values_Dim1\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 142
+        },
+        {
+          "name": "Kthvalue_Values_Dim1\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 142
+        },
+        {
+          "name": "Kthvalue_Values_Dim1\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 142
+        },
+        {
+          "name": "Kthvalue_Values_Dim1\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 142
+        },
+        {
+          "name": "UniqueConsecutive_Default\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 153
+        },
+        {
+          "name": "UniqueConsecutive_Default\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 153
+        },
+        {
+          "name": "UniqueConsecutive_Default\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 153
+        },
+        {
+          "name": "UniqueConsecutive_Default\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 153
+        },
+        {
+          "name": "UniqueConsecutive_Default\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 153
+        },
+        {
+          "name": "Cov_2DMatrix\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 169
+        },
+        {
+          "name": "Cov_2DMatrix\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 169
+        },
+        {
+          "name": "Cov_2DMatrix\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 169
+        },
+        {
+          "name": "Cov_2DMatrix\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 169
+        },
+        {
+          "name": "Cov_2DMatrix\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 169
+        },
+        {
+          "name": "Corrcoef_2DMatrix\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 176
+        },
+        {
+          "name": "Corrcoef_2DMatrix\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 176
+        },
+        {
+          "name": "Corrcoef_2DMatrix\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 176
+        },
+        {
+          "name": "Corrcoef_2DMatrix\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 176
+        },
+        {
+          "name": "Corrcoef_2DMatrix\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backend_parity\/test_nanstats_parity.cpp",
+          "line": 176
+        }
+      ]
+    }
+  ]
+}

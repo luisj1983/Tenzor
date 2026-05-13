@@ -1,471 +1,160 @@
 {
-  "tests": 76,
+  "tests": 25,
   "name": "AllTests",
   "testsuites": [
     {
-      "name": "ZeROStage1cpuDTypeTest",
-      "tests": 1,
+      "name": "AllBackends\/SyncBatchNormTest",
+      "tests": 25,
       "testsuite": [
         {
-          "name": "ElementLevel_MasterFP32_FP16Param",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 132
-        }
-      ]
-    },
-    {
-      "name": "MultiBackendDType\/ZeROStage1MultiDTypeTest",
-      "tests": 75,
-      "testsuite": [
-        {
-          "name": "Construction\/cpu_Float32",
-          "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/cpu_Float64",
-          "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/cpu_Float16",
-          "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/cuda0_Float32",
-          "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/cuda0_Float64",
-          "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/cuda0_Float16",
-          "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/vulkan0_Float32",
-          "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/vulkan0_Float64",
-          "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/vulkan0_Float16",
-          "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/oneapi0_Float32",
-          "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/oneapi0_Float64",
-          "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/oneapi0_Float16",
-          "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/rocm0_Float32",
-          "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/rocm0_Float64",
-          "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "Construction\/rocm0_Float16",
-          "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 52
-        },
-        {
-          "name": "PartitionCount\/cpu_Float32",
-          "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/cpu_Float64",
-          "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/cpu_Float16",
-          "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/cuda0_Float32",
-          "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/cuda0_Float64",
-          "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/cuda0_Float16",
-          "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/vulkan0_Float32",
-          "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/vulkan0_Float64",
-          "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/vulkan0_Float16",
-          "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/oneapi0_Float32",
-          "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/oneapi0_Float64",
-          "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/oneapi0_Float16",
-          "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/rocm0_Float32",
-          "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/rocm0_Float64",
-          "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "PartitionCount\/rocm0_Float16",
-          "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 61
-        },
-        {
-          "name": "Step\/cpu_Float32",
-          "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/cpu_Float64",
-          "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/cpu_Float16",
-          "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/cuda0_Float32",
-          "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/cuda0_Float64",
-          "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/cuda0_Float16",
-          "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/vulkan0_Float32",
-          "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/vulkan0_Float64",
-          "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/vulkan0_Float16",
-          "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/oneapi0_Float32",
-          "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/oneapi0_Float64",
-          "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/oneapi0_Float16",
-          "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/rocm0_Float32",
-          "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/rocm0_Float64",
-          "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "Step\/rocm0_Float16",
-          "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 70
-        },
-        {
-          "name": "ZeroGrad\/cpu_Float32",
-          "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
-        },
-        {
-          "name": "ZeroGrad\/cpu_Float64",
-          "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
-        },
-        {
-          "name": "ZeroGrad\/cpu_Float16",
-          "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
-        },
-        {
-          "name": "ZeroGrad\/cuda0_Float32",
-          "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
-        },
-        {
-          "name": "ZeroGrad\/cuda0_Float64",
-          "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
-        },
-        {
-          "name": "ZeroGrad\/cuda0_Float16",
-          "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "BasicForward\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 45
         },
         {
-          "name": "ZeroGrad\/vulkan0_Float32",
-          "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "BasicForward\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 45
         },
         {
-          "name": "ZeroGrad\/vulkan0_Float64",
-          "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "BasicForward\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 45
         },
         {
-          "name": "ZeroGrad\/vulkan0_Float16",
-          "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "BasicForward\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 45
         },
         {
-          "name": "ZeroGrad\/oneapi0_Float32",
-          "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "BasicForward\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 45
         },
         {
-          "name": "ZeroGrad\/oneapi0_Float64",
-          "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "RunningStats\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 75
         },
         {
-          "name": "ZeroGrad\/oneapi0_Float16",
-          "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "RunningStats\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 75
         },
         {
-          "name": "ZeroGrad\/rocm0_Float32",
-          "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "RunningStats\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 75
         },
         {
-          "name": "ZeroGrad\/rocm0_Float64",
-          "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "RunningStats\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 75
         },
         {
-          "name": "ZeroGrad\/rocm0_Float16",
-          "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 83
+          "name": "RunningStats\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 75
         },
         {
-          "name": "WithSGD\/cpu_Float32",
-          "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "EvalMode\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 111
         },
         {
-          "name": "WithSGD\/cpu_Float64",
-          "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "EvalMode\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 111
         },
         {
-          "name": "WithSGD\/cpu_Float16",
-          "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "EvalMode\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 111
         },
         {
-          "name": "WithSGD\/cuda0_Float32",
-          "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "EvalMode\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 111
         },
         {
-          "name": "WithSGD\/cuda0_Float64",
-          "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "EvalMode\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 111
         },
         {
-          "name": "WithSGD\/cuda0_Float16",
-          "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "GradientFlow\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 147
         },
         {
-          "name": "WithSGD\/vulkan0_Float32",
-          "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "GradientFlow\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 147
         },
         {
-          "name": "WithSGD\/vulkan0_Float64",
-          "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "GradientFlow\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 147
         },
         {
-          "name": "WithSGD\/vulkan0_Float16",
-          "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "GradientFlow\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 147
         },
         {
-          "name": "WithSGD\/oneapi0_Float32",
-          "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "GradientFlow\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 147
         },
         {
-          "name": "WithSGD\/oneapi0_Float64",
-          "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "VarianceStableWithLargeMean\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 203
         },
         {
-          "name": "WithSGD\/oneapi0_Float16",
-          "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "VarianceStableWithLargeMean\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 203
         },
         {
-          "name": "WithSGD\/rocm0_Float32",
-          "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "VarianceStableWithLargeMean\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 203
         },
         {
-          "name": "WithSGD\/rocm0_Float64",
-          "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "VarianceStableWithLargeMean\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 203
         },
         {
-          "name": "WithSGD\/rocm0_Float16",
-          "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
-          "line": 95
+          "name": "VarianceStableWithLargeMean\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_sync_batchnorm.cpp",
+          "line": 203
         }
       ]
     }
