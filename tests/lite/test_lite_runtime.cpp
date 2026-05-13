@@ -4,10 +4,41 @@
  */
 
 #include <gtest/gtest.h>
+#include <tenzor/lite/lite_graph.hpp>
+#include <tenzor/lite/model_format.hpp>
 #include <tenzor/lite/runtime.hpp>
 #include <cstdint>
 
+namespace tenzor { void initialize(); }
+
+namespace {
+class TenzorLiteEnv : public ::testing::Environment {
+public:
+    void SetUp() override { tenzor::initialize(); }
+};
+[[maybe_unused]] auto* g_lite_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorLiteEnv);
+}
+
 using namespace tenzor::lite;
+
+namespace {
+
+// Helper: build a single-op graph that adds two scalar/vector inputs.
+// inputs[0] = tensor_id 0, inputs[1] = tensor_id 1, output = tensor_id 2.
+auto build_add_graph() -> LiteGraph {
+    LiteGraph g;
+    LiteNode n;
+    n.op = LiteOpType::Add;
+    n.input_ids = {0, 1};
+    n.output_ids = {2};
+    g.add_node(std::move(n));
+    g.set_input_ids({0, 1});
+    g.set_output_ids({2});
+    return g;
+}
+
+}  // namespace
 
 TEST(LiteRuntimeExpandedTest, AllocatorAlignment64) {
     std::vector<size_t> pools = {256};
@@ -53,14 +84,21 @@ TEST(LiteRuntimeExpandedTest, AllocatorOffsetWithinPool) {
 }
 
 TEST(LiteRuntimeExpandedTest, RuntimeLoadFromMagic) {
-    uint8_t magic[] = {0x54, 0x4C, 0x5A, 0x54};  // "TZLT"
-    auto runtime = LiteRuntime::load(magic, sizeof(magic));
+    // Build a minimal valid TZLite header (24 bytes, zero nodes, no TLV).
+    // Phase 2 strict-parses the header — the previous 4-byte-magic shortcut
+    // is no longer accepted.
+    tenzor::lite::TZLiteHeader header{};
+    header.magic = tenzor::lite::TZLITE_MAGIC;
+    header.version = tenzor::lite::TZLITE_VERSION;
+    header.num_nodes = 0;
+    header.num_weights = 0;
+    header.weight_data_offset = sizeof(header);
+    auto runtime = LiteRuntime::load(&header, sizeof(header));
     ASSERT_NE(runtime, nullptr);
 }
 
 TEST(LiteRuntimeExpandedTest, RuntimeCreateInputShape) {
-    uint8_t magic[] = {0x54, 0x4C, 0x5A, 0x54};
-    auto runtime = LiteRuntime::load(magic, sizeof(magic));
+    auto runtime = LiteRuntime::from_graph(LiteGraph{});
     ASSERT_NE(runtime, nullptr);
 
     auto input = runtime->create_input({1, 16});
@@ -73,8 +111,7 @@ TEST(LiteRuntimeExpandedTest, RuntimeCreateInputShape) {
 }
 
 TEST(LiteRuntimeExpandedTest, RuntimeCreateInputDtype) {
-    uint8_t magic[] = {0x54, 0x4C, 0x5A, 0x54};
-    auto runtime = LiteRuntime::load(magic, sizeof(magic));
+    auto runtime = LiteRuntime::from_graph(LiteGraph{});
     ASSERT_NE(runtime, nullptr);
 
     auto input_f32 = runtime->create_input({2, 2}, tenzor::DType::Float32);
@@ -94,56 +131,65 @@ TEST(LiteRuntimeExpandedTest, MaxDimsConstant) {
 }
 
 // ============================================================================
-// Phase 6.6 — Forward-pass sanity.
-// LiteRuntime::forward() is currently a placeholder that returns a copy
-// of the input (see src/lite/runtime.cpp:150-170). This test pins that
-// behavior against accidental regression AND documents the gap: once
-// the real graph execution lands, the test expectation should flip
-// from "output == input" to "output matches a reference computation".
+// Forward-pass numerics — Phase 1 wires LiteGraph::execute() through the main
+// OpId dispatch table, so a hand-built graph should produce bit-identical
+// output to the same op called eagerly. These tests replace the original
+// "identity passthrough" assertions that pinned the pre-Phase-1 stub.
 // ============================================================================
 
 TEST(LiteRuntimeExpandedTest, ForwardReturnsCopyOfInput) {
-    uint8_t magic[] = {0x54, 0x4C, 0x5A, 0x54};  // "TZLT"
-    auto runtime = LiteRuntime::load(magic, sizeof(magic));
+    // Build a single-node Add graph and verify forward() produces the
+    // element-wise sum of its two inputs. Shape preserved across the call.
+    auto runtime = LiteRuntime::from_graph(build_add_graph());
     ASSERT_NE(runtime, nullptr);
 
-    // Populate a known input.
-    auto input = runtime->create_input({2, 3}, tenzor::DType::Float32);
-    ASSERT_EQ(input.numel(), 6);
-    auto* in_data = static_cast<float*>(input.data);
-    for (int i = 0; i < 6; ++i) in_data[i] = static_cast<float>(i + 1);
+    auto a = runtime->create_input({2, 3}, tenzor::DType::Float32);
+    auto b = runtime->create_input({2, 3}, tenzor::DType::Float32);
+    ASSERT_EQ(a.numel(), 6);
+    auto* a_data = static_cast<float*>(a.data);
+    auto* b_data = static_cast<float*>(b.data);
+    for (int i = 0; i < 6; ++i) {
+        a_data[i] = static_cast<float>(i + 1);   // 1..6
+        b_data[i] = static_cast<float>(10 * (i + 1)); // 10..60
+    }
 
-    auto output = runtime->forward(input);
+    std::vector<LiteTensor> ins;
+    ins.push_back(std::move(a));
+    ins.push_back(std::move(b));
+    auto outs = runtime->forward(ins);
+    ASSERT_EQ(outs.size(), 1u);
+    auto& output = outs.front();
 
-    // Shape preserved.
     EXPECT_EQ(output.ndim, 2);
     EXPECT_EQ(output.shape[0], 2);
     EXPECT_EQ(output.shape[1], 3);
     EXPECT_EQ(output.dtype, tenzor::DType::Float32);
 
-    // With the identity placeholder, the output must bit-equal the input.
-    // When the real graph executor lands, this assertion will need to
-    // be replaced with a reference-model comparison.
     ASSERT_NE(output.data, nullptr);
     const auto* out_data = static_cast<const float*>(output.data);
     for (int i = 0; i < 6; ++i) {
-        EXPECT_FLOAT_EQ(out_data[i], static_cast<float>(i + 1));
+        EXPECT_FLOAT_EQ(out_data[i], static_cast<float>(11 * (i + 1)));
     }
 }
 
 TEST(LiteRuntimeExpandedTest, ForwardAllocatesNewOutputBuffer) {
-    // The output must own its own data so it survives after the input
-    // falls out of scope. This guards against a regression where the
-    // placeholder silently switched to aliasing the input buffer.
-    uint8_t magic[] = {0x54, 0x4C, 0x5A, 0x54};
-    auto runtime = LiteRuntime::load(magic, sizeof(magic));
+    // The output of forward() must own its data — it is allocated by
+    // to_lite_tensor and survives after the inputs fall out of scope.
+    auto runtime = LiteRuntime::from_graph(build_add_graph());
     ASSERT_NE(runtime, nullptr);
 
-    auto input = runtime->create_input({4}, tenzor::DType::Float32);
-    auto output = runtime->forward(input);
+    auto a = runtime->create_input({4}, tenzor::DType::Float32);
+    auto b = runtime->create_input({4}, tenzor::DType::Float32);
+    void* a_data_addr = a.data;
 
-    EXPECT_TRUE(output.owns_data);
-    EXPECT_NE(output.data, input.data)
+    std::vector<LiteTensor> ins;
+    ins.push_back(std::move(a));
+    ins.push_back(std::move(b));
+    auto outs = runtime->forward(ins);
+    ASSERT_EQ(outs.size(), 1u);
+
+    EXPECT_TRUE(outs.front().owns_data);
+    EXPECT_NE(outs.front().data, a_data_addr)
         << "LiteRuntime::forward must allocate a fresh buffer, not alias "
            "the caller's input";
 }

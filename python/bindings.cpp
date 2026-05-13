@@ -2516,6 +2516,9 @@ void bind_compression(py::module& m) {
     // Nested Tensor — see python/bindings/bindings_nested.cpp
     tenzor::python::register_nested(m);
 
+    // Lite inference runtime — see python/bindings/bindings_lite.cpp
+    tenzor::python::register_lite(m);
+
     // =============================================================================
     // Memory Management
     // =============================================================================
