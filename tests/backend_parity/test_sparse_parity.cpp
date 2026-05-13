@@ -161,12 +161,12 @@ TEST_P(SparseParity, SparseAddSparseDense) {
 // test to appear 5× (once per backend parameter) with 4 silent skips — the
 // anti-pattern TESTING.md calls out. One TEST_F + SKIP_IF_NO_CUDA is honest.
 
-class SparseAddCUDATest : public ::testing::Test {
+class SparseAddcudaTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite() { tenzor::initialize(); }
 };
 
-TEST_F(SparseAddCUDATest, Float32) {
+TEST_F(SparseAddcudaTest, Float32) {
     SKIP_IF_NO_CUDA;
 
     auto sparse = make_test_csr();
@@ -182,7 +182,7 @@ TEST_F(SparseAddCUDATest, Float32) {
     EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd Float32 should match CPU";
 }
 
-TEST_F(SparseAddCUDATest, Float64) {
+TEST_F(SparseAddcudaTest, Float64) {
     SKIP_IF_NO_CUDA;
 
     // Larger matrix to exercise more threads.
@@ -200,7 +200,7 @@ TEST_F(SparseAddCUDATest, Float64) {
     EXPECT_LT(max_err, 1e-12) << "CUDA SparseAdd Float64 should match CPU";
 }
 
-TEST_F(SparseAddCUDATest, EmptySparse) {
+TEST_F(SparseAddcudaTest, EmptySparse) {
     SKIP_IF_NO_CUDA;
 
     // Empty sparse (all zeros) + dense should return dense unchanged.
@@ -216,7 +216,7 @@ TEST_F(SparseAddCUDATest, EmptySparse) {
     EXPECT_LT(max_err, 1e-6f) << "SparseAdd with empty sparse should return dense unchanged";
 }
 
-TEST_F(SparseAddCUDATest, FullRank) {
+TEST_F(SparseAddcudaTest, FullRank) {
     SKIP_IF_NO_CUDA;
 
     // Fully dense sparse matrix (every element nonzero) + dense.

@@ -1,460 +1,471 @@
 {
-  "tests": 75,
+  "tests": 76,
   "name": "AllTests",
   "testsuites": [
     {
-      "name": "MultiBackendDType\/TransformerContainerMultiDTypeTest",
+      "name": "ZeROStage1cpuDTypeTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "ElementLevel_MasterFP32_FP16Param",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 132
+        }
+      ]
+    },
+    {
+      "name": "MultiBackendDType\/ZeROStage1MultiDTypeTest",
       "tests": 75,
       "testsuite": [
         {
-          "name": "TransformerEncoder_ForwardShape\/Cpu_Float32",
+          "name": "Construction\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Cpu_Float64",
+          "name": "Construction\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Cpu_Float16",
+          "name": "Construction\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float32",
+          "name": "Construction\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float64",
+          "name": "Construction\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Cuda0_Float16",
+          "name": "Construction\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float32",
+          "name": "Construction\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float64",
+          "name": "Construction\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Vulkan0_Float16",
+          "name": "Construction\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float32",
+          "name": "Construction\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float64",
+          "name": "Construction\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Oneapi0_Float16",
+          "name": "Construction\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float32",
+          "name": "Construction\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float64",
+          "name": "Construction\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_ForwardShape\/Rocm0_Float16",
+          "name": "Construction\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 38
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 52
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float32",
+          "name": "PartitionCount\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float64",
+          "name": "PartitionCount\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cpu_Float16",
+          "name": "PartitionCount\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float32",
+          "name": "PartitionCount\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float64",
+          "name": "PartitionCount\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Cuda0_Float16",
+          "name": "PartitionCount\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float32",
+          "name": "PartitionCount\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float64",
+          "name": "PartitionCount\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Vulkan0_Float16",
+          "name": "PartitionCount\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float32",
+          "name": "PartitionCount\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float64",
+          "name": "PartitionCount\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Oneapi0_Float16",
+          "name": "PartitionCount\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float32",
+          "name": "PartitionCount\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float64",
+          "name": "PartitionCount\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_WithFinalNorm\/Rocm0_Float16",
+          "name": "PartitionCount\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 57
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 61
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float32",
+          "name": "Step\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float64",
+          "name": "Step\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cpu_Float16",
+          "name": "Step\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float32",
+          "name": "Step\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float64",
+          "name": "Step\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Cuda0_Float16",
+          "name": "Step\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float32",
+          "name": "Step\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float64",
+          "name": "Step\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Vulkan0_Float16",
+          "name": "Step\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float32",
+          "name": "Step\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float64",
+          "name": "Step\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Oneapi0_Float16",
+          "name": "Step\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float32",
+          "name": "Step\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float64",
+          "name": "Step\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerEncoder_BackwardGradFlow\/Rocm0_Float16",
+          "name": "Step\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 72
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 70
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cpu_Float32",
+          "name": "ZeroGrad\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cpu_Float64",
+          "name": "ZeroGrad\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cpu_Float16",
+          "name": "ZeroGrad\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float32",
+          "name": "ZeroGrad\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float64",
+          "name": "ZeroGrad\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Cuda0_Float16",
+          "name": "ZeroGrad\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float32",
+          "name": "ZeroGrad\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float64",
+          "name": "ZeroGrad\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Vulkan0_Float16",
+          "name": "ZeroGrad\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float32",
+          "name": "ZeroGrad\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float64",
+          "name": "ZeroGrad\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Oneapi0_Float16",
+          "name": "ZeroGrad\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float32",
+          "name": "ZeroGrad\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float64",
+          "name": "ZeroGrad\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_ForwardShape\/Rocm0_Float16",
+          "name": "ZeroGrad\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 96
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 83
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float32",
+          "name": "WithSGD\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float64",
+          "name": "WithSGD\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cpu_Float16",
+          "name": "WithSGD\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float32",
+          "name": "WithSGD\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float64",
+          "name": "WithSGD\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Cuda0_Float16",
+          "name": "WithSGD\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float32",
+          "name": "WithSGD\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float64",
+          "name": "WithSGD\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Vulkan0_Float16",
+          "name": "WithSGD\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float32",
+          "name": "WithSGD\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float64",
+          "name": "WithSGD\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Oneapi0_Float16",
+          "name": "WithSGD\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float32",
+          "name": "WithSGD\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float64",
+          "name": "WithSGD\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         },
         {
-          "name": "TransformerDecoder_BackwardGradFlow\/Rocm0_Float16",
+          "name": "WithSGD\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
-          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_transformer_containers_multidtype.cpp",
-          "line": 116
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_multidtype.cpp",
+          "line": 95
         }
       ]
     }

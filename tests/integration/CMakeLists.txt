@@ -11,7 +11,7 @@ target_link_libraries(test_training_loops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Model persistence integration tests
 add_executable(test_model_persistence
@@ -23,7 +23,7 @@ target_link_libraries(test_model_persistence PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_persistence DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_model_persistence DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Cross-backend integration tests
 add_executable(test_cross_backend
@@ -35,7 +35,7 @@ target_link_libraries(test_cross_backend PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_cross_backend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_cross_backend DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Attention contract dispatch-table audit (M9 — enforces every backend
 # registers all required attention OpIds; see docs/internals/attention-contract.md).
@@ -48,7 +48,7 @@ target_link_libraries(test_attention_contract PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_attention_contract DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_attention_contract DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Attention autograd grad-flow tests (M9 — catches the audit's C1-C6 dead
 # training path / severed grad_fn class of bugs).
@@ -61,7 +61,7 @@ target_link_libraries(test_attention_autograd PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Phase 13b — Per-backend Philox seed-determinism TEST_P harness.
 add_executable(test_attention_philox_multibackend
@@ -73,7 +73,7 @@ target_link_libraries(test_attention_philox_multibackend PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_attention_philox_multibackend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_attention_philox_multibackend DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Cross-backend FlashAttention/FusedAttention parity sweep (M9 — verifies
 # every enabled backend matches the CPU reference within F32 tolerance
@@ -87,7 +87,7 @@ target_link_libraries(test_attention_parity PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_attention_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_attention_parity DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Data pipeline integration tests
 add_executable(test_data_pipeline
@@ -99,7 +99,7 @@ target_link_libraries(test_data_pipeline PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_data_pipeline DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_data_pipeline DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Model zoo integration tests
 add_executable(test_model_zoo
@@ -111,7 +111,7 @@ target_link_libraries(test_model_zoo PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Optimization integration tests
 add_executable(test_optimization
@@ -123,7 +123,7 @@ target_link_libraries(test_optimization PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # DataParallel multi-GPU integration tests
 add_executable(test_data_parallel_integration
@@ -135,7 +135,7 @@ target_link_libraries(test_data_parallel_integration PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_data_parallel_integration DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_data_parallel_integration DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Distributed training tests
 add_executable(test_distributed
@@ -160,7 +160,7 @@ endif()
 
 # Distributed tests require special setup (multi-process environment)
 # Tests will automatically skip if RANK/WORLD_SIZE environment variables are not set
-gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
 
 # Multi-GPU integration tests (CUDA required)
 if(TENZOR_BUILD_CUDA)
@@ -185,7 +185,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     # Multi-GPU tests capped at maximum test timeout
-    gtest_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+    tenzor_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cuda)
 endif()
 
 # ============================================================================
@@ -194,19 +194,19 @@ endif()
 
 add_executable(test_data_pipeline_multidtype test_data_pipeline_multidtype.cpp)
 target_link_libraries(test_data_pipeline_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_data_pipeline_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_data_pipeline_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
 
 add_executable(test_model_persistence_multidtype test_model_persistence_multidtype.cpp)
 target_link_libraries(test_model_persistence_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_model_persistence_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_model_persistence_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
 
 add_executable(test_model_zoo_multidtype test_model_zoo_multidtype.cpp)
 target_link_libraries(test_model_zoo_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_model_zoo_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_model_zoo_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
 
 add_executable(test_optimization_multidtype test_optimization_multidtype.cpp)
 target_link_libraries(test_optimization_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_optimization_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+tenzor_discover_tests(test_optimization_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
 
 # Note: Existing integration tests
 # - test_nn.cpp

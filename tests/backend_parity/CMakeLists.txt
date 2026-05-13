@@ -18,8 +18,24 @@ include_directories(
 set(TENZOR_GOLDEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/golden" CACHE PATH
     "Directory containing recorded parity goldens")
 
-# Helper function to create a parity test executable
+# Helper function to create a parity test executable.
+#
+# Each *_parity binary is a TEST_P harness parametrized over the available
+# backends (see e.g. INSTANTIATE_TEST_SUITE_P(..., AllBackends, …) in the
+# .cpp files). We discover individual TEST_P cases via tenzor_discover_tests
+# with BACKENDS multi so that:
+#   - `ctest -R cuda` finds the parametrized "cuda" cases by name match,
+#   - `ctest -L cuda` finds them by label match,
+#   - `ctest -L backend_parity` keeps working.
 function(add_parity_test TEST_NAME SOURCE_FILE)
+    # Optional 3rd+ positional args (or LABELS keyword) -> extra labels.
+    # Used for the smoke-tagged subset (test_kernel_completeness, etc.).
+    cmake_parse_arguments(PT "" "" "LABELS" ${ARGN})
+    set(_labels "backend_parity")
+    foreach(_extra IN LISTS PT_LABELS)
+        set(_labels "${_labels}\;${_extra}")
+    endforeach()
+
     add_executable(${TEST_NAME} ${SOURCE_FILE})
 
     target_link_libraries(${TEST_NAME}
@@ -33,14 +49,15 @@ function(add_parity_test TEST_NAME SOURCE_FILE)
         TENZOR_TEST_GOLDEN_DIR="${TENZOR_GOLDEN_DIR}"
     )
 
-    # Add test to CTest
-    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-
-    # Set test properties
-    set_tests_properties(${TEST_NAME} PROPERTIES
-        TIMEOUT ${TENZOR_TEST_TIMEOUT}  # 10 minute timeout for all tests
-        LABELS "backend_parity"
-    )
+    # Discover per-case rather than one CTest entry per binary so that
+    # the parametrized backend value lands in the test name and `-R`
+    # filtering works. PRE_TEST mode keeps discovery in step with builds
+    # when only the source changes.
+    tenzor_discover_tests(${TEST_NAME}
+        DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST
+        LABELS "${_labels}"
+        BACKENDS multi)
 
     # Install test
     install(TARGETS ${TEST_NAME}
@@ -234,37 +251,24 @@ add_parity_test(test_grad_shape_parity test_grad_shape_parity.cpp)
 # Numerical gradcheck parity tests (finite difference verification on each backend)
 add_parity_test(test_gradcheck_parity test_gradcheck_parity.cpp)
 
-# Kernel completeness tests (Phase 4A — required ops registered on each backend)
-add_parity_test(test_kernel_completeness test_kernel_completeness.cpp)
+# Kernel completeness tests (Phase 4A — required ops registered on each backend).
+# Smoke-tagged because <2s and catches dispatch-table regressions instantly.
+add_parity_test(test_kernel_completeness test_kernel_completeness.cpp LABELS smoke)
 
-# Registration report (Phase 4B — informational coverage matrix)
-add_parity_test(test_registration_report test_registration_report.cpp)
+# Registration report (Phase 4B — informational coverage matrix).
+# Smoke-tagged for the same reason as test_kernel_completeness.
+add_parity_test(test_registration_report test_registration_report.cpp LABELS smoke)
 
 # Audit 2026-05-02 I.3: skip-policy meta-test.
 add_parity_test(test_skip_policy test_skip_policy.cpp)
-
-# Audit 2026-05-02 I.1: extend the backend_parity LABELS on the two
-# coverage tests with "smoke" so they run in the fast feedback set
-# (`ctest -L smoke`). Both are <2s and catch dispatch-table regressions
-# instantly. We replace rather than append because set_tests_properties
-# overwrites the LABELS list. add_parity_test() set "backend_parity"
-# alone above; we now set "backend_parity;smoke".
-set_tests_properties(test_kernel_completeness PROPERTIES
-    LABELS "backend_parity;smoke")
-set_tests_properties(test_registration_report PROPERTIES
-    LABELS "backend_parity;smoke")
-# test_inplace_ops_parity smoke-tag is set after that test is added below
-# (set_tests_properties must come AFTER add_test).
 
 # ==============================================================================
 # Audit-driven additions (2026-05-02 test-coverage plan, Workstream C)
 # ==============================================================================
 
-# In-place ops parity (covers AddInplace..GeluInplace; was 0% covered by name)
-add_parity_test(test_inplace_ops_parity test_inplace_ops_parity.cpp)
-# Smoke-tag this fast (~16s) cross-backend test so it runs in the smoke set.
-set_tests_properties(test_inplace_ops_parity PROPERTIES
-    LABELS "backend_parity;smoke")
+# In-place ops parity (covers AddInplace..GeluInplace; was 0% covered by name).
+# Smoke-tagged because this fast (~16s) cross-backend test runs in the smoke set.
+add_parity_test(test_inplace_ops_parity test_inplace_ops_parity.cpp LABELS smoke)
 
 # Advanced (NumPy-style fancy) indexing parity
 add_parity_test(test_advanced_index_parity test_advanced_index_parity.cpp)

@@ -7,361 +7,361 @@
       "tests": 60,
       "testsuite": [
         {
-          "name": "Construction\/Cpu_Float32",
+          "name": "Construction\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Cpu_Float64",
+          "name": "Construction\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Cpu_Float16",
+          "name": "Construction\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Cuda0_Float32",
+          "name": "Construction\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Cuda0_Float64",
+          "name": "Construction\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Cuda0_Float16",
+          "name": "Construction\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Vulkan0_Float32",
+          "name": "Construction\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Vulkan0_Float64",
+          "name": "Construction\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Vulkan0_Float16",
+          "name": "Construction\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Oneapi0_Float32",
+          "name": "Construction\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Oneapi0_Float64",
+          "name": "Construction\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Oneapi0_Float16",
+          "name": "Construction\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Rocm0_Float32",
+          "name": "Construction\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Rocm0_Float64",
+          "name": "Construction\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "Construction\/Rocm0_Float16",
+          "name": "Construction\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 31
         },
         {
-          "name": "ToDenseConversion\/Cpu_Float32",
+          "name": "ToDenseConversion\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Cpu_Float64",
+          "name": "ToDenseConversion\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Cpu_Float16",
+          "name": "ToDenseConversion\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Cuda0_Float32",
+          "name": "ToDenseConversion\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Cuda0_Float64",
+          "name": "ToDenseConversion\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Cuda0_Float16",
+          "name": "ToDenseConversion\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Vulkan0_Float32",
+          "name": "ToDenseConversion\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Vulkan0_Float64",
+          "name": "ToDenseConversion\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Vulkan0_Float16",
+          "name": "ToDenseConversion\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Oneapi0_Float32",
+          "name": "ToDenseConversion\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Oneapi0_Float64",
+          "name": "ToDenseConversion\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Oneapi0_Float16",
+          "name": "ToDenseConversion\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Rocm0_Float32",
+          "name": "ToDenseConversion\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Rocm0_Float64",
+          "name": "ToDenseConversion\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ToDenseConversion\/Rocm0_Float16",
+          "name": "ToDenseConversion\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 67
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cpu_Float32",
+          "name": "ShapePreservedAcrossDevices\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cpu_Float64",
+          "name": "ShapePreservedAcrossDevices\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cpu_Float16",
+          "name": "ShapePreservedAcrossDevices\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cuda0_Float32",
+          "name": "ShapePreservedAcrossDevices\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cuda0_Float64",
+          "name": "ShapePreservedAcrossDevices\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Cuda0_Float16",
+          "name": "ShapePreservedAcrossDevices\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Vulkan0_Float32",
+          "name": "ShapePreservedAcrossDevices\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Vulkan0_Float64",
+          "name": "ShapePreservedAcrossDevices\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Vulkan0_Float16",
+          "name": "ShapePreservedAcrossDevices\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Oneapi0_Float32",
+          "name": "ShapePreservedAcrossDevices\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Oneapi0_Float64",
+          "name": "ShapePreservedAcrossDevices\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Oneapi0_Float16",
+          "name": "ShapePreservedAcrossDevices\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Rocm0_Float32",
+          "name": "ShapePreservedAcrossDevices\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Rocm0_Float64",
+          "name": "ShapePreservedAcrossDevices\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "ShapePreservedAcrossDevices\/Rocm0_Float16",
+          "name": "ShapePreservedAcrossDevices\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 115
         },
         {
-          "name": "EmptyBSR\/Cpu_Float32",
+          "name": "EmptyBSR\/cpu_Float32",
           "value_param": "(\"cpu\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Cpu_Float64",
+          "name": "EmptyBSR\/cpu_Float64",
           "value_param": "(\"cpu\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Cpu_Float16",
+          "name": "EmptyBSR\/cpu_Float16",
           "value_param": "(\"cpu\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Cuda0_Float32",
+          "name": "EmptyBSR\/cuda0_Float32",
           "value_param": "(\"cuda\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Cuda0_Float64",
+          "name": "EmptyBSR\/cuda0_Float64",
           "value_param": "(\"cuda\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Cuda0_Float16",
+          "name": "EmptyBSR\/cuda0_Float16",
           "value_param": "(\"cuda\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Vulkan0_Float32",
+          "name": "EmptyBSR\/vulkan0_Float32",
           "value_param": "(\"vulkan\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Vulkan0_Float64",
+          "name": "EmptyBSR\/vulkan0_Float64",
           "value_param": "(\"vulkan\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Vulkan0_Float16",
+          "name": "EmptyBSR\/vulkan0_Float16",
           "value_param": "(\"vulkan\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Oneapi0_Float32",
+          "name": "EmptyBSR\/oneapi0_Float32",
           "value_param": "(\"oneapi\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Oneapi0_Float64",
+          "name": "EmptyBSR\/oneapi0_Float64",
           "value_param": "(\"oneapi\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Oneapi0_Float16",
+          "name": "EmptyBSR\/oneapi0_Float16",
           "value_param": "(\"oneapi\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Rocm0_Float32",
+          "name": "EmptyBSR\/rocm0_Float32",
           "value_param": "(\"rocm\", 1-byte object <00>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Rocm0_Float64",
+          "name": "EmptyBSR\/rocm0_Float64",
           "value_param": "(\"rocm\", 1-byte object <01>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144
         },
         {
-          "name": "EmptyBSR\/Rocm0_Float16",
+          "name": "EmptyBSR\/rocm0_Float16",
           "value_param": "(\"rocm\", 1-byte object <02>)",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_sparse_bsr_multidtype.cpp",
           "line": 144

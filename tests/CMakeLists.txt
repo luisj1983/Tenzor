@@ -38,8 +38,28 @@ option(TENZOR_TEST_ONEAPI_ALLOW_CPU
 
 # Custom function that wraps gtest_discover_tests
 # Supports optional LABELS parameter for CTest label-based filtering
+# and a BACKENDS parameter that controls backend tagging of generated
+# CTest names (TEST_PREFIX) and CTest labels.
+#
+# BACKENDS values:
+#   (omitted) / cpu           — single-backend CPU test. Prepend "cpu_" to
+#                               every discovered CTest case and add "cpu"
+#                               to LABELS so `ctest -R cpu` and
+#                               `ctest -L cpu` both match.
+#   cuda / rocm / vulkan / oneapi — same as above for that backend.
+#   multi                     — test is parametrized over backends inside
+#                               its source (e.g. uses
+#                               INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS).
+#                               Skip TEST_PREFIX because the backend name
+#                               already appears in each parametrized
+#                               case's value (e.g. `..."cuda"...`), but
+#                               attach all five backend labels so
+#                               `ctest -L cuda` still finds these.
+#   none                      — pure-logic test that never touches a
+#                               backend (lint, audit, codegen text
+#                               output). No prefix, no backend label.
 function(tenzor_discover_tests target)
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES;LABELS")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES;LABELS;BACKENDS")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
     if(NOT TIMEOUT)
         set(TIMEOUT 60)
@@ -56,19 +76,86 @@ function(tenzor_discover_tests target)
         list(APPEND PROPS TIMEOUT ${TENZOR_TEST_TIMEOUT})
     endif()
 
-    # Inject LABELS if provided.
-    #
-    # Multi-label note: to attach more than one label, escape the
-    # semicolon at the call site (e.g. `LABELS "nn\;smoke"`). A bare
-    # `LABELS "nn;smoke"` is split into a CMake list before reaching
-    # gtest_discover_tests, which then writes `LABELS nn smoke` into
-    # the generated tests.cmake — and CTest only picks up the first.
-    # The escaped form `nn\;smoke` survives as a single literal string
-    # all the way through to set_tests_properties, which then parses
-    # the embedded `;` as a real list separator.
-    if(ARG_LABELS)
-        list(APPEND PROPS LABELS "${ARG_LABELS}")
+    # ----------------------------------------------------------------------
+    # BACKENDS handling
+    # ----------------------------------------------------------------------
+    # Default = cpu (most tests link tenzor_backend_cpu implicitly through
+    # tenzor_core and run on CPU). The supported tokens are checked so a
+    # typo at the call site becomes a configure-time error instead of a
+    # silent miss.
+    set(_backends ${ARG_BACKENDS})
+    if(NOT _backends)
+        set(_backends "cpu")
     endif()
+
+    set(_test_prefix "")
+    set(_backend_labels "")
+    set(_valid_single cpu cuda rocm vulkan oneapi)
+    set(_all_backends cpu cuda rocm vulkan oneapi)
+
+    list(LENGTH _backends _nbackends)
+    if(_nbackends EQUAL 1 AND "${_backends}" STREQUAL "none")
+        # Pure-logic test: no prefix, no backend label.
+    elseif(_nbackends EQUAL 1 AND "${_backends}" STREQUAL "multi")
+        # Source-level multi-backend parametrization: every five backends
+        # get a label so `ctest -L cuda` etc. find these. Name already
+        # contains the backend value so no TEST_PREFIX.
+        set(_backend_labels ${_all_backends})
+    else()
+        foreach(_b IN LISTS _backends)
+            if(NOT _b IN_LIST _valid_single)
+                message(FATAL_ERROR
+                    "tenzor_discover_tests(${target}): unknown BACKENDS "
+                    "token '${_b}'. Expected one of: "
+                    "cpu cuda rocm vulkan oneapi multi none")
+            endif()
+        endforeach()
+        list(APPEND _backend_labels ${_backends})
+        # TEST_PREFIX is a single string; when multiple backends are
+        # declared explicitly (rare) we don't prefix to avoid ambiguity
+        # — the backend labels still make `-L` work.
+        if(_nbackends EQUAL 1)
+            set(_test_prefix "${_backends}_")
+        endif()
+    endif()
+
+    # Merge backend labels with caller-supplied LABELS into a single CMake
+    # list and turn it into an escape-preserved string.
+    #
+    # Why this is awkward: gtest_discover_tests forwards LABELS through
+    # GoogleTestAddTests.cmake, which eventually does
+    #     add_command(set_tests_properties ${name} PROPERTIES ${arg_TEST_PROPERTIES})
+    # with `${arg_TEST_PROPERTIES}` UNQUOTED. CMake unquoted expansion
+    # strips escape-semicolon markers from list elements; once stripped,
+    # the joined-labels string `a;b;c` splits into three positional
+    # arguments. set_tests_properties then treats only the first as the
+    # LABELS value and silently drops the rest as bogus property names.
+    # That bug is how `ctest -L cuda` returned just one test.
+    #
+    # The fix: build the labels string with TRUE CMake escape-semicolon
+    # markers between each label (not just literal backslash-semicolon
+    # characters from `string(REPLACE)`, which don't survive expansion).
+    # The only reliable way to insert real escape markers dynamically is
+    # via `cmake_language(EVAL CODE ...)` — the eval'd source is re-parsed,
+    # so `\;` becomes an actual escaped semicolon. The escapes then
+    # survive all the way through to GoogleTestAddTests, which
+    # bracket-arg-wraps the value (`LABELS [==[a;b;c]==]`) for CTest.
+    set(_label_list "")
+    if(ARG_LABELS)
+        # ARG_LABELS may itself be a semicolon-separated string (e.g. the
+        # legacy `"nn\;smoke"` form): list(APPEND) splits it back into
+        # individual items.
+        list(APPEND _label_list ${ARG_LABELS})
+    endif()
+    foreach(_bl IN LISTS _backend_labels)
+        list(APPEND _label_list "${_bl}")
+    endforeach()
+    list(REMOVE_DUPLICATES _label_list)
+    list(JOIN _label_list "\\;" _label_str_raw)
+    # Re-parse the joined string so the `\;` sequences become true escape
+    # markers rather than literal backslash-semicolon pairs.
+    cmake_language(EVAL CODE
+        "set(_label_str \"${_label_str_raw}\")")
 
     # Inject TENZOR_ONEAPI_ALLOW_CPU=1 if the project was configured with
     # TENZOR_TEST_ONEAPI_ALLOW_CPU=ON. Honors any user-supplied ENVIRONMENT
@@ -85,24 +172,59 @@ function(tenzor_discover_tests target)
         endif()
     endif()
 
-    # Now call gtest_discover_tests
-    gtest_discover_tests(${target}
-        DISCOVERY_TIMEOUT ${TIMEOUT}
-        DISCOVERY_MODE ${MODE}
-        PROPERTIES ${PROPS})
+    # Now call gtest_discover_tests. TEST_PREFIX is empty for `multi` /
+    # `none`; gtest_discover_tests accepts an empty prefix gracefully.
+    #
+    # LABELS is passed as a separate quoted argument AFTER ${PROPS} so the
+    # semicolon-joined value survives as one token (see the long comment
+    # above on the unquoted-expansion bug). When _label_str is empty we
+    # skip the keyword entirely so set_tests_properties never sees
+    # `LABELS ""`.
+    if(_test_prefix)
+        if(_label_str)
+            gtest_discover_tests(${target}
+                TEST_PREFIX "${_test_prefix}"
+                DISCOVERY_TIMEOUT ${TIMEOUT}
+                DISCOVERY_MODE ${MODE}
+                PROPERTIES ${PROPS} LABELS "${_label_str}")
+        else()
+            gtest_discover_tests(${target}
+                TEST_PREFIX "${_test_prefix}"
+                DISCOVERY_TIMEOUT ${TIMEOUT}
+                DISCOVERY_MODE ${MODE}
+                PROPERTIES ${PROPS})
+        endif()
+    else()
+        if(_label_str)
+            gtest_discover_tests(${target}
+                DISCOVERY_TIMEOUT ${TIMEOUT}
+                DISCOVERY_MODE ${MODE}
+                PROPERTIES ${PROPS} LABELS "${_label_str}")
+        else()
+            gtest_discover_tests(${target}
+                DISCOVERY_TIMEOUT ${TIMEOUT}
+                DISCOVERY_MODE ${MODE}
+                PROPERTIES ${PROPS})
+        endif()
+    endif()
 endfunction()
 
 # Helper macro: create a test executable, link GTest, and register with CTest.
-# Usage: tenzor_add_test(NAME test_foo SOURCE unit/test_foo.cpp [LIBS extra_lib] [LABELS unit])
+# Usage: tenzor_add_test(NAME test_foo SOURCE unit/test_foo.cpp [LIBS extra_lib]
+#                        [LABELS unit] [BACKENDS cpu|cuda|...|multi|none])
+# BACKENDS is forwarded to tenzor_discover_tests; default is cpu.
 macro(tenzor_add_test)
-    cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS;LABELS" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS;LABELS;BACKENDS" ${ARGN})
     add_executable(${ARG_NAME} ${ARG_SOURCE})
     target_link_libraries(${ARG_NAME} PRIVATE tenzor_core GTest::gtest_main ${ARG_LIBS})
+    set(_extra "")
     if(ARG_LABELS)
-        tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60 LABELS "${ARG_LABELS}")
-    else()
-        tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60)
+        list(APPEND _extra LABELS "${ARG_LABELS}")
     endif()
+    if(ARG_BACKENDS)
+        list(APPEND _extra BACKENDS ${ARG_BACKENDS})
+    endif()
+    tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60 ${_extra})
 endmacro()
 
 # ============================================================================
@@ -268,7 +390,7 @@ tenzor_discover_tests(test_creation_ops DISCOVERY_TIMEOUT 60)
 # Creation operations multi-dtype tests
 add_executable(test_creation_ops_multidtype test_creation_ops_multidtype.cpp)
 target_link_libraries(test_creation_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Comparison operators tests
 add_executable(test_comparison_operators test_comparison_operators.cpp)
@@ -279,8 +401,8 @@ tenzor_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 60)
 add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
 target_link_libraries(test_checkpoint_leaf_fix tenzor_core)
 target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR}/include)
-add_test(NAME CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
-set_tests_properties(CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
+add_test(NAME cpu_CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
+set_tests_properties(cpu_CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "cpu")
 
 # Phase 9-followup #29: tolerance audit. Advisory check (not strict by
 # default — fixing the 261 existing unjustified loose tolerances is its own
@@ -295,11 +417,11 @@ set_tests_properties(ToleranceAudit PROPERTIES TIMEOUT 60 LABELS "audit")
 # Manual KLDiv debug test
 add_executable(test_kldiv_manual test_kldiv_manual.cpp)
 target_link_libraries(test_kldiv_manual PRIVATE tenzor_core GTest::gtest_main)
-add_test(NAME KLDivManual.StepByStepBackward COMMAND test_kldiv_manual --gtest_filter=KLDivManual.StepByStepBackward)
-add_test(NAME KLDivManual.SimpleSubtract COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleSubtract)
-add_test(NAME KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleMultiply)
-set_tests_properties(KLDivManual.StepByStepBackward KLDivManual.SimpleSubtract KLDivManual.SimpleMultiply
-    PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
+add_test(NAME cpu_KLDivManual.StepByStepBackward COMMAND test_kldiv_manual --gtest_filter=KLDivManual.StepByStepBackward)
+add_test(NAME cpu_KLDivManual.SimpleSubtract COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleSubtract)
+add_test(NAME cpu_KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleMultiply)
+set_tests_properties(cpu_KLDivManual.StepByStepBackward cpu_KLDivManual.SimpleSubtract cpu_KLDivManual.SimpleMultiply
+    PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "cpu")
 
 # ONNX import tests
 add_executable(test_onnx_import test_onnx_import.cpp)
@@ -384,42 +506,42 @@ tenzor_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 60)
 # Repeat/tile multi-backend
 add_executable(test_repeat_tile_multidtype test_repeat_tile_multidtype.cpp)
 target_link_libraries(test_repeat_tile_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_repeat_tile_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_repeat_tile_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Comparison operators multi-backend
 add_executable(test_comparison_operators_multidtype test_comparison_operators_multidtype.cpp)
 target_link_libraries(test_comparison_operators_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_comparison_operators_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_comparison_operators_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Statistics operations (cov, corrcoef) multi-backend
 add_executable(test_statistics_multidtype test_statistics_multidtype.cpp)
 target_link_libraries(test_statistics_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_statistics_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_statistics_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Indexing operator multi-backend
 add_executable(test_indexing_operator_multidtype test_indexing_operator_multidtype.cpp)
 target_link_libraries(test_indexing_operator_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_indexing_operator_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_indexing_operator_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # BMM autograd multi-backend
 add_executable(test_bmm_autograd_multidtype test_bmm_autograd_multidtype.cpp)
 target_link_libraries(test_bmm_autograd_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_bmm_autograd_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_bmm_autograd_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # DType conversion multi-backend
 add_executable(test_dtype_conversion_multidtype test_dtype_conversion_multidtype.cpp)
 target_link_libraries(test_dtype_conversion_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_dtype_conversion_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_dtype_conversion_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Split operation multi-backend
 add_executable(test_split_operation_multidtype test_split_operation_multidtype.cpp)
 target_link_libraries(test_split_operation_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_split_operation_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_split_operation_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Conv1d multi-backend
 add_executable(test_conv1d_multidtype test_conv1d_multidtype.cpp)
 target_link_libraries(test_conv1d_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_conv1d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_conv1d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # CholeskySolve multi-backend
 add_executable(test_cholesky_solve_multidtype test_cholesky_solve_multidtype.cpp)
@@ -439,12 +561,12 @@ tenzor_discover_tests(test_einsum_dispatch_multidtype DISCOVERY_TIMEOUT 60 DISCO
 # ConvTranspose2d multi-backend
 add_executable(test_convtranspose2d_multidtype test_convtranspose2d_multidtype.cpp)
 target_link_libraries(test_convtranspose2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_convtranspose2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_convtranspose2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # KL divergence multi-backend
 add_executable(test_kldiv_manual_multidtype test_kldiv_manual_multidtype.cpp)
 target_link_libraries(test_kldiv_manual_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_kldiv_manual_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_kldiv_manual_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # ============================================================================
 # Phase 4: New tests for previously untested components
@@ -453,22 +575,22 @@ tenzor_discover_tests(test_kldiv_manual_multidtype DISCOVERY_TIMEOUT 60 DISCOVER
 # Missing loss functions (MarginRanking, Poisson, Cosine, Triplet, etc.)
 add_executable(test_losses_missing_multidtype test_losses_missing_multidtype.cpp)
 target_link_libraries(test_losses_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_losses_missing_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_losses_missing_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # RNN cells (RNNCell, GRUCell)
 add_executable(test_rnn_cells_multidtype test_rnn_cells_multidtype.cpp)
 target_link_libraries(test_rnn_cells_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_rnn_cells_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_rnn_cells_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # RNN utilities (pack_padded_sequence, pad_packed_sequence)
 add_executable(test_rnn_utils_multidtype test_rnn_utils_multidtype.cpp)
 target_link_libraries(test_rnn_utils_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_rnn_utils_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_rnn_utils_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # KV Cache
 add_executable(test_kv_cache_multidtype test_kv_cache_multidtype.cpp)
 target_link_libraries(test_kv_cache_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_kv_cache_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_kv_cache_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Gradient accumulation
 add_executable(test_grad_accumulation test_grad_accumulation.cpp)
@@ -478,7 +600,7 @@ tenzor_discover_tests(test_grad_accumulation DISCOVERY_TIMEOUT 60 DISCOVERY_MODE
 # ROI operations (ROIAlign)
 add_executable(test_roi_ops_multidtype test_roi_ops_multidtype.cpp)
 target_link_libraries(test_roi_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_roi_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_roi_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # LOBPCG eigenvalue solver multi-backend
 add_executable(test_lobpcg_multidtype test_lobpcg_multidtype.cpp)
@@ -502,7 +624,7 @@ tenzor_discover_tests(test_lazy_tensor DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_T
 # LazyTensor multi-backend × multi-dtype tests (audit 2026-05-02 D.2)
 add_executable(test_lazy_tensor_multidtype test_lazy_tensor_multidtype.cpp)
 target_link_libraries(test_lazy_tensor_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_lazy_tensor_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_lazy_tensor_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # LazyTensor: materialise -> Variable -> backward parity (audit 2026-05-02 D.3)
 add_executable(test_lazy_tensor_backward test_lazy_tensor_backward.cpp)
@@ -549,8 +671,8 @@ if(TENZOR_BUILD_CUDA)
     target_link_libraries(test_cuda_cat PRIVATE tenzor_core CUDA::cudart)
     target_include_directories(test_cuda_cat PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     set_target_properties(test_cuda_cat PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    add_test(NAME CUDAConcatenation COMMAND test_cuda_cat)
-    set_tests_properties(CUDAConcatenation PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
+    add_test(NAME cuda_CUDAConcatenation COMMAND test_cuda_cat)
+    set_tests_properties(cuda_CUDAConcatenation PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "cuda")
 endif()
 
 # test_jit.cpp orphan removed: rotted APIs (Tensor::full/zeros/ones static methods, DeviceType enum no longer exist)
@@ -612,18 +734,23 @@ if(TENZOR_BUILD_PYTHON)
         file(GLOB PYTHON_TEST_FILES "${PYTHON_TEST_DIR}/test_*.py")
         foreach(test_file ${PYTHON_TEST_FILES})
             get_filename_component(test_name ${test_file} NAME_WE)
+            # Each Python test process boots tenzor on CPU (and opportunistically
+            # uses GPU backends when available). The `cpu_` prefix and `cpu`
+            # label make `ctest -R cpu` / `ctest -L cpu` cover them; per-backend
+            # GPU filtering for Python is handled at runtime via
+            # TENZOR_SKIP_BACKENDS.
             add_test(
-                NAME "python_${test_name}"
+                NAME "cpu_python_${test_name}"
                 COMMAND ${Python_EXECUTABLE} ${test_file}
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
             )
             list(FIND PYTHON_SMOKE_TESTS ${test_name} _smoke_idx)
             if(_smoke_idx GREATER -1)
-                set(_py_labels "python;smoke")
+                set(_py_labels "python;smoke;cpu")
             else()
-                set(_py_labels "python")
+                set(_py_labels "python;cpu")
             endif()
-            set_tests_properties("python_${test_name}" PROPERTIES
+            set_tests_properties("cpu_python_${test_name}" PROPERTIES
                 LABELS "${_py_labels}"
                 TIMEOUT ${TENZOR_TEST_TIMEOUT}
                 ENVIRONMENT "${PYTHON_TEST_ENV}"

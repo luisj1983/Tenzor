@@ -111,7 +111,7 @@ INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ZeROStage1MultiDTypeTest);
 // (the parameterized fixture skips CPU, so these use a plain TEST_F fixture).
 // ============================================================================
 
-class ZeROStage1CPUDTypeTest : public ::testing::Test {
+class ZeROStage1cpuDTypeTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
         tenzor::initialize();
@@ -129,7 +129,7 @@ protected:
     }
 };
 
-TEST_F(ZeROStage1CPUDTypeTest, ElementLevel_MasterFP32_FP16Param) {
+TEST_F(ZeROStage1cpuDTypeTest, ElementLevel_MasterFP32_FP16Param) {
     auto params = create_fp16_params(2, {16, 16});
     auto base = std::make_unique<Adam>(params, 0.001);
 

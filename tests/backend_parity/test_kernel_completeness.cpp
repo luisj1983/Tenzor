@@ -66,26 +66,30 @@ void check_backend_completeness(Device::Type device_type, const char* backend_na
 // Per-backend completeness tests
 // ===========================================================================
 
-TEST(KernelCompleteness, CPU) {
+// Lower-case case names so `ctest -R cuda` (lowercase) matches the
+// generated CTest entry KernelCompleteness.cuda. The user-facing strings
+// passed to check_backend_completeness keep their canonical capitalised
+// form for log messages.
+TEST(KernelCompleteness, cpu) {
     check_backend_completeness(Device::Type::CPU, "CPU");
 }
 
-TEST(KernelCompleteness, CUDA) {
+TEST(KernelCompleteness, cuda) {
     if (!has_cuda()) GTEST_SKIP() << "CUDA backend not available";
     check_backend_completeness(Device::Type::CUDA, "CUDA");
 }
 
-TEST(KernelCompleteness, ROCm) {
+TEST(KernelCompleteness, rocm) {
     if (!has_rocm()) GTEST_SKIP() << "ROCm backend not available";
     check_backend_completeness(Device::Type::ROCm, "ROCm");
 }
 
-TEST(KernelCompleteness, Vulkan) {
+TEST(KernelCompleteness, vulkan) {
     if (!has_vulkan()) GTEST_SKIP() << "Vulkan backend not available";
     check_backend_completeness(Device::Type::Vulkan, "Vulkan");
 }
 
-TEST(KernelCompleteness, OneAPI) {
+TEST(KernelCompleteness, oneapi) {
     if (!has_oneapi()) GTEST_SKIP() << "OneAPI backend not available";
     check_backend_completeness(Device::Type::OneAPI, "OneAPI");
 }

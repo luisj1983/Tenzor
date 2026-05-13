@@ -148,15 +148,17 @@ inline Device::Type nameToDeviceType(const std::string& name) {
 /**
  * @brief Format a backend string as a GTest-safe test name.
  *
- * "cuda:1" -> "Cuda1", "cpu" -> "Cpu", "cuda" -> "Cuda"
+ * "cuda:1" -> "cuda1", "cpu" -> "cpu", "cuda" -> "cuda0"
+ *
+ * Lowercase is chosen deliberately so the generated CTest name (e.g.
+ * `MultiBackendDType/MyTest.Foo/cuda0_Float32`) matches `ctest -R cuda`.
+ * GTest parameter-name identifiers permit `[a-zA-Z0-9_]`, so leaving the
+ * leading character lowercase is still valid.
  */
 inline std::string formatBackendTestName(const std::string& backend) {
     auto base = parseBackendName(backend);
     auto index = parseDeviceIndex(backend);
-    std::string result = base;
-    if (!result.empty()) {
-        result[0] = std::toupper(result[0]);
-    }
+    std::string result = base;  // already lowercase by convention
     if (base != "cpu") {
         result += std::to_string(index);
     }
