@@ -1191,14 +1191,20 @@ static void layer_norm_simd_with_stats(
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;
 
-        // Single-pass mean and variance computation with SIMD
-        float sum = 0.0f;
-        float sum_sq = 0.0f;
+        // Phase P0 / Numerical-precision fix: two-pass mean/variance.
+        // The previous single-pass form `var = sum_sq/n - mean*mean`
+        // catastrophically cancels for inputs with large mean (the
+        // standard LayerNorm-on-pre-trained-embedding scenario), often
+        // producing negative variance and a NaN inv_std. The two-pass
+        // `var = E[(x - mean)^2]` is unconditionally stable.
+        // Accumulators are double for precision; final mean / inv_std are
+        // float (matches the saved-stats Float32 contract).
 
+        // -------- Pass 1: sum -> mean --------
+        double sum_d = 0.0;
 #ifdef HAS_AVX512
         int64_t simd_size = 16;
         __m512 vsum = _mm512_setzero_ps();
-        __m512 vsum_sq = _mm512_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
             if (i + PREFETCH_DISTANCE < norm_size) {
@@ -1206,18 +1212,12 @@ static void layer_norm_simd_with_stats(
             }
             __m512 v = _mm512_loadu_ps(in_ptr + i);
             vsum = _mm512_add_ps(vsum, v);
-            vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
         }
-        sum = _mm512_reduce_add_ps(vsum);
-        sum_sq = _mm512_reduce_add_ps(vsum_sq);
-        for (; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
-        }
+        sum_d = static_cast<double>(_mm512_reduce_add_ps(vsum));
+        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
 #elif defined(HAS_AVX2)
         int64_t simd_size = 8;
         __m256 vsum = _mm256_setzero_ps();
-        __m256 vsum_sq = _mm256_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
             if (i + PREFETCH_DISTANCE < norm_size) {
@@ -1225,36 +1225,67 @@ static void layer_norm_simd_with_stats(
             }
             __m256 v = _mm256_loadu_ps(in_ptr + i);
             vsum = _mm256_add_ps(vsum, v);
-            vsum_sq = _mm256_fmadd_ps(v, v, vsum_sq);
         }
         __m128 lo = _mm256_castps256_ps128(vsum);
         __m128 hi = _mm256_extractf128_ps(vsum, 1);
         lo = _mm_add_ps(lo, hi);
         lo = _mm_hadd_ps(lo, lo);
         lo = _mm_hadd_ps(lo, lo);
-        sum = _mm_cvtss_f32(lo);
+        sum_d = static_cast<double>(_mm_cvtss_f32(lo));
+        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
+#else
+        for (int64_t i = 0; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
+#endif
+        const double mean_d = sum_d / static_cast<double>(norm_size);
 
-        lo = _mm256_castps256_ps128(vsum_sq);
-        hi = _mm256_extractf128_ps(vsum_sq, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        sum_sq = _mm_cvtss_f32(lo);
-
-        for (; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
+        // -------- Pass 2: sum((x - mean)^2) -> var --------
+        double sum_sq_d = 0.0;
+#ifdef HAS_AVX512
+        const __m512 vmean512 = _mm512_set1_ps(static_cast<float>(mean_d));
+        __m512 vss = _mm512_setzero_ps();
+        int64_t j = 0;
+        for (; j + simd_size <= norm_size; j += simd_size) {
+            __m512 v = _mm512_loadu_ps(in_ptr + j);
+            __m512 d = _mm512_sub_ps(v, vmean512);
+            vss = _mm512_fmadd_ps(d, d, vss);
+        }
+        sum_sq_d = static_cast<double>(_mm512_reduce_add_ps(vss));
+        for (; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
+        }
+#elif defined(HAS_AVX2)
+        const __m256 vmean256 = _mm256_set1_ps(static_cast<float>(mean_d));
+        __m256 vss = _mm256_setzero_ps();
+        int64_t j = 0;
+        for (; j + simd_size <= norm_size; j += simd_size) {
+            __m256 v = _mm256_loadu_ps(in_ptr + j);
+            __m256 d = _mm256_sub_ps(v, vmean256);
+            vss = _mm256_fmadd_ps(d, d, vss);
+        }
+        {
+            __m128 lo2 = _mm256_castps256_ps128(vss);
+            __m128 hi2 = _mm256_extractf128_ps(vss, 1);
+            lo2 = _mm_add_ps(lo2, hi2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            sum_sq_d = static_cast<double>(_mm_cvtss_f32(lo2));
+        }
+        for (; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
         }
 #else
-        for (int64_t i = 0; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
+        for (int64_t j = 0; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
         }
 #endif
 
-        float mean = sum / norm_size;
-        float var = (sum_sq / norm_size) - (mean * mean);
-        float inv_std = 1.0f / std::sqrt(var + eps);
+        const double var_d = sum_sq_d / static_cast<double>(norm_size);
+        const float mean = static_cast<float>(mean_d);
+        const float inv_std = static_cast<float>(
+            1.0 / std::sqrt(var_d + static_cast<double>(eps)));
 
         // Save statistics for backward pass
         mean_out[b] = mean;
@@ -1330,73 +1361,97 @@ static void layer_norm_simd(
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;
 
-        // Single-pass mean and variance computation with SIMD
-        float sum = 0.0f;
-        float sum_sq = 0.0f;
+        // Phase P0 / Numerical-precision fix: two-pass mean/variance.
+        // See layer_norm_simd_with_stats above for rationale — one-pass
+        // `sum_sq/n - mean*mean` catastrophically cancels for inputs with
+        // large mean. Two-pass `E[(x-mean)^2]` is unconditionally stable.
 
+        // -------- Pass 1: sum -> mean --------
+        double sum_d = 0.0;
 #ifdef HAS_AVX512
         int64_t simd_size = 16;
         __m512 vsum = _mm512_setzero_ps();
-        __m512 vsum_sq = _mm512_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
-            // Prefetch ahead for next iterations
             if (i + PREFETCH_DISTANCE < norm_size) {
                 _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             }
             __m512 v = _mm512_loadu_ps(in_ptr + i);
             vsum = _mm512_add_ps(vsum, v);
-            vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
         }
-        sum = _mm512_reduce_add_ps(vsum);
-        sum_sq = _mm512_reduce_add_ps(vsum_sq);
-        for (; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
-        }
+        sum_d = static_cast<double>(_mm512_reduce_add_ps(vsum));
+        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
 #elif defined(HAS_AVX2)
         int64_t simd_size = 8;
         __m256 vsum = _mm256_setzero_ps();
-        __m256 vsum_sq = _mm256_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
-            // Prefetch ahead for next iterations
             if (i + PREFETCH_DISTANCE < norm_size) {
                 _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             }
             __m256 v = _mm256_loadu_ps(in_ptr + i);
             vsum = _mm256_add_ps(vsum, v);
-            vsum_sq = _mm256_fmadd_ps(v, v, vsum_sq);
         }
-        // Horizontal sum
         __m128 lo = _mm256_castps256_ps128(vsum);
         __m128 hi = _mm256_extractf128_ps(vsum, 1);
         lo = _mm_add_ps(lo, hi);
         lo = _mm_hadd_ps(lo, lo);
         lo = _mm_hadd_ps(lo, lo);
-        sum = _mm_cvtss_f32(lo);
+        sum_d = static_cast<double>(_mm_cvtss_f32(lo));
+        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
+#else
+        for (int64_t i = 0; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
+#endif
+        const double mean_d = sum_d / static_cast<double>(norm_size);
 
-        lo = _mm256_castps256_ps128(vsum_sq);
-        hi = _mm256_extractf128_ps(vsum_sq, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        sum_sq = _mm_cvtss_f32(lo);
-
-        for (; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
+        // -------- Pass 2: sum((x - mean)^2) -> var --------
+        double sum_sq_d = 0.0;
+#ifdef HAS_AVX512
+        const __m512 vmean512 = _mm512_set1_ps(static_cast<float>(mean_d));
+        __m512 vss = _mm512_setzero_ps();
+        int64_t j = 0;
+        for (; j + simd_size <= norm_size; j += simd_size) {
+            __m512 v = _mm512_loadu_ps(in_ptr + j);
+            __m512 d = _mm512_sub_ps(v, vmean512);
+            vss = _mm512_fmadd_ps(d, d, vss);
+        }
+        sum_sq_d = static_cast<double>(_mm512_reduce_add_ps(vss));
+        for (; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
+        }
+#elif defined(HAS_AVX2)
+        const __m256 vmean256 = _mm256_set1_ps(static_cast<float>(mean_d));
+        __m256 vss = _mm256_setzero_ps();
+        int64_t j = 0;
+        for (; j + simd_size <= norm_size; j += simd_size) {
+            __m256 v = _mm256_loadu_ps(in_ptr + j);
+            __m256 d = _mm256_sub_ps(v, vmean256);
+            vss = _mm256_fmadd_ps(d, d, vss);
+        }
+        {
+            __m128 lo2 = _mm256_castps256_ps128(vss);
+            __m128 hi2 = _mm256_extractf128_ps(vss, 1);
+            lo2 = _mm_add_ps(lo2, hi2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            sum_sq_d = static_cast<double>(_mm_cvtss_f32(lo2));
+        }
+        for (; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
         }
 #else
-        for (int64_t i = 0; i < norm_size; ++i) {
-            sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
+        for (int64_t j = 0; j < norm_size; ++j) {
+            const double d = static_cast<double>(in_ptr[j]) - mean_d;
+            sum_sq_d += d * d;
         }
 #endif
 
-        float mean = sum / norm_size;
-        float var = (sum_sq / norm_size) - (mean * mean);
-        float inv_std = 1.0f / std::sqrt(var + eps);
+        const double var_d = sum_sq_d / static_cast<double>(norm_size);
+        const float mean = static_cast<float>(mean_d);
+        const float inv_std = static_cast<float>(
+            1.0 / std::sqrt(var_d + static_cast<double>(eps)));
 
         // Normalize with SIMD
 #ifdef HAS_AVX512

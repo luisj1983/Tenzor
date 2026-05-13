@@ -366,6 +366,14 @@ add_executable(test_group_instance_norm_f64_precision test_group_instance_norm_f
 target_link_libraries(test_group_instance_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_group_instance_norm_f64_precision DISCOVERY_TIMEOUT 60)
 
+# Numerical-precision fix: layer_norm_simd + layer_norm_simd_with_stats used
+# the catastrophic-cancellation formula var = sum_sq/n - mean^2. For inputs
+# with large mean this produces negative variance and a NaN inv_std. Fixed
+# with two-pass E[(x-mean)^2] form.
+add_executable(test_layer_norm_variance_stability test_layer_norm_variance_stability.cpp)
+target_link_libraries(test_layer_norm_variance_stability PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_layer_norm_variance_stability DISCOVERY_TIMEOUT 60)
+
 # Phase P0 / Fix 5 — CUDA median Float16/BFloat16: the indices output was
 # a hard-coded 0; the values were reconstructed via float-to-half conversion
 # losing the original half representation. Mirrors mode_kernel pattern.
