@@ -326,10 +326,22 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
 
         // ---- Pass 2: per-channel sum of squared deviations -------------
         // Compute (x - global_mean)^2 against the freshly-reduced mean.
+        // 6th-audit Fix #4: trim peak memory by reducing immediately and
+        // releasing the full-size intermediates back to the allocator.
+        // Pre-fix kept `centred` and `dev_sq` (each ~ |x|) live until the
+        // end of the block; for a typical BN input (B=64,C=128,H=W=56,F32)
+        // that's ~200 MiB of avoidable peak. The reduce + reset pattern
+        // returns each buffer as soon as the next op no longer needs it.
         auto mean_b = batch_mean.reshape({1, C, 1, 1});
-        auto centred = x_compute - mean_b;
-        auto dev_sq = centred * centred;
-        auto local_sum_sq_dev = sum(sum(sum(dev_sq, 3, false), 2, false), 0, false);
+        Tensor local_sum_sq_dev;
+        {
+            Tensor centred = x_compute - mean_b;
+            Tensor dev_sq  = centred * centred;
+            centred = Tensor();  // release the first full-size buffer
+            local_sum_sq_dev = sum(sum(sum(dev_sq, 3, false), 2, false), 0, false);
+            // dev_sq goes out of scope here, releasing the second buffer
+            // before the all-reduce begins.
+        }
 
         if (world_size_ > 1 && all_reduce_fn_) {
             all_reduce_fn_(local_sum_sq_dev);

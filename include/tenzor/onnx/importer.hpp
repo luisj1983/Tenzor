@@ -182,6 +182,12 @@ private:
     Device device_ = Device::cpu();
     ONNXModelData model_data_;
     ONNXImportContext context_;
+
+    // 6th-audit Fix #1: directory containing the .onnx file, used as the
+    // base path when resolving `external_data` location entries. Set by
+    // `import_from_file`; left empty for `import_from_bytes` (in which case
+    // any EXTERNAL initializer throws — there's no anchor for the sidecar).
+    std::string external_data_dir_;
 };
 
 auto import_onnx(const std::string& filepath, bool verbose = false) -> std::shared_ptr<nn::Module>;

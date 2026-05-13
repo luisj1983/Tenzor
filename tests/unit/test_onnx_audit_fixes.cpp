@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/onnx/exporter.hpp>
+#include <tenzor/onnx/importer.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -282,4 +283,124 @@ TEST(ONNXAuditFixes, SmallModelDoesNotEmitSidecar) {
         << "Small-model export must not produce an external-data sidecar";
 
     fs::remove(proto_path);
+}
+
+// =========================================================================
+// 6th-audit Fix #1: importer must read external_data sidecars.
+// =========================================================================
+
+TEST(ONNXAuditFixes, ImporterReadsExternalDataRoundTrip) {
+    using namespace tenzor::onnx;
+    namespace fs = std::filesystem;
+
+    // Export a BN model with external_data, then re-parse it via the importer
+    // and verify the initializer bytes were loaded from the sidecar (not
+    // silently treated as empty).
+    ONNXExporter exporter(/*opset=*/18);
+    const int64_t C = (4 * 1024 * 1024) / 4;  // 4 MiB per BN tensor (Float32)
+
+    auto input  = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    auto scale  = tenzor::ones({C}, DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({C}, DType::Float32, Device::cpu());
+    auto output = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(input, scale, bias, mean, var,
+                                /*eps=*/1e-5, output, "bn_out");
+
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_ext_rt_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{true},
+                            /*threshold_bytes=*/1ULL << 20);
+
+    ASSERT_TRUE(fs::exists(proto_path));
+    ASSERT_TRUE(fs::exists(data_path));
+
+    // Importer side: parse the file and check that the initializers
+    // round-tripped correctly. Pre-fix the importer ignored external_data
+    // and surfaced an "expected N bytes, got 0" exception when downstream
+    // code tried to materialise a tensor from empty raw_data.
+    ONNXImporter importer;
+    auto model = importer.import_from_file(proto_path.string());
+    const auto& graph = importer.get_model_data().graph;
+
+    // BN export adds 4 initializers (scale, bias, mean, var). Each is
+    // 4 MiB of Float32 == C floats.
+    EXPECT_EQ(graph.initializers.size(), 4u)
+        << "Importer dropped or duplicated initializers from the round-trip";
+
+    bool found_at_least_one_loaded = false;
+    for (const auto& [name, init] : graph.initializers) {
+        EXPECT_EQ(init.raw_data.size(),
+                  static_cast<size_t>(C * sizeof(float)))
+            << "Initializer '" << name << "' raw_data size mismatch — "
+               "external_data was not loaded (pre-Fix#1 bug)";
+        if (init.raw_data.size() == static_cast<size_t>(C * sizeof(float))) {
+            found_at_least_one_loaded = true;
+        }
+    }
+    EXPECT_TRUE(found_at_least_one_loaded)
+        << "No initializers were loaded from the sidecar — importer ignored "
+           "data_location=EXTERNAL";
+
+    fs::remove(proto_path);
+    fs::remove(data_path);
+}
+
+TEST(ONNXAuditFixes, ImporterRejectsPathTraversalInExternalData) {
+    // Hand-build a TensorProto pointing the sidecar at "../../../etc/passwd".
+    // The importer must refuse to open it.
+    using namespace tenzor::onnx;
+    namespace fs = std::filesystem;
+
+    ONNXExporter exporter(/*opset=*/18);
+    auto t = tenzor::ones({1024}, DType::Float32, Device::cpu());
+    // Force-emit through BN (small initializers, so the auto path won't
+    // externalise — but use_external_data=true threshold=0 forces it).
+    auto in     = tenzor::zeros({1, 1024, 1, 1}, DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({1024}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({1024}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({1024},  DType::Float32, Device::cpu());
+    auto out    = tenzor::zeros({1, 1024, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(in, t, bias, mean, var, /*eps=*/1e-5, out, "y");
+
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_pt_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{true},
+                            /*threshold_bytes=*/0);  // force all-external
+
+    // Hand-edit the proto to replace the sidecar filename with a relative
+    // traversal. We rely on the basename appearing as a length-prefixed
+    // string inside the proto; replace its content in-place with a string
+    // of equal length but the leading characters set to "../".
+    std::ifstream in_f(proto_path, std::ios::binary);
+    std::string blob((std::istreambuf_iterator<char>(in_f)),
+                      std::istreambuf_iterator<char>());
+    in_f.close();
+    const std::string needle = data_path.filename().string();
+    auto pos = blob.find(needle);
+    ASSERT_NE(pos, std::string::npos)
+        << "Could not locate sidecar basename in proto blob";
+    // Patch: "../X" of the same length so the protobuf wire encoding stays
+    // valid (length prefix unchanged).
+    blob[pos]     = '.';
+    blob[pos + 1] = '.';
+    blob[pos + 2] = '/';
+    std::ofstream out_f(proto_path, std::ios::binary | std::ios::trunc);
+    out_f.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+    out_f.close();
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_file(proto_path.string()),
+                 std::runtime_error)
+        << "Importer should reject external_data locations containing '..' "
+           "(path-traversal hardening)";
+
+    fs::remove(proto_path);
+    fs::remove(data_path);
 }
