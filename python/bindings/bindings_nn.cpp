@@ -235,6 +235,34 @@ void register_nn(py::module_& m) {
         //
         // Each register_*_hook returns a RemovableHandle (defined in
         // python/tenzor/nn.py). Call handle.remove() to detach.
+        //
+        // 5th-audit B'1: reference-cycle hazard for self-referential hooks.
+        //
+        //   class M(nn.Module):
+        //       def __init__(self):
+        //           super().__init__()
+        //           self.register_forward_hook(self.my_hook)  # self <-> hook
+        //
+        // The bound method `self.my_hook` captures `self`, the hook closure
+        // captures the bound method, and `M.hooks_` (C++-side) stores the
+        // closure as `py::object` (strong ref). The cycle is invisible to
+        // Python's GC because the C++ side holds the only strong reference
+        // to the hook from the cycle's perspective — Python sees a cycle of
+        // length 0.
+        //
+        // We intentionally keep STRONG refs to hooks here (changing to
+        // `py::weakref` would silently stop firing for any user that passes
+        // a transient lambda — incompatible with PyTorch semantics). To
+        // break the cycle for self-referential hooks, Python users should
+        // either:
+        //   (a) wrap with `weakref.WeakMethod(self.my_hook)` and unwrap in
+        //       the hook body, or
+        //   (b) explicitly call `handle.remove()` in `__del__` /
+        //       `__exit__`, or
+        //   (c) register the hook on the parent rather than self.
+        //
+        // The Python `RemovableHandle` already exposes (b) — see
+        // `python/tenzor/nn.py`.
         // ====================================================================
         .def("register_forward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();

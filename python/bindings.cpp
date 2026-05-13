@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
 #include "bindings/register.hpp"  // split-out submodule registrars
+#include <cassert>                 // 5th-audit B6 PyGILState_Check assertions
 #include <iostream>
 #include <sstream>
 #include <tenzor/tenzor.hpp>
@@ -182,9 +183,19 @@ PYBIND11_MODULE(tenzor_core, m) {
         m, "BackendError", py_tenzor_error.ptr());
     py::register_exception<tenzor::MemoryException>(
         m, "MemoryError", py_tenzor_error.ptr());
+    // 5th-audit B'7: register every TenzorException-derived class that ships
+    // in the public API. Pre-fix `TensorBoardException` was missing and would
+    // surface only through the catch-all translator below, losing its
+    // distinctive Python type (users couldn't write
+    // `except tz.TensorBoardError`). The catch-all is kept as a safety net.
+    py::register_exception<tenzor::TensorBoardException>(
+        m, "TensorBoardError", py_tenzor_error.ptr());
 
     // Catch-all translator: any future TenzorException-derived types not
     // explicitly registered above will still map to TenzorError in Python.
+    // This also covers the case where pybind11's per-class translator misses
+    // a cross-DSO-boundary exception (RTTI mismatch); the catch matches by
+    // base type.
     py::register_exception_translator([](std::exception_ptr p) {
         try {
             if (p) std::rethrow_exception(p);
@@ -253,7 +264,27 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_property_readonly("saved_tensors", &PyFunctionCtx::saved_tensors,
              "Get saved tensors");
 
-    // PyCustomFunction bridges Python custom Functions to C++ autograd graph
+    // PyCustomFunction bridges Python custom Functions to C++ autograd graph.
+    //
+    // 5th-audit B6 / B'9 (GIL safety + reference-cycle hygiene):
+    //
+    //   * Every method that touches `py_forward_fn_`, `py_backward_fn_`, or
+    //     `ctx_` MUST hold the Python GIL. The C++ autograd engine releases
+    //     the GIL around `Variable::backward()`, so calls into this object
+    //     can arrive from arbitrary C++ worker threads. All such methods
+    //     below begin with `py::gil_scoped_acquire`.
+    //   * The destructor likewise acquires the GIL before dropping the
+    //     `py::object` members — destroying a `py::object` without the GIL
+    //     would race the CPython refcount.
+    //   * Reference-cycle note: a Python user closure for `forward`/`backward`
+    //     captured by a `staticmethod` is owned at the class level, not by
+    //     a `PyCustomFunction` instance; the lifetime is bounded by the
+    //     class object, which Python cleans up at interpreter shutdown.
+    //     We never store `self` inside the closure ourselves, so no
+    //     class -> instance -> closure -> instance cycle is introduced
+    //     here. Future modifiers: keep `py_forward_fn_` and `py_backward_fn_`
+    //     as Python staticmethod-compatible objects; do not bind `self`
+    //     into either.
     struct PyCustomFunction : public tenzor::Function {
         py::object py_forward_fn_;  // Python static forward function
         py::object py_backward_fn_; // Python static backward function
@@ -279,6 +310,10 @@ PYBIND11_MODULE(tenzor_core, m) {
 
         auto forward(std::vector<tenzor::Variable> inputs) -> std::vector<tenzor::Variable> override {
             py::gil_scoped_acquire acquire;
+            // 5th-audit B6 defensive assert: catch any future GIL-release
+            // bypass at the soonest possible point. In Release builds this
+            // is compiled out; in Debug it fires before any Python touch.
+            assert(PyGILState_Check() && "PyCustomFunction::forward called without the GIL");
             try {
                 // Build args: (ctx, *inputs_as_tensors)
                 py::list args;
@@ -307,13 +342,20 @@ PYBIND11_MODULE(tenzor_core, m) {
                     saved_versions_.push_back(t.version());
                 }
                 return outputs;
-            } catch (py::error_already_set&) {
-                throw;  // Preserves Python traceback
+            } catch (py::error_already_set& e) {
+                // 5th-audit B'6: explicit restore-and-rethrow preserves the
+                // Python traceback. Pre-fix `throw;` propagated `e` by
+                // reference; if pybind11 hadn't yet snapshotted the
+                // PyErr_* state into `e`, the traceback could be lost
+                // when the destination Python frame restored it.
+                e.restore();
+                throw py::error_already_set();
             }
         }
 
         auto backward(std::vector<tenzor::Tensor> grad_outputs) -> std::vector<tenzor::Tensor> override {
             py::gil_scoped_acquire acquire;
+            assert(PyGILState_Check() && "PyCustomFunction::backward called without the GIL");
             try {
                 // Restore ctx saved tensors
                 ctx_->saved_tensors_ = saved_tensors_;
@@ -339,8 +381,11 @@ PYBIND11_MODULE(tenzor_core, m) {
                     }
                 }
                 return grads;
-            } catch (py::error_already_set&) {
-                throw;  // Preserves Python traceback
+            } catch (py::error_already_set& e) {
+                // 5th-audit B'6: see forward() — restore-and-rethrow to
+                // keep the Python traceback intact.
+                e.restore();
+                throw py::error_already_set();
             }
         }
 
