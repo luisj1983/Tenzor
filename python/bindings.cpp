@@ -1034,9 +1034,30 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("tensor"), py::arg("name"),
              py::arg("dynamic_axes") = std::unordered_map<int64_t, std::string>(),
              "Add model output")
-        .def("export_to_file", &tenzor::onnx::ONNXExporter::export_to_file,
+        // 6th-audit Fix #2: `export_to_file` is overloaded since 5th-audit C6
+        // (legacy 1-arg form + 3-arg external_data form). Disambiguate via
+        // explicit member-function-pointer cast — pybind11 cannot deduce the
+        // overload set from a bare `&Class::method`.
+        .def("export_to_file",
+             static_cast<void (tenzor::onnx::ONNXExporter::*)(const std::string&)>(
+                 &tenzor::onnx::ONNXExporter::export_to_file),
              py::arg("filepath"),
-             "Export model to ONNX file")
+             "Export model to a single ONNX file (legacy single-file form).")
+        // 6th-audit Fix #2: expose the external_data overload so Python users
+        // can actually export >2 GB models. Defaults match the C++ API:
+        // `use_external_data=None` → auto-enable at >1.5 GB initializer total;
+        // `external_data_threshold_bytes=1 MiB` per-tensor.
+        .def("export_to_file",
+             static_cast<void (tenzor::onnx::ONNXExporter::*)(
+                 const std::string&, std::optional<bool>, size_t)>(
+                 &tenzor::onnx::ONNXExporter::export_to_file),
+             py::arg("filepath"),
+             py::arg("use_external_data") = std::optional<bool>{},
+             py::arg("external_data_threshold_bytes") = size_t{1ULL << 20},
+             "Export model to ONNX, optionally splitting large initializers "
+             "into a sidecar .data file. Set `use_external_data=True` to "
+             "force external data, `False` for single-file, or `None` (default) "
+             "to auto-enable when total initializer bytes exceed 1.5 GB.")
         .def("export_to_bytes", &tenzor::onnx::ONNXExporter::export_to_bytes,
              "Export model to ONNX bytes")
         .def("get_graph", &tenzor::onnx::ONNXExporter::get_graph,

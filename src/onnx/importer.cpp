@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 
 #ifdef TENZOR_HAS_ONNX_PROTOBUF
 #include "onnx.pb.h"
@@ -58,11 +59,91 @@ constexpr int32_t kAttrTypeTensor = 4;
 constexpr int32_t kAttrTypeFloats = 6;
 constexpr int32_t kAttrTypeInts   = 7;
 
-auto proto_to_ir_tensor(const tenzor_onnx::TensorProto& t) -> ONNXTensorData {
+// 6th-audit Fix #1: load the bytes for an EXTERNAL TensorProto from the
+// sidecar file referenced by its `external_data` entries. Throws on missing
+// keys, short reads, or path-traversal attempts (e.g. "../etc/passwd").
+auto load_external_tensor_bytes(const tenzor_onnx::TensorProto& t,
+                                 const std::string& base_dir) -> std::vector<uint8_t> {
+    if (base_dir.empty()) {
+        throw std::runtime_error(
+            "ONNXImporter: tensor '" + t.name() + "' references external_data "
+            "but the importer was given a byte buffer with no source-file path "
+            "anchor. Use import_from_file() instead of import_from_bytes() for "
+            "models that use external data.");
+    }
+    std::string location;
+    int64_t offset = 0;
+    int64_t length = -1;
+    for (const auto& kv : t.external_data()) {
+        if (kv.key() == "location")    location = kv.value();
+        else if (kv.key() == "offset") offset = std::stoll(kv.value());
+        else if (kv.key() == "length") length = std::stoll(kv.value());
+    }
+    if (location.empty()) {
+        throw std::runtime_error(
+            "ONNXImporter: tensor '" + t.name() + "' has data_location=EXTERNAL "
+            "but no `location` entry in external_data");
+    }
+    // Reject path traversal — the sidecar must sit next to the .onnx file or
+    // in a subdirectory below it. Any "../" component is rejected.
+    if (location.find("..") != std::string::npos) {
+        throw std::runtime_error(
+            "ONNXImporter: external_data location '" + location +
+            "' contains '..' (path-traversal attempt rejected)");
+    }
+    namespace fs = std::filesystem;
+    fs::path full = fs::path(base_dir) / location;
+    std::ifstream sidecar(full, std::ios::binary);
+    if (!sidecar.is_open()) {
+        throw std::runtime_error(
+            "ONNXImporter: failed to open external_data sidecar: " + full.string());
+    }
+    sidecar.seekg(0, std::ios::end);
+    const int64_t file_size = sidecar.tellg();
+    sidecar.seekg(offset, std::ios::beg);
+    if (length < 0) {
+        // Per ONNX spec, length is optional — when absent, read to EOF.
+        length = file_size - offset;
+    }
+    if (offset < 0 || offset > file_size || length < 0 ||
+        offset + length > file_size) {
+        throw std::runtime_error(
+            "ONNXImporter: external_data offset/length out of range for " +
+            full.string() + " (file=" + std::to_string(file_size) +
+            ", offset=" + std::to_string(offset) +
+            ", length=" + std::to_string(length) + ")");
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));
+    sidecar.read(reinterpret_cast<char*>(bytes.data()),
+                 static_cast<std::streamsize>(length));
+    if (!sidecar) {
+        throw std::runtime_error(
+            "ONNXImporter: short read on external_data sidecar " + full.string());
+    }
+    return bytes;
+}
+
+// 6th-audit Fix #1: thread-local propagation of the source-file directory for
+// EXTERNAL initializers. Set by `ONNXImporter::parse_model` for the duration
+// of the parse and cleared on exit (RAII). Used by `proto_to_ir_tensor` when
+// it sees `data_location()==EXTERNAL`, plus by `proto_to_ir_attribute` when
+// it recurses into an embedded tensor.
+thread_local std::string g_onnx_external_data_dir;
+
+auto proto_to_ir_tensor(const tenzor_onnx::TensorProto& t,
+                         const std::string& external_data_dir = "") -> ONNXTensorData {
     ONNXTensorData tensor;
     tensor.name = t.name();
     tensor.dtype = static_cast<ONNXDataType>(t.data_type());
     tensor.shape.assign(t.dims().begin(), t.dims().end());
+
+    // 6th-audit Fix #1: handle data_location=EXTERNAL initializers. Per the
+    // ONNX spec, when this is set the tensor's raw bytes live in a sidecar
+    // file referenced by `external_data`.
+    if (t.data_location() == tenzor_onnx::TensorProto_DataLocation_EXTERNAL) {
+        tensor.raw_data = load_external_tensor_bytes(t, external_data_dir);
+        return tensor;
+    }
 
     if (!t.raw_data().empty()) {
         const std::string& raw = t.raw_data();
@@ -107,7 +188,13 @@ auto proto_to_ir_attribute(const tenzor_onnx::AttributeProto& a) -> ONNXAttribut
         attr.s = a.s();
     }
     if (type == kAttrTypeTensor && a.has_t()) {
-        attr.tensor = proto_to_ir_tensor(a.t());
+        // 6th-audit Fix #1: attribute-tensors can also use external_data;
+        // defer to the same dir-aware helper. `external_data_dir_seen` is a
+        // thread-local-style propagation via a module-level static; safer
+        // than threading the dir through every signature for a path that
+        // rarely fires.
+        extern thread_local std::string g_onnx_external_data_dir;
+        attr.tensor = proto_to_ir_tensor(a.t(), g_onnx_external_data_dir);
     }
     if (type == kAttrTypeInts || (!a.ints().empty() && type == 0)) {
         std::vector<int64_t> ints(a.ints().begin(), a.ints().end());
@@ -162,7 +249,9 @@ auto proto_to_ir_graph(const tenzor_onnx::GraphProto& g) -> ONNXGraphData {
         graph.nodes.push_back(proto_to_ir_node(n));
     }
     for (const auto& init : g.initializer()) {
-        auto tensor = proto_to_ir_tensor(init);
+        // 6th-audit Fix #1: pass the active source-file directory so that
+        // EXTERNAL initializers resolve their sidecar relative to the .onnx.
+        auto tensor = proto_to_ir_tensor(init, g_onnx_external_data_dir);
         graph.initializers[tensor.name] = std::move(tensor);
     }
     for (const auto& i : g.input()) {
@@ -361,6 +450,14 @@ auto ONNXImporter::import_from_file(const std::string& filepath) -> std::shared_
 
     log("Read " + std::to_string(file_size) + " bytes from file");
 
+    // 6th-audit Fix #1: anchor external_data lookups at the source file's
+    // directory. parse_model() picks this up via the thread-local in
+    // importer.cpp.
+    namespace fs = std::filesystem;
+    external_data_dir_ = fs::path(filepath).parent_path().string();
+    if (external_data_dir_.empty()) {
+        external_data_dir_ = ".";  // file in current directory
+    }
     return import_from_bytes(bytes);
 }
 
@@ -386,6 +483,19 @@ auto ONNXImporter::get_model_data() const -> const ONNXModelData& {
 
 auto ONNXImporter::parse_model(const std::vector<uint8_t>& bytes) -> ONNXModelData {
 #ifdef TENZOR_HAS_ONNX_PROTOBUF
+    // 6th-audit Fix #1: publish the source-file directory (set by
+    // import_from_file) into the thread-local read by proto_to_ir_tensor /
+    // proto_to_ir_attribute. RAII reset so we don't pollute the next parse
+    // on the same thread, even on exception.
+    struct ExternalDataDirScope {
+        std::string previous;
+        explicit ExternalDataDirScope(const std::string& set_to)
+            : previous(g_onnx_external_data_dir) {
+            g_onnx_external_data_dir = set_to;
+        }
+        ~ExternalDataDirScope() { g_onnx_external_data_dir = previous; }
+    } _scope(external_data_dir_);
+
     tenzor_onnx::ModelProto proto;
     if (!proto.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
         throw std::runtime_error(

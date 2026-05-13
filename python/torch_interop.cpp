@@ -226,13 +226,17 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             std::memcpy(torch_tensor.data_ptr(),
                        contiguous_tensor.data<void>(),
                        contiguous_tensor.numel() * dtype_size(dtype));
-        } else {
-            // 5th-audit B3: select the correct cudaMemcpyKind from the
-            // actual {source, destination} device pair. Pre-fix this path
-            // hardcoded `cudaMemcpyDeviceToDevice` regardless of whether
-            // the contiguous source had landed on the CPU (which can
-            // happen if `contiguous()` materialised a host tensor) —
-            // silently corrupting the destination.
+        } else if (contiguous_tensor.device().type == Device::Type::CUDA
+                   || torch_device.is_cuda()) {
+            // 5th-audit B3 / 6th-audit Fix #3: CUDA path. Select the correct
+            // cudaMemcpyKind from the actual {source, destination} device
+            // pair. Pre-5th-audit this path hardcoded
+            // `cudaMemcpyDeviceToDevice`; the 5th-audit fix selected on
+            // CUDA-vs-not but only handled CUDA tensors. The 6th-audit
+            // refinement explicitly gates on CUDA and routes
+            // non-CUDA-non-CPU sources (ROCm/MPS/OneAPI/Vulkan) to the
+            // generic copy path below instead of mislabelling them as
+            // host-to-host CUDA transfers.
             const auto src_is_cuda = (contiguous_tensor.device().type == Device::Type::CUDA);
             const auto dst_is_cuda = torch_device.is_cuda();
             cudaMemcpyKind kind;
@@ -244,6 +248,26 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
                       contiguous_tensor.data<void>(),
                       contiguous_tensor.numel() * dtype_size(dtype),
                       kind);
+        } else {
+            // 6th-audit Fix #3: non-CPU non-CUDA source (ROCm / MPS /
+            // OneAPI / Vulkan). PyTorch's C++ side doesn't expose a
+            // generic device-aware memcpy for these without going through
+            // the dispatcher, so route via a CPU bounce — `contiguous()`
+            // already materialised a host-readable view if any of those
+            // backends's `data<void>()` returns host memory; otherwise the
+            // round-trip via `cpu()` ensures a host buffer.
+            auto host = contiguous_tensor.cpu().contiguous();
+            const size_t bytes = host.numel() * dtype_size(dtype);
+            if (torch_device.is_cpu()) {
+                std::memcpy(torch_tensor.data_ptr(), host.data<void>(), bytes);
+            } else if (torch_device.is_cuda()) {
+                cudaMemcpy(torch_tensor.data_ptr(), host.data<void>(),
+                           bytes, cudaMemcpyHostToDevice);
+            } else {
+                throw std::runtime_error(
+                    "tensor_to_torch: unsupported PyTorch target device for "
+                    "non-CPU/non-CUDA Tenzor source");
+            }
         }
     }
 
