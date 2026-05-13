@@ -373,6 +373,16 @@ add_executable(test_vulkan_layer_norm_saved_stats test_vulkan_layer_norm_saved_s
 target_link_libraries(test_vulkan_layer_norm_saved_stats PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_vulkan_layer_norm_saved_stats DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 6 — CUDA flash-attention backward dropout reproduction:
+# backward kernel used to (void)-cast the Philox seed; now threads it
+# through and re-applies the same mask the forward used.
+add_executable(test_flash_attention_dropout_backward test_flash_attention_dropout_backward.cpp)
+target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_core GTest::gtest_main)
+if(TARGET tenzor_backend_cuda)
+    target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_backend_cuda)
+endif()
+tenzor_discover_tests(test_flash_attention_dropout_backward DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)
