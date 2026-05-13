@@ -359,6 +359,13 @@ add_executable(test_layer_norm_f64_precision test_layer_norm_f64_precision.cpp)
 target_link_libraries(test_layer_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_layer_norm_f64_precision DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 5 — CUDA median Float16/BFloat16: the indices output was
+# a hard-coded 0; the values were reconstructed via float-to-half conversion
+# losing the original half representation. Mirrors mode_kernel pattern.
+add_executable(test_median_f16_bf16 test_median_f16_bf16.cpp)
+target_link_libraries(test_median_f16_bf16 PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)

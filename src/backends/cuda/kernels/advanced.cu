@@ -1003,40 +1003,30 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim,
                     d_half_slice, d_f32_slice, dim_size);
                 TENZOR_CUDA_POST_LAUNCH_CHECK();
 
-                // Sort float copy
+                // Sort float copy with parallel index tracking. d_idx[i]
+                // now holds the original-slice position of the value that
+                // ended up at sorted position i.
                 sort_1d_thrust<float>(d_f32_slice, d_f32_slice, d_idx, dim_size, false, stream);
 
-                // Extract median index from sorted indices
-                // Copy the median index back to host to gather the original half value
+                // Phase P0 / Fix 5: previously this branch wrote a fixed `0`
+                // to the indices output and reconstructed the median value
+                // by converting the sorted float back to half — losing both
+                // the correct index AND any half-precision bit patterns
+                // (subnormals, etc.). Mirror the mode_kernel pattern at
+                // lines 1188-1235 instead: copy d_idx[mid] to the indices
+                // output and gather the original half value via the sorted
+                // index.
                 int64_t out_offset = outer * inner_size + inner;
-                indices.data<int64_t>()[out_offset] = 0;  // placeholder
+                TENZOR_CUDA_CHECK(cudaMemcpyAsync(
+                    indices.data<int64_t>() + out_offset,
+                    d_idx + mid, sizeof(int64_t),
+                    cudaMemcpyDeviceToDevice, stream));
 
-                // Use a device kernel to write the result
-                // d_f32_slice[mid] has the sorted float value, d_idx[mid] has original index
-                // We need to write the original half value, so gather from half slice
-                // But half slice was extracted before sort — d_idx[mid] is the original position
-                // in the slice, so we need the original half values
-                // Actually d_half_slice was not sorted, but we overwrote d_f32_slice.
-                // Re-extract the half slice to get unsorted original values
-                extract_slice_kernel<HalfT><<<grid, block, 0, stream>>>(
-                    reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
-                    d_half_slice, dim_size, inner_size, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-                // Now use a simple kernel to write value and index
-                // We need d_idx[mid] and d_half_slice[d_idx[mid]]
-                // Use extract_median_kernel with the float sorted indices
-                extract_median_kernel<int64_t><<<1, 1, 0, stream>>>(
-                    d_idx, d_idx,  // dummy — we just need d_idx[mid]
-                    indices.data<int64_t>(), indices.data<int64_t>(),
-                    dim_size, inner_size, mid, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-                // For the value, we need to gather from the original half data
-                // Use a gather kernel: out[offset] = half_slice[sorted_idx[mid]]
-                // Simpler: just write f32 median and convert back
-                float_to_half_kernel<HalfT><<<1, 1, 0, stream>>>(
-                    d_f32_slice + mid,
+                // d_half_slice still holds the original (unsorted) half values
+                // from the extract_slice_kernel call above; gather index
+                // d_idx[mid] directly into the values output.
+                gather_by_indices_kernel<HalfT><<<1, 1, 0, stream>>>(
+                    d_half_slice, d_idx + mid,
                     reinterpret_cast<HalfT*>(values.data_ptr()) + out_offset,
                     1);
                 TENZOR_CUDA_POST_LAUNCH_CHECK();
