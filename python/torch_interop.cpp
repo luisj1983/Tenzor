@@ -81,6 +81,13 @@ auto dtype_to_torch(DType dtype) -> int {
             return static_cast<int>(torch::kInt64);
         case DType::UInt8:
             return static_cast<int>(torch::kUInt8);
+        // 5th-audit B1: PyTorch added UInt16/UInt32/UInt64 in 2.3+.
+        case DType::UInt16:
+            return static_cast<int>(torch::kUInt16);
+        case DType::UInt32:
+            return static_cast<int>(torch::kUInt32);
+        case DType::UInt64:
+            return static_cast<int>(torch::kUInt64);
         case DType::Bool:
             return static_cast<int>(torch::kBool);
         case DType::Complex64:
@@ -114,6 +121,13 @@ auto dtype_from_torch(int torch_dtype) -> DType {
             return DType::Int64;
         case torch::kUInt8:
             return DType::UInt8;
+        // 5th-audit B1: PyTorch added UInt16/UInt32/UInt64 in 2.3+.
+        case torch::kUInt16:
+            return DType::UInt16;
+        case torch::kUInt32:
+            return DType::UInt32;
+        case torch::kUInt64:
+            return DType::UInt64;
         case torch::kBool:
             return DType::Bool;
         case torch::kComplexFloat:

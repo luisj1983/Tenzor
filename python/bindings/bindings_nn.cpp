@@ -2840,9 +2840,14 @@ void register_nn(py::module_& m) {
         .def(py::init([](std::shared_ptr<tenzor::nn::Module> model,
                         std::shared_ptr<tenzor::optim::Optimizer> optimizer,
                         py::object loss_fn_obj) {
-            // Create a lambda that wraps the Python loss function
+            // Create a lambda that wraps the Python loss function.
+            // 5th-audit B7: the lambda is stored on the C++ side and may be
+            // invoked from a context where the GIL has been released (e.g.
+            // future async-engine threading, or any caller that wraps the
+            // fit/train_step in a no-GIL block). Acquire the GIL defensively
+            // before touching `loss_fn_obj` or `py::cast`.
             auto loss_fn = [loss_fn_obj](const tenzor::Variable& pred, const tenzor::Variable& target) -> tenzor::Variable {
-                // Call the Python loss function
+                py::gil_scoped_acquire acquire;
                 py::object result = loss_fn_obj(pred, target);
                 return py::cast<tenzor::Variable>(result);
             };

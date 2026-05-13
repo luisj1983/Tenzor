@@ -63,8 +63,16 @@ auto dtype_to_onnx(DType dtype) -> ONNXDataType {
         case DType::UInt32: return ONNXDataType::UINT32;
         case DType::UInt64: return ONNXDataType::UINT64;
         case DType::Bool: return ONNXDataType::BOOL;
-        case DType::Complex64: return ONNXDataType::COMPLEX64;
-        case DType::Complex128: return ONNXDataType::COMPLEX128;
+        // 5th-audit C1: Tenzor's ONNX importer does not currently accept
+        // COMPLEX64/COMPLEX128 codes (see src/onnx/importer.cpp dtype_from_onnx),
+        // so exporting them silently produces a non-round-trippable file.
+        // Throw early with a clear message instead.
+        case DType::Complex64:
+        case DType::Complex128:
+            throw std::runtime_error(
+                "ONNX export: Complex64/Complex128 are not round-trippable through "
+                "this importer/exporter. Cast to a real {real, imag} Float32/Float64 "
+                "pair (e.g. tenzor::view_as_real) before export.");
         default:
             throw std::runtime_error("Unsupported DType for ONNX export");
     }

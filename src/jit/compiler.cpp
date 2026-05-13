@@ -693,6 +693,15 @@ auto FuseConvBatchNormReluPass::run(Graph& graph) -> bool {
                 flow_valid = false;
             }
 
+            // Phase P0 / JIT correctness fix (5th-audit sibling-bug A3): mirror
+            // the training-mode guard from the Conv+BN pair-fusion pass (line
+            // ~429). In training, BN uses live batch mean/variance; folding the
+            // running statistics into conv weights would silently produce wrong
+            // outputs compared to the eager path.
+            if (flow_valid && node2->get_bool_attr("training")) {
+                flow_valid = false;
+            }
+
             if (flow_valid && fuse_triple(node1, node2, node3, graph)) {
                 modified = true;
                 // Skip over the removed nodes
