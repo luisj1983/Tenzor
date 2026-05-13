@@ -989,6 +989,27 @@ auto ONNXExporter::export_conv_transpose(const Tensor& input, const Tensor& weig
     if (spatial_rank < 1 || spatial_rank > 3) {
         throw std::runtime_error("export_conv_transpose: spatial_rank must be 1, 2, or 3");
     }
+    // 5th-audit C3: validate that the parameters we are about to emit are
+    // ones the importer can read back. The exporter signature only accepts
+    // scalar kernel_size/stride/padding/output_padding/dilation, so
+    // anisotropic pads/output_padding cannot be constructed here — but the
+    // dilation case can: ConvTranspose2d in Tenzor does not expose dilation
+    // and the importer rejects dilation != 1 (importer.cpp ~ line 1038).
+    // Emit the validation defensively so a future signature broadening also
+    // gets the check.
+    if (spatial_rank == 2 && dilation != 1) {
+        throw std::runtime_error(
+            "ONNX ConvTranspose2d export: dilation != 1 is not round-trippable "
+            "through this importer (Tenzor ConvTranspose2d does not expose "
+            "dilation). Use spatial_rank=1 or 3, or set dilation=1.");
+    }
+    // Asymmetric pads / anisotropic output_padding are not constructible
+    // from the current scalar signature; assert-on-broaden:
+    if (padding < 0 || output_padding < 0 || dilation < 1 || stride < 1 || kernel_size < 1) {
+        throw std::runtime_error(
+            "ONNX ConvTranspose export: negative/zero kernel/stride/padding/"
+            "output_padding/dilation is not representable.");
+    }
     ONNXExportNode node("ConvTranspose", context_.generate_name("convtranspose"));
     std::string input_name = get_tensor_name(input, "convt_input");
     std::string weight_name = context_.generate_name("convt_weight");
@@ -1055,7 +1076,8 @@ auto ONNXExporter::export_batchnorm2d(const Tensor& input, const Tensor& scale,
                                        const Tensor& bias, const Tensor& mean,
                                        const Tensor& var, double eps,
                                        const Tensor& output,
-                                       const std::string& output_name) -> void {
+                                       const std::string& output_name,
+                                       bool training) -> void {
     ONNXExportNode node("BatchNormalization", context_.generate_name("batchnorm"));
 
     std::string input_name = get_tensor_name(input, "bn_input");
@@ -1082,6 +1104,14 @@ auto ONNXExporter::export_batchnorm2d(const Tensor& input, const Tensor& scale,
 
     node.set_attr("epsilon", static_cast<float>(eps));
     node.set_attr("momentum", 0.9f); // Default momentum
+    // 5th-audit C4: ONNX BatchNormalization has a `training_mode` attribute
+    // (opset 14+; default 0 = inference). Emit it when the caller declares the
+    // BN module was in training mode so the produced graph faithfully encodes
+    // batch-stats vs running-stats semantics. Pre-fix this attribute was
+    // never set, silently exporting every BN as inference.
+    if (training) {
+        node.set_attr("training_mode", static_cast<int64_t>(1));
+    }
 
     graph_.add_node(node);
     context_.register_tensor(output, output_name);
@@ -1091,9 +1121,10 @@ auto ONNXExporter::export_batchnorm1d(const Tensor& input, const Tensor& scale,
                                        const Tensor& bias, const Tensor& mean,
                                        const Tensor& var, double eps,
                                        const Tensor& output,
-                                       const std::string& output_name) -> void {
+                                       const std::string& output_name,
+                                       bool training) -> void {
     // BatchNorm1d uses the same ONNX op as BatchNorm2d
-    export_batchnorm2d(input, scale, bias, mean, var, eps, output, output_name);
+    export_batchnorm2d(input, scale, bias, mean, var, eps, output, output_name, training);
 }
 
 auto ONNXExporter::export_layernorm(const Tensor& input, const Tensor& scale,
@@ -3982,7 +4013,12 @@ auto trace_custom_module(ONNXExporter& exporter,
                 running_var->tensor(),
                 /*eps=*/1e-5,
                 output.tensor(),
-                output_name
+                output_name,
+                // 5th-audit C5: forward the BN module's training/eval state
+                // so the produced ONNX node faithfully encodes it via the
+                // `training_mode` attribute. Pre-fix the exporter silently
+                // exported every BN as inference, dropping the mode bit.
+                /*training=*/module->is_training()
             );
             return;
         }

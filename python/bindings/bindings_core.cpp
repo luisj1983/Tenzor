@@ -2047,7 +2047,25 @@ Returns:
             } else if (py::isinstance<py::int_>(value)) {
                 is_scalar_value = true;
                 is_integer_scalar = true;
-                int_scalar_value = py::cast<int64_t>(value);
+                // 5th-audit B'3: Python ints are unbounded. py::cast<int64_t>
+                // raises py::error_already_set on PyLong_AsLongLong overflow,
+                // but the message ("Python int too large to convert to C long")
+                // gives no scalar-assignment context. Wrap with an explicit
+                // PyLong_AsLongLongAndOverflow check for a clearer diagnostic.
+                {
+                    int overflow = 0;
+                    long long v = PyLong_AsLongLongAndOverflow(value.ptr(), &overflow);
+                    if (overflow != 0) {
+                        throw std::overflow_error(
+                            "Tensor scalar assignment: Python int does not fit "
+                            "in int64 (overflow). Cast to a wider/narrower dtype "
+                            "or use a tenzor.Tensor for the scalar value.");
+                    }
+                    if (v == -1 && PyErr_Occurred()) {
+                        throw py::error_already_set();
+                    }
+                    int_scalar_value = static_cast<int64_t>(v);
+                }
                 scalar_value = static_cast<double>(int_scalar_value);
             } else if (py::isinstance<py::float_>(value)) {
                 is_scalar_value = true;

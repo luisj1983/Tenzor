@@ -232,6 +232,15 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
 
 // NumPy to Tensor conversion
 auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
+    // 5th-audit B'4: reject object-dtype arrays at the entry. They have
+    // PyObject* elements (not raw bytes), so a generic dtype-mapping error
+    // deeper in the call would surface as "Unsupported NumPy dtype" without
+    // context. Catch them here with a precise message.
+    if (arr.dtype().kind() == 'O') {
+        throw std::invalid_argument(
+            "NumPy object-dtype arrays are not supported. Convert to a "
+            "numeric dtype first (e.g. arr.astype(np.float32)).");
+    }
     // Warn about Fortran-contiguous (column-major) arrays — data will be copied
     // as row-major which may silently transpose the data layout
     auto flags = arr.flags();

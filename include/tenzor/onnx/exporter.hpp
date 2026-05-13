@@ -496,21 +496,30 @@ public:
 
     /**
      * @brief Export BatchNorm2d layer
+     *
+     * @param training If true, sets the ONNX `training_mode` attribute to 1
+     *        (5th-audit C4/C5). Defaults to false (inference). Callers that
+     *        trace a BatchNorm layer with `module.training() == true` MUST
+     *        pass true so the produced graph faithfully encodes the mode.
      */
     auto export_batchnorm2d(const Tensor& input, const Tensor& scale,
                             const Tensor& bias, const Tensor& mean,
                             const Tensor& var, double eps,
                             const Tensor& output,
-                            const std::string& output_name) -> void;
+                            const std::string& output_name,
+                            bool training = false) -> void;
 
     /**
      * @brief Export BatchNorm1d layer
+     *
+     * @param training See `export_batchnorm2d` (forwarded through).
      */
     auto export_batchnorm1d(const Tensor& input, const Tensor& scale,
                             const Tensor& bias, const Tensor& mean,
                             const Tensor& var, double eps,
                             const Tensor& output,
-                            const std::string& output_name) -> void;
+                            const std::string& output_name,
+                            bool training = false) -> void;
 
     /**
      * @brief Export a LayerNorm layer as ONNX LayerNormalization (opset 17+).
