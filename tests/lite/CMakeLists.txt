@@ -19,3 +19,7 @@ tenzor_discover_tests(test_model_format LABELS "lite" DISCOVERY_TIMEOUT 60)
 add_executable(test_lite_runtime test_lite_runtime.cpp)
 target_link_libraries(test_lite_runtime PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_lite_runtime LABELS "lite" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_exporter test_exporter.cpp)
+target_link_libraries(test_exporter PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_exporter LABELS "lite" DISCOVERY_TIMEOUT 60)

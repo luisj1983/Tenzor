@@ -4,12 +4,19 @@
  */
 
 #include "tenzor/lite/runtime.hpp"
+#include "tenzor/lite/lite_graph.hpp"
+#include "tenzor/lite/model_format.hpp"
+#include "tenzor/lite/tensor_bridge.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/core/tensor.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace tenzor {
 namespace lite {
@@ -103,8 +110,16 @@ struct LiteRuntime::Impl {
     std::vector<std::vector<int64_t>> output_shapes;
     std::unordered_map<std::string, std::string> metadata;
 
-    // In production: graph nodes, weight data, op dispatch table
-    std::vector<uint8_t> model_data;  // Raw model bytes for now
+    LiteGraph graph;
+
+    // Phase 2: parsed model artefacts.
+    //   - tensor_values[tid] is the TVAL entry for tensor_id `tid`. Entries
+    //     omitted from TVAL get a default Intermediate slot here.
+    //   - weight_blob holds the raw bytes of the WGTS section (owned). Weight
+    //     tensors are reconstructed as Tensor views over this buffer per
+    //     forward() call. Phase 5 can swap this for an mmap-backed span.
+    std::vector<TensorValue> tensor_values_by_id;  ///< indexed by tensor_id
+    std::vector<uint8_t> weight_blob;
 };
 
 LiteRuntime::~LiteRuntime() = default;
@@ -126,56 +141,166 @@ auto LiteRuntime::load(const std::string& path) -> std::unique_ptr<LiteRuntime> 
     return load(data.data(), data.size());
 }
 
+namespace {
+
+// Reshape a flat `LoadedModel::tensor_values` into an indexed table sized
+// by max_tensor_id + 1, so the runtime can do O(1) lookup. Unfilled slots
+// keep their default-constructed (Intermediate) TensorValue.
+auto index_tensor_values(const std::vector<TensorValue>& tvs)
+    -> std::vector<TensorValue> {
+    int16_t max_id = -1;
+    for (const auto& tv : tvs) max_id = std::max(max_id, tv.tensor_id);
+    std::vector<TensorValue> out(static_cast<size_t>(max_id + 1));
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i].tensor_id = static_cast<int16_t>(i);
+    }
+    for (const auto& tv : tvs) {
+        out[static_cast<size_t>(tv.tensor_id)] = tv;
+    }
+    return out;
+}
+
+// Walk the graph and verify every node's OpId is registered on the chosen
+// backend. Throws with a deduplicated, actionable list of missing OpIds if
+// any are absent. (Phase 5 backend coverage check — promoted from a future
+// runtime crash into a clean load-time error.)
+auto verify_op_coverage(const LiteGraph& graph, Device::Type device) -> void {
+    std::unordered_set<uint16_t> missing;
+    for (const auto& node : graph.nodes()) {
+        if (!tenzor::is_op_supported(node.op, device)) {
+            missing.insert(static_cast<uint16_t>(node.op));
+        }
+    }
+    if (missing.empty()) return;
+
+    std::vector<uint16_t> sorted(missing.begin(), missing.end());
+    std::sort(sorted.begin(), sorted.end());
+
+    std::ostringstream oss;
+    oss << "LiteRuntime::load: " << sorted.size()
+        << " OpId(s) used by this graph are not registered on backend "
+        << tenzor::device_type_to_string(device) << ": [";
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (i) oss << ", ";
+        oss << sorted[i];
+    }
+    oss << "]. Either pick a backend that supports them, or rebuild Tenzor "
+           "with the missing kernels enabled.";
+    throw std::runtime_error(oss.str());
+}
+
+}  // namespace
+
 auto LiteRuntime::load(const void* data, size_t size) -> std::unique_ptr<LiteRuntime> {
     if (!data || size == 0) {
         throw std::runtime_error("LiteRuntime: empty model data");
     }
 
-    // In production: parse TZLITE format header, extract graph, weights, memory plan
-    // For now: create a basic runtime with placeholder data
-
     auto runtime = std::unique_ptr<LiteRuntime>(new LiteRuntime());
     runtime->impl_ = std::make_unique<Impl>();
-    runtime->impl_->model_data.assign(
-        static_cast<const uint8_t*>(data),
-        static_cast<const uint8_t*>(data) + size);
 
-    // Default: single pool of 1MB for intermediates
+    auto model = TZLiteReader::load_full(data, size);
+
+    // Phase 5: verify CPU coverage at load time so an unsupported op fails
+    // here rather than mid-forward(). Multi-backend selection is the natural
+    // next step (caller-supplied Device), gated behind a future API change.
+    verify_op_coverage(*model.graph, Device::Type::CPU);
+
+    runtime->impl_->graph              = std::move(*model.graph);
+    runtime->impl_->tensor_values_by_id = index_tensor_values(model.tensor_values);
+    runtime->impl_->weight_blob        = std::move(model.weight_blob);
+    runtime->impl_->metadata           = std::move(model.metadata);
+
+    // Populate input/output shape metadata from TVAL where available.
+    for (int16_t tid : model.input_ids) {
+        if (static_cast<size_t>(tid) < runtime->impl_->tensor_values_by_id.size()) {
+            const auto& tv = runtime->impl_->tensor_values_by_id[tid];
+            runtime->impl_->input_shapes.push_back(tv.shape);
+        } else {
+            runtime->impl_->input_shapes.emplace_back();
+        }
+    }
+    // Output shapes are typically unknown without shape inference; Phase 3
+    // populates them at export time.
+
+    // Phase 5 sizes this from a packed MMPL section; Phase 2 falls back to
+    // a small placeholder pool (kernels allocate their own outputs).
     runtime->impl_->allocator = std::make_unique<LiteAllocator>(
-        std::vector<size_t>{1024 * 1024}, 64);
+        std::vector<size_t>{}, 64);
 
     return runtime;
 }
 
-auto LiteRuntime::forward(const LiteTensor& input) -> LiteTensor {
-    // In production: execute the graph nodes in topological order,
-    // dispatching each to the appropriate lite kernel, using
-    // allocator buffers for intermediates.
-
-    // Placeholder: return input as output
-    LiteTensor output;
-    output.ndim = input.ndim;
-    output.dtype = input.dtype;
-    output.shape = input.shape;
-    output.strides = input.strides;
-    output.owns_data = true;
-
-    auto bytes = input.nbytes();
-    output.data = std::malloc(bytes);
-    if (output.data && input.data) {
-        std::memcpy(output.data, input.data, bytes);
-    }
-
-    return output;
+auto LiteRuntime::from_graph(LiteGraph graph) -> std::unique_ptr<LiteRuntime> {
+    auto runtime = std::unique_ptr<LiteRuntime>(new LiteRuntime());
+    runtime->impl_ = std::make_unique<Impl>();
+    runtime->impl_->graph = std::move(graph);
+    // Match declared graph I/O shape metadata if present (currently empty for
+    // hand-built graphs — Phase 3 exporter fills these from JIT shape info).
+    runtime->impl_->allocator = std::make_unique<LiteAllocator>(
+        std::vector<size_t>{}, 64);
+    return runtime;
 }
 
 auto LiteRuntime::forward(const std::vector<LiteTensor>& inputs) -> std::vector<LiteTensor> {
-    std::vector<LiteTensor> outputs;
-    outputs.reserve(inputs.size());
-    for (auto& input : inputs) {
-        outputs.push_back(forward(input));
+    if (!impl_) {
+        throw std::runtime_error("LiteRuntime: forward() called on uninitialised runtime");
     }
-    return outputs;
+    if (impl_->graph.num_nodes() == 0 && impl_->graph.input_ids().empty()) {
+        throw std::runtime_error(
+            "LiteRuntime::forward: graph is empty. "
+            "Either build a runtime via LiteRuntime::from_graph(...) or load a "
+            "real .tzlite file with at least one node.");
+    }
+
+    // Build non-owning Tensor views over the weight blob for every tensor_id
+    // marked as a Weight in the TVAL table. The Tensor's Storage references
+    // weight_blob with a no-op deleter, so the LiteRuntime's owned bytes
+    // remain the source of truth.
+    std::unordered_map<int16_t, Tensor> constants;
+    if (!impl_->tensor_values_by_id.empty() && !impl_->weight_blob.empty()) {
+        for (const auto& tv : impl_->tensor_values_by_id) {
+            if (tv.source != TensorSource::Weight) continue;
+            if (tv.weight_offset + tv.weight_nbytes > impl_->weight_blob.size()) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: weight for tensor_id " +
+                    std::to_string(tv.tensor_id) +
+                    " refers to bytes past end of WGTS payload");
+            }
+            void* data = impl_->weight_blob.data() + tv.weight_offset;
+            constants.emplace(
+                tv.tensor_id,
+                Tensor::from_blob(data,
+                                  tv.shape,
+                                  tv.dtype,
+                                  Device::cpu(),
+                                  /*deleter=*/[](void*) noexcept {}));
+        }
+    }
+    return impl_->graph.execute(inputs, constants);
+}
+
+auto LiteRuntime::forward(const LiteTensor& input) -> LiteTensor {
+    // Build a non-owning view of `input` so the per-call destructor of the
+    // vector element doesn't free the user's buffer when ins goes out of
+    // scope. (LiteTensor's destructor frees iff owns_data is true.)
+    LiteTensor view;
+    view.data    = input.data;
+    view.shape   = input.shape;
+    view.strides = input.strides;
+    view.ndim    = input.ndim;
+    view.dtype   = input.dtype;
+    view.owns_data = false;
+    std::vector<LiteTensor> ins;
+    ins.push_back(std::move(view));
+
+    auto outs = forward(ins);
+    if (outs.size() != 1) {
+        throw std::runtime_error(
+            "LiteRuntime::forward(single): graph produced " +
+            std::to_string(outs.size()) + " outputs");
+    }
+    return std::move(outs.front());
 }
 
 auto LiteRuntime::input_shapes() const -> std::vector<std::vector<int64_t>> {

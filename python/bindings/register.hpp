@@ -74,4 +74,9 @@ void register_nn(pybind11::module_& m);
 // nested_linear, nested_attention, nested_sum, nested_mean).
 void register_nested(pybind11::module_& m);
 
+// Self-contained lite inference submodule. Creates m.lite and binds
+// `lite.Runtime` (load + forward) plus the `lite.export` function that
+// serialises an nn.Module to a `.tzlite` file.
+void register_lite(pybind11::module_& m);
+
 } // namespace tenzor::python

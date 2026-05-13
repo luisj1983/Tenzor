@@ -4,8 +4,21 @@
  */
 
 #include <gtest/gtest.h>
+#include <tenzor/lite/lite_graph.hpp>
 #include <tenzor/lite/runtime.hpp>
+#include <cmath>
 #include <cstring>
+
+namespace tenzor { void initialize(); }
+
+namespace {
+class TenzorLiteOpsEnv : public ::testing::Environment {
+public:
+    void SetUp() override { tenzor::initialize(); }
+};
+[[maybe_unused]] auto* g_lite_ops_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorLiteOpsEnv);
+}
 
 using namespace tenzor::lite;
 
@@ -72,9 +85,10 @@ TEST(LiteRuntimeTest, LoadFromNullData) {
 }
 
 TEST(LiteRuntimeTest, CreateInput) {
-    // Create a dummy runtime from minimal data
-    uint8_t dummy_data[] = {0x54, 0x4C, 0x5A, 0x54};  // "TZLT" magic
-    auto runtime = LiteRuntime::load(dummy_data, sizeof(dummy_data));
+    // create_input is a pure helper that allocates a LiteTensor of the given
+    // shape/dtype and is independent of whether the runtime has a real graph.
+    // Build the runtime via from_graph() to avoid needing a serialised file.
+    auto runtime = LiteRuntime::from_graph(LiteGraph{});
     ASSERT_NE(runtime, nullptr);
 
     auto input = runtime->create_input({1, 3, 224, 224});
@@ -88,23 +102,143 @@ TEST(LiteRuntimeTest, CreateInput) {
     EXPECT_TRUE(input.owns_data);
 }
 
-TEST(LiteRuntimeTest, ForwardPassthrough) {
-    uint8_t dummy_data[] = {0x54, 0x4C, 0x5A, 0x54};
-    auto runtime = LiteRuntime::load(dummy_data, sizeof(dummy_data));
+// Phase 1 end-to-end test: build a 3-node MatMul -> Add -> ReLU graph in C++
+// and verify the numerical output matches a hand-computed reference. This
+// exercises the bridge layers (LiteTensor <-> Tensor, LiteAttributes ->
+// OpAttributes) and the dispatch path through the main kernel registry.
+TEST(LiteRuntimeTest, ForwardMatMulAddReLU) {
+    // Graph (tensor_ids):
+    //   0,1 -> MatMul -> 3
+    //   3,2 -> Add    -> 4
+    //   4   -> ReLU   -> 5
+    //   inputs:  [0, 1, 2]   ->  A, B, bias
+    //   outputs: [5]         ->  relu(A @ B + bias)
+    LiteGraph graph;
+    {
+        LiteNode mm;
+        mm.op = LiteOpType::MatMul;
+        mm.input_ids = {0, 1};
+        mm.output_ids = {3};
+        graph.add_node(std::move(mm));
+
+        LiteNode ad;
+        ad.op = LiteOpType::Add;
+        ad.input_ids = {3, 2};
+        ad.output_ids = {4};
+        graph.add_node(std::move(ad));
+
+        LiteNode rl;
+        rl.op = LiteOpType::ReLU;
+        rl.input_ids = {4};
+        rl.output_ids = {5};
+        graph.add_node(std::move(rl));
+    }
+    graph.set_input_ids({0, 1, 2});
+    graph.set_output_ids({5});
+
+    auto runtime = LiteRuntime::from_graph(std::move(graph));
     ASSERT_NE(runtime, nullptr);
 
-    auto input = runtime->create_input({2, 4});
-    // Fill with known values
-    float* data = input.data_as<float>();
-    for (int i = 0; i < 8; ++i) data[i] = static_cast<float>(i);
-
-    auto output = runtime->forward(input);
-    EXPECT_EQ(output.numel(), 8);
-    // Placeholder forward returns a copy
-    float* out_data = output.data_as<float>();
-    for (int i = 0; i < 8; ++i) {
-        EXPECT_FLOAT_EQ(out_data[i], static_cast<float>(i));
+    // A is 2x3, B is 3x2, bias is 2x2. (A @ B) has shape 2x2.
+    auto A = runtime->create_input({2, 3}, tenzor::DType::Float32);
+    auto B = runtime->create_input({3, 2}, tenzor::DType::Float32);
+    auto bias = runtime->create_input({2, 2}, tenzor::DType::Float32);
+    {
+        // A = [[ 1, 2,  3],
+        //      [-4, 5, -6]]
+        float* a = A.data_as<float>();
+        a[0]= 1; a[1]= 2; a[2]= 3;
+        a[3]=-4; a[4]= 5; a[5]=-6;
+        // B = [[1, 0],
+        //      [0, 1],
+        //      [1, 1]]
+        float* b = B.data_as<float>();
+        b[0]=1; b[1]=0;
+        b[2]=0; b[3]=1;
+        b[4]=1; b[5]=1;
+        // bias = [[-5, -5],
+        //         [-5, -5]]   (large negative -> some ReLU clipping)
+        float* c = bias.data_as<float>();
+        c[0]=-5; c[1]=-5; c[2]=-5; c[3]=-5;
     }
+
+    std::vector<LiteTensor> ins;
+    ins.push_back(std::move(A));
+    ins.push_back(std::move(B));
+    ins.push_back(std::move(bias));
+    auto outs = runtime->forward(ins);
+    ASSERT_EQ(outs.size(), 1u);
+    auto& out = outs.front();
+    EXPECT_EQ(out.ndim, 2);
+    EXPECT_EQ(out.shape[0], 2);
+    EXPECT_EQ(out.shape[1], 2);
+    ASSERT_EQ(out.numel(), 4);
+
+    // Reference: A @ B = [[ 1*1 + 2*0 + 3*1,  1*0 + 2*1 + 3*1],
+    //                     [-4*1 + 5*0 -6*1, -4*0 + 5*1 -6*1]]
+    //                   = [[ 4,  5],
+    //                      [-10, -1]]
+    // + bias                = [[-1,  0],
+    //                          [-15, -6]]
+    // ReLU                  = [[ 0,  0],
+    //                          [ 0,  0]]
+    const float* o = out.data_as<float>();
+    EXPECT_FLOAT_EQ(o[0], 0.0f);
+    EXPECT_FLOAT_EQ(o[1], 0.0f);
+    EXPECT_FLOAT_EQ(o[2], 0.0f);
+    EXPECT_FLOAT_EQ(o[3], 0.0f);
+}
+
+// Companion test: same graph topology, different bias so the ReLU has a
+// mix of clipped and pass-through values (stronger regression coverage).
+TEST(LiteRuntimeTest, ForwardMatMulAddReLU_PartialClip) {
+    LiteGraph graph;
+    {
+        LiteNode mm; mm.op = LiteOpType::MatMul; mm.input_ids = {0, 1}; mm.output_ids = {3};
+        graph.add_node(std::move(mm));
+        LiteNode ad; ad.op = LiteOpType::Add;    ad.input_ids = {3, 2}; ad.output_ids = {4};
+        graph.add_node(std::move(ad));
+        LiteNode rl; rl.op = LiteOpType::ReLU;   rl.input_ids = {4};    rl.output_ids = {5};
+        graph.add_node(std::move(rl));
+    }
+    graph.set_input_ids({0, 1, 2});
+    graph.set_output_ids({5});
+    auto runtime = LiteRuntime::from_graph(std::move(graph));
+
+    auto A = runtime->create_input({2, 3}, tenzor::DType::Float32);
+    auto B = runtime->create_input({3, 2}, tenzor::DType::Float32);
+    auto bias = runtime->create_input({2, 2}, tenzor::DType::Float32);
+    {
+        float* a = A.data_as<float>();
+        a[0]=1; a[1]=2; a[2]=3;  a[3]=-4; a[4]=5; a[5]=-6;
+        float* b = B.data_as<float>();
+        b[0]=1; b[1]=0;  b[2]=0; b[3]=1;  b[4]=1; b[5]=1;
+        float* c = bias.data_as<float>();
+        c[0]=0; c[1]=0; c[2]=11; c[3]=2;  // shifts: row 1 goes positive
+    }
+
+    std::vector<LiteTensor> ins;
+    ins.push_back(std::move(A));
+    ins.push_back(std::move(B));
+    ins.push_back(std::move(bias));
+    auto outs = runtime->forward(ins);
+    const float* o = outs.front().data_as<float>();
+    // A @ B = [[4, 5], [-10, -1]]
+    // + bias  = [[4, 5], [1, 1]]
+    // ReLU    = [[4, 5], [1, 1]]
+    EXPECT_FLOAT_EQ(o[0], 4.0f);
+    EXPECT_FLOAT_EQ(o[1], 5.0f);
+    EXPECT_FLOAT_EQ(o[2], 1.0f);
+    EXPECT_FLOAT_EQ(o[3], 1.0f);
+}
+
+// Empty-graph runtimes should still allow create_input (it's a pure helper),
+// but forward() must throw a clean error rather than segfaulting.
+TEST(LiteRuntimeTest, ForwardOnEmptyGraphThrows) {
+    auto runtime = LiteRuntime::from_graph(LiteGraph{});
+    ASSERT_NE(runtime, nullptr);
+    auto input = runtime->create_input({4});
+    EXPECT_THROW(runtime->forward(input), std::runtime_error);
 }
 
 TEST(LiteRuntimeTest, MaxDims) {

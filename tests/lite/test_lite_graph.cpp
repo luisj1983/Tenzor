@@ -1,6 +1,12 @@
 /**
  * @file test_lite_graph.cpp
- * @brief Tests for LiteGraph, LiteNode, and LiteOpType
+ * @brief Tests for LiteGraph, LiteNode, LiteOpType (= OpId alias).
+ *
+ * Since Phase 1, `LiteOpType` is a type alias for `OpId`. The runtime
+ * dispatches each LiteNode through the main per-backend dispatch table,
+ * so any OpId registered on the chosen backend is a valid LiteNode op.
+ * Op-name spellings below match the OpId enum (e.g. Conv2dForward, not
+ * Conv2d; Linear / QuantizedLinear, not Gemm / QuantizedMatMul).
  */
 
 #include <gtest/gtest.h>
@@ -49,22 +55,22 @@ TEST(LiteGraphTest, AddMultipleNodes) {
 }
 
 TEST(LiteGraphTest, OpTypeEnumValues) {
-    // Verify a selection of enum values are distinct
+    // The op type is OpId; verify a selection of values are distinct.
     EXPECT_NE(static_cast<uint16_t>(LiteOpType::Add),
               static_cast<uint16_t>(LiteOpType::Sub));
     EXPECT_NE(static_cast<uint16_t>(LiteOpType::MatMul),
-              static_cast<uint16_t>(LiteOpType::Gemm));
+              static_cast<uint16_t>(LiteOpType::Linear));  // was Gemm
     EXPECT_NE(static_cast<uint16_t>(LiteOpType::ReLU),
               static_cast<uint16_t>(LiteOpType::Sigmoid));
-    EXPECT_NE(static_cast<uint16_t>(LiteOpType::Conv2d),
+    EXPECT_NE(static_cast<uint16_t>(LiteOpType::Conv2dForward),  // was Conv2d
               static_cast<uint16_t>(LiteOpType::QuantizedConv2d));
 }
 
 TEST(LiteGraphTest, OpTypeCoversQuantized) {
-    // Verify quantized ops exist and are distinct
-    auto qmm = static_cast<uint16_t>(LiteOpType::QuantizedMatMul);
+    // Quantized ops are part of the main OpId enum; spot-check distinctness.
+    auto qlin = static_cast<uint16_t>(LiteOpType::QuantizedLinear);  // was QuantizedMatMul
     auto qconv = static_cast<uint16_t>(LiteOpType::QuantizedConv2d);
-    EXPECT_NE(qmm, qconv);
+    EXPECT_NE(qlin, qconv);
 }
 
 TEST(LiteGraphTest, NodeAttributes) {
@@ -84,7 +90,7 @@ TEST(LiteGraphTest, NodeAttributes) {
 
 TEST(LiteGraphTest, NodeInputOutputIds) {
     LiteNode node;
-    node.op = LiteOpType::Conv2d;
+    node.op = LiteOpType::Conv2dForward;  // was Conv2d
     node.input_ids = {0, 1, 2};  // input, weight, bias
     node.output_ids = {3};
     node.attrs.i[0] = 3;  // kernel_size

@@ -240,6 +240,9 @@ set(TENZOR_CORE_SOURCES
     lite/runtime.cpp
     lite/lite_graph.cpp
     lite/model_format.cpp
+    lite/tensor_bridge.cpp
+    lite/dispatch_bridge.cpp
+    lite/exporter.cpp
     distributed/elastic/rendezvous.cpp
     distributed/elastic/health_monitor.cpp
     distributed/elastic/elastic_trainer.cpp

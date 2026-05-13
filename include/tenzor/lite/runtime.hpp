@@ -1,23 +1,28 @@
 /**
  * @file runtime.hpp
- * @brief Lightweight inference-only runtime for mobile/embedded deployment
+ * @brief Inference-only runtime for ahead-of-time-compiled `.tzlite` models.
  *
- * The lite runtime is a minimal C++ library for executing optimized
- * models on resource-constrained devices. Features:
- * - No autograd, no Python, minimal dependencies
- * - Static memory planning (zero allocation during inference)
- * - ARM NEON / x86 SSE/AVX kernel dispatch
- * - INT8 quantized execution
- * - TZLITE model format with embedded weights
+ * The Lite runtime executes a serialised, optimised execution plan against
+ * Tenzor's main per-backend kernel dispatch table. It does not maintain a
+ * parallel kernel registry; an OpId-keyed `LiteNode` is dispatched through
+ * the same code path as eager execution, so the runtime inherits whatever
+ * backends (CPU, CUDA, ROCm, Vulkan, OneAPI) the host build supports.
  *
- * Target binary size: <5MB (stripped, static, ARM64)
+ * Features (cumulative across phases):
+ *  - Phase 1: in-memory graphs of OpId nodes, executed via dispatch<OpId>.
+ *  - Phase 2: TLV-sectioned `.tzlite` file with mmap'd SafeTensors weights
+ *             and an AOT static memory plan (zero alloc during inference).
+ *  - Phase 3: exporter that walks an nn::Module via the JIT tracer, runs
+ *             graph-level optimisation passes, and emits `.tzlite`.
+ *  - Phase 4: Python bindings (`tz.lite.export`, `tz.lite.Runtime`).
+ *  - Phase 5: caller-selectable backend (CPU/CUDA/...) at load time,
+ *             quantised int8 execution.
  *
- * Usage:
+ * Usage (post-Phase 3 / Phase 4):
  * @code
- * auto runtime = LiteRuntime::load("model.tzlite");
- * LiteTensor input = runtime->create_input({1, 3, 224, 224});
- * // ... fill input data ...
- * LiteTensor output = runtime->forward(input);
+ *   tenzor::lite::export_to_tzlite(module, "model.tzlite", {.example_input_shapes={...}});
+ *   auto runtime = LiteRuntime::load("model.tzlite");
+ *   auto out = runtime->forward(input);
  * @endcode
  */
 
@@ -25,6 +30,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +38,10 @@
 
 namespace tenzor {
 namespace lite {
+
+// Forward declarations (defined in lite_graph.hpp). Kept here to avoid a
+// header cycle (lite_graph.hpp #includes runtime.hpp).
+class LiteGraph;
 
 // ============================================================================
 // LiteTensor: minimal tensor with no heap allocation for metadata
@@ -57,7 +67,45 @@ struct LiteTensor {
     DType dtype{DType::Float32};               ///< Data type
     bool owns_data{false};                     ///< True if this tensor owns its data
 
+    LiteTensor() = default;
     ~LiteTensor();
+
+    // Copy disabled — a LiteTensor with owns_data=true cannot safely share
+    // its buffer with a copy. Callers that need a duplicate must allocate
+    // explicitly via the API.
+    LiteTensor(const LiteTensor&) = delete;
+    auto operator=(const LiteTensor&) -> LiteTensor& = delete;
+
+    // Move transfers ownership: source is zeroed so its destructor is a
+    // no-op. Keeps put-into-vector / return-by-value safe when owns_data is
+    // true.
+    LiteTensor(LiteTensor&& other) noexcept
+        : data(other.data),
+          shape(other.shape),
+          strides(other.strides),
+          ndim(other.ndim),
+          dtype(other.dtype),
+          owns_data(other.owns_data)
+    {
+        other.data = nullptr;
+        other.owns_data = false;
+        other.ndim = 0;
+    }
+    auto operator=(LiteTensor&& other) noexcept -> LiteTensor& {
+        if (this != &other) {
+            if (owns_data && data) std::free(data);
+            data       = other.data;
+            shape      = other.shape;
+            strides    = other.strides;
+            ndim       = other.ndim;
+            dtype      = other.dtype;
+            owns_data  = other.owns_data;
+            other.data = nullptr;
+            other.owns_data = false;
+            other.ndim = 0;
+        }
+        return *this;
+    }
 
     /// Total number of elements.
     auto numel() const -> int64_t;
@@ -152,6 +200,15 @@ public:
      * @return Runtime instance ready for inference
      */
     static auto load(const void* data, size_t size) -> std::unique_ptr<LiteRuntime>;
+
+    /**
+     * @brief Build a runtime around an in-memory graph (no file I/O).
+     *
+     * Useful for tests and for callers that produce a graph programmatically.
+     * The graph is consumed by the runtime — caller's local variable is left
+     * empty.
+     */
+    static auto from_graph(LiteGraph graph) -> std::unique_ptr<LiteRuntime>;
 
     ~LiteRuntime();
 
