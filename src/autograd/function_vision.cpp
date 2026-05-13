@@ -81,7 +81,81 @@ auto GridSampleBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
                     iy = ((gy + 1.0f) * static_cast<float>(H_in) - 1.0f) * 0.5f;
                 }
 
-                if (mode_ == "bilinear") {
+                if (mode_ == "bicubic") {
+                    // Phase P0 / Fix 7: real bicubic backward. 4x4 stencil
+                    // mirroring the forward (a = -0.5 Catmull-Rom). For each
+                    // (dy, dx) ∈ [-1, 2], scatter grad_output weighted by
+                    // wy[dy+1] * wx[dx+1] into grad_input, and accumulate the
+                    // analytic derivative of (wy * wx) w.r.t. ix / iy into
+                    // grad_grid.
+                    const int64_t ix_floor = static_cast<int64_t>(std::floor(ix));
+                    const int64_t iy_floor = static_cast<int64_t>(std::floor(iy));
+                    const float tx = ix - static_cast<float>(ix_floor);
+                    const float ty = iy - static_cast<float>(iy_floor);
+
+                    constexpr float a = -0.5f;
+                    auto cubic_w = [](float t, float w[4]) {
+                        const float t2 = t * t;
+                        const float t3 = t2 * t;
+                        w[0] = ((a * t - 2.0f * a) * t + a) * t;
+                        w[1] = ((a + 2.0f) * t3 - (a + 3.0f) * t2 + 1.0f);
+                        const float u = 1.0f - t;
+                        const float u2 = u * u;
+                        const float u3 = u2 * u;
+                        w[2] = ((a + 2.0f) * u3 - (a + 3.0f) * u2 + 1.0f);
+                        w[3] = ((a * u - 2.0f * a) * u + a) * u;
+                    };
+                    // d w[k] / d t. The chain through 1-t flips the sign for
+                    // w[2] and w[3].
+                    auto cubic_dw = [](float t, float dw[4]) {
+                        dw[0] = (3.0f * a * t * t - 4.0f * a * t + a);
+                        dw[1] = (3.0f * (a + 2.0f) * t * t - 2.0f * (a + 3.0f) * t);
+                        const float u = 1.0f - t;
+                        dw[2] = -(3.0f * (a + 2.0f) * u * u - 2.0f * (a + 3.0f) * u);
+                        dw[3] = -(3.0f * a * u * u - 4.0f * a * u + a);
+                    };
+                    float wx[4], wy[4], dwx[4], dwy[4];
+                    cubic_w(tx, wx);
+                    cubic_w(ty, wy);
+                    cubic_dw(tx, dwx);
+                    cubic_dw(ty, dwy);
+
+                    float dix_dgx_bc, diy_dgy_bc;
+                    if (align_corners_) {
+                        dix_dgx_bc = 0.5f * static_cast<float>(W_in - 1);
+                        diy_dgy_bc = 0.5f * static_cast<float>(H_in - 1);
+                    } else {
+                        dix_dgx_bc = 0.5f * static_cast<float>(W_in);
+                        diy_dgy_bc = 0.5f * static_cast<float>(H_in);
+                    }
+
+                    for (int64_t c = 0; c < C; ++c) {
+                        float go = go_data[((n * C + c) * H_out + h) * W_out + w];
+                        auto scatter_add = [&](int64_t y, int64_t x, float weight) {
+                            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
+                                gi_data[((n * C + c) * H_in + y) * W_in + x] += go * weight;
+                            }
+                        };
+                        auto safe_get = [&](int64_t y, int64_t x) -> float {
+                            if (y >= 0 && y < H_in && x >= 0 && x < W_in)
+                                return in_data[((n * C + c) * H_in + y) * W_in + x];
+                            return 0.0f;
+                        };
+                        float dval_dix = 0.0f;
+                        float dval_diy = 0.0f;
+                        for (int dy = -1; dy <= 2; ++dy) {
+                            for (int dx = -1; dx <= 2; ++dx) {
+                                const float weight = wy[dy + 1] * wx[dx + 1];
+                                scatter_add(iy_floor + dy, ix_floor + dx, weight);
+                                const float v = safe_get(iy_floor + dy, ix_floor + dx);
+                                dval_dix += wy[dy + 1] * dwx[dx + 1] * v;
+                                dval_diy += dwy[dy + 1] * wx[dx + 1] * v;
+                            }
+                        }
+                        gg_data[grid_idx]     += go * dval_dix * dix_dgx_bc;
+                        gg_data[grid_idx + 1] += go * dval_diy * diy_dgy_bc;
+                    }
+                } else if (mode_ == "bilinear") {
                     int64_t x0 = static_cast<int64_t>(std::floor(ix));
                     int64_t y0 = static_cast<int64_t>(std::floor(iy));
                     int64_t x1 = x0 + 1;

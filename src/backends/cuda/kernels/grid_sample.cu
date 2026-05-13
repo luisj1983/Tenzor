@@ -105,6 +105,89 @@ __global__ void grid_sample_bilinear_kernel(
 }
 
 // ============================================================================
+// Bicubic grid_sample kernel — Phase P0 / Fix 7
+// ============================================================================
+//
+// 4x4 neighbourhood with Catmull-Rom basis (a = -0.5), matching PyTorch's
+// `grid_sample(mode='bicubic')` and Tenzor's own interpolate(mode='bicubic').
+//
+__device__ inline void cubic_weights_dev(float t, float w[4]) {
+    constexpr float a = -0.5f;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    w[0] = ((a * t - 2.0f * a) * t + a) * t;
+    w[1] = ((a + 2.0f) * t3 - (a + 3.0f) * t2 + 1.0f);
+    const float u = 1.0f - t;
+    const float u2 = u * u;
+    const float u3 = u2 * u;
+    w[2] = ((a + 2.0f) * u3 - (a + 3.0f) * u2 + 1.0f);
+    w[3] = ((a * u - 2.0f * a) * u + a) * u;
+}
+
+__global__ void grid_sample_bicubic_kernel(
+    const float* __restrict__ input,
+    const float* __restrict__ grid,
+    float* __restrict__ output,
+    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int padding_mode,  // 0=zeros, 1=border, 2=reflection
+    bool align_corners
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * H_out * W_out;
+    if (idx >= total) return;
+
+    int w = idx % W_out;
+    int h = (idx / W_out) % H_out;
+    int c = (idx / (W_out * H_out)) % C;
+    int n = idx / (C * H_out * W_out);
+
+    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    float gx = grid[grid_idx];
+    float gy = grid[grid_idx + 1];
+
+    float ix = denormalize_dev(gx, W_in, align_corners);
+    float iy = denormalize_dev(gy, H_in, align_corners);
+
+    if (padding_mode == 1) {  // border
+        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
+        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+    } else if (padding_mode == 2) {  // reflection
+        ix = reflect_coord(ix, W_in);
+        iy = reflect_coord(iy, H_in);
+    }
+
+    const int ix_floor = static_cast<int>(floorf(ix));
+    const int iy_floor = static_cast<int>(floorf(iy));
+    const float tx = ix - static_cast<float>(ix_floor);
+    const float ty = iy - static_cast<float>(iy_floor);
+    float wx[4], wy[4];
+    cubic_weights_dev(tx, wx);
+    cubic_weights_dev(ty, wy);
+
+    auto safe_get = [&](int y, int x) -> float {
+        if (padding_mode == 0) {  // zeros
+            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return 0.0f;
+            return input[((n * C + c) * H_in + y) * W_in + x];
+        }
+        // border / reflection: clamp neighbours past the edge.
+        y = max(0, min(y, H_in - 1));
+        x = max(0, min(x, W_in - 1));
+        return input[((n * C + c) * H_in + y) * W_in + x];
+    };
+
+    float val = 0.0f;
+    #pragma unroll
+    for (int dy = -1; dy <= 2; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 2; ++dx) {
+            val += wy[dy + 1] * wx[dx + 1] * safe_get(iy_floor + dy, ix_floor + dx);
+        }
+    }
+
+    output[((n * C + c) * H_out + h) * W_out + w] = val;
+}
+
+// ============================================================================
 // Nearest grid_sample kernel
 // ============================================================================
 
@@ -221,13 +304,23 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
             output_f32.data<float>(),
             N, C, H_in, W_in, H_out, W_out,
             pad_mode, align_corners);
-    } else {
-        // bilinear and bicubic (bicubic falls back to bilinear for now)
+    } else if (mode == "bilinear") {
         grid_sample_bilinear_kernel<<<grid_size, block_size>>>(
             input_f32.data<float>(), grid_f32.data<float>(),
             output_f32.data<float>(),
             N, C, H_in, W_in, H_out, W_out,
             pad_mode, align_corners);
+    } else if (mode == "bicubic") {
+        // Phase P0 / Fix 7: real bicubic, no longer silently bilinear.
+        grid_sample_bicubic_kernel<<<grid_size, block_size>>>(
+            input_f32.data<float>(), grid_f32.data<float>(),
+            output_f32.data<float>(),
+            N, C, H_in, W_in, H_out, W_out,
+            pad_mode, align_corners);
+    } else {
+        throw std::invalid_argument(
+            "grid_sample_cuda: unknown mode '" + mode +
+            "'. Supported: bilinear, nearest, bicubic.");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();

@@ -383,6 +383,13 @@ if(TARGET tenzor_backend_cuda)
 endif()
 tenzor_discover_tests(test_flash_attention_dropout_backward DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 7 — grid_sample bicubic: forward used to silently fall
+# back to bilinear; backward only handled bilinear (silent zero grads for
+# bicubic). Both fixed.
+add_executable(test_grid_sample_bicubic test_grid_sample_bicubic.cpp)
+target_link_libraries(test_grid_sample_bicubic PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_grid_sample_bicubic DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)
