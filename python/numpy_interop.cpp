@@ -155,9 +155,22 @@ auto can_zero_copy_tensor_to_numpy(const Tensor& tensor) -> bool {
 }
 
 auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {
-    // Zero-copy only if contiguous and C-style (row-major)
+    // Zero-copy only if contiguous and C-style (row-major).
     auto flags = arr.flags();
-    return (flags & py::array::c_style) && !(flags & py::array::f_style);
+    if (!(flags & py::array::c_style) || (flags & py::array::f_style)) {
+        return false;
+    }
+    // 5th-audit B5: explicitly reject negative-stride (reversed slice) and
+    // zero-stride (broadcasted) arrays. A naive memcpy past these strides
+    // either reads backwards or repeatedly reads the same byte — both
+    // corrupt the resulting tensor. The non-zero-copy path below already
+    // forces a contiguous copy via `py::array::ensure(arr, c_style)`.
+    for (ssize_t i = 0; i < arr.ndim(); ++i) {
+        if (arr.strides(i) <= 0 && arr.shape(i) > 1) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Phase 1: Prepare tensor for NumPy (pure C++, GIL not required)
@@ -214,7 +227,22 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array
     void* data_ptr = base_ptr + checked_mul(static_cast<int64_t>(tensor.offset()),
                                             static_cast<int64_t>(element_size));
 
-    // Create capsule that keeps the tensor's storage alive via intrusive_ptr refcount.
+    // 5th-audit B'2: lifetime contract for the zero-copy NumPy array.
+    //
+    //   - We heap-allocate an `intrusive_ptr<Storage>` that holds one
+    //     additional reference to the tensor's storage.
+    //   - The capsule owns that allocation; NumPy guarantees the capsule's
+    //     deleter fires exactly once when the array is garbage-collected
+    //     (CPython destroys the array first, then walks the base chain to
+    //     the capsule and runs its destructor).
+    //   - The deleter deletes the intrusive_ptr, which decrements the
+    //     storage refcount. If the source Tensor has already gone out of
+    //     scope by then, this is the last reference and the storage is
+    //     freed; otherwise the storage stays alive until the Tensor side
+    //     drops its reference.
+    //   - There is no double-decrement: `intrusive_ptr` is move-aware and
+    //     this allocation is the only one with a "ticket" to call decref
+    //     here.
     auto* storage_ptr = new intrusive_ptr<Storage>(tensor.storage());
     py::capsule capsule(storage_ptr, [](void* ptr) {
         delete static_cast<intrusive_ptr<Storage>*>(ptr);
@@ -252,22 +280,33 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
             "to explicitly convert before passing.", 1);
     }
 
-    // Warn about misaligned data pointer
+    // 5th-audit B'8: on a misaligned source pointer, force a contiguous
+    // (and therefore freshly aligned) copy. Pre-fix we issued a warning and
+    // then memcpy'd from the misaligned buffer, which is undefined behaviour
+    // on strict-alignment hardware (ARMv7, SPARC, some RISC-V). On x86-64
+    // misalignment is "merely" slow, but the new path is uniformly safe.
     auto itemsize = arr.dtype().itemsize();
     if (itemsize > 1 && reinterpret_cast<uintptr_t>(arr.data()) % itemsize != 0) {
-        PyErr_WarnEx(PyExc_UserWarning,
-            "NumPy array data pointer is not aligned to element size. "
-            "This may cause a performance penalty during conversion.", 1);
+        arr = py::array::ensure(arr, py::array::c_style);
     }
 
     // Get NumPy array properties
     auto dtype = numpy_dtype_to_tenzor(arr);
 
-    // Get shape
+    // 5th-audit B4: explicit 0-dim handling. `np.array(3.14)` has ndim==0
+    // and an empty shape vector; the loops below would happily produce a
+    // numel=1 tensor with shape `{}`, which is the *correct* representation
+    // of a numpy scalar, but make the contract explicit and document it so
+    // future maintainers don't "fix" the empty-shape path away.
     std::vector<int64_t> shape;
     shape.reserve(arr.ndim());
-    for (ssize_t i = 0; i < arr.ndim(); ++i) {
-        shape.push_back(arr.shape(i));
+    if (arr.ndim() == 0) {
+        // 0-D scalar array: leave `shape` empty; tenzor::Tensor with empty
+        // shape vector is a 0-d (scalar) tensor with numel==1.
+    } else {
+        for (ssize_t i = 0; i < arr.ndim(); ++i) {
+            shape.push_back(arr.shape(i));
+        }
     }
 
     // Calculate total elements
