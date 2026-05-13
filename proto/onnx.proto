@@ -69,6 +69,28 @@ message TensorProto {
   repeated int32 int32_data = 5 [packed = true];
   repeated int64 int64_data = 7 [packed = true];
   repeated double double_data = 10 [packed = true];
+
+  // 5th-audit C6: external_data support for >2GB models.
+  //
+  // The protobuf wire-format hard caps a single message at ~2 GB. Real
+  // models (Llama-class) routinely exceed this. ONNX solves it via a
+  // sidecar file: the inline TensorProto's `data_location` is set to
+  // EXTERNAL, and `external_data` carries (location, offset, length)
+  // pointing at a .data sibling file on disk.
+  //
+  // Field numbers match canonical onnx.proto exactly.
+  enum DataLocation {
+    DEFAULT  = 0;
+    EXTERNAL = 1;
+  }
+  repeated StringStringEntryProto external_data = 13;
+  DataLocation data_location = 14;
+}
+
+// Key/value entry used by TensorProto.external_data (location, offset, length).
+message StringStringEntryProto {
+  string key   = 1;
+  string value = 2;
 }
 
 message AttributeProto {

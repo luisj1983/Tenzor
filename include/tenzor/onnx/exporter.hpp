@@ -496,21 +496,30 @@ public:
 
     /**
      * @brief Export BatchNorm2d layer
+     *
+     * @param training If true, sets the ONNX `training_mode` attribute to 1
+     *        (5th-audit C4/C5). Defaults to false (inference). Callers that
+     *        trace a BatchNorm layer with `module.training() == true` MUST
+     *        pass true so the produced graph faithfully encodes the mode.
      */
     auto export_batchnorm2d(const Tensor& input, const Tensor& scale,
                             const Tensor& bias, const Tensor& mean,
                             const Tensor& var, double eps,
                             const Tensor& output,
-                            const std::string& output_name) -> void;
+                            const std::string& output_name,
+                            bool training = false) -> void;
 
     /**
      * @brief Export BatchNorm1d layer
+     *
+     * @param training See `export_batchnorm2d` (forwarded through).
      */
     auto export_batchnorm1d(const Tensor& input, const Tensor& scale,
                             const Tensor& bias, const Tensor& mean,
                             const Tensor& var, double eps,
                             const Tensor& output,
-                            const std::string& output_name) -> void;
+                            const std::string& output_name,
+                            bool training = false) -> void;
 
     /**
      * @brief Export a LayerNorm layer as ONNX LayerNormalization (opset 17+).
@@ -1035,6 +1044,31 @@ public:
      * @param filepath Output file path
      * @throws std::runtime_error if export fails
      */
+    /**
+     * @brief Export model to a file, optionally splitting large initializers
+     *        into a sidecar `.data` file (5th-audit C6).
+     *
+     * @param filepath  Path for the `.onnx` (proto) file.
+     * @param use_external_data
+     *        When true, every initializer whose `raw_data` exceeds
+     *        `external_data_threshold_bytes` is written to
+     *        `<filepath>.data`, and the inline TensorProto's
+     *        `data_location` is set to EXTERNAL with `external_data`
+     *        entries (location, offset, length).
+     *        When `std::nullopt` (default), enables external data only
+     *        if the total bytes of all initializers exceed 1.5 GB (safety
+     *        margin under protobuf's 2 GB wire-format cap).
+     *        When false, never splits — equivalent to the legacy single-
+     *        file path.
+     * @param external_data_threshold_bytes
+     *        Per-tensor size in bytes above which a tensor is externalised
+     *        (default 1 MiB). Small tensors stay inline regardless.
+     */
+    auto export_to_file(const std::string& filepath,
+                        std::optional<bool> use_external_data,
+                        size_t external_data_threshold_bytes = 1ULL << 20) -> void;
+
+    /** @brief Legacy single-argument export (no external_data). */
     auto export_to_file(const std::string& filepath) -> void;
 
     /**

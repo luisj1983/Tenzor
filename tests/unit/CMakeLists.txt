@@ -277,6 +277,12 @@ target_link_libraries(test_comparison_ops PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_onnx_export test_onnx_export.cpp)
 target_link_libraries(test_onnx_export PRIVATE tenzor_core GTest::gtest_main)
 
+# 5th-audit ONNX exporter regression coverage (Complex throw, ConvTranspose
+# validation, BatchNorm training_mode, external_data).
+add_executable(test_onnx_audit_fixes test_onnx_audit_fixes.cpp)
+target_link_libraries(test_onnx_audit_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_onnx_audit_fixes LABELS "unit;onnx" DISCOVERY_TIMEOUT 60)
+
 # ONNX round-trip tests
 add_executable(test_onnx_roundtrip test_onnx_roundtrip.cpp)
 target_link_libraries(test_onnx_roundtrip PRIVATE tenzor_core GTest::gtest_main)

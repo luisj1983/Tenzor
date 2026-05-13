@@ -288,28 +288,32 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         DType compute_dtype = (x.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
         auto x_compute = (x.dtype() != compute_dtype) ? x.to(compute_dtype) : x;
 
-        // Per-channel local sum: reduce over N, H, W -> [C]
+        // 5th-audit A2: two-pass variance, NOT `E[X^2] - E[X]^2`.
+        //
+        // Pre-fix used `var = global_sum_sq*inv_count - batch_mean*batch_mean`,
+        // which is mathematically equivalent but numerically unstable
+        // (catastrophic cancellation) when `mean^2` is close to `E[X^2]`.
+        // The CPU LayerNorm-forward path was already fixed
+        // (commit 2ee72b5b); SyncBatchNorm has the same bug across the
+        // collective.
+        //
+        // The cost: ONE extra all-reduce. We accept this for correctness —
+        // ZeRO-Stage-3 / FSDP runs at large world sizes already burn most of
+        // their time in collectives, so the marginal cost is bounded, while
+        // silent variance corruption surfaces as 4-7% gradcheck drift that
+        // gets "fixed" by relaxing tolerance.
+
+        // ---- Pass 1: per-channel mean ----------------------------------
         auto local_sum = sum(sum(sum(x_compute, 3, false), 2, false), 0, false);
-
-        // Per-channel local sum of squares
-        auto x_sq = x_compute * x_compute;
-        auto local_sum_sq = sum(sum(sum(x_sq, 3, false), 2, false), 0, false);
-
-        // Pack [local_sum, local_sum_sq, count] for a single all-reduce
         auto count_tensor = full({1}, static_cast<double>(local_count), compute_dtype).to(x.device());
-        auto packed = cat({local_sum, local_sum_sq, count_tensor}, 0);
+        auto packed1 = cat({local_sum, count_tensor}, 0);
 
-        // All-reduce across ranks (SUM)
         if (world_size_ > 1 && all_reduce_fn_) {
-            all_reduce_fn_(packed);
+            all_reduce_fn_(packed1);
         }
 
-        // Unpack global statistics
-        auto global_sum = packed.slice(0, 0, C);
-        auto global_sum_sq = packed.slice(0, C, 2 * C);
-        auto global_count_t = packed.slice(0, 2 * C, 2 * C + 1);
-        // Move to CPU to read the scalar value (tensor may be on GPU). Read
-        // at the compute dtype so Float64 doesn't truncate via float.
+        auto global_sum = packed1.slice(0, 0, C);
+        auto global_count_t = packed1.slice(0, C, C + 1);
         double global_count_d;
         if (compute_dtype == DType::Float64) {
             global_count_d = global_count_t.to(Device::cpu()).data<double>()[0];
@@ -317,12 +321,21 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
             global_count_d = static_cast<double>(global_count_t.to(Device::cpu()).data<float>()[0]);
         }
         global_count = static_cast<int64_t>(global_count_d);
-        // inv_count materialised as a tensor so it adopts compute_dtype.
         auto inv_count_t = full({1}, 1.0 / global_count_d, compute_dtype).to(x.device());
-
         batch_mean = global_sum * inv_count_t;
-        // Var = E[X^2] - E[X]^2
-        batch_var = global_sum_sq * inv_count_t - batch_mean * batch_mean;
+
+        // ---- Pass 2: per-channel sum of squared deviations -------------
+        // Compute (x - global_mean)^2 against the freshly-reduced mean.
+        auto mean_b = batch_mean.reshape({1, C, 1, 1});
+        auto centred = x_compute - mean_b;
+        auto dev_sq = centred * centred;
+        auto local_sum_sq_dev = sum(sum(sum(dev_sq, 3, false), 2, false), 0, false);
+
+        if (world_size_ > 1 && all_reduce_fn_) {
+            all_reduce_fn_(local_sum_sq_dev);
+        }
+
+        batch_var = local_sum_sq_dev * inv_count_t;
 
         // Update running statistics
         if (track_running_stats_) {

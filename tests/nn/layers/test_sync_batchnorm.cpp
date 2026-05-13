@@ -189,6 +189,65 @@ TEST_P(SyncBatchNormTest, GradientFlow) {
 }
 
 // ============================================================================
+// 5th-audit A2: variance stability under large-mean inputs.
+//
+// SyncBatchNorm pre-fix computed variance via the catastrophic-cancellation
+// form `var = E[X^2] - E[X]^2` AFTER a single all-reduce. We now do a
+// two-pass {sum -> mean, sum_sq_dev -> variance} with an extra all-reduce,
+// matching the LayerNorm forward fix already on main (commit 2ee72b5b).
+//
+// This is a CPU-only test (using a no-op all-reduce) — the variance bug is
+// in the math, not the collective, so any backend exercises the path.
+// ============================================================================
+
+TEST_P(SyncBatchNormTest, VarianceStableWithLargeMean) {
+    auto sbn = createSyncBN(8);
+    sbn.to(device);
+    sbn.train();
+
+    // Input with std O(1) sitting on a mean of 1e6. Pre-fix, sum_sq*inv_n
+    // ≈ mean^2 in float32 → subtraction destroys precision and variance
+    // collapses (or even goes negative, producing NaN inv_std downstream).
+    auto base = tenzor::randn({4, 8, 4, 4}, DType::Float32, device);
+    auto shift = tenzor::full({1}, 1e6f, DType::Float32, device);
+    auto input_tensor = base + shift;
+    Variable input(input_tensor, /*requires_grad=*/true);
+
+    auto output = sbn.forward(input);
+
+    // Output should be finite everywhere — i.e. variance was valid.
+    auto out_f32 = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* od = out_f32.data<float>();
+    for (int64_t i = 0; i < out_f32.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(od[i]))
+            << "SyncBatchNorm forward produced NaN — variance collapsed "
+               "under catastrophic cancellation (A2)";
+        ASSERT_FALSE(std::isinf(od[i]))
+            << "SyncBatchNorm forward produced Inf at index " << i;
+    }
+
+    // Backward must produce finite, non-zero gradients (the variance must
+    // not have been clamped to zero, which would zero out the gradient).
+    auto out_shape = output.shape();
+    std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
+    auto grad_output = tenzor::randn(shape_vec, DType::Float32, device);
+    output.backward(grad_output);
+
+    ASSERT_TRUE(input.has_grad());
+    auto grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);
+    auto* gd = grad_f32.data<float>();
+    bool has_nonzero = false;
+    for (int64_t i = 0; i < grad_f32.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(gd[i])) << "NaN grad at " << i;
+        EXPECT_FALSE(std::isinf(gd[i])) << "Inf grad at " << i;
+        if (std::abs(gd[i]) > 1e-7f) has_nonzero = true;
+    }
+    EXPECT_TRUE(has_nonzero)
+        << "Backward gradient collapsed to zero — variance was clamped "
+           "due to F32 catastrophic cancellation (A2)";
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

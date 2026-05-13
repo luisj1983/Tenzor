@@ -157,6 +157,86 @@ TEST(JitCorrectnessFixes, ConvBnFusionSkipsTrainingBN) {
            "diverge from eager (uses running stats instead of batch stats)";
 }
 
+// 5th-audit sibling-bug A3: the same training-mode guard must also apply to
+// the Conv+BN+ReLU TRIPLE fusion. Pre-fix, fuse_triple ran on training-mode
+// BatchNorms and silently folded running_mean/running_var into the conv
+// weights — diverging from eager which uses live batch stats.
+TEST(JitCorrectnessFixes, ConvBnReluTripleFusionSkipsTrainingBN) {
+    auto g = std::make_shared<Graph>();
+    auto x = g->create_value("x", {1, 3, 8, 8}, DType::Float32, Device::cpu());
+    g->set_inputs({x});
+
+    auto conv = g->create_node(OpType::Conv2d, "conv");
+    conv->add_input(x);
+    conv->set_tensor_attr("weight",
+        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
+    auto conv_out = g->create_value("cv", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    conv->add_output(conv_out); conv_out->set_node(conv); g->add_node(conv);
+
+    auto bn = g->create_node(OpType::BatchNorm2d, "bn");
+    bn->add_input(conv_out);
+    bn->set_tensor_attr("weight", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("running_mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("running_var", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->set_attr("eps", 1e-5f);
+    bn->set_bool_attr("training", true);  // the new gate (mirrors pair-fusion)
+    auto bn_out = g->create_value("bn_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    bn->add_output(bn_out); bn_out->set_node(bn); g->add_node(bn);
+
+    auto relu = g->create_node(OpType::ReLU, "relu");
+    relu->add_input(bn_out);
+    auto relu_out = g->create_value("relu_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    relu->add_output(relu_out); relu_out->set_node(relu); g->add_node(relu);
+
+    g->set_outputs({relu_out});
+    ASSERT_EQ(g->nodes().size(), 3u);
+
+    FuseConvBatchNormReluPass pass;
+    pass.run(*g);
+
+    EXPECT_EQ(g->nodes().size(), 3u)
+        << "Conv+BN+ReLU triple-fusion ran on a training-mode BatchNorm — "
+           "would silently diverge from eager (uses running stats instead of "
+           "batch stats)";
+}
+
+TEST(JitCorrectnessFixes, ConvBnReluTripleFusionStillRunsInEvalMode) {
+    // Regression guard: triple fusion still runs when BN is eval-mode.
+    auto g = std::make_shared<Graph>();
+    auto x = g->create_value("x", {1, 3, 8, 8}, DType::Float32, Device::cpu());
+    g->set_inputs({x});
+
+    auto conv = g->create_node(OpType::Conv2d, "conv");
+    conv->add_input(x);
+    conv->set_tensor_attr("weight",
+        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
+    conv->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    auto conv_out = g->create_value("cv", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    conv->add_output(conv_out); conv_out->set_node(conv); g->add_node(conv);
+
+    auto bn = g->create_node(OpType::BatchNorm2d, "bn");
+    bn->add_input(conv_out);
+    bn->set_tensor_attr("weight", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("running_mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    bn->set_tensor_attr("running_var", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->set_attr("eps", 1e-5f);
+    // training defaults to false → eval mode → fusion allowed.
+    auto bn_out = g->create_value("bn_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    bn->add_output(bn_out); bn_out->set_node(bn); g->add_node(bn);
+
+    auto relu = g->create_node(OpType::ReLU, "relu");
+    relu->add_input(bn_out);
+    auto relu_out = g->create_value("relu_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());
+    relu->add_output(relu_out); relu_out->set_node(relu); g->add_node(relu);
+
+    g->set_outputs({relu_out});
+    FuseConvBatchNormReluPass pass;
+    const bool modified = pass.run(*g);
+    EXPECT_TRUE(modified) << "Triple fusion should run in eval mode";
+}
+
 TEST(JitCorrectnessFixes, ConvBnFusionStillRunsInEvalMode) {
     // Regression guard: same graph but BN is in eval mode (training=false
     // / absent) — fusion SHOULD run.

@@ -509,16 +509,26 @@ public:
             float mu = mean_data[b];
             float inv_std = rstd_data[b];
 
-            // Check if variance is essentially zero (which causes numerical instability)
-            // When all inputs are identical (variance ~0), gradients should be zero
-            // because small changes to input don't change the normalized output
-            float inv_n = 1.0f / static_cast<float>(N);
-            float sum_sq = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                sum_sq += input_data[b * N + i] * input_data[b * N + i];
+            // 5th-audit A1: replace the catastrophic-cancellation form
+            // `var = E[x^2] - E[x]^2` (computed as `sum_sq*inv_n - mu*mu`)
+            // with a numerically stable two-pass algorithm in double
+            // precision. The CPU Float32 fast path is the lane every dtype
+            // downcasts through, so the precision loss here silently
+            // corrupts Float64 / Float16 / BFloat16 gradient checks. Sibling
+            // to the layer_norm_simd forward fix already on main
+            // (commit 2ee72b5b).
+            double sum_d = 0.0;
+            for (int64_t i = 0; i < N; ++i) {
+                sum_d += static_cast<double>(input_data[b * N + i]);
             }
-            float var = (sum_sq * inv_n) - (mu * mu);
-            bool zero_variance = (var < static_cast<float>(eps_));
+            const double mu_d = sum_d / static_cast<double>(N);
+            double sum_sq_dev_d = 0.0;
+            for (int64_t i = 0; i < N; ++i) {
+                const double d = static_cast<double>(input_data[b * N + i]) - mu_d;
+                sum_sq_dev_d += d * d;
+            }
+            const double var_d = sum_sq_dev_d / static_cast<double>(N);
+            bool zero_variance = (var_d < static_cast<double>(eps_));
 
             if (zero_variance) {
                 // With zero variance, input gradients should be zero

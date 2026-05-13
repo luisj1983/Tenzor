@@ -81,6 +81,13 @@ auto dtype_to_torch(DType dtype) -> int {
             return static_cast<int>(torch::kInt64);
         case DType::UInt8:
             return static_cast<int>(torch::kUInt8);
+        // 5th-audit B1: PyTorch added UInt16/UInt32/UInt64 in 2.3+.
+        case DType::UInt16:
+            return static_cast<int>(torch::kUInt16);
+        case DType::UInt32:
+            return static_cast<int>(torch::kUInt32);
+        case DType::UInt64:
+            return static_cast<int>(torch::kUInt64);
         case DType::Bool:
             return static_cast<int>(torch::kBool);
         case DType::Complex64:
@@ -114,6 +121,13 @@ auto dtype_from_torch(int torch_dtype) -> DType {
             return DType::Int64;
         case torch::kUInt8:
             return DType::UInt8;
+        // 5th-audit B1: PyTorch added UInt16/UInt32/UInt64 in 2.3+.
+        case torch::kUInt16:
+            return DType::UInt16;
+        case torch::kUInt32:
+            return DType::UInt32;
+        case torch::kUInt64:
+            return DType::UInt64;
         case torch::kBool:
             return DType::Bool;
         case torch::kComplexFloat:
@@ -174,11 +188,24 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
     torch::Tensor torch_tensor;
 
     if (can_zero_copy_to_torch(tensor)) {
-        // Zero-copy conversion using from_blob
+        // 5th-audit B2: zero-copy `torch::from_blob` MUST be given a deleter
+        // that keeps the source Tenzor storage alive for at least as long as
+        // the returned PyTorch tensor. Pre-fix this call had no deleter — if
+        // the source Tenzor went out of scope first, PyTorch ended up reading
+        // freed memory (use-after-free).
+        //
+        // We heap-allocate an `intrusive_ptr<Storage>` ticket and free it
+        // from the deleter (mirroring the numpy capsule pattern at B'2).
+        // The capture-by-value `storage_ticket` parameter in the deleter
+        // closure cannot move, so we use the raw-ptr-and-delete idiom.
+        auto* storage_ticket = new intrusive_ptr<Storage>(tensor.storage());
         torch_tensor = torch::from_blob(
             const_cast<void*>(tensor.data<void>()),
             torch_shape,
-            torch_dtype
+            /*deleter=*/[storage_ticket](void* /*data*/) {
+                delete storage_ticket;
+            },
+            torch::TensorOptions().dtype(torch_dtype)
         );
 
         // If CUDA, move to correct device
@@ -195,16 +222,28 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
                                                     .dtype(torch_dtype)
                                                     .device(torch_device));
 
-        if (device.type == Device::Type::CPU) {
+        if (device.type == Device::Type::CPU && torch_device.is_cpu()) {
             std::memcpy(torch_tensor.data_ptr(),
                        contiguous_tensor.data<void>(),
                        contiguous_tensor.numel() * dtype_size(dtype));
-        } else if (device.type == Device::Type::CUDA) {
-            // CUDA memcpy
+        } else {
+            // 5th-audit B3: select the correct cudaMemcpyKind from the
+            // actual {source, destination} device pair. Pre-fix this path
+            // hardcoded `cudaMemcpyDeviceToDevice` regardless of whether
+            // the contiguous source had landed on the CPU (which can
+            // happen if `contiguous()` materialised a host tensor) —
+            // silently corrupting the destination.
+            const auto src_is_cuda = (contiguous_tensor.device().type == Device::Type::CUDA);
+            const auto dst_is_cuda = torch_device.is_cuda();
+            cudaMemcpyKind kind;
+            if (src_is_cuda && dst_is_cuda)        kind = cudaMemcpyDeviceToDevice;
+            else if (src_is_cuda && !dst_is_cuda)  kind = cudaMemcpyDeviceToHost;
+            else if (!src_is_cuda && dst_is_cuda)  kind = cudaMemcpyHostToDevice;
+            else                                    kind = cudaMemcpyHostToHost;
             cudaMemcpy(torch_tensor.data_ptr(),
                       contiguous_tensor.data<void>(),
                       contiguous_tensor.numel() * dtype_size(dtype),
-                      cudaMemcpyDeviceToDevice);
+                      kind);
         }
     }
 

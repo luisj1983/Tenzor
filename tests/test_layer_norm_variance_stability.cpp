@@ -15,8 +15,10 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/autograd/variable.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/nn/layers/normalization.hpp>
 #include <tenzor/ops/op_id.hpp>
 
 #include <cmath>
@@ -121,5 +123,68 @@ TEST(LayerNormVarianceStability, OutputMatchesNormalizedReference) {
         const double expected = (i - mean_ref) * inv_std_ref;
         EXPECT_NEAR(od[i], expected, 1e-5)
             << "LayerNorm output diverges at i=" << i;
+    }
+}
+
+// =========================================================================
+// 5th-audit A1 extension: BACKWARD path on the same large-mean input.
+//
+// Pre-fix `LayerNormBackward::backward` recomputes variance using the
+// same catastrophic-cancellation form `(sum_sq * inv_n) - mu*mu`, then
+// guards on `var < eps` and silently zeros grad_input. The two-pass
+// double-precision rewrite fixes the variance estimate so the gradient
+// flows. Sibling to the forward fix already on main (commit 2ee72b5b).
+// =========================================================================
+
+TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient) {
+    using namespace tenzor;
+    using namespace tenzor::nn;
+
+    const int64_t B = 2;
+    const int64_t N = 64;
+    auto x_t = randn({B, N}, DType::Float32, Device::cpu()) +
+               full({1}, 1e6f, DType::Float32, Device::cpu());
+    auto x = Variable(x_t, /*requires_grad=*/true);
+
+    LayerNorm ln(/*normalized_shape=*/std::vector<int64_t>{N}, /*eps=*/1e-5);
+    auto y = ln.forward(x);
+    y.backward(ones_like(y.tensor()));
+
+    ASSERT_TRUE(x.grad().has_value()) << "grad_input must be populated";
+    auto g = x.grad().value();
+    const float* p = g.data<float>();
+
+    bool any_nan = false, any_inf = false, all_zero = true;
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        if (std::isnan(p[i])) any_nan = true;
+        if (std::isinf(p[i])) any_inf = true;
+        if (p[i] != 0.0f) all_zero = false;
+    }
+    EXPECT_FALSE(any_nan) << "grad_input contained NaN — variance produced "
+                              "non-finite intermediates (A1)";
+    EXPECT_FALSE(any_inf) << "grad_input contained Inf";
+    EXPECT_FALSE(all_zero) << "grad_input collapsed to zero — the "
+                               "zero_variance branch fired due to F32 "
+                               "catastrophic cancellation in backward (A1)";
+}
+
+TEST(LayerNormVarianceStability, BackwardSmallVarianceStable) {
+    using namespace tenzor;
+    using namespace tenzor::nn;
+    const int64_t B = 2;
+    const int64_t N = 64;
+    auto x_t = randn({B, N}, DType::Float32, Device::cpu()) *
+               full({1}, 1e-4f, DType::Float32, Device::cpu());
+    auto x = Variable(x_t, true);
+    LayerNorm ln(std::vector<int64_t>{N}, /*eps=*/1e-5);
+    auto y = ln.forward(x);
+    y.backward(ones_like(y.tensor()));
+
+    ASSERT_TRUE(x.grad().has_value());
+    auto g = x.grad().value();
+    const float* p = g.data<float>();
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(p[i]))
+            << "Non-finite grad at i=" << i << ", v=" << p[i];
     }
 }

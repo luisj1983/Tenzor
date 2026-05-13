@@ -139,10 +139,20 @@ void register_autograd(py::module_& m) {
     }, py::arg("f"),
     "Return a function that computes the gradient of f.");
 
+    // 5th-audit B'5: every inner `cpp_fn` lambda below now acquires the GIL
+    // before touching `f(input)` or `result.cast<...>()`. The outer cpp_function
+    // already holds it on entry, but the underlying C++ transforms
+    // (tenzor::jacobian / hessian / vmap / jvp / hvp / vhp / vjp) may release
+    // the GIL across worker threads for performance; an inner re-entry into
+    // pybind11 without GIL would crash. The `gil_scoped_acquire` inside the
+    // inner lambda is a no-op when the GIL is already held (re-entry-safe)
+    // and a real acquire on a child thread.
+
     func_mod.def("vmap", [](py::function f, int64_t in_dim, [[maybe_unused]] int64_t out_dim) {
         return py::cpp_function([f, in_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
                 py::object result = f(x);
                 return result.cast<tenzor::Variable>();
             };
@@ -155,6 +165,7 @@ void register_autograd(py::module_& m) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
@@ -168,6 +179,7 @@ void register_autograd(py::module_& m) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
@@ -181,6 +193,7 @@ void register_autograd(py::module_& m) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
@@ -194,6 +207,7 @@ void register_autograd(py::module_& m) {
                            const tenzor::Tensor& tangent) {
         py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
@@ -206,6 +220,7 @@ void register_autograd(py::module_& m) {
                            const tenzor::Tensor& v) {
         py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
@@ -218,6 +233,7 @@ void register_autograd(py::module_& m) {
                            const tenzor::Tensor& v) {
         py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
@@ -230,6 +246,7 @@ void register_autograd(py::module_& m) {
                            const tenzor::Tensor& cotangent) {
         py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };

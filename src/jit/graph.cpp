@@ -32,6 +32,14 @@ auto Node::add_input(std::shared_ptr<Value> val) -> void {
 }
 
 auto Node::add_output(std::shared_ptr<Value> val) -> void {
+    // 5th-audit sibling-bug A4: defensively ensure the Value's owning-node
+    // pointer is set. Idempotent when callers (e.g. Graph::create_value)
+    // already called set_node(this). Closes the latent contract violation
+    // where a future caller forgets the wiring step and the resulting
+    // Value->node back-edge silently dangles.
+    if (val) {
+        val->set_node(shared_from_this());
+    }
     outputs_.push_back(val);
 }
 
