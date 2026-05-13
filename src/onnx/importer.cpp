@@ -84,15 +84,40 @@ auto load_external_tensor_bytes(const tenzor_onnx::TensorProto& t,
             "ONNXImporter: tensor '" + t.name() + "' has data_location=EXTERNAL "
             "but no `location` entry in external_data");
     }
-    // Reject path traversal — the sidecar must sit next to the .onnx file or
-    // in a subdirectory below it. Any "../" component is rejected.
+    // 7th-audit Fix #2: harden path traversal. The sidecar must sit next
+    // to the .onnx file or in a subdirectory below it. We reject:
+    //
+    //   (a) Any ".." component — classic parent-directory traversal.
+    //   (b) Absolute paths (POSIX "/x" or Windows "C:\x") — `std::filesystem::
+    //       path::operator/` REPLACES the base when the RHS is absolute,
+    //       so a malicious "/etc/passwd" would silently bypass the base_dir
+    //       anchor entirely.
+    //   (c) Empty after the constructor's parsing (defensive).
+    //
+    // Why both (a) and (b): the previous-pass fix caught (a) but missed (b),
+    // surfaced by the seventh-pass audit.
     if (location.find("..") != std::string::npos) {
         throw std::runtime_error(
             "ONNXImporter: external_data location '" + location +
             "' contains '..' (path-traversal attempt rejected)");
     }
     namespace fs = std::filesystem;
-    fs::path full = fs::path(base_dir) / location;
+    fs::path loc_path(location);
+    if (loc_path.is_absolute()) {
+        throw std::runtime_error(
+            "ONNXImporter: external_data location '" + location +
+            "' is an absolute path (path-traversal attempt rejected). "
+            "Sidecar paths must be relative to the .onnx file's directory.");
+    }
+    // Also reject locations beginning with '/' or '\' even on platforms
+    // where std::filesystem might not classify them as "absolute"
+    // (e.g. POSIX paths viewed on Windows). Defence in depth.
+    if (!location.empty() && (location.front() == '/' || location.front() == '\\')) {
+        throw std::runtime_error(
+            "ONNXImporter: external_data location '" + location +
+            "' begins with a root separator (rejected).");
+    }
+    fs::path full = fs::path(base_dir) / loc_path;
     std::ifstream sidecar(full, std::ios::binary);
     if (!sidecar.is_open()) {
         throw std::runtime_error(
@@ -458,11 +483,27 @@ auto ONNXImporter::import_from_file(const std::string& filepath) -> std::shared_
     if (external_data_dir_.empty()) {
         external_data_dir_ = ".";  // file in current directory
     }
+    // 7th-audit Fix #3: tell the immediate import_from_bytes call NOT to
+    // clear our freshly-set anchor.
+    called_from_file_path_anchor_set_ = true;
     return import_from_bytes(bytes);
 }
 
 auto ONNXImporter::import_from_bytes(const std::vector<uint8_t>& bytes) -> std::shared_ptr<nn::Module> {
     log("Parsing ONNX model");
+
+    // 7th-audit Fix #3: clear any external_data_dir_ left over from a
+    // prior `import_from_file` call. `import_from_bytes` has no source
+    // file anchor, so EXTERNAL initializers in the buffer must surface
+    // the documented "no anchor" error rather than silently resolving
+    // against a stale directory. `import_from_file` sets the
+    // single-shot flag BEFORE forwarding to us so we don't clear the
+    // anchor it just established.
+    if (called_from_file_path_anchor_set_) {
+        called_from_file_path_anchor_set_ = false;
+    } else {
+        external_data_dir_.clear();
+    }
 
     // Parse model
     model_data_ = parse_model(bytes);

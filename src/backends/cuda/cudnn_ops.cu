@@ -3060,35 +3060,53 @@ __global__ void layer_norm_mixed_kernel(
 
     __shared__ float shared[BLOCK_SIZE / 32];
 
-    // First pass: compute sum and sum_sq in float
+    // 7th-audit Fix #1: numerically stable two-pass variance.
+    //
+    // Pre-fix this kernel used `var = E[X^2] - E[X]^2` (computed as
+    // `sum_sq / N - mean*mean`), which catastrophically cancels in Float32
+    // when |mean|^2 ≈ E[X^2]. The classic trigger is FP16/BF16 LayerNorm on
+    // a tensor with a large mean (pretrained embeddings, mean ~ 1e3+),
+    // where the cancellation produces variance ≈ 0 → rsqrtf(eps) → output
+    // overflow. Sibling site to the CPU forward fix (commit 2ee72b5b) and
+    // the CPU backward fix shipped in the 5th-audit (A1 — normalization.cpp).
+    //
+    // Two-pass cost is one extra global-memory read per element per row
+    // (we re-stream the input to accumulate squared deviations against
+    // the freshly-reduced mean). Eliminates the catastrophic-cancellation
+    // entirely.
+
+    // ---- Pass 1: per-row mean ------------------------------------------
     float sum = 0.0f;
-    float sum_sq = 0.0f;
-
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        float val = static_cast<float>(batch_in[i]);
-        sum += val;
-        sum_sq += val * val;
+        sum += static_cast<float>(batch_in[i]);
     }
-
     sum = blockReduceSum<BLOCK_SIZE>(sum, shared);
     __syncthreads();
-    sum_sq = blockReduceSum<BLOCK_SIZE>(sum_sq, shared);
 
     float mean, inv_std;
     if (threadIdx.x == 0) {
         mean = sum / static_cast<float>(norm_size);
-        float variance = (sum_sq / static_cast<float>(norm_size)) - (mean * mean);
-        inv_std = rsqrtf(variance + eps);
-        mean_out[b] = static_cast<OutputT>(mean);
-        inv_std_out[b] = static_cast<OutputT>(inv_std);
-    }
-
-    if (threadIdx.x == 0) {
-        shared[0] = mean;
-        shared[1] = inv_std;
+        shared[0] = mean;  // publish to whole block
     }
     __syncthreads();
     mean = shared[0];
+
+    // ---- Pass 2: per-row sum of squared deviations against the mean ----
+    float sum_sq_dev = 0.0f;
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        const float d = static_cast<float>(batch_in[i]) - mean;
+        sum_sq_dev += d * d;
+    }
+    sum_sq_dev = blockReduceSum<BLOCK_SIZE>(sum_sq_dev, shared);
+
+    if (threadIdx.x == 0) {
+        const float variance = sum_sq_dev / static_cast<float>(norm_size);
+        inv_std = rsqrtf(variance + eps);
+        mean_out[b] = static_cast<OutputT>(mean);
+        inv_std_out[b] = static_cast<OutputT>(inv_std);
+        shared[1] = inv_std;
+    }
+    __syncthreads();
     inv_std = shared[1];
 
     // Second pass: normalize and apply affine transform
