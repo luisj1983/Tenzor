@@ -148,7 +148,21 @@ TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient)
 
     LayerNorm ln(/*normalized_shape=*/std::vector<int64_t>{N}, /*eps=*/1e-5);
     auto y = ln.forward(x);
-    y.backward(ones_like(y.tensor()));
+
+    // 7th-audit Fix #4: use a RANDOM grad_output, not ones-like.
+    // LayerNorm has the constant vector in its null space (adding a constant
+    // to all outputs leaves mean/variance unchanged), so a ones-grad
+    // analytically produces grad_input == 0 — pre-fix and post-fix would
+    // both produce ~zero values, and the pre-fix bug was only caught
+    // because its `zero_variance` early-exit returned EXACT zeros while
+    // the post-fix path returned FP-noise zeros. The discriminator was
+    // numerical noise, which is fragile.
+    //
+    // A random grad_output exercises the full backward formula, so
+    // pre-fix would produce NaN/Inf or zeros via the bad variance, and
+    // post-fix produces well-conditioned finite non-zero gradients.
+    auto grad_out_random = randn({B, N}, DType::Float32, Device::cpu());
+    y.backward(grad_out_random);
 
     ASSERT_TRUE(x.grad().has_value()) << "grad_input must be populated";
     auto g = x.grad().value();
@@ -158,14 +172,16 @@ TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient)
     for (int64_t i = 0; i < g.numel(); ++i) {
         if (std::isnan(p[i])) any_nan = true;
         if (std::isinf(p[i])) any_inf = true;
-        if (p[i] != 0.0f) all_zero = false;
+        if (std::abs(p[i]) > 1e-7f) all_zero = false;
     }
     EXPECT_FALSE(any_nan) << "grad_input contained NaN — variance produced "
                               "non-finite intermediates (A1)";
     EXPECT_FALSE(any_inf) << "grad_input contained Inf";
     EXPECT_FALSE(all_zero) << "grad_input collapsed to zero — the "
                                "zero_variance branch fired due to F32 "
-                               "catastrophic cancellation in backward (A1)";
+                               "catastrophic cancellation in backward (A1). "
+                               "Random grad_output should produce a "
+                               "well-conditioned non-zero gradient.";
 }
 
 TEST(LayerNormVarianceStability, BackwardSmallVarianceStable) {
@@ -186,5 +202,62 @@ TEST(LayerNormVarianceStability, BackwardSmallVarianceStable) {
     for (int64_t i = 0; i < g.numel(); ++i) {
         EXPECT_TRUE(std::isfinite(p[i]))
             << "Non-finite grad at i=" << i << ", v=" << p[i];
+    }
+}
+
+// =========================================================================
+// 7th-audit Fix #1: CUDA `layer_norm_mixed_kernel` two-pass variance.
+//
+// Pre-fix the FP16/BF16 LayerNorm forward fast path on CUDA used
+// `var = E[X^2] - E[X]^2`, which catastrophically cancels for large-mean
+// inputs. Sibling site to the CPU forward fix (commit 2ee72b5b) and the
+// 5th-audit A1 backward fix.
+//
+// The test runs FP16 LayerNorm forward on a mean-1e3 input on CUDA and
+// asserts the output is finite (pre-fix produced Inf via rsqrtf(eps)).
+// Auto-skips when CUDA is not available.
+// =========================================================================
+TEST(LayerNormVarianceStability, CudaMixedKernelLargeMeanFiniteOutput) {
+    using namespace tenzor;
+
+    // Skip cleanly when CUDA isn't compiled in or no device is available.
+    bool has_cuda = false;
+    try {
+        Device d = Device::cuda(0);
+        // Construct a 1-elem tensor on CUDA as a liveness probe.
+        auto probe = zeros({1}, DType::Float32, d);
+        has_cuda = (probe.device().type == Device::Type::CUDA);
+    } catch (...) {
+        has_cuda = false;
+    }
+    if (!has_cuda) {
+        GTEST_SKIP() << "CUDA device unavailable; skipping CUDA-only test";
+    }
+
+    Device cuda_dev = Device::cuda(0);
+    const int64_t B = 2;
+    const int64_t N = 64;
+
+    // FP16 input with mean ≈ 1e3 (well into the cancellation regime for
+    // Float32 accumulator: 1e3^2 = 1e6 vs sum_sq ~ 1e6 + O(N)).
+    auto base_f32 = randn({B, N}, DType::Float32, cuda_dev);
+    auto shift = full({1}, 1e3f, DType::Float32, cuda_dev);
+    auto x_f32 = base_f32 + shift;
+    auto x_f16 = x_f32.to(DType::Float16);
+    Variable x(x_f16, /*requires_grad=*/false);
+
+    nn::LayerNorm ln(std::vector<int64_t>{N}, /*eps=*/1e-5);
+    ln.to(cuda_dev);
+    auto y = ln.forward(x);
+
+    auto y_cpu = y.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* p = y_cpu.data<float>();
+    for (int64_t i = 0; i < y_cpu.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(p[i]))
+            << "CUDA mixed-kernel LN forward produced NaN at i=" << i
+            << " (variance catastrophically cancelled — 7th-audit Fix #1)";
+        ASSERT_FALSE(std::isinf(p[i]))
+            << "CUDA mixed-kernel LN forward produced Inf at i=" << i
+            << " (variance ≈ 0 → rsqrtf(eps) overflowed downstream)";
     }
 }

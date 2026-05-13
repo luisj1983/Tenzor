@@ -404,3 +404,108 @@ TEST(ONNXAuditFixes, ImporterRejectsPathTraversalInExternalData) {
     fs::remove(proto_path);
     fs::remove(data_path);
 }
+
+// =========================================================================
+// 7th-audit Fix #2: importer rejects absolute external_data location.
+// =========================================================================
+TEST(ONNXAuditFixes, ImporterRejectsAbsolutePathInExternalData) {
+    using namespace tenzor::onnx;
+    namespace fs = std::filesystem;
+
+    // Same setup as the path-traversal test, but patch the location to
+    // an absolute path. Pre-Fix#2 std::filesystem::path::operator/ would
+    // silently REPLACE the base anchor, allowing any-file read.
+    ONNXExporter exporter(/*opset=*/18);
+    auto in     = tenzor::zeros({1, 1024, 1, 1}, DType::Float32, Device::cpu());
+    auto scale  = tenzor::ones({1024},  DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({1024}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({1024}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({1024},  DType::Float32, Device::cpu());
+    auto out    = tenzor::zeros({1, 1024, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(in, scale, bias, mean, var,
+                                /*eps=*/1e-5, out, "y");
+
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_abs_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{true},
+                            /*threshold_bytes=*/0);
+
+    // Patch the proto: find the sidecar basename and rewrite it to begin
+    // with a '/' (POSIX absolute). Replace exactly the basename length so
+    // the proto length-prefix stays valid.
+    std::ifstream in_f(proto_path, std::ios::binary);
+    std::string blob((std::istreambuf_iterator<char>(in_f)),
+                      std::istreambuf_iterator<char>());
+    in_f.close();
+    const std::string needle = data_path.filename().string();
+    auto pos = blob.find(needle);
+    ASSERT_NE(pos, std::string::npos);
+    // Patch to "/tmp/X" (same length as the basename — we just overwrite
+    // the leading character with '/'; rest of the bytes remain valid path
+    // characters). Importer's absolute-path check fires before any open.
+    blob[pos] = '/';
+    std::ofstream out_f(proto_path, std::ios::binary | std::ios::trunc);
+    out_f.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+    out_f.close();
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_file(proto_path.string()),
+                 std::runtime_error)
+        << "Importer must reject absolute paths in external_data location "
+           "(7th-audit Fix #2 — std::filesystem operator/ replaces base "
+           "when RHS is absolute, bypassing the anchor)";
+
+    fs::remove(proto_path);
+    fs::remove(data_path);
+}
+
+// =========================================================================
+// 7th-audit Fix #3: external_data_dir_ does not leak across calls.
+// =========================================================================
+TEST(ONNXAuditFixes, ImporterClearsExternalDataDirOnBytesEntry) {
+    using namespace tenzor::onnx;
+    namespace fs = std::filesystem;
+
+    // Export a model WITH external_data so the .onnx file references a
+    // sidecar relative to its directory.
+    ONNXExporter exporter(/*opset=*/18);
+    const int64_t C = (4 * 1024 * 1024) / 4;
+    auto in     = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    auto scale  = tenzor::ones({C},  DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({C},  DType::Float32, Device::cpu());
+    auto out    = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(in, scale, bias, mean, var,
+                                /*eps=*/1e-5, out, "y");
+
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_dir_leak_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{true},
+                            /*threshold_bytes=*/1ULL << 20);
+    ASSERT_TRUE(fs::exists(data_path));
+
+    ONNXImporter importer;
+    // First import via file path — sets the anchor.
+    ASSERT_NO_THROW(importer.import_from_file(proto_path.string()));
+
+    // Now slurp the same bytes and import via the bytes entry point.
+    // Pre-Fix#3 the leftover external_data_dir_ would silently resolve
+    // the sidecar against the previous file's directory. Post-fix the
+    // anchor is cleared and the call must throw "no anchor".
+    std::ifstream f(proto_path, std::ios::binary);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    f.close();
+
+    EXPECT_THROW(importer.import_from_bytes(bytes), std::runtime_error)
+        << "import_from_bytes inherited an external_data anchor from a "
+           "prior import_from_file call (7th-audit Fix #3 regression)";
+
+    fs::remove(proto_path);
+    fs::remove(data_path);
+}

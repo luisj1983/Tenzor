@@ -188,6 +188,10 @@ private:
     // `import_from_file`; left empty for `import_from_bytes` (in which case
     // any EXTERNAL initializer throws — there's no anchor for the sidecar).
     std::string external_data_dir_;
+    // 7th-audit Fix #3: single-shot flag — set by `import_from_file` after
+    // it populates `external_data_dir_`, cleared by `import_from_bytes`
+    // on entry. Prevents the dir from leaking across separate calls.
+    bool called_from_file_path_anchor_set_ = false;
 };
 
 auto import_onnx(const std::string& filepath, bool verbose = false) -> std::shared_ptr<nn::Module>;
