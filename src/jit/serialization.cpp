@@ -311,25 +311,40 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
 
         auto node = graph.create_node(op_type, name);
 
-        // Read inputs
+        // Read inputs.
+        // Phase P0 / JIT correctness fix: if an input/output value ID isn't
+        // in the values table (truncated or corrupted file), refuse to load
+        // rather than silently dropping the missing input. The previous
+        // silent-skip path produced a node with fewer inputs than the file
+        // declared, causing forward() to crash later with a misleading
+        // "value not computed" error instead of a clear deserialization
+        // failure here.
         uint64_t num_inputs = read_uint64();
         for (uint64_t i = 0; i < num_inputs; ++i) {
             std::string input_id = read_string();
             auto value = graph.get_value(input_id);
-            if (value) {
-                node->add_input(value);
+            if (!value) {
+                throw std::runtime_error(
+                    "GraphReader: malformed graph — node '" + name +
+                    "' references input value '" + input_id +
+                    "' that does not exist in the values section");
             }
+            node->add_input(value);
         }
 
-        // Read outputs
+        // Read outputs — same rule.
         uint64_t num_outputs = read_uint64();
         for (uint64_t i = 0; i < num_outputs; ++i) {
             std::string output_id = read_string();
             auto value = graph.get_value(output_id);
-            if (value) {
-                value->set_node(node);
-                node->add_output(value);
+            if (!value) {
+                throw std::runtime_error(
+                    "GraphReader: malformed graph — node '" + name +
+                    "' produces output value '" + output_id +
+                    "' that does not exist in the values section");
             }
+            value->set_node(node);
+            node->add_output(value);
         }
 
         // Read attributes
