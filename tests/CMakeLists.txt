@@ -359,6 +359,13 @@ add_executable(test_layer_norm_f64_precision test_layer_norm_f64_precision.cpp)
 target_link_libraries(test_layer_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_layer_norm_f64_precision DISCOVERY_TIMEOUT 60)
 
+# Numerical-precision fix: group_norm_impl and instance_norm_impl used
+# `float` accumulators inside `template<typename T>` — silently truncating
+# Float64 inputs to Float32. Same bug class as the LayerNorm scalar fix.
+add_executable(test_group_instance_norm_f64_precision test_group_instance_norm_f64_precision.cpp)
+target_link_libraries(test_group_instance_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_group_instance_norm_f64_precision DISCOVERY_TIMEOUT 60)
+
 # Phase P0 / Fix 5 — CUDA median Float16/BFloat16: the indices output was
 # a hard-coded 0; the values were reconstructed via float-to-half conversion
 # losing the original half representation. Mirrors mode_kernel pattern.

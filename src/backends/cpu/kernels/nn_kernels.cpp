@@ -1665,6 +1665,11 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
     return {output, mean, rstd};
 }
 
+// Phase P0 / Numerical-precision fix: double-precision accumulation regardless
+// of T. Same bug class + fix as the layer_norm_scalar accumulator (see commit
+// 3a713e1a). Variance uses the two-pass form E[(X-μ)²] which is stable for
+// arbitrary mean magnitude; the one-pass E[X²] - E[X]² form would
+// catastrophically cancel for large means.
 template<typename T>
 void group_norm_impl(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                      int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, float eps) {
@@ -1676,30 +1681,36 @@ void group_norm_impl(const T* in_data, T* out_data, const T* w_data, const T* b_
             int64_t c_start = g * channels_per_group;
             int64_t group_size = channels_per_group * spatial_size;
 
-            float mean = 0.0f;
+            double sum = 0.0;
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                    sum += ln_to_double(in_data[(n * C + c) * spatial_size + s]);
                 }
             }
-            mean /= static_cast<float>(group_size);
+            const double mean = sum / static_cast<double>(group_size);
 
-            float var = 0.0f;
+            double var = 0.0;
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    const double diff =
+                        ln_to_double(in_data[(n * C + c) * spatial_size + s]) - mean;
                     var += diff * diff;
                 }
             }
-            var /= static_cast<float>(group_size);
-
-            float inv_std = 1.0f / std::sqrt(var + eps);
+            var /= static_cast<double>(group_size);
+            const double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
 
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
                     int64_t idx = (n * C + c) * spatial_size + s;
-                    float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
-                    out_data[idx] = static_cast<T>(normalized * static_cast<float>(w_data[c]) + static_cast<float>(b_data[c]));
+                    const double normalized = (ln_to_double(in_data[idx]) - mean) * inv_std;
+                    const double result =
+                        normalized * ln_to_double(w_data[c]) + ln_to_double(b_data[c]);
+                    if constexpr (std::is_same_v<T, double>) {
+                        out_data[idx] = result;
+                    } else {
+                        out_data[idx] = static_cast<T>(static_cast<float>(result));
+                    }
                 }
             }
         }
@@ -1746,31 +1757,38 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
 template<typename T>
 void instance_norm_impl(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                          int64_t N, int64_t C, int64_t spatial_size, float eps) {
+    // Phase P0 / Numerical-precision fix: double-precision accumulation +
+    // two-pass variance. Same fix class as group_norm_impl above.
     #pragma omp parallel for collapse(2) if(N * C > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
-            float mean = 0.0f;
+            double sum = 0.0;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                sum += ln_to_double(in_data[(n * C + c) * spatial_size + s]);
             }
-            mean /= static_cast<float>(spatial_size);
+            const double mean = sum / static_cast<double>(spatial_size);
 
-            float var = 0.0f;
+            double var = 0.0;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                const double diff =
+                    ln_to_double(in_data[(n * C + c) * spatial_size + s]) - mean;
                 var += diff * diff;
             }
-            var /= static_cast<float>(spatial_size);
+            var /= static_cast<double>(spatial_size);
+            const double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
 
-            float inv_std = 1.0f / std::sqrt(var + eps);
-
-            float w = w_data ? static_cast<float>(w_data[c]) : 1.0f;
-            float b = b_data ? static_cast<float>(b_data[c]) : 0.0f;
+            const double w = w_data ? ln_to_double(w_data[c]) : 1.0;
+            const double b = b_data ? ln_to_double(b_data[c]) : 0.0;
 
             for (int64_t s = 0; s < spatial_size; ++s) {
                 int64_t idx = (n * C + c) * spatial_size + s;
-                float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
-                out_data[idx] = static_cast<T>(normalized * w + b);
+                const double normalized = (ln_to_double(in_data[idx]) - mean) * inv_std;
+                const double result = normalized * w + b;
+                if constexpr (std::is_same_v<T, double>) {
+                    out_data[idx] = result;
+                } else {
+                    out_data[idx] = static_cast<T>(static_cast<float>(result));
+                }
             }
         }
     }
