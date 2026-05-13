@@ -352,6 +352,13 @@ add_executable(test_conv1d test_conv1d.cpp)
 target_link_libraries(test_conv1d PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_conv1d DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 3: Float64 LayerNorm precision regression — accumulators
+# were declared `float` inside `template<typename T>`, silently truncating
+# F64 inputs. See src/backends/cpu/kernels/nn_kernels.cpp.
+add_executable(test_layer_norm_f64_precision test_layer_norm_f64_precision.cpp)
+target_link_libraries(test_layer_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_layer_norm_f64_precision DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)

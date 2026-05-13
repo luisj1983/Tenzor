@@ -1452,7 +1452,26 @@ static void layer_norm_simd(
     }
 }
 
-// Scalar layer norm implementation for non-Float32 dtypes
+// Promote a value of the half-precision or double dtype family to `double`
+// for accumulation. Direct `static_cast<double>` works for `double` but not
+// for `Float16`/`BFloat16` (those define implicit conversion to `float`,
+// not to `double`); going through `float` is lossless for the half types
+// since `float` is a strict superset of both.
+template<typename T>
+inline auto ln_to_double(const T& v) -> double {
+    if constexpr (std::is_same_v<T, double>) {
+        return v;
+    } else {
+        return static_cast<double>(static_cast<float>(v));
+    }
+}
+
+// Scalar layer norm implementation for non-Float32 dtypes.
+//
+// Accumulators are `double` regardless of T: Float32 inputs gain numerical
+// stability for free, and Float64 inputs no longer silently truncate to
+// Float32 precision (the MEMORY.md "Float32-accumulator-inside-template<T>"
+// pattern — Phase P0 / Fix 3 of the audit cleanup).
 template<typename T>
 void layer_norm_scalar(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                        int64_t batch_size, int64_t norm_size, float eps) {
@@ -1461,24 +1480,33 @@ void layer_norm_scalar(const T* in_data, T* out_data, const T* w_data, const T* 
         const T* in_ptr = in_data + b * norm_size;
         T* out_ptr = out_data + b * norm_size;
 
-        // Two-pass: compute mean and variance in float for precision
-        float sum = 0.0f;
+        // Two-pass mean/variance, double accumulation.
+        double sum = 0.0;
         for (int64_t i = 0; i < norm_size; ++i) {
-            sum += static_cast<float>(in_ptr[i]);
+            sum += ln_to_double(in_ptr[i]);
         }
-        float mean = sum / static_cast<float>(norm_size);
+        const double mean = sum / static_cast<double>(norm_size);
 
-        float var = 0.0f;
+        double var = 0.0;
         for (int64_t i = 0; i < norm_size; ++i) {
-            float diff = static_cast<float>(in_ptr[i]) - mean;
+            const double diff = ln_to_double(in_ptr[i]) - mean;
             var += diff * diff;
         }
-        var /= static_cast<float>(norm_size);
-        float inv_std = 1.0f / std::sqrt(var + eps);
+        var /= static_cast<double>(norm_size);
+        const double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
 
         for (int64_t i = 0; i < norm_size; ++i) {
-            float normalized = (static_cast<float>(in_ptr[i]) - mean) * inv_std;
-            out_ptr[i] = static_cast<T>(normalized * static_cast<float>(w_data[i]) + static_cast<float>(b_data[i]));
+            const double normalized = (ln_to_double(in_ptr[i]) - mean) * inv_std;
+            const double result =
+                normalized * ln_to_double(w_data[i]) + ln_to_double(b_data[i]);
+            // T = double: assign directly. T = Float16/BFloat16: narrow via
+            // float (their single-argument ctors take float and are
+            // ambiguous from double).
+            if constexpr (std::is_same_v<T, double>) {
+                out_ptr[i] = result;
+            } else {
+                out_ptr[i] = static_cast<T>(static_cast<float>(result));
+            }
         }
     }
 }
@@ -1535,7 +1563,10 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
     return output;
 }
 
-// Scalar layer norm with stats for non-Float32 dtypes
+// Same fix as layer_norm_scalar plus saves mean/rstd for backward. Saved
+// stats are stored Float32 (external buffer type), but accumulation +
+// normalization remain double-precision throughout — matching PyTorch's
+// LayerNorm reference implementation.
 template<typename T>
 void layer_norm_scalar_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                                    float* mean_data, float* rstd_data,
@@ -1545,26 +1576,37 @@ void layer_norm_scalar_with_stats(const T* in_data, T* out_data, const T* w_data
         const T* in_ptr = in_data + b * norm_size;
         T* out_ptr = out_data + b * norm_size;
 
-        float sum = 0.0f;
+        double sum = 0.0;
         for (int64_t i = 0; i < norm_size; ++i) {
-            sum += static_cast<float>(in_ptr[i]);
+            sum += ln_to_double(in_ptr[i]);
         }
-        float mean = sum / static_cast<float>(norm_size);
+        const double mean = sum / static_cast<double>(norm_size);
 
-        float var = 0.0f;
+        double var = 0.0;
         for (int64_t i = 0; i < norm_size; ++i) {
-            float diff = static_cast<float>(in_ptr[i]) - mean;
+            const double diff = ln_to_double(in_ptr[i]) - mean;
             var += diff * diff;
         }
-        var /= static_cast<float>(norm_size);
-        float inv_std = 1.0f / std::sqrt(var + eps);
+        var /= static_cast<double>(norm_size);
+        const double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
 
-        mean_data[b] = mean;
-        rstd_data[b] = inv_std;
+        // Saved stats are Float32 buffers per the kernel-registry contract;
+        // narrow at the boundary only.
+        mean_data[b] = static_cast<float>(mean);
+        rstd_data[b] = static_cast<float>(inv_std);
 
         for (int64_t i = 0; i < norm_size; ++i) {
-            float normalized = (static_cast<float>(in_ptr[i]) - mean) * inv_std;
-            out_ptr[i] = static_cast<T>(normalized * static_cast<float>(w_data[i]) + static_cast<float>(b_data[i]));
+            const double normalized = (ln_to_double(in_ptr[i]) - mean) * inv_std;
+            const double result =
+                normalized * ln_to_double(w_data[i]) + ln_to_double(b_data[i]);
+            // T = double: assign directly. T = Float16/BFloat16: narrow via
+            // float (their single-argument ctors take float and are
+            // ambiguous from double).
+            if constexpr (std::is_same_v<T, double>) {
+                out_ptr[i] = result;
+            } else {
+                out_ptr[i] = static_cast<T>(static_cast<float>(result));
+            }
         }
     }
 }
