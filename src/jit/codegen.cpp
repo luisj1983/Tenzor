@@ -9,6 +9,9 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"  // CPU fallback below uses tenzor::{exp,sin,add,...}
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"  // CPU fallback dispatches activations via OpId
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
@@ -431,6 +434,11 @@ auto KernelCache::num_cached() const -> size_t {
 // High-level API
 // ============================================================================
 
+// Forward declaration; defined further below. The GPU path in execute_fused
+// also delegates here on failure modes that require a CPU fallback.
+auto execute_fused_cpu(const FusionGroup& group,
+                       const std::vector<Tensor>& inputs) -> Tensor;
+
 auto execute_fused(const FusionGroup& group,
                    const std::vector<Tensor>& inputs) -> Tensor {
     if (inputs.empty()) {
@@ -498,45 +506,153 @@ auto execute_fused(const FusionGroup& group,
     }
     return output;
 #else
-    // CPU fallback: execute operations sequentially using existing ops
+    // GPU codegen not compiled in — delegate to the CPU eager fallback.
+    return execute_fused_cpu(group, inputs);
+#endif
+}
+
+auto execute_fused_cpu(const FusionGroup& group,
+                       const std::vector<Tensor>& inputs) -> Tensor {
+    if (inputs.empty()) {
+        throw std::runtime_error("execute_fused_cpu: no inputs provided");
+    }
+    const int64_t numel = inputs[0].numel();
+    for (size_t i = 1; i < inputs.size(); ++i) {
+        if (inputs[i].numel() != numel) {
+            throw std::runtime_error("execute_fused_cpu: all inputs must have same numel");
+        }
+    }
+
+    // Execute operations sequentially using existing eager ops.
+    //
+    // Every ElemOp value declared in include/tenzor/jit/codegen.hpp must be
+    // handled here — the `default:` branch throws rather than silently
+    // returning the unmodified input, which would produce silently-wrong
+    // output (the bug fixed in Phase P0/Fix-1 of the audit cleanup).
+    //
+    // Activation ops (LeakyRelu/Elu/Selu/Gelu/Mish/Softplus) don't have
+    // Tensor-level free functions, so they dispatch through OpId into the
+    // main backend kernel registry. This matches eager behaviour byte for
+    // byte and reuses the optimised CPU kernels.
     Tensor result = inputs[0].clone();
     for (const auto& step : group.steps) {
         Tensor a = (step.input_idx < 0) ? result : inputs[step.input_idx];
+        auto binary_b = [&]() -> Tensor {
+            return (step.second_input_idx < 0) ? result : inputs[step.second_input_idx];
+        };
+        const double s = step.scalar;
+
         switch (step.op) {
-            case ElemOp::Exp:    result = tenzor::exp(a); break;
-            case ElemOp::Log:    result = tenzor::log(a); break;
-            case ElemOp::Sqrt:   result = tenzor::sqrt(a); break;
-            case ElemOp::Sin:    result = tenzor::sin(a); break;
-            case ElemOp::Cos:    result = tenzor::cos(a); break;
-            case ElemOp::Neg:    result = tenzor::neg(a); break;
-            case ElemOp::Abs:    result = tenzor::abs(a); break;
-            case ElemOp::Sigmoid: result = tenzor::sigmoid(a); break;
-            case ElemOp::Relu:   result = tenzor::clamp_min(a, 0.0f); break;
-            case ElemOp::Tanh:   result = tenzor::tanh(a); break;
-            case ElemOp::Erf:    result = tenzor::erf(a); break;
-            case ElemOp::Add: {
-                Tensor b = (step.second_input_idx < 0) ? result : inputs[step.second_input_idx];
-                result = tenzor::add(a, b); break;
+            // ----- Unary, direct tensor wrappers -------------------------
+            case ElemOp::Neg:        result = tenzor::neg(a); break;
+            case ElemOp::Abs:        result = tenzor::abs(a); break;
+            case ElemOp::Sign:       result = tenzor::sign(a); break;
+            case ElemOp::Reciprocal: result = tenzor::reciprocal(a); break;
+            case ElemOp::Exp:        result = tenzor::exp(a); break;
+            case ElemOp::Log:        result = tenzor::log(a); break;
+            case ElemOp::Sqrt:       result = tenzor::sqrt(a); break;
+            case ElemOp::Sin:        result = tenzor::sin(a); break;
+            case ElemOp::Cos:        result = tenzor::cos(a); break;
+            case ElemOp::Tan:        result = tenzor::tan(a); break;
+            case ElemOp::Asin:       result = tenzor::asin(a); break;
+            case ElemOp::Acos:       result = tenzor::acos(a); break;
+            case ElemOp::Atan:       result = tenzor::atan(a); break;
+            case ElemOp::Sinh:       result = tenzor::sinh(a); break;
+            case ElemOp::Cosh:       result = tenzor::cosh(a); break;
+            case ElemOp::Tanh:       result = tenzor::tanh(a); break;
+            case ElemOp::Sigmoid:    result = tenzor::sigmoid(a); break;
+            case ElemOp::Relu:       result = tenzor::clamp_min(a, 0.0f); break;
+            case ElemOp::Erf:        result = tenzor::erf(a); break;
+            case ElemOp::Erfc:       result = tenzor::erfc(a); break;
+            case ElemOp::Log2:       result = tenzor::log2(a); break;
+            case ElemOp::Log10:      result = tenzor::log10(a); break;
+            case ElemOp::Log1p:      result = tenzor::log1p(a); break;
+            case ElemOp::Exp2:       result = tenzor::exp2(a); break;
+            case ElemOp::Expm1:      result = tenzor::expm1(a); break;
+            case ElemOp::Floor:      result = tenzor::floor(a); break;
+            case ElemOp::Ceil:       result = tenzor::ceil(a); break;
+            case ElemOp::Round:      result = tenzor::round(a); break;
+
+            // ----- Activations via OpId dispatch -------------------------
+            //
+            // Each routes to the registered CPU kernel with the appropriate
+            // AttrKey value pulled from step.scalar. Default values match
+            // PyTorch's nn.functional defaults (matches the eager autograd
+            // path in src/autograd/ops.cpp).
+            case ElemOp::LeakyRelu: {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Alpha, s != 0.0 ? s : 0.01);
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::LeakyReLU,
+                                          std::span<const Tensor>{in_arr, 1}, attrs)[0];
+                break;
             }
-            case ElemOp::Mul: {
-                Tensor b = (step.second_input_idx < 0) ? result : inputs[step.second_input_idx];
-                result = tenzor::mul(a, b); break;
+            case ElemOp::Elu: {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Alpha, s != 0.0 ? s : 1.0);
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::Elu,
+                                          std::span<const Tensor>{in_arr, 1}, attrs)[0];
+                break;
             }
-            case ElemOp::Sub: {
-                Tensor b = (step.second_input_idx < 0) ? result : inputs[step.second_input_idx];
-                result = tenzor::sub(a, b); break;
+            case ElemOp::Selu: {
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::Selu,
+                                          std::span<const Tensor>{in_arr, 1}, {})[0];
+                break;
             }
-            case ElemOp::Div: {
-                Tensor b = (step.second_input_idx < 0) ? result : inputs[step.second_input_idx];
-                result = tenzor::div(a, b); break;
+            case ElemOp::Gelu: {
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::Gelu,
+                                          std::span<const Tensor>{in_arr, 1}, {})[0];
+                break;
             }
-            case ElemOp::AddScalar: result = tenzor::add(a, static_cast<double>(step.scalar)); break;
-            case ElemOp::MulScalar: result = tenzor::mul(a, static_cast<double>(step.scalar)); break;
-            default: break;  // Unsupported in CPU fallback
+            case ElemOp::Mish: {
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::Mish,
+                                          std::span<const Tensor>{in_arr, 1}, {})[0];
+                break;
+            }
+            case ElemOp::Softplus: {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Beta, s != 0.0 ? s : 1.0);
+                attrs.set(AttrKey::Threshold, 20.0);
+                const Tensor in_arr[1] = {a};
+                result = tenzor::dispatch(OpId::Softplus,
+                                          std::span<const Tensor>{in_arr, 1}, attrs)[0];
+                break;
+            }
+
+            // ----- Binary ops --------------------------------------------
+            case ElemOp::Add: { Tensor b = binary_b(); result = tenzor::add(a, b); break; }
+            case ElemOp::Sub: { Tensor b = binary_b(); result = tenzor::sub(a, b); break; }
+            case ElemOp::Mul: { Tensor b = binary_b(); result = tenzor::mul(a, b); break; }
+            case ElemOp::Div: { Tensor b = binary_b(); result = tenzor::div(a, b); break; }
+            case ElemOp::Max: { Tensor b = binary_b(); result = tenzor::maximum(a, b); break; }
+            case ElemOp::Min: { Tensor b = binary_b(); result = tenzor::minimum(a, b); break; }
+            case ElemOp::Fmod: { Tensor b = binary_b(); result = tenzor::fmod(a, b); break; }
+            case ElemOp::Pow: {
+                // No tensor-tensor pow free function; route through dispatch.
+                Tensor b = binary_b();
+                const Tensor in_arr[2] = {a, b};
+                result = tenzor::dispatch(OpId::Pow,
+                                          std::span<const Tensor>{in_arr, 2}, {})[0];
+                break;
+            }
+
+            // ----- Scalar binary ops -------------------------------------
+            case ElemOp::AddScalar: result = tenzor::add(a, s); break;
+            case ElemOp::MulScalar: result = tenzor::mul(a, s); break;
+            case ElemOp::PowScalar: result = tenzor::pow(a, static_cast<float>(s)); break;
+            case ElemOp::ClampMin:  result = tenzor::clamp_min(a, static_cast<float>(s)); break;
+            case ElemOp::ClampMax:  result = tenzor::clamp_max(a, static_cast<float>(s)); break;
         }
+        // No `default:` — every ElemOp value must have a `case` arm above.
+        // If the enum grows and a new value lands without being handled
+        // here, the compiler's -Wswitch warning (treated as error by the
+        // project's build flags) will catch it at compile time.
     }
     return result;
-#endif
 }
 
 } // namespace tenzor::jit

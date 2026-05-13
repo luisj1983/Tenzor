@@ -978,8 +978,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* gamma = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* beta = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchLayerNorm(
-            inputs[0], normalized_size, gamma, beta, eps)};
+        auto [out, mean, rstd] = get_vulkan_backend()->dispatchLayerNorm(
+            inputs[0], normalized_size, gamma, beta, eps);
+        return std::vector<Tensor>{out, mean, rstd};
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1250,31 +1251,42 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // Per docs/internals/attention-contract.md: FusedLayerNorm forward must
-        // return (output, mean, rstd). Vulkan's dispatchLayerNorm currently
-        // returns just output and discards mean/inv_std internally — the
-        // SEGV pattern from feedback_forward_returns_stats (audit C12 Vulkan).
-        // Until dispatchLayerNorm exposes mean/inv_std, recompute them at the
-        // host level so the contract is honored. Per the contract, mean and
-        // rstd are Float32 even for FP16/BF16 inputs.
+        // return (output, mean, rstd). Phase P0 / Fix 4 made
+        // dispatchLayerNorm return that triple directly from the shader, so
+        // we no longer need the host-level recomputation that used to live
+        // here as a workaround.
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         int64_t normalized_size = 1;
         for (auto s : normalized_shape) normalized_size *= s;
         if (normalized_size <= 0) normalized_size = inputs[0].shape().back();
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
 
-        Tensor output;
+        Tensor output, mean, rstd;
         if (inputs[0].dtype() == DType::BFloat16) {
             Tensor input_f32 = inputs[0].to(DType::Float32);
             Tensor gamma_f32 = inputs[1].to(DType::Float32);
             Tensor beta_f32 = inputs[2].to(DType::Float32);
-            output = get_vulkan_backend()->dispatchLayerNorm(
-                input_f32, normalized_size, &gamma_f32, &beta_f32, eps).to(DType::BFloat16);
+            auto [out_f32, m, r] = get_vulkan_backend()->dispatchLayerNorm(
+                input_f32, normalized_size, &gamma_f32, &beta_f32, eps);
+            output = out_f32.to(DType::BFloat16);
+            mean = m;
+            rstd = r;
         } else {
-            output = get_vulkan_backend()->dispatchLayerNorm(
+            auto [out, m, r] = get_vulkan_backend()->dispatchLayerNorm(
                 inputs[0], normalized_size, &inputs[1], &inputs[2], eps);
+            output = out;
+            mean = m;
+            rstd = r;
         }
-
-        // Compute mean / rstd at host level for the saved-stats slots.
+        return std::vector<Tensor>{output, mean, rstd};
+    });
+    // The host-level mean/rstd recomputation below is no longer reachable —
+    // the kernel returned above. Leaving the rest of the original block
+    // commented out for one release in case any user code depended on a
+    // specific intermediate tensor; safe to delete in a follow-up.
+    /*
+    {
+        // (former host-level workaround follows)
         const Tensor& X = inputs[0];
         int64_t batch_size = X.numel() / normalized_size;
         Tensor X_f32 = (X.dtype() == DType::Float32) ? X : X.to(DType::Float32);
@@ -1298,7 +1310,8 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                          1.0, var_eps.dtype(), var_eps.device()),
             tenzor::sqrt(var_eps));
         return std::vector<Tensor>{output, mean, rstd};
-    });
+    }
+    */  // end of legacy host-level recompute block
 
     // ========================================================================
     // Interpolation
@@ -3861,7 +3874,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t D = values.shape().back();
         // Apply regular layer norm (operates on last dim, same for all rows)
         auto vk = get_vulkan_backend();
-        return vk->dispatchLayerNorm(values, D, weight_ptr, bias_ptr, eps);
+        auto [out, /*mean*/_m, /*rstd*/_r] =
+            vk->dispatchLayerNorm(values, D, weight_ptr, bias_ptr, eps);
+        (void)_m; (void)_r;
+        return out;
     });
 
     table.register_single_output_kernel(OpId::NestedLinear, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {

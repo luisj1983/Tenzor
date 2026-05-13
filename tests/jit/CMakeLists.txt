@@ -20,6 +20,12 @@ add_executable(test_codegen test_codegen.cpp)
 target_link_libraries(test_codegen PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_codegen LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# P0 / Fix-1 regression coverage: every ElemOp must produce correct output
+# via execute_fused_cpu, including the 30 previously dropped via default:.
+add_executable(test_codegen_elementwise_cpu test_codegen_elementwise_cpu.cpp)
+target_link_libraries(test_codegen_elementwise_cpu PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_codegen_elementwise_cpu LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 add_executable(test_extended_codegen test_extended_codegen.cpp)
 target_link_libraries(test_extended_codegen PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_extended_codegen LABELS "jit" DISCOVERY_TIMEOUT 60)

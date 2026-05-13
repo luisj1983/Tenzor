@@ -585,12 +585,15 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 }
 
 auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
-                                      const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+                                      const Tensor* gamma, const Tensor* beta, float epsilon)
+                                      -> std::tuple<Tensor, Tensor, Tensor> {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
     // For Float16/BFloat16, upcast to Float32 for numerical stability
-    // (BFloat16 has only 7 mantissa bits, gamma/beta dtype must also match shader expectations)
+    // (BFloat16 has only 7 mantissa bits, gamma/beta dtype must also match shader expectations).
+    // The mean/rstd tensors stay Float32 as in CPU/CUDA — they're a saved-stats
+    // contract, not user-facing data, so dtype is fixed.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
@@ -603,8 +606,9 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
             gamma_ptr = &gamma_f32;
             beta_ptr = &beta_f32;
         }
-        auto result_f32 = dispatchLayerNorm(input_f32, normalized_shape, gamma_ptr, beta_ptr, epsilon);
-        return result_f32.to(orig_dtype);
+        auto [out_f32, mean_f32, rstd_f32] =
+            dispatchLayerNorm(input_f32, normalized_shape, gamma_ptr, beta_ptr, epsilon);
+        return {out_f32.to(orig_dtype), mean_f32, rstd_f32};
     }
 
     // Select correct pipeline based on dtype
@@ -626,16 +630,26 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     int64_t batch_size = input.numel() / normalized_shape;
     bool has_affine = (gamma != nullptr && beta != nullptr);
 
+    // Phase P0 / Fix 4: persist mean and rstd buffers — one Float32 scalar
+    // per batch element. Vulkan's contract now matches CPU/CUDA/OneAPI:
+    // forward returns {output, mean, rstd} so backward can read them
+    // without re-deriving from input.
+    Tensor mean({batch_size}, DType::Float32, input.device());
+    Tensor rstd({batch_size}, DType::Float32, input.device());
+    size_t stat_buffer_size = batch_size * sizeof(float);
+
     // Get VkBuffer handles
     const void* buffer_input = input.data_ptr();
     const void* buffer_output = output.data_ptr();
+    const void* buffer_mean = mean.data_ptr();
+    const void* buffer_rstd = rstd.data_ptr();
 
     size_t elem_size = input.dtype_size();
     size_t input_buffer_size = input.numel() * elem_size;
     size_t output_buffer_size = output.numel() * elem_size;
     size_t norm_buffer_size = normalized_shape * elem_size;
 
-    // Build buffer bindings: input(0), output(1), gamma(2), beta(3)
+    // Build buffer bindings: input(0), output(1), gamma(2), beta(3), mean(4), rstd(5)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
@@ -656,6 +670,12 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
         sizes.push_back(output_buffer_size);
         sizes.push_back(output_buffer_size);
     }
+
+    // Saved-stats buffers (always bound — see binding 4/5 in layer_norm.comp).
+    bindings.push_back({4, buffer_mean});
+    bindings.push_back({5, buffer_rstd});
+    sizes.push_back(stat_buffer_size);
+    sizes.push_back(stat_buffer_size);
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -690,7 +710,7 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return fp16_saturate_if_needed(*this, output);
+    return {fp16_saturate_if_needed(*this, output), mean, rstd};
 }
 
 auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,

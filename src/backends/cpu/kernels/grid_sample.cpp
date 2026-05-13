@@ -62,6 +62,20 @@ inline bool is_in_bounds(float y, float x, int64_t H, int64_t W) {
     return y >= 0 && y < H && x >= 0 && x < W;
 }
 
+// Catmull-Rom cubic interpolation weights with a = -0.5. Matches the
+// `cubic_interp1d` helper used by interpolate(mode='bicubic') in vision.cpp.
+// Returns the four weights w[-1..2] that combine with the 4 neighbour values.
+inline void cubic_weights(float t, float w[4]) {
+    constexpr float a = -0.5f;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    w[0] = ((a * t - 2.0f * a) * t + a) * t;                // t = 1+t   -> |x|=1+t
+    w[1] = ((a + 2.0f) * t3 - (a + 3.0f) * t2 + 1.0f);      // t = t     -> |x|=t
+    w[2] = ((a + 2.0f) * (1.0f - t) * (1.0f - t) * (1.0f - t)
+           - (a + 3.0f) * (1.0f - t) * (1.0f - t) + 1.0f);   // t = 1-t   -> |x|=1-t
+    w[3] = ((a * (1.0f - t) - 2.0f * a) * (1.0f - t) + a) * (1.0f - t); // |x|=2-t
+}
+
 } // anonymous namespace
 
 auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
@@ -217,29 +231,49 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
                     }
                     out_data[((n * C + c) * H_out + h) * W_out + w] = val;
                 }
-            } else {
-                // bicubic fallback (simplified as bilinear)
-                float px = apply_padding(ix, W_in, padding_mode);
-                float py = apply_padding(iy, H_in, padding_mode);
-                int64_t x0 = static_cast<int64_t>(std::floor(px));
-                int64_t y0 = static_cast<int64_t>(std::floor(py));
-                float wx1 = px - static_cast<float>(x0);
-                float wy1 = py - static_cast<float>(y0);
-                float wx0 = 1.0f - wx1;
-                float wy0 = 1.0f - wy1;
+            } else if (mode == "bicubic") {
+                // Phase P0 / Fix 7: real bicubic interpolation. 4x4 neighbourhood
+                // with Catmull-Rom (a = -0.5) basis, matching PyTorch and the
+                // existing interpolate(mode='bicubic') kernel in vision.cpp.
+                // Padding is applied per-neighbour so all three modes (zeros,
+                // border, reflection) work the same as bilinear.
+                const float ix_pad = apply_padding(ix, W_in, padding_mode);
+                const float iy_pad = apply_padding(iy, H_in, padding_mode);
+                const int64_t ix_floor = static_cast<int64_t>(std::floor(ix_pad));
+                const int64_t iy_floor = static_cast<int64_t>(std::floor(iy_pad));
+                const float tx = ix_pad - static_cast<float>(ix_floor);
+                const float ty = iy_pad - static_cast<float>(iy_floor);
+                float wx[4], wy[4];
+                cubic_weights(tx, wx);
+                cubic_weights(ty, wy);
 
                 for (int64_t c = 0; c < C; ++c) {
+                    const float* ch_data = in_data + (n * C + c) * spatial_size;
                     auto safe_get = [&](int64_t y, int64_t x) -> float {
+                        if (padding_mode == "zeros") {
+                            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return 0.0f;
+                            return ch_data[y * W_in + x];
+                        }
+                        // border / reflection: clamp since apply_padding already
+                        // mapped the center; neighbours past the edge clamp.
                         y = std::clamp(y, int64_t(0), H_in - 1);
                         x = std::clamp(x, int64_t(0), W_in - 1);
-                        return in_data[((n * C + c) * H_in + y) * W_in + x];
+                        return ch_data[y * W_in + x];
                     };
-                    float val = wy0 * wx0 * safe_get(y0, x0) +
-                                wy0 * wx1 * safe_get(y0, x0 + 1) +
-                                wy1 * wx0 * safe_get(y0 + 1, x0) +
-                                wy1 * wx1 * safe_get(y0 + 1, x0 + 1);
+                    float val = 0.0f;
+                    for (int dy = -1; dy <= 2; ++dy) {
+                        for (int dx = -1; dx <= 2; ++dx) {
+                            val += wy[dy + 1] * wx[dx + 1] *
+                                   safe_get(iy_floor + dy, ix_floor + dx);
+                        }
+                    }
                     out_data[((n * C + c) * H_out + h) * W_out + w] = val;
                 }
+            } else {
+                // Unknown mode — fail loud rather than silently falling back.
+                throw std::invalid_argument(
+                    "grid_sample: unknown mode '" + mode +
+                    "'. Supported: bilinear, nearest, bicubic.");
             }
         }
     }

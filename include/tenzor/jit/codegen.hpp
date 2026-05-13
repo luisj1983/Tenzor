@@ -225,6 +225,24 @@ auto execute_fused(const FusionGroup& group,
                    const std::vector<Tensor>& inputs) -> Tensor;
 
 /**
+ * @brief Execute a FusionGroup via the CPU eager fallback path.
+ *
+ * Runs each ElemStep sequentially via `tenzor::*` / OpId dispatch into the
+ * main backend kernel registry. Unlike `execute_fused`, this never invokes
+ * the GPU code generator — it always runs on CPU semantics, regardless of
+ * whether CUDA/HIP support is compiled in. Used by `execute_fused` as the
+ * fallback when GPU codegen is unavailable or fails, and by tests that
+ * need to validate the fallback path explicitly.
+ *
+ * @param group Fusion group describing the operations
+ * @param inputs Input tensors (any device; copied via existing tensor ops)
+ * @return Output tensor with same shape as inputs[0]
+ * @throws std::runtime_error if `inputs` is empty or numel mismatches
+ */
+auto execute_fused_cpu(const FusionGroup& group,
+                       const std::vector<Tensor>& inputs) -> Tensor;
+
+/**
  * @brief Build a FusionGroup from a simple lambda-style description.
  *
  * Convenience for building fusion groups programmatically.

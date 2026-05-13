@@ -1207,10 +1207,55 @@ auto LinalgMatrixNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
         return {mul(grad_reshaped, outer)};
     }
 
-    // For ord = 1, -1, ±inf the gradient is column/row-sum-based — a max
-    // selector that's piecewise linear; returning zero is a placeholder
-    // for the non-smooth case and matches PyTorch's behaviour.
-    return {zeros_like(input)};
+    // Induced p-norms for ord ∈ {1, -1, ±inf} are piecewise-linear but
+    // differentiable almost everywhere, with a well-defined subgradient.
+    // Phase P0 / Fix 2 of the audit cleanup: the previous version returned
+    // `zeros_like(input)` claiming PyTorch compatibility, but the sibling
+    // `LinalgVectorNormBackward` (above) handles the same `ord` values
+    // with proper subgradients — and PyTorch's matrix-norm backward also
+    // does, modulo the implementation details below.
+    //
+    // Math:
+    //   ord = 1  (max column sum):  pick column j* with max Σ_i |A[i,j]|;
+    //                               subgradient = sign(A[:, j*]) in that col,
+    //                               zero elsewhere.
+    //   ord = -1 (min column sum):  same with argmin.
+    //   ord = +inf (max row sum):   pick row i* with max Σ_j |A[i,j]|;
+    //                               subgradient = sign(A[i*, :]) in that row.
+    //   ord = -inf (min row sum):   same with argmin.
+    //
+    // Output of forward is one scalar per batch (shape input.shape[:-2]).
+    // grad has the same shape; we broadcast it back to the matrix shape by
+    // appending two trailing-1 dimensions.
+    const int64_t ndim    = input.ndim();
+    const int64_t M       = input.size(ndim - 2);
+    const int64_t N       = input.size(ndim - 1);
+    const bool col_norm   = (std::abs(ord_) == 1.0);    // ord = ±1 -> column sums
+    const int64_t reduce_dim = col_norm ? ndim - 2 : ndim - 1;
+    const int64_t num_classes = col_norm ? N : M;
+    const bool use_min    = (ord_ < 0.0);
+
+    auto abs_A = tenzor::abs(input);
+    auto sums  = tenzor::sum(abs_A, /*dim=*/reduce_dim, /*keepdim=*/false);
+    // `sums` has shape input.shape with `reduce_dim` removed. Its last dim
+    // is the select-axis (N for column-sum, M for row-sum); argmax/argmin
+    // along that dim collapses to a scalar per batch.
+    auto idx = use_min
+        ? tenzor::argmin(sums, /*dim=*/-1, /*keepdim=*/false)
+        : tenzor::argmax(sums, /*dim=*/-1, /*keepdim=*/false);
+    // one_hot returns Int64; broadcast against the input matrix by
+    // unsqueezing the *other* matrix dim:
+    //   col_norm: mask shape (..., N), unsqueeze to (..., 1, N).
+    //   row_norm: mask shape (..., M), unsqueeze to (..., M, 1).
+    auto mask = tenzor::one_hot(idx, num_classes).to(input.dtype());
+    mask = mask.unsqueeze(col_norm ? ndim - 2 : ndim - 1);
+
+    // Expand `grad` to broadcast against (..., M, N): append two trailing 1s.
+    auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+    while (grad_shape.size() < static_cast<size_t>(ndim)) grad_shape.push_back(1);
+    auto grad_reshaped = reshape(grad, grad_shape);
+
+    return { mul(mul(grad_reshaped, mask), tenzor::sign(input)) };
 }
 
 auto LinalgMatrixNormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {

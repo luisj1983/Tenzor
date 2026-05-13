@@ -12,6 +12,13 @@ add_executable(test_gradcheck_multibackend test_gradcheck_multibackend.cpp)
 target_link_libraries(test_gradcheck_multibackend PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_multibackend LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Phase P0 / Fix 2 — LinalgMatrixNormBackward subgradient correctness for
+# ord ∈ {1, -1, ±inf}. Old code returned zeros; now returns proper
+# argmax/argmin + one_hot + sign subgradient.
+add_executable(test_matrix_norm_backward test_matrix_norm_backward.cpp)
+target_link_libraries(test_matrix_norm_backward PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_matrix_norm_backward LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Phase 8 — numerical edge-case gradcheck (sqrt(eps), log(eps), log1p(-0.9),
 # reciprocal(small), abs near 0, etc.). Audit-flagged gap.
 add_executable(test_gradcheck_edge_cases_numeric test_gradcheck_edge_cases_numeric.cpp)

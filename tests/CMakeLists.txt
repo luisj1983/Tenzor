@@ -352,6 +352,44 @@ add_executable(test_conv1d test_conv1d.cpp)
 target_link_libraries(test_conv1d PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_conv1d DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 3: Float64 LayerNorm precision regression — accumulators
+# were declared `float` inside `template<typename T>`, silently truncating
+# F64 inputs. See src/backends/cpu/kernels/nn_kernels.cpp.
+add_executable(test_layer_norm_f64_precision test_layer_norm_f64_precision.cpp)
+target_link_libraries(test_layer_norm_f64_precision PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_layer_norm_f64_precision DISCOVERY_TIMEOUT 60)
+
+# Phase P0 / Fix 5 — CUDA median Float16/BFloat16: the indices output was
+# a hard-coded 0; the values were reconstructed via float-to-half conversion
+# losing the original half representation. Mirrors mode_kernel pattern.
+add_executable(test_median_f16_bf16 test_median_f16_bf16.cpp)
+target_link_libraries(test_median_f16_bf16 PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
+
+# Phase P0 / Fix 4 — Vulkan LayerNorm 3-tensor return: forward shader used
+# to compute mean/rstd in shared memory and discard them; backward read
+# them as inputs → OOB crash. Fix exposes them via new SSBO bindings.
+add_executable(test_vulkan_layer_norm_saved_stats test_vulkan_layer_norm_saved_stats.cpp)
+target_link_libraries(test_vulkan_layer_norm_saved_stats PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_vulkan_layer_norm_saved_stats DISCOVERY_TIMEOUT 60)
+
+# Phase P0 / Fix 6 — CUDA flash-attention backward dropout reproduction:
+# backward kernel used to (void)-cast the Philox seed; now threads it
+# through and re-applies the same mask the forward used.
+add_executable(test_flash_attention_dropout_backward test_flash_attention_dropout_backward.cpp)
+target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_core GTest::gtest_main)
+if(TARGET tenzor_backend_cuda)
+    target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_backend_cuda)
+endif()
+tenzor_discover_tests(test_flash_attention_dropout_backward DISCOVERY_TIMEOUT 60)
+
+# Phase P0 / Fix 7 — grid_sample bicubic: forward used to silently fall
+# back to bilinear; backward only handled bilinear (silent zero grads for
+# bicubic). Both fixed.
+add_executable(test_grid_sample_bicubic test_grid_sample_bicubic.cpp)
+target_link_libraries(test_grid_sample_bicubic PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_grid_sample_bicubic DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)

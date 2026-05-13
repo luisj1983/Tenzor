@@ -481,7 +481,8 @@ public:
     auto dispatchFusedAdagradStep(std::span<const Tensor> inputs,
                                    const OpAttributes& attrs) -> std::vector<Tensor>;
     auto dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
-                          const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+                          const Tensor* gamma, const Tensor* beta, float epsilon)
+                          -> std::tuple<Tensor, Tensor, Tensor>;
     auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> std::vector<Tensor>;
     auto dispatchLayerNormBackward(const Tensor& grad_output, const Tensor& input,

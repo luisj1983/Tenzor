@@ -2580,7 +2580,14 @@ __global__ void flash_attention_backward_kernel(
     float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
     const int seq_len,
     const float scale,
-    const bool causal
+    const bool causal,
+    // Phase P0 / Fix 6: dropout reproduction. When apply_dropout is true,
+    // the backward kernel regenerates the same Philox mask the forward
+    // used (deterministic given the (batch_head, query_idx, kv_pos)
+    // counter triple and the rng_seed). Without this, gradients leak
+    // from dropped attention positions.
+    const float dropout_p,
+    const uint32_t rng_seed
 ) {
     const int kv_tile_idx = blockIdx.x;  // which KV tile (column block)
     const int batch_head = blockIdx.y;
@@ -2705,6 +2712,12 @@ __global__ void flash_attention_backward_kernel(
 
         // Compute P_ij = exp(S_ij - l_i)  [Br x Bc]
         // Apply causal mask: P_ij = 0 where query_pos < key_pos
+        // Phase P0 / Fix 6: also replay the same dropout mask the forward
+        // kernel applied at lines 2027-2040. Counter is (batch_head,
+        // query_idx, kv_pos, 0) — identical to forward — so the same
+        // (seed, counter) triple deterministically reproduces the mask.
+        const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
+        const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
             int i = idx / Bc;
             int j = idx % Bc;
@@ -2714,9 +2727,21 @@ __global__ void flash_attention_backward_kernel(
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                    if (apply_dropout) {
+                        const uint32_t query_idx = static_cast<uint32_t>(q_start + i);
+                        const uint32_t kv_pos    = static_cast<uint32_t>(kv_start + j);
+                        const float u = philox_uniform(
+                            static_cast<uint32_t>(batch_head),
+                            query_idx, kv_pos, rng_seed);
+                        if (u < dropout_p) {
+                            p = 0.0f;
+                        } else {
+                            p *= dropout_scale;
+                        }
+                    }
                 }
             }
-            S_tile[i * Bc + j] = p;  // Reuse S_tile for P_ij
+            S_tile[i * Bc + j] = p;  // Reuse S_tile for (dropout-masked) P_ij
         }
         __syncthreads();
 
@@ -2835,7 +2860,12 @@ __global__ void flash_attention_backward_kernel_mp(
     T* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM]
     const int seq_len,
     const float scale,
-    const bool causal
+    const bool causal,
+    // Phase P0 / Fix 6: dropout reproduction. See FP32 backward kernel
+    // for the rationale; mask application is identical (post-softmax,
+    // pre-dV/dS).
+    const float dropout_p,
+    const uint32_t rng_seed
 ) {
     const int kv_tile_idx = blockIdx.x;
     const int batch_head = blockIdx.y;
@@ -2949,7 +2979,10 @@ __global__ void flash_attention_backward_kernel_mp(
         }
         __syncthreads();
 
-        // Compute P_ij = exp(S_ij - l_i), causal mask
+        // Compute P_ij = exp(S_ij - l_i), causal mask, dropout-mask replay.
+        // Phase P0 / Fix 6 — same logic as the FP32 backward.
+        const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
+        const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
             int i = idx / Bc;
             int j = idx % Bc;
@@ -2959,6 +2992,18 @@ __global__ void flash_attention_backward_kernel_mp(
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                    if (apply_dropout) {
+                        const uint32_t query_idx = static_cast<uint32_t>(q_start + i);
+                        const uint32_t kv_pos    = static_cast<uint32_t>(kv_start + j);
+                        const float u = philox_uniform(
+                            static_cast<uint32_t>(batch_head),
+                            query_idx, kv_pos, rng_seed);
+                        if (u < dropout_p) {
+                            p = 0.0f;
+                        } else {
+                            p *= dropout_scale;
+                        }
+                    }
                 }
             }
             S_tile[i * Bc + j] = p;
@@ -3049,13 +3094,25 @@ auto flash_attention_backward_cuda(
     const Tensor& L,     // [batch_heads, seq_len] logsumexp
     float scale,
     bool causal,
-    float dropout_p,             // M4: dropout reproduction not yet wired
+    float dropout_p,
     const Tensor& philox_seed,
     const Tensor& philox_offset
 ) -> std::vector<Tensor> {
-    (void)dropout_p;
-    (void)philox_seed;
-    (void)philox_offset;
+    // Phase P0 / Fix 6: extract the rng seed from the saved Philox state
+    // tensor (a single uint32) so the backward kernel can regenerate the
+    // exact same dropout mask the forward used. philox_offset is the
+    // counter[3] slot — fixed at 0 in our forward kernel, so unused.
+    uint32_t rng_seed = 0;
+    if (dropout_p > 0.0f && philox_seed.numel() > 0) {
+        auto seed_cpu = philox_seed.to(Device::cpu()).contiguous();
+        // Forward stores the seed as a single int64 or uint32 depending on
+        // the producer; coerce via int64 to avoid dtype-specific code.
+        Tensor seed_i64 = (seed_cpu.dtype() == DType::Int64)
+                          ? seed_cpu
+                          : seed_cpu.to(DType::Int64);
+        rng_seed = static_cast<uint32_t>(seed_i64.data<int64_t>()[0]);
+    }
+    (void)philox_offset;  // counter[3] hardcoded to 0 in philox_uniform
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
@@ -3110,13 +3167,13 @@ auto flash_attention_backward_cuda(
             size_t smem = compute_bwd_smem(32);
             flash_attention_backward_kernel<32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (head_dim == 64) {
             size_t smem = compute_bwd_smem(64);
             flash_attention_backward_kernel<64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (head_dim == 128) {
             size_t smem = compute_bwd_smem(128);
@@ -3124,7 +3181,7 @@ auto flash_attention_backward_cuda(
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error(
@@ -3154,13 +3211,13 @@ auto flash_attention_backward_cuda(
             size_t smem = compute_bwd_smem(32);
             flash_attention_backward_kernel_mp<T, 32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (head_dim == 64) {
             size_t smem = compute_bwd_smem(64);
             flash_attention_backward_kernel_mp<T, 64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (head_dim == 128) {
             size_t smem = compute_bwd_smem(128);
@@ -3168,7 +3225,7 @@ auto flash_attention_backward_cuda(
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal);
+                seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error(

@@ -8,6 +8,11 @@ layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
 layout(binding = 2) buffer Gamma { float gamma_data[]; };    // Optional affine parameter
 layout(binding = 3) buffer Beta { float beta_data[]; };      // Optional affine parameter
+// Phase P0 / Fix 4: persist saved stats so backward (and FusedLayerNorm
+// wrappers) can read mean/rstd without recomputing on the host.
+// One scalar per batch element.
+layout(binding = 4) buffer MeanOut { float mean_out[]; };
+layout(binding = 5) buffer RstdOut { float rstd_out[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -67,6 +72,14 @@ void main() {
 
     float variance = shared_sum_sq[0] / float(params.normalized_shape);
     float inv_std = 1.0 / sqrt(variance + params.epsilon);
+    barrier();
+
+    // Persist mean and rstd from thread 0 only — one scalar per batch
+    // element. Backward / FusedLayerNorm consumers read these directly.
+    if (tid == 0) {
+        mean_out[batch_idx] = mean;
+        rstd_out[batch_idx] = inv_std;
+    }
     barrier();
 
     // Step 3: Normalize and apply affine transformation
