@@ -26,6 +26,15 @@ add_executable(test_codegen_elementwise_cpu test_codegen_elementwise_cpu.cpp)
 target_link_libraries(test_codegen_elementwise_cpu PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_codegen_elementwise_cpu LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# Phase P0 — JIT correctness fixes (fourth-pass audit):
+#  1. CSE must not dedup stateful Dropout/BatchNorm.
+#  2. Conv+BN fusion must not run on training-mode BatchNorm.
+#  3. GraphReader must throw on missing input values, not silently drop.
+#  4. Node::replace_input must clean up the OLD value's uses_ list.
+add_executable(test_jit_correctness_fixes test_jit_correctness_fixes.cpp)
+target_link_libraries(test_jit_correctness_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_correctness_fixes LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 add_executable(test_extended_codegen test_extended_codegen.cpp)
 target_link_libraries(test_extended_codegen PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_extended_codegen LABELS "jit" DISCOVERY_TIMEOUT 60)

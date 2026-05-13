@@ -39,6 +39,14 @@ auto Node::replace_input(size_t idx, std::shared_ptr<Value> val) -> void {
     if (idx >= inputs_.size()) {
         throw std::runtime_error("Input index out of bounds");
     }
+    // Disconnect this node from the OLD value's uses list before wiring up
+    // the new value. Without this, downstream passes (DCE, replace_value,
+    // dead-value detection) walk a stale uses_ list and either fail to
+    // remove genuinely-dead nodes, or treat live nodes as dead.
+    // (Phase P0 / JIT correctness fix.)
+    if (auto old = inputs_[idx]) {
+        old->remove_use(shared_from_this());
+    }
     inputs_[idx] = val;
     val->add_use(shared_from_this());
 }

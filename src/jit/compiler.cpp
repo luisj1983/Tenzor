@@ -213,9 +213,30 @@ auto CommonSubexpressionEliminationPass::compute_node_hash(const Node& node) -> 
     return hash;
 }
 
+namespace {
+// Ops whose result depends on hidden state (RNG draws, running statistics,
+// etc.) and therefore must NOT be deduplicated even when their inputs and
+// attributes are identical. CSE'ing two of these would silently turn two
+// independent random draws into one shared draw — the classic JIT
+// correctness bug (Phase P0 / JIT correctness fix).
+auto is_stateful_op(OpType op) -> bool {
+    switch (op) {
+        case OpType::Dropout:    // each call draws a fresh Bernoulli mask
+        case OpType::BatchNorm2d: // training-mode batch stats update + running-stat read
+            return true;
+        default:
+            return false;
+    }
+}
+}  // namespace
+
 auto CommonSubexpressionEliminationPass::nodes_equivalent(const Node& a, const Node& b) -> bool {
     // Same operation type
     if (a.op_type() != b.op_type()) return false;
+
+    // Stateful ops: never equivalent, even if inputs match. Two independent
+    // Dropout draws must produce independent random masks.
+    if (is_stateful_op(a.op_type())) return false;
 
     // Same number of inputs
     if (a.inputs().size() != b.inputs().size()) return false;
@@ -396,6 +417,17 @@ auto FuseConvBatchNormPass::run(Graph& graph) -> bool {
                 if (conv_out->uses().size() > 1) {
                     can_fuse = false;
                 }
+            }
+
+            // Phase P0 / JIT correctness fix: Conv+BN fusion is only valid
+            // in eval/inference mode. In training, BN uses *batch* mean and
+            // variance computed from the live input, not the saved running
+            // statistics — folding running_mean/var into the conv weights
+            // would silently produce different output than the eager path.
+            // Tracer marks training mode via the bool attribute "training";
+            // if present and true, refuse to fuse.
+            if (can_fuse && node2->get_bool_attr("training")) {
+                can_fuse = false;
             }
 
             if (can_fuse && fuse_pair(node1, node2, graph)) {
