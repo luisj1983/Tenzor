@@ -366,6 +366,13 @@ add_executable(test_median_f16_bf16 test_median_f16_bf16.cpp)
 target_link_libraries(test_median_f16_bf16 PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
 
+# Phase P0 / Fix 4 — Vulkan LayerNorm 3-tensor return: forward shader used
+# to compute mean/rstd in shared memory and discard them; backward read
+# them as inputs → OOB crash. Fix exposes them via new SSBO bindings.
+add_executable(test_vulkan_layer_norm_saved_stats test_vulkan_layer_norm_saved_stats.cpp)
+target_link_libraries(test_vulkan_layer_norm_saved_stats PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_vulkan_layer_norm_saved_stats DISCOVERY_TIMEOUT 60)
+
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)
