@@ -16,10 +16,12 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/onnx/exporter.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace tenzor;
 using namespace tenzor::onnx;
@@ -167,4 +169,117 @@ TEST(ONNXAuditFixes, BatchNorm2dEvalDefaultSkipsTrainingMode) {
         << "BatchNorm2d exported with training=false should NOT emit the "
            "training_mode attribute (regression of C4 fix)";
     std::filesystem::remove(path);
+}
+
+// =========================================================================
+// C6: external_data sidecar for large initializers
+// =========================================================================
+namespace {
+constexpr int64_t kBigBytes = 4 * 1024 * 1024;  // 4 MiB, > default 1 MiB threshold
+constexpr int64_t kSmallElems = 4;
+}  // namespace
+
+TEST(ONNXAuditFixes, ExternalDataSidecarRoundTrip) {
+    // Build a graph with a few large initializers via BatchNorm2d export
+    // (the only public path that registers initializers). Each of the
+    // four BN tensors (scale, bias, mean, var) is 4 MiB at C=1M float.
+    // Export with use_external_data=true; verify the sidecar receives
+    // those bytes and the main .onnx file stays small.
+    ONNXExporter exporter(/*opset=*/18);
+
+    const int64_t C = kBigBytes / 4;  // 1M channels => 4 MiB per tensor
+    auto input  = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    auto scale  = tenzor::ones({C}, DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({C}, DType::Float32, Device::cpu());
+    auto output = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(input, scale, bias, mean, var,
+                                /*eps=*/1e-5, output, "bn_out");
+
+    namespace fs = std::filesystem;
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_ext_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{true},
+                            /*threshold_bytes=*/1ULL << 20);
+
+    // Both files must exist.
+    ASSERT_TRUE(fs::exists(proto_path))
+        << "Main .onnx file missing: " << proto_path;
+    ASSERT_TRUE(fs::exists(data_path))
+        << "Sidecar .data file missing: " << data_path;
+
+    // Sidecar must contain exactly the four BN tensors' bytes
+    // (4 * 4 MiB = 16 MiB).
+    EXPECT_EQ(fs::file_size(data_path), static_cast<uintmax_t>(4 * kBigBytes))
+        << "Sidecar size does not match the combined initializer bytes";
+
+    // The proto file must be small — multi-MiB initializers are OUT of it.
+    EXPECT_LT(fs::file_size(proto_path), static_cast<uintmax_t>(kBigBytes))
+        << "Main .onnx file is unexpectedly large — initializers may have "
+           "been inlined despite use_external_data=true";
+
+    // The proto bytes should mention the data_basename + the external_data keys.
+    {
+        std::ifstream f(proto_path, std::ios::binary);
+        std::string blob((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+        EXPECT_NE(blob.find(data_path.filename().string()), std::string::npos)
+            << "Proto blob does not reference the sidecar basename";
+        EXPECT_NE(blob.find("location"), std::string::npos);
+        EXPECT_NE(blob.find("offset"), std::string::npos);
+        EXPECT_NE(blob.find("length"), std::string::npos);
+    }
+
+    // Verify the sidecar's first 8 bytes are the same as the BN `scale`
+    // tensor's first 8 bytes (raw_data round-trip; ordering: scale, bias,
+    // mean, var by the order export_batchnorm2d adds initializers).
+    {
+        std::ifstream f(data_path, std::ios::binary);
+        char head[8];
+        f.read(head, 8);
+        const auto* expect = reinterpret_cast<const char*>(scale.data<float>());
+        for (size_t i = 0; i < 8; ++i) {
+            EXPECT_EQ(head[i], expect[i])
+                << "Sidecar byte " << i << " does not match BN scale";
+        }
+    }
+
+    fs::remove(proto_path);
+    fs::remove(data_path);
+}
+
+TEST(ONNXAuditFixes, SmallModelDoesNotEmitSidecar) {
+    // Tiny BN: total initializer bytes << 1.5 GB autostart threshold and
+    // << 1 MiB per-tensor threshold. No sidecar should be created in
+    // auto mode.
+    ONNXExporter exporter(/*opset=*/18);
+    const int64_t C = kSmallElems;
+    auto input  = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    auto scale  = tenzor::ones({C},  DType::Float32, Device::cpu());
+    auto bias   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto mean   = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto var    = tenzor::ones({C},  DType::Float32, Device::cpu());
+    auto output = tenzor::zeros({1, C, 1, 1}, DType::Float32, Device::cpu());
+    exporter.export_batchnorm2d(input, scale, bias, mean, var,
+                                /*eps=*/1e-5, output, "bn_out");
+
+    namespace fs = std::filesystem;
+    const fs::path proto_path = fs::temp_directory_path() /
+        ("onnx_no_ext_" + std::to_string(::getpid()) + ".onnx");
+    const fs::path data_path = proto_path.string() + ".data";
+    fs::remove(data_path);  // ensure clean slate
+
+    // Default (auto) should NOT externalise for a small model.
+    exporter.export_to_file(proto_path.string(),
+                            /*use_external_data=*/std::optional<bool>{});
+
+    ASSERT_TRUE(fs::exists(proto_path));
+    EXPECT_FALSE(fs::exists(data_path))
+        << "Small-model export must not produce an external-data sidecar";
+
+    fs::remove(proto_path);
 }

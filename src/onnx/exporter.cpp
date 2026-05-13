@@ -15,10 +15,12 @@
 #include "../../include/tenzor/utils/error.hpp"
 #include "../../include/tenzor/utils/logging.hpp"
 #include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <system_error>
 #include <unordered_set>
 
 #ifdef TENZOR_HAS_ONNX_PROTOBUF
@@ -2627,17 +2629,208 @@ auto ONNXExporter::serialize_model() -> std::vector<uint8_t> {
 }
 
 auto ONNXExporter::export_to_file(const std::string& filepath) -> void {
-    auto bytes = serialize_model();
+    // Legacy single-argument export — no external_data, single .onnx file.
+    export_to_file(filepath, /*use_external_data=*/std::optional<bool>{false});
+}
 
-    std::ofstream file(filepath, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file for writing: " + filepath);
+auto ONNXExporter::export_to_file(const std::string& filepath,
+                                  std::optional<bool> use_external_data,
+                                  size_t external_data_threshold_bytes) -> void {
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+    // 5th-audit C6: optional external_data sidecar for >2GB models.
+    //
+    // We always defer to `serialize_model()` for the "no-external-data" path
+    // (legacy callers, small models). For the external path we re-serialise
+    // here so we can intercept large initializers BEFORE they get packed
+    // into raw_data, write them to the sidecar, and replace them with an
+    // `external_data` reference.
+
+    // Decide whether to enable external_data automatically when not specified.
+    bool emit_external = use_external_data.value_or(false);
+    if (!use_external_data.has_value()) {
+        size_t total_init_bytes = 0;
+        for (const auto& init : graph_.initializers) {
+            total_init_bytes += init.raw_data.size();
+        }
+        // 1.5 GB safety margin under protobuf's 2 GB cap.
+        if (total_init_bytes > (size_t{1500} * 1024ULL * 1024ULL)) {
+            emit_external = true;
+        }
     }
 
-    file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    file.close();
+    if (!emit_external) {
+        // Fast path: single-file proto, legacy semantics.
+        auto bytes = serialize_model();
+        std::ofstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open file for writing: " + filepath);
+        }
+        file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        return;
+    }
 
-    // Model exported successfully (LOG_INFO removed as logging system not available)
+    // External-data path. We write a sibling `.data` file and use the
+    // `external_data` field on each large initializer.
+    namespace fs = std::filesystem;
+    const fs::path proto_path(filepath);
+    const std::string data_basename = proto_path.filename().string() + ".data";
+    const fs::path data_path = proto_path.parent_path().empty()
+                                   ? fs::path(data_basename)
+                                   : (proto_path.parent_path() / data_basename);
+
+    std::ofstream data_out(data_path, std::ios::binary | std::ios::trunc);
+    if (!data_out.is_open()) {
+        throw std::runtime_error(
+            "Failed to open external-data sidecar for writing: " + data_path.string());
+    }
+
+    // Build the same ModelProto as `serialize_model`, but route large
+    // initializers through the sidecar instead of inline raw_data.
+    // (We could refactor `serialize_model` to share this code; kept inline
+    // for clarity of the data-location decisions.)
+    tenzor_onnx::ModelProto model;
+    model.set_ir_version(8);
+    model.set_producer_name(producer_name_);
+    model.set_model_version(model_version_);
+    if (!description_.empty()) {
+        model.set_doc_string(description_);
+    }
+    auto* opset = model.add_opset_import();
+    opset->set_domain("");
+    opset->set_version(opset_version_);
+    auto* graph_proto = model.mutable_graph();
+    graph_proto->set_name(graph_.name);
+
+    auto set_attr_name_and_type = [](tenzor_onnx::AttributeProto* a,
+                                     const std::string& name,
+                                     tenzor_onnx::AttributeProto_AttributeType t) {
+        a->set_name(name);
+        a->set_type(t);
+    };
+
+    for (const auto& node : graph_.nodes) {
+        auto* n = graph_proto->add_node();
+        for (const auto& input  : node.inputs)  n->add_input(input);
+        for (const auto& output : node.outputs) n->add_output(output);
+        n->set_name(node.name);
+        n->set_op_type(node.op_type);
+
+        for (const auto& [key, val] : node.int_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_INT);
+            a->set_i(val);
+        }
+        for (const auto& [key, val] : node.float_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_FLOAT);
+            a->set_f(val);
+        }
+        for (const auto& [key, val] : node.string_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_STRING);
+            a->set_s(val);
+        }
+        for (const auto& [key, vals] : node.ints_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_INTS);
+            for (auto v : vals) a->add_ints(v);
+        }
+        for (const auto& [key, vals] : node.floats_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_FLOATS);
+            for (auto v : vals) a->add_floats(v);
+        }
+        for (const auto& [key, t] : node.tensor_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_TENSOR);
+            auto* tp = a->mutable_t();
+            tp->set_name(t.name);
+            tp->set_data_type(static_cast<int32_t>(t.dtype));
+            for (auto d : t.dims) tp->add_dims(d);
+            if (!t.raw_data.empty()) {
+                tp->set_raw_data(std::string(t.raw_data.begin(), t.raw_data.end()));
+            }
+        }
+    }
+
+    // Initializers: route large ones through the sidecar.
+    uint64_t offset = 0;
+    for (const auto& tensor : graph_.initializers) {
+        auto* t = graph_proto->add_initializer();
+        t->set_name(tensor.name);
+        t->set_data_type(static_cast<int32_t>(tensor.dtype));
+        for (auto d : tensor.dims) t->add_dims(d);
+
+        if (!tensor.raw_data.empty()
+            && tensor.raw_data.size() > external_data_threshold_bytes) {
+            // External: append bytes to sidecar, emit (location, offset, length).
+            const uint64_t length = tensor.raw_data.size();
+            data_out.write(reinterpret_cast<const char*>(tensor.raw_data.data()),
+                           static_cast<std::streamsize>(length));
+            if (!data_out) {
+                throw std::runtime_error(
+                    "External-data sidecar write failed: " + data_path.string());
+            }
+
+            t->set_data_location(tenzor_onnx::TensorProto_DataLocation_EXTERNAL);
+            auto add_entry = [&](const char* key, const std::string& value) {
+                auto* e = t->add_external_data();
+                e->set_key(key);
+                e->set_value(value);
+            };
+            add_entry("location", data_basename);
+            add_entry("offset",   std::to_string(offset));
+            add_entry("length",   std::to_string(length));
+            offset += length;
+        } else if (!tensor.raw_data.empty()) {
+            // Inline: small enough to embed.
+            t->set_raw_data(std::string(tensor.raw_data.begin(), tensor.raw_data.end()));
+        }
+    }
+    data_out.close();
+
+    auto build_value_info = [](tenzor_onnx::ValueInfoProto* vi,
+                               const ONNXExportValueInfo& src) {
+        vi->set_name(src.name);
+        auto* type = vi->mutable_type();
+        auto* tensor_type = type->mutable_tensor_type();
+        tensor_type->set_elem_type(static_cast<int32_t>(src.dtype));
+        auto* shape = tensor_type->mutable_shape();
+        for (int64_t i = 0; i < static_cast<int64_t>(src.shape.size()); ++i) {
+            auto* d = shape->add_dim();
+            auto param_it = src.dim_params.find(i);
+            if (src.shape[i] < 0 && param_it != src.dim_params.end()) {
+                d->set_dim_param(param_it->second);
+            } else if (src.shape[i] < 0) {
+                d->set_dim_param("dynamic_" + std::to_string(i));
+            } else {
+                d->set_dim_value(src.shape[i]);
+            }
+        }
+    };
+    for (const auto& input : graph_.inputs) {
+        build_value_info(graph_proto->add_input(), input);
+    }
+    for (const auto& output : graph_.outputs) {
+        build_value_info(graph_proto->add_output(), output);
+    }
+
+    const std::string out_bytes = model.SerializeAsString();
+    std::ofstream proto_out(filepath, std::ios::binary | std::ios::trunc);
+    if (!proto_out.is_open()) {
+        // Clean up the sidecar so we don't leave a half-written export.
+        std::error_code ec;
+        fs::remove(data_path, ec);
+        throw std::runtime_error("Failed to open file for writing: " + filepath);
+    }
+    proto_out.write(out_bytes.data(), static_cast<std::streamsize>(out_bytes.size()));
+#else
+    (void)filepath;
+    (void)use_external_data;
+    (void)external_data_threshold_bytes;
+    throw std::runtime_error(
+        "ONNXExporter::export_to_file(external_data): built without protobuf support.");
+#endif
 }
 
 auto ONNXExporter::export_to_bytes() -> std::vector<uint8_t> {
