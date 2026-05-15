@@ -595,6 +595,38 @@ auto benchmark_quantization(
 // Per-layer QuantizationConfig overloads
 // ============================================================================
 
+// Audit J2: recursive per-layer QuantizationConfig walker. Builds the fully-
+// qualified dotted module path (e.g., "encoder.layer.0.attention") at every
+// depth and consults `config.config_for(full_name)` for an override. The old
+// loop only iterated top-level submodules, so per-layer overrides at deeper
+// paths (the common case for transformers) silently did nothing.
+//
+// Pattern: convert-in-place with the override that applies to the current
+// node; if the override is empty (config.config_for returns nullopt), the
+// node is skipped and recursion continues with children. Children may still
+// have their own overrides.
+static void apply_per_layer_quant_recursive(
+    std::shared_ptr<nn::Module> module,
+    const QuantizationConfig& config,
+    const std::string& current_path
+) {
+    if (!module) return;
+    auto override_at_path = config.config_for(current_path);
+    if (override_at_path.has_value()) {
+        // Apply this override to the entire subtree rooted at `module`. We
+        // don't recurse deeper here because convert_module_to_quantized_recursive
+        // walks the subtree itself with this qconfig.
+        convert_module_to_quantized_recursive(module, override_at_path.value());
+        return;
+    }
+    // No override at this exact path — recurse to find overrides on children.
+    for (const auto& [child_name, child] : module->get_submodules()) {
+        std::string child_path = current_path.empty()
+            ? child_name : current_path + "." + child_name;
+        apply_per_layer_quant_recursive(child, config, child_path);
+    }
+}
+
 auto quantize_dynamic(
     std::shared_ptr<nn::Module> model,
     const QuantizationConfig& config
@@ -603,23 +635,15 @@ auto quantize_dynamic(
         throw std::runtime_error("Cannot quantize null model");
     }
 
-    // Apply per-layer quantization using config
-    auto named_params = model->named_parameters();
-    auto quantized_model = model;
+    // Audit J2: real recursive per-layer walk. The previous implementation
+    // iterated only `model->get_submodules()` (top-level), so overrides on
+    // deeper paths like "encoder.layer.5.attention" silently never fired.
+    apply_per_layer_quant_recursive(model, config, /*current_path=*/"");
 
-    // For each submodule, check if it should be skipped or use an override
-    for (const auto& [name, submod] : model->get_submodules()) {
-        auto layer_config = config.config_for(name);
-        if (!layer_config.has_value()) {
-            continue; // Skip this layer
-        }
-        // Apply the layer-specific or default qconfig
-        convert_module_to_quantized_recursive(submod, layer_config.value());
-    }
-
-    // Convert remaining top-level parameters with default config
-    quantized_model = convert_module_to_quantized_recursive(model, config.default_config);
-
+    // Apply the default qconfig to any remaining un-overridden submodules at
+    // the root level. The recursive call above handled subtrees with explicit
+    // overrides; this final pass quantizes the rest using the default.
+    auto quantized_model = convert_module_to_quantized_recursive(model, config.default_config);
     return quantized_model;
 }
 

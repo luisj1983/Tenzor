@@ -1152,17 +1152,20 @@ private:
 /**
  * @brief Bilinear upsample gradient function.
  *
- * Implements forward and backward for bilinear upsampling (currently using nearest neighbor).
+ * Implements the linear adjoint of bilinear upsampling.
  *
- * Forward: y = upsample(x, target_h, target_w)
- * Backward: Distribute dL/dy back to input pixels
+ * Forward: y = upsample_bilinear(x, target_h, target_w)
+ *   (handled by `nn::upsample_bilinear` via `OpId::Interpolate` dispatch.)
+ * Backward: distribute dL/dy back to input pixels using bilinear weights —
+ *   each output pixel contributes to its four nearest input pixels in
+ *   proportion to its fractional source coordinates.
  *
- * For nearest neighbor upsampling:
- * - Each output pixel comes from exactly one input pixel
- * - Gradient at output pixel is added back to corresponding input pixel
- *
- * @note Current implementation uses nearest neighbor for both forward and backward.
- *       True bilinear interpolation would distribute gradients to 4 neighboring pixels.
+ * Audit D3: the tensor-level `backward` dispatches `OpId::InterpolateBackward`
+ * (CPU + CUDA device-resident scatter; ROCm/OneAPI/Vulkan throw honestly
+ * until their kernels land) — no `.to(cpu)` round-trip. The Variable-level
+ * `backward_with_variables` attaches an `UpsampleBilinearForwardAdjoint`
+ * `grad_fn` so `create_graph=true` produces a real 2nd-order graph that
+ * dispatches `OpId::Interpolate` for the next-level backward.
  */
 class UpsampleBilinearBackward : public Function {
 public:
@@ -1172,12 +1175,47 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    // Audit D3: no longer a stub — `backward_with_variables` builds a real
+    // adjoint Function (`UpsampleBilinearForwardAdjoint`) that dispatches
+    // `OpId::Interpolate` for higher-order grads.
+    auto is_higher_order_stub() const -> bool override { return false; }
 private:
     int64_t input_h_;   ///< Input height
     int64_t input_w_;   ///< Input width
     int64_t output_h_;  ///< Output height
     int64_t output_w_;  ///< Output width
+};
+
+/**
+ * @brief Adjoint of `UpsampleBilinearBackward` — audit D3 higher-order.
+ *
+ * The bilinear-upsample backward is a linear scatter A^T (where A is the
+ * forward bilinear upsample). When the engine asks for the backward of the
+ * scatter (i.e. 2nd-order grads), the answer is the forward bilinear
+ * upsample applied to the next-level gradient — exactly what
+ * `OpId::Interpolate` already implements on every backend.
+ *
+ * This Function is created on the fly inside
+ * `UpsampleBilinearBackward::backward_with_variables` and never directly
+ * exercised from forward code, so its own `forward` throws.
+ */
+class UpsampleBilinearForwardAdjoint : public Function {
+public:
+    UpsampleBilinearForwardAdjoint(int64_t input_h, int64_t input_w,
+                                    int64_t output_h, int64_t output_w)
+        : input_h_(input_h), input_w_(input_w),
+          output_h_(output_h), output_w_(output_w) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+    auto name() const -> std::string override { return "UpsampleBilinearForwardAdjoint"; }
+private:
+    int64_t input_h_;
+    int64_t input_w_;
+    int64_t output_h_;
+    int64_t output_w_;
 };
 
 // =========================================================================
@@ -2359,6 +2397,13 @@ using CustomBackwardFn = std::function<std::vector<Tensor>(
     std::span<const Tensor> saved_tensors,
     std::span<const Tensor> grad_outputs)>;
 
+/// Audit D2: Variable-level custom-op backward.
+/// Must match the definition in `tenzor/ops/custom_op.hpp` — declared here
+/// too so `CustomOpBackward` below can use it without a circular include.
+using CustomBackwardVariableFn = std::function<std::vector<Variable>(
+    std::span<const Variable> saved_variables,
+    std::span<const Variable> grad_outputs)>;
+
 /**
  * @brief Autograd function for user-registered custom operations.
  *
@@ -2397,14 +2442,29 @@ public:
     explicit CustomOpBackward(CustomBackwardFn backward_fn)
         : backward_fn_(std::move(backward_fn)) {}
 
+    /// Audit D2: variant that also accepts a Variable-level backward. When
+    /// `var_backward_fn` is non-null, `backward_with_variables` invokes it
+    /// and preserves the autograd graph; otherwise the op honestly reports
+    /// `is_higher_order_stub() = true` and the engine's disconnection
+    /// machinery fires under Warn/Error mode.
+    CustomOpBackward(CustomBackwardFn backward_fn,
+                     CustomBackwardVariableFn var_backward_fn)
+        : backward_fn_(std::move(backward_fn)),
+          var_backward_fn_(std::move(var_backward_fn)) {}
+
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    /// D2: stub iff no Variable-level backward was registered.
+    auto is_higher_order_stub() const -> bool override {
+        return !static_cast<bool>(var_backward_fn_);
+    }
     auto name() const -> std::string override { return "CustomOpBackward"; }
 
 private:
     CustomBackwardFn backward_fn_;
+    CustomBackwardVariableFn var_backward_fn_;  // may be empty
 };
 
 /**

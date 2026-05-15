@@ -172,6 +172,31 @@ using ScoreModFn = std::function<Tensor(const Tensor& score, int64_t b, int64_t 
 auto causal_score_mod() -> ScoreModFn;
 
 /**
+ * @brief Register a user-defined score-mod functor for FlexAttention's
+ * ScoreModId path (audit J12).
+ *
+ * The backend dispatch uses `AttrKey::ScoreModId` to select a score
+ * modification. IDs 0-2 are built-ins (identity, causal, sliding-window).
+ * IDs >= 3 are reserved for user-registered functors. Register a functor
+ * here so the backend's `OpId::FlexAttention` lambda can locate it by ID.
+ *
+ * Functor signature: takes the raw scores tensor (shape (B, H, S_q, S_kv))
+ * and the BHQK indices, returns the modified scores tensor.
+ *
+ * @param id  Score-mod ID to register under (≥ 3).
+ * @param fn  Score-mod functor.
+ *
+ * @throws std::invalid_argument if `id < 3`.
+ */
+auto register_score_mod(int64_t id, ScoreModFn fn) -> void;
+
+/**
+ * @brief Look up a previously registered score-mod functor by ID
+ * (audit J12). Returns nullptr if no such functor is registered.
+ */
+auto find_registered_score_mod(int64_t id) -> ScoreModFn;
+
+/**
  * @brief Create an ALiBi (Attention with Linear Biases) score modification.
  *
  * Adds a position-dependent linear bias: score[q][kv] += slope * (kv - q).

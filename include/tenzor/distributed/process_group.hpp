@@ -81,6 +81,56 @@ public:
     /** @brief Reduce-scatter: reduce then scatter */
     virtual auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void = 0;
 
+    /**
+     * @brief Create a sub-process-group containing only the ranks that
+     *        supply the same `color`.
+     *
+     * Audit A3-extended: enables true per-axis sub-PGs for DeviceMesh.
+     *
+     * This is a **collective operation** — every rank in this PG must
+     * invoke `split(color, key)` together with consistent values. Ranks
+     * sharing the same `color` end up in the same new sub-PG, ordered by
+     * `key` (lower `key` → lower new rank). Pass `color == -1` to indicate
+     * "do not participate"; that rank receives `nullptr`.
+     *
+     * The default implementation throws — backends that genuinely support
+     * sub-group creation (NCCL via `ncclCommSplit`, MPI via
+     * `MPI_Comm_split`) override this.
+     *
+     * @param color Group identifier; ranks sharing `color` form one sub-PG.
+     *              Use `-1` to opt out (returns nullptr).
+     * @param key   Order within the new sub-PG. Lower keys map to lower
+     *              ranks in the result.
+     * @return Shared pointer to the new sub-PG, or `nullptr` if
+     *         `color == -1`. The returned PG's `world_size()` equals the
+     *         number of ranks sharing `color`.
+     */
+    virtual auto split(int color, int key)
+        -> std::shared_ptr<ProcessGroupBase>;
+
+    /**
+     * @brief Equal-size all-to-all on a single contiguous buffer.
+     *
+     * Splits `input` evenly into `world_size()` chunks along dimension 0,
+     * sends chunk[k] to rank k for every k, and receives the analogous
+     * chunk from every peer into `output`. `output[r * chunk .. (r+1) * chunk]`
+     * receives from rank r.
+     *
+     * Both `input` and `output` must have the same shape, and
+     * `input.shape()[0]` must be divisible by `world_size()`.
+     *
+     * The default implementation routes the operation through `all_gather`,
+     * which is bandwidth-suboptimal (uses world_size * input_size) but
+     * correct on any backend implementing all_gather. Backends that have a
+     * native primitive (NCCL, MPI) override this method.
+     *
+     * Required by DTensor's Shard(a) -> Shard(b) redistribute.
+     *
+     * @param output Pre-allocated output tensor, same shape & dtype as input.
+     * @param input  Local input buffer to be split across peers.
+     */
+    virtual auto all_to_all_single(Tensor& output, const Tensor& input) -> void;
+
     /** @brief Synchronization barrier */
     virtual auto barrier() -> void = 0;
 };
@@ -138,12 +188,18 @@ public:
     auto broadcast(Tensor& tensor, int src_rank) -> void override;
     auto all_gather(std::vector<Tensor>& output, const Tensor& input) -> void override;
     auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void override;
+    auto all_to_all_single(Tensor& output, const Tensor& input) -> void override;
+    auto split(int color, int key)
+        -> std::shared_ptr<ProcessGroupBase> override;
     auto barrier() -> void override;
 
 private:
     int rank_;
     int world_size_;
     void* comm_{nullptr};  // ncclComm_t stored as void* to avoid header dep
+
+    /// Private constructor used by `split()` to wrap an already-split comm.
+    NCCLProcessGroup(int rank, int world_size, void* comm);
 
     /** @brief TCP bootstrap: exchange ncclUniqueId across all ranks */
     auto bootstrap_unique_id(const std::string& master_addr, int master_port) -> void;
@@ -178,6 +234,7 @@ public:
     auto broadcast(Tensor& tensor, int src_rank) -> void override;
     auto all_gather(std::vector<Tensor>& output, const Tensor& input) -> void override;
     auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void override;
+    auto all_to_all_single(Tensor& output, const Tensor& input) -> void override;
     auto barrier() -> void override;
 
 private:

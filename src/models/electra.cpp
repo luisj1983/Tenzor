@@ -4,12 +4,14 @@
  */
 
 #include "tenzor/models/electra.hpp"
+#include "tenzor/models/hub.hpp"  // Audit H4
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include <cstring>
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"  // Audit G13: tenzor::sum on Tensor (for mask count)
 #include <random>
 #include <cmath>
 
@@ -270,6 +272,11 @@ auto ElectraForPreTraining::forward_impl(const Variable& input) -> Variable {
     return disc_logits;
 }
 
+auto ElectraForPreTraining::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4. See AlbertModel::load_pretrained.
+    ModelHub::load_pretrained_weights(*this, path, strict);
+}
+
 auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
                                          const Variable& disc_logits,
                                          const Tensor& is_replaced,
@@ -295,12 +302,23 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
         : labels_cpu.to(original_tokens.device());
     Variable labels_var(labels_flat, false);
 
-    // Compute log softmax for cross-entropy
-    auto log_probs = nn::log_softmax(reshaped_logits, 1);
-
-    // Gather log probabilities for true labels
-    // For simplicity, we'll compute mean loss over masked positions
-    // In a full implementation, this would use a proper cross-entropy loss with masking
+    // Audit G13: real MLM cross-entropy at masked positions only.
+    //
+    // Previous code computed `auto gen_loss = mean(log_probs);` over EVERY
+    // (B*T, V) entry — that's just the average log-prob over the whole vocab
+    // and is ≈ -log(V) ≈ constant, providing no learning signal for the
+    // generator.
+    //
+    // Correct MLM loss: for each *masked* position p, compute
+    //   loss_p = -log_softmax(logits_p)[original_token_p]
+    // then average over the count of masked positions (not all positions).
+    //
+    // Implementation: gather log-probs at the true labels via
+    // `autograd::gather(log_probs, dim=1, labels)` → per-token NLL,
+    // multiply by the (B*T,) mask of masked positions, divide by the count
+    // of masked positions (clamped ≥1 to avoid div-by-zero when no tokens
+    // were masked in this batch).
+    auto log_probs = nn::log_softmax(reshaped_logits, 1);  // (B*T, V)
 
     // Discriminator loss: Binary cross-entropy on ALL tokens
     // Convert is_replaced to Variable
@@ -320,13 +338,48 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
     // Mean over all tokens
     disc_loss = tenzor::mean(disc_loss);
 
-    // For generator loss, we'll use a simplified version here
-    // In practice, this should be proper MLM loss
-    auto gen_loss = tenzor::mean(log_probs);  // Simplified
+    // Audit G13: real MLM loss on masked positions only.
+    //
+    // 1. Gather log-prob at the true token for every position: (B*T, 1) → (B*T,).
+    // 2. Negate → per-position NLL.
+    // 3. Build a (B*T,) float mask from `masked_positions` (preferred) or
+    //    `is_replaced` (fallback when caller passed an empty masked_positions
+    //    — still a reasonable proxy: every replaced position must have been
+    //    a masked position).
+    // 4. Multiply NLL by mask, sum, divide by count of masked positions
+    //    (clamped ≥1 to avoid 0/0 when nothing was masked).
+    const int64_t flat_n = batch_size * seq_len;
+    Tensor labels_2d = labels_flat.reshape({flat_n, 1});
+    auto gathered = tenzor::gather(log_probs, /*dim=*/1, labels_2d);       // (B*T, 1)
+    auto nll_per_pos = tenzor::neg(gathered.reshape({flat_n}));            // (B*T,)
 
-    // Combined loss (weighted sum)
-    auto neg_gen_loss = tenzor::neg(gen_loss);
-    auto gen_component = neg_gen_loss * config_.gen_loss_weight;
+    const DType float_dtype = gen_logits.dtype();
+    Tensor mask_flat;
+    if (masked_positions.is_valid() && masked_positions.numel() == flat_n) {
+        mask_flat = masked_positions.reshape({flat_n}).to(float_dtype).to(gen_logits.device());
+    } else if (masked_positions.is_valid() && masked_positions.numel() > 0) {
+        // Shape mismatch — fall back to is_replaced rather than crash.
+        mask_flat = is_replaced.reshape({flat_n}).to(float_dtype).to(gen_logits.device());
+    } else {
+        mask_flat = is_replaced.reshape({flat_n}).to(float_dtype).to(gen_logits.device());
+    }
+    Variable mask_var(mask_flat, false);
+
+    auto masked_nll = nll_per_pos * mask_var;                              // (B*T,)
+    Variable total_nll = tenzor::sum(masked_nll);                          // scalar
+
+    // Count masked positions on CPU (one-time scalar reduction).
+    Tensor mask_sum_cpu = tenzor::sum(mask_flat).to(Device::cpu()).to(DType::Float32);
+    float num_masked = mask_sum_cpu.item<float>();
+    double divisor = static_cast<double>(std::max(num_masked, 1.0f));
+
+    auto gen_loss = total_nll * (1.0 / divisor);                           // scalar Variable
+
+    // Combined loss (weighted sum). gen_loss is already the MLM cross-entropy
+    // averaged over masked positions, so it's positive and ready to use — no
+    // extra negation needed (unlike the previous mean-of-log-probs which was
+    // negative and needed to be flipped).
+    auto gen_component  = gen_loss * config_.gen_loss_weight;
     auto disc_component = disc_loss * config_.disc_loss_weight;
     auto total_loss = gen_component + disc_component;
 

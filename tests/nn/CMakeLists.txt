@@ -257,6 +257,11 @@ target_link_libraries(test_functional PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_safetensors test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE tenzor_core GTest::gtest_main)
 
+# H2-followup: native PyTorch .pth pickle parser tests
+add_executable(test_torch_pickle test_torch_pickle.cpp)
+target_link_libraries(test_torch_pickle PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_torch_pickle LABELS "nn" DISCOVERY_TIMEOUT 60)
+
 tenzor_discover_tests(test_hrm LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pytorch_loader LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fsdp LABELS "nn" DISCOVERY_TIMEOUT 60)

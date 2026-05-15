@@ -454,6 +454,27 @@ public:
         -> std::vector<std::tuple<Tensor, Tensor, Tensor>>;
     auto load_pretrained(const std::string& path) -> void;
 
+    /**
+     * @brief Refit detection anchors via k=9 k-means over the user's dataset.
+     *
+     * Audit G17: COCO defaults are baked in at construction (see anchors_p3_/
+     * anchors_p4_/anchors_p5_). For custom datasets, call this with the
+     * (w, h) ground-truth box sizes (in pixels at training resolution) to
+     * compute 9 cluster centers via Ultralytics-style 1−IoU k-means, sort
+     * them by area, and assign the smallest 3 to P3, middle 3 to P4, and
+     * largest 3 to P5. COCO defaults are preserved if you never call this.
+     *
+     * @param box_sizes Flat list of (w, h) GT box sizes (pixels)
+     * @param iters    Maximum k-means iterations (default 100)
+     */
+    auto refit_anchors_kmeans(const std::vector<std::pair<float, float>>& box_sizes,
+                              int64_t iters = 100) -> void;
+
+    /// Accessors for the refit results / verification (also used by tests).
+    auto anchors_p3() const -> const std::vector<std::pair<float, float>>& { return anchors_p3_; }
+    auto anchors_p4() const -> const std::vector<std::pair<float, float>>& { return anchors_p4_; }
+    auto anchors_p5() const -> const std::vector<std::pair<float, float>>& { return anchors_p5_; }
+
 private:
     auto get_size_params(Size size) -> std::pair<double, double>;
 
@@ -469,7 +490,8 @@ private:
     std::shared_ptr<YOLOv5Head> head_p4_;  // 40x40
     std::shared_ptr<YOLOv5Head> head_p5_;  // 20x20
 
-    // Auto-learned anchors (COCO defaults)
+    // Auto-learned anchors (COCO defaults; mutable post-construction via
+    // refit_anchors_kmeans).
     std::vector<std::pair<float, float>> anchors_p3_;
     std::vector<std::pair<float, float>> anchors_p4_;
     std::vector<std::pair<float, float>> anchors_p5_;

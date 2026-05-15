@@ -45,10 +45,18 @@ struct HubConfig {
  */
 struct ModelWeightInfo {
     std::string name;               // Model name
-    std::string url;                // Download URL
+    std::string url;                // Download URL (legacy .pth or .safetensors)
     std::string sha256;             // Expected SHA256 checksum
     size_t size;                    // File size in bytes (0 if unknown)
     std::string description;        // Model description
+    // H3-followup: optional SafeTensors mirror URL. When non-empty,
+    // `download_pretrained(name, prefer_safetensors=true)` resolves to this
+    // URL instead of `url`. SafeTensors mirrors are typically hosted on
+    // HuggingFace (`https://huggingface.co/{org}/{model}/resolve/main/model.safetensors`)
+    // and parse cleanly through H2's format-aware loader. The legacy `url`
+    // (PyTorch .pth) currently throws an actionable error because the
+    // pickle parser is H2-followup.
+    std::string safetensors_url;    // Optional SafeTensors mirror (HuggingFace)
 };
 
 /**
@@ -103,6 +111,31 @@ public:
      */
     static std::string download_pretrained(
         const std::string& model_name,
+        bool show_progress = true,
+        ProgressCallback progress_callback = nullptr
+    );
+
+    /**
+     * @brief Download pretrained weights, preferring a SafeTensors mirror
+     *        when the model's registry entry provides one.
+     *
+     * H3-followup: SafeTensors-mirror-aware variant. When the model's
+     * `safetensors_url` field is non-empty, this routes the download to
+     * the safetensors URL instead of the legacy `.pth` URL. The downloaded
+     * file is then parsed by H2's format dispatcher, which handles
+     * `.safetensors` natively. Falls back to the legacy URL if the model
+     * has no safetensors mirror registered.
+     *
+     * @param model_name Unique model identifier
+     * @param prefer_safetensors If true and a safetensors mirror is registered,
+     *                            download from the mirror; else use legacy URL.
+     * @param show_progress Whether to show download progress
+     * @param progress_callback Custom progress callback
+     * @return Path to downloaded/cached weights file
+     */
+    static std::string download_pretrained_safetensors(
+        const std::string& model_name,
+        bool prefer_safetensors = true,
         bool show_progress = true,
         ProgressCallback progress_callback = nullptr
     );

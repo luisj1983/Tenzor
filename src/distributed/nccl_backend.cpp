@@ -596,6 +596,73 @@ auto NCCLBackend::recv(Tensor& tensor, int src_rank) -> void {
 #endif
 }
 
+auto NCCLBackend::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    // A4-extended NCCL override: native ncclGroupStart + ncclSend/Recv pairs
+    // (mirrors NCCLProcessGroup::all_to_all_single in process_group.cpp,
+    // which is the ProcessGroupBase-hierarchy version). The input has shape
+    // [world_size * chunk, ...]; each rank slices its outgoing chunk for
+    // every peer and submits one Send + one Recv per peer inside a single
+    // NCCL group call so the runtime can fuse them.
+    validate_gpu_tensor(input);
+    validate_gpu_tensor(output);
+
+    auto input_shape = input.shape();
+    if (input_shape.empty()) {
+        throw std::invalid_argument(
+            "NCCLBackend::all_to_all_single: input must have >= 1 dimension.");
+    }
+    const int64_t total = input_shape[0];
+    if (total % world_size_ != 0) {
+        throw std::invalid_argument(
+            "NCCLBackend::all_to_all_single: input.shape[0] (" +
+            std::to_string(total) + ") must be divisible by world_size (" +
+            std::to_string(world_size_) + ").");
+    }
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
+    std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
+    if (in_shape_vec != out_shape_vec || output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "NCCLBackend::all_to_all_single: output and input must have identical shape and dtype.");
+    }
+
+    const int64_t chunk = total / world_size_;
+    int64_t inner = 1;
+    for (size_t i = 1; i < input_shape.size(); ++i) inner *= input_shape[i];
+    const int64_t chunk_numel = chunk * inner;
+    const size_t elem_size = dtype_size(input.dtype());
+
+    int device_id = get_device_id(input);
+    ncclComm_t comm = get_communicator(device_id);
+    ncclDataType_t nccl_dtype = to_nccl_datatype(input.dtype());
+
+    // Group all Send/Recv pairs so NCCL can pipeline them.
+    NCCL_CHECK(ncclGroupStart());
+    const char* in_ptr  = static_cast<const char*>(input.data_ptr());
+    char*       out_ptr = static_cast<char*>(output.data_ptr());
+    for (int peer = 0; peer < world_size_; ++peer) {
+        const void* send_ptr = in_ptr  + static_cast<size_t>(peer) * static_cast<size_t>(chunk_numel) * elem_size;
+        void*       recv_ptr = out_ptr + static_cast<size_t>(peer) * static_cast<size_t>(chunk_numel) * elem_size;
+        if (peer == rank_) {
+            // Self-chunk: cudaMemcpy directly; NCCL forbids self Send/Recv.
+            GPU_CHECK(cudaMemcpyAsync(recv_ptr, send_ptr,
+                                       static_cast<size_t>(chunk_numel) * elem_size,
+                                       cudaMemcpyDeviceToDevice));
+        } else {
+            NCCL_CHECK(ncclSend(send_ptr, chunk_numel, nccl_dtype, peer, comm, nullptr));
+            NCCL_CHECK(ncclRecv(recv_ptr, chunk_numel, nccl_dtype, peer, comm, nullptr));
+        }
+    }
+    NCCL_CHECK(ncclGroupEnd());
+
+    GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)output;
+    (void)input;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
+}
+
 auto NCCLBackend::barrier() -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     // NCCL doesn't have native barrier, use all-reduce on dummy tensor

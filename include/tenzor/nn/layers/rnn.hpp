@@ -227,6 +227,24 @@ public:
     LSTMCell(int64_t input_size, int64_t hidden_size, bool bias = true);
 
     /**
+     * @brief Construct LSTM cell with explicit recurrent dimension (audit G1).
+     *
+     * Used by LSTM with `proj_size > 0` (PyTorch LSTMP): the recurrent
+     * connection weight `W_hh` has shape (4*hidden_size, recurrent_size)
+     * instead of the default (4*hidden_size, hidden_size). The cell still
+     * produces an output of `hidden_size` per step — the LSTM module
+     * applies the hidden→proj projection externally.
+     *
+     * @param input_size Size of input features
+     * @param hidden_size Size of cell hidden state (always)
+     * @param recurrent_size Size of the recurrent input (== proj_size when
+     *        used inside an LSTM with projection)
+     * @param bias If true, add learnable bias on weight_ih (no bias on weight_hh)
+     */
+    LSTMCell(int64_t input_size, int64_t hidden_size,
+             int64_t recurrent_size, bool bias);
+
+    /**
      * @brief Forward pass through LSTM cell.
      *
      * @param input Input tensor of shape (batch, input_size)
@@ -271,8 +289,11 @@ public:
 private:
     int64_t input_size_;
     int64_t hidden_size_;
+    /// Audit G1: dim of the recurrent input. Equals hidden_size by default;
+    /// equals LSTM's proj_size when used inside an LSTMP.
+    int64_t recurrent_size_;
     std::shared_ptr<Linear> weight_ih_;   ///< Input-to-hidden weights (4*hidden_size, input_size)
-    std::shared_ptr<Linear> weight_hh_;   ///< Hidden-to-hidden weights (4*hidden_size, hidden_size)
+    std::shared_ptr<Linear> weight_hh_;   ///< Hidden-to-hidden weights (4*hidden_size, recurrent_size)
 };
 
 /**
@@ -359,6 +380,10 @@ private:
 
     std::vector<std::shared_ptr<LSTMCell>> forward_cells_;
     std::vector<std::shared_ptr<LSTMCell>> backward_cells_;  // For bidirectional
+    // Audit G1: per-layer hidden→proj projection (no bias) for proj_size > 0.
+    // Empty when proj_size == 0.
+    std::vector<std::shared_ptr<Linear>> forward_projections_;
+    std::vector<std::shared_ptr<Linear>> backward_projections_;
     std::shared_ptr<Dropout> dropout_;
 };
 

@@ -266,6 +266,61 @@ __global__ void interpolate_bilinear_kernel_hip(
     }
 }
 
+// D3-followup ROCm: bilinear backward via atomicAdd scatter — mirror of
+// `interpolate_bilinear_backward_kernel` in src/backends/cuda/kernels/vision.cu.
+// HIP supports atomicAdd for float and double (gfx9+ via builtin); the kernel
+// itself is line-for-line equivalent to the CUDA version.
+template<typename T>
+__global__ void interpolate_bilinear_backward_kernel_hip(
+    const T* __restrict__ grad_out,
+    T* __restrict__ grad_in,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    bool align_corners)
+{
+    int64_t total = batch * channels * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float y, x;
+        if (align_corners) {
+            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
+            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+        } else {
+            float scale_h = static_cast<float>(in_h) / out_h;
+            float scale_w = static_cast<float>(in_w) / out_w;
+            y = (oh + 0.5f) * scale_h - 0.5f;
+            x = (ow + 0.5f) * scale_w - 0.5f;
+        }
+        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
+        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t y1 = min(y0 + 1, in_h - 1);
+        int64_t x1 = min(x0 + 1, in_w - 1);
+        float fy = y - y0;
+        float fx = x - x0;
+
+        float w00 = (1.0f - fy) * (1.0f - fx);
+        float w01 = (1.0f - fy) * fx;
+        float w10 = fy * (1.0f - fx);
+        float w11 = fy * fx;
+
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        atomicAdd(&grad_in[base_idx + y0 * in_w + x0], static_cast<T>(w00 * g));
+        atomicAdd(&grad_in[base_idx + y0 * in_w + x1], static_cast<T>(w01 * g));
+        atomicAdd(&grad_in[base_idx + y1 * in_w + x0], static_cast<T>(w10 * g));
+        atomicAdd(&grad_in[base_idx + y1 * in_w + x1], static_cast<T>(w11 * g));
+    }
+}
+
 // Bicubic interpolation helper function
 __device__ inline float cubic_interp1d(float x) {
     float abs_x = fabsf(x);
@@ -583,6 +638,65 @@ auto interpolate_kernel(const Tensor& input,
 
     HIP_CHECK(hipGetLastError());
     return output;
+}
+
+// ============================================================================
+// Interpolate backward (D3-followup ROCm) — bilinear-only, atomicAdd scatter.
+// Mirrors the CUDA host function 1:1; nearest-mode backward routes through
+// the bilinear path with integer fractional parts (the same shape simplification
+// the CUDA host function makes).
+// ============================================================================
+auto interpolate_backward_kernel(const Tensor& grad_output,
+                                  const std::vector<int64_t>& input_size,
+                                  const std::string& mode,
+                                  bool align_corners,
+                                  hipStream_t stream) -> Tensor {
+    if (mode != "bilinear" && mode != "nearest") {
+        throw std::runtime_error("interpolate_backward (ROCm): mode '" + mode +
+                                  "' not supported. Use 'bilinear' or 'nearest'.");
+    }
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("interpolate_backward (ROCm): only 4D (N,C,H,W) supported.");
+    }
+    if (input_size.size() != 2) {
+        throw std::runtime_error("interpolate_backward (ROCm): input_size must be [in_h, in_w].");
+    }
+    const int64_t N     = shape[0];
+    const int64_t C     = shape[1];
+    const int64_t out_h = shape[2];
+    const int64_t out_w = shape[3];
+    const int64_t in_h  = input_size[0];
+    const int64_t in_w  = input_size[1];
+
+    Tensor grad_input({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
+    HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0,
+                              static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype()),
+                              stream));
+
+    const int64_t total = N * C * out_h * out_w;
+    const int threads = 256;
+    const int blocks  = static_cast<int>((total + threads - 1) / threads);
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), grad_input.data<float>(),
+            N, C, in_h, in_w, out_h, out_w, align_corners);
+    } else if (grad_output.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), grad_input.data<double>(),
+            N, C, in_h, in_w, out_h, out_w, align_corners);
+    } else {
+        throw std::runtime_error(
+            "interpolate_backward (ROCm): unsupported dtype " +
+            std::string(dtype_name(grad_output.dtype())) +
+            ". Only Float32 and Float64 are supported (HIP atomicAdd availability).");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_input;
 }
 
 // ============================================================================

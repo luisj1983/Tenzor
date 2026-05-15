@@ -34,6 +34,10 @@ target_link_libraries(test_rnn_multidtype PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_lstm test_lstm.cpp)
 target_link_libraries(test_lstm PRIVATE tenzor_core GTest::gtest_main)
 
+# Audit G1: LSTM with proj_size (PyTorch LSTMP).
+add_executable(test_lstm_proj_size test_lstm_proj_size.cpp)
+target_link_libraries(test_lstm_proj_size PRIVATE tenzor_core GTest::gtest_main)
+
 # LSTM multi-dtype tests
 add_executable(test_lstm_multidtype test_lstm_multidtype.cpp)
 target_link_libraries(test_lstm_multidtype PRIVATE tenzor_core GTest::gtest_main)
@@ -540,6 +544,11 @@ target_link_libraries(test_dataloader_multidtype PRIVATE tenzor_core GTest::gtes
 add_executable(test_dtype_edge_cases_multidtype test_dtype_edge_cases_multidtype.cpp)
 target_link_libraries(test_dtype_edge_cases_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+# F13/F22-followup: Philox dropout helper
+add_executable(test_philox_dropout test_philox_dropout.cpp)
+target_link_libraries(test_philox_dropout PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_philox_dropout LABELS "unit" DISCOVERY_TIMEOUT 60)
+
 # Sparse Tensor Tests
 add_executable(test_sparse test_sparse.cpp)
 target_link_libraries(test_sparse PRIVATE tenzor_core GTest::gtest_main)
@@ -603,6 +612,7 @@ tenzor_discover_tests(test_losses_advanced DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_rnn DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 tenzor_discover_tests(test_lstm DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_lstm_proj_size DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_lstm_cuda_forward_regression DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_attention_sdpa_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)

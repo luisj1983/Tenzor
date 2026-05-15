@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/albert.hpp"
+#include "tenzor/models/hub.hpp"  // Audit H4: ModelHub::load_pretrained_weights
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -218,6 +219,13 @@ auto AlbertModel::forward(const Variable& input_ids,
 auto AlbertModel::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{}, Variable{});
     return outputs.sequence_output;
+}
+
+auto AlbertModel::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4: thin wrapper around ModelHub's format-dispatching loader.
+    // Accepts SafeTensors and native Tenzor checkpoints; .pth throws a clear
+    // error pointing to the SafeTensors variant (H2-followup for pickle).
+    ModelHub::load_pretrained_weights(*this, path, strict);
 }
 
 // ============================================================================

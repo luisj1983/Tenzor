@@ -237,6 +237,64 @@ TEST_F(ElectraTest, PreTrainingLossComputation) {
     });
 }
 
+// G13 regression: MLM loss must be a real cross-entropy on masked positions,
+// not `mean(log_probs)` which is ≈ -log(V) and provides no learning signal.
+//
+// The verification: (a) gen_loss is non-negative (CE always is), (b) it
+// changes when the set of masked positions changes — proving the masking
+// actually influences the loss instead of being silently dropped.
+TEST_F(ElectraTest, MLMLossIsRealCrossEntropyAtMaskedPositions_G13) {
+    auto config = ElectraConfig::base();
+    config.num_hidden_layers = 1;
+    config.generator_layers = 1;
+    // Use only generator weight so disc_loss doesn't dominate the signal —
+    // makes the loss-magnitude assertions easy to reason about.
+    config.gen_loss_weight = 1.0f;
+    config.disc_loss_weight = 0.0f;
+    ElectraForPreTraining model(config);
+    model.eval();
+
+    const int64_t B = 2;
+    const int64_t T = 8;
+
+    Tensor input_tensor({B, T}, DType::Int64, Device::cpu());
+    input_tensor.fill_(42);
+    Variable input_ids(input_tensor, false);
+
+    // Two different mask patterns covering different positions.
+    Tensor mask_a({B, T}, DType::Int64, Device::cpu());
+    Tensor mask_b({B, T}, DType::Int64, Device::cpu());
+    mask_a.zero_(); mask_b.zero_();
+    auto* ma = mask_a.data<int64_t>();
+    auto* mb = mask_b.data<int64_t>();
+    ma[0] = 1; ma[1] = 1;                // mask positions 0,1 of batch 0
+    mb[T + 4] = 1; mb[T + 5] = 1;        // mask positions 4,5 of batch 1
+
+    Tensor original_tokens({B, T}, DType::Int64, Device::cpu());
+    original_tokens.fill_(42);
+
+    auto outputs = model.forward(input_ids, mask_a, original_tokens);
+
+    auto loss_a = model.compute_loss(outputs.gen_logits, outputs.disc_logits,
+                                     outputs.is_replaced, mask_a, original_tokens);
+    auto loss_b = model.compute_loss(outputs.gen_logits, outputs.disc_logits,
+                                     outputs.is_replaced, mask_b, original_tokens);
+
+    float va = loss_a.tensor().to(Device::cpu()).to(DType::Float32).item<float>();
+    float vb = loss_b.tensor().to(Device::cpu()).to(DType::Float32).item<float>();
+
+    EXPECT_TRUE(std::isfinite(va)) << "loss_a not finite: " << va;
+    EXPECT_TRUE(std::isfinite(vb)) << "loss_b not finite: " << vb;
+    EXPECT_GE(va, 0.0f) << "Real MLM cross-entropy must be non-negative, got " << va;
+    EXPECT_GE(vb, 0.0f) << "Real MLM cross-entropy must be non-negative, got " << vb;
+
+    // Different masks → different losses. With the old mean(log_probs) bug,
+    // masked_positions was ignored entirely so va == vb to floating precision.
+    EXPECT_GT(std::abs(va - vb), 1e-4f)
+        << "Loss did not change when masked_positions changed — generator "
+           "loss is probably still ignoring the mask. va=" << va << ", vb=" << vb;
+}
+
 // ============================================================================
 // ElectraForSequenceClassification Tests
 // ============================================================================

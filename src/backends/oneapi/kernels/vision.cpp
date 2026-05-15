@@ -2070,5 +2070,123 @@ auto box_iou_kernel(
     return output;
 }
 
+// =========================================================================
+// D3-followup OneAPI: bilinear backward via sycl::atomic_ref<float/double>
+// fetch_add scatter. Mirrors the CUDA `interpolate_bilinear_backward_kernel`
+// 1:1; the only thing changing is the atomic primitive
+// (`atomicAdd` → `sycl::atomic_ref<T, relaxed, device>::fetch_add`).
+// =========================================================================
+template <typename T, typename KernelName>
+static void interp_bilinear_backward_dispatch(
+    const T* grad_out_ptr, T* grad_in_ptr,
+    int64_t N, int64_t C, int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    bool align_corners, sycl::queue& queue)
+{
+    const int64_t total = N * C * out_h * out_w;
+    queue.parallel_for<KernelName>(sycl::range<1>(total), [=](sycl::id<1> id) {
+        int64_t idx = id[0];
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % C; temp /= C;
+        int64_t b  = temp;
+
+        T y, x;
+        if (align_corners) {
+            y = (out_h > 1) ? oh * static_cast<T>(in_h - 1) / static_cast<T>(out_h - 1) : T(0);
+            x = (out_w > 1) ? ow * static_cast<T>(in_w - 1) / static_cast<T>(out_w - 1) : T(0);
+        } else {
+            T scale_h = static_cast<T>(in_h) / static_cast<T>(out_h);
+            T scale_w = static_cast<T>(in_w) / static_cast<T>(out_w);
+            y = (static_cast<T>(oh) + T(0.5)) * scale_h - T(0.5);
+            x = (static_cast<T>(ow) + T(0.5)) * scale_w - T(0.5);
+        }
+        if (y < T(0)) y = T(0);
+        if (x < T(0)) x = T(0);
+        if (y > static_cast<T>(in_h - 1)) y = static_cast<T>(in_h - 1);
+        if (x > static_cast<T>(in_w - 1)) x = static_cast<T>(in_w - 1);
+
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t y1 = sycl::min(y0 + 1, in_h - 1);
+        int64_t x1 = sycl::min(x0 + 1, in_w - 1);
+        T fy = y - static_cast<T>(y0);
+        T fx = x - static_cast<T>(x0);
+
+        T w00 = (T(1) - fy) * (T(1) - fx);
+        T w01 = (T(1) - fy) * fx;
+        T w10 = fy * (T(1) - fx);
+        T w11 = fy * fx;
+
+        T g = grad_out_ptr[idx];
+        int64_t base_idx = b * (C * in_h * in_w) + c * (in_h * in_w);
+
+        // sycl::atomic_ref<T> fetch_add is supported for float and double.
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device>
+            a00(grad_in_ptr[base_idx + y0 * in_w + x0]);
+        a00.fetch_add(w00 * g);
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device>
+            a01(grad_in_ptr[base_idx + y0 * in_w + x1]);
+        a01.fetch_add(w01 * g);
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device>
+            a10(grad_in_ptr[base_idx + y1 * in_w + x0]);
+        a10.fetch_add(w10 * g);
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device>
+            a11(grad_in_ptr[base_idx + y1 * in_w + x1]);
+        a11.fetch_add(w11 * g);
+    }).wait();
+}
+
+class InterpolateBilinearBackwardKernelFloat32;
+class InterpolateBilinearBackwardKernelFloat64;
+
+auto interpolate_backward_kernel(const Tensor& grad_output,
+                                  const std::vector<int64_t>& input_size,
+                                  const std::string& mode,
+                                  bool align_corners,
+                                  sycl::queue& queue) -> Tensor {
+    if (mode != "bilinear" && mode != "nearest") {
+        throw std::runtime_error("interpolate_backward (OneAPI): mode '" + mode +
+                                  "' not supported. Use 'bilinear' or 'nearest'.");
+    }
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("interpolate_backward (OneAPI): only 4D (N,C,H,W) supported.");
+    }
+    if (input_size.size() != 2) {
+        throw std::runtime_error("interpolate_backward (OneAPI): input_size must be [in_h, in_w].");
+    }
+    const int64_t N     = shape[0];
+    const int64_t C     = shape[1];
+    const int64_t out_h = shape[2];
+    const int64_t out_w = shape[3];
+    const int64_t in_h  = input_size[0];
+    const int64_t in_w  = input_size[1];
+
+    Tensor grad_input({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
+    queue.memset(grad_input.data_ptr(), 0,
+                 static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype())).wait();
+
+    if (grad_output.dtype() == DType::Float32) {
+        interp_bilinear_backward_dispatch<float, InterpolateBilinearBackwardKernelFloat32>(
+            get_data_ptr<const float>(grad_output),
+            get_data_ptr<float>(grad_input),
+            N, C, in_h, in_w, out_h, out_w, align_corners, queue);
+    } else if (grad_output.dtype() == DType::Float64) {
+        interp_bilinear_backward_dispatch<double, InterpolateBilinearBackwardKernelFloat64>(
+            get_data_ptr<const double>(grad_output),
+            get_data_ptr<double>(grad_input),
+            N, C, in_h, in_w, out_h, out_w, align_corners, queue);
+    } else {
+        throw std::runtime_error(
+            "interpolate_backward (OneAPI): unsupported dtype " +
+            std::string(dtype_name(grad_output.dtype())) +
+            ". Only Float32 and Float64 are supported (sycl::atomic_ref availability).");
+    }
+
+    return grad_input;
+}
+
 } // namespace oneapi
 } // namespace tenzor

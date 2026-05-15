@@ -1,8 +1,9 @@
 #include "tenzor/data/datasets/imagenet.hpp"
+#include "tenzor/io/image.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/vision.hpp"
 #include <algorithm>
 #include <stdexcept>
-#include <fstream>
 
 namespace tenzor::data::datasets {
 
@@ -61,29 +62,26 @@ auto ImageFolder::get(size_t index) -> std::pair<Tensor, Tensor> {
 
     const auto& sample = samples_[index];
 
-    // Load raw file bytes and convert to tensor
-    // For a real implementation, this would use stb_image or similar.
-    // Here we load raw bytes and create a placeholder tensor.
-    std::ifstream file(sample.path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        throw std::runtime_error("ImageFolder: cannot open " + sample.path.string());
+    // Decode the image file (JPEG/PNG/BMP/TGA/GIF/PSD/HDR/PIC/PNM via stb_image)
+    // into a UInt8 (3, H, W) tensor.
+    Tensor decoded = io::read_image(sample.path.string(), io::ImageMode::RGB);
+
+    // Promote to Float32 in [0, 1].
+    Tensor as_float = decoded.to(DType::Float32);
+    {
+        auto* p = as_float.data<float>();
+        int64_t n = as_float.numel();
+        for (int64_t i = 0; i < n; ++i) p[i] *= (1.0f / 255.0f);
     }
 
-    auto file_size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> raw(file_size);
-    file.read(reinterpret_cast<char*>(raw.data()), file_size);
-
-    // Create a tensor from raw image bytes
-    // In production, decode JPEG/PNG here. For now, return raw bytes as flat tensor.
-    auto image = zeros({3, image_size_, image_size_}, DType::Float32, Device::cpu());
-    // Fill with raw data scaled to [0,1] up to available bytes
-    auto* dst = image.data<float>();
-    size_t pixels = std::min(raw.size(),
-                             static_cast<size_t>(3 * image_size_ * image_size_));
-    for (size_t i = 0; i < pixels; ++i) {
-        dst[i] = static_cast<float>(raw[i]) / 255.0f;
-    }
+    // Resize to (3, image_size_, image_size_) via the bilinear interpolate op.
+    // interpolate() expects a 4D (N, C, H, W) input; unsqueeze + squeeze around it.
+    Tensor batched = as_float.unsqueeze(0); // (1, 3, H, W)
+    Tensor resized = ops::interpolate(batched,
+                                      {image_size_, image_size_},
+                                      /*mode=*/"bilinear",
+                                      /*align_corners=*/false);
+    Tensor image = resized.squeeze(0); // (3, image_size_, image_size_)
 
     auto label = zeros({}, DType::Int64, Device::cpu());
     label.data<int64_t>()[0] = sample.label;

@@ -198,6 +198,9 @@ public:
      */
     auto config() const -> const RobertaConfig& { return config_; }
 
+    /// Load pretrained weights via ModelHub. See AlbertModel for details.
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
+
 private:
     RobertaConfig config_;
     std::shared_ptr<RobertaEmbeddings> embeddings_;

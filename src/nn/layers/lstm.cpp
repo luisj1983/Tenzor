@@ -21,19 +21,25 @@ namespace tenzor::nn {
 // ============================================================================
 
 LSTMCell::LSTMCell(int64_t input_size, int64_t hidden_size, bool bias)
-    : input_size_(input_size), hidden_size_(hidden_size) {
+    : LSTMCell(input_size, hidden_size, /*recurrent_size=*/hidden_size, bias) {}
+
+// Audit G1: explicit-recurrent-size constructor for LSTM with projection.
+LSTMCell::LSTMCell(int64_t input_size, int64_t hidden_size,
+                   int64_t recurrent_size, bool bias)
+    : input_size_(input_size),
+      hidden_size_(hidden_size),
+      recurrent_size_(recurrent_size) {
 
     // PyTorch-style LSTM with separate weight matrices for input and hidden
     // All 4 gates are combined into single weight matrices for efficiency
     // weight_ih: (4 * hidden_size, input_size) - maps input to all 4 gates
-    // weight_hh: (4 * hidden_size, hidden_size) - maps hidden state to all 4 gates
+    // weight_hh: (4 * hidden_size, recurrent_size) - maps hidden state to all 4 gates
+    //            (recurrent_size == hidden_size by default; == proj_size for LSTMP)
 
-    // Input-to-hidden transformation for all 4 gates
     weight_ih_ = std::make_shared<Linear>(input_size, 4 * hidden_size, bias);
     register_module("weight_ih", weight_ih_);
 
-    // Hidden-to-hidden transformation for all 4 gates
-    weight_hh_ = std::make_shared<Linear>(hidden_size, 4 * hidden_size, false);  // No bias for hh
+    weight_hh_ = std::make_shared<Linear>(recurrent_size, 4 * hidden_size, false);  // No bias for hh
     register_module("weight_hh", weight_hh_);
 }
 
@@ -64,7 +70,7 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     Variable c = cx;
 
     if (!h.is_initialized() || h.tensor().numel() == 0) {
-        h = Variable(zeros({batch_size, hidden_size_},
+        h = Variable(zeros({batch_size, recurrent_size_},
                           input.dtype(), input.device()), false);
     }
     if (!c.is_initialized() || c.tensor().numel() == 0) {
@@ -72,10 +78,11 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
                           input.dtype(), input.device()), false);
     }
 
-    // Validate hidden and cell state shapes
+    // Validate hidden and cell state shapes. Audit G1: h has recurrent_size
+    // (== hidden_size unless this cell is part of an LSTM with projection).
     auto h_shape = h.shape();
     auto c_shape = c.shape();
-    if (h_shape.size() != 2 || h_shape[0] != batch_size || h_shape[1] != hidden_size_) {
+    if (h_shape.size() != 2 || h_shape[0] != batch_size || h_shape[1] != recurrent_size_) {
         throw std::runtime_error("LSTMCell: invalid hidden state shape");
     }
     if (c_shape.size() != 2 || c_shape[0] != batch_size || c_shape[1] != hidden_size_) {
@@ -202,14 +209,28 @@ LSTM::LSTM(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     if (proj_size < 0) {
         throw std::invalid_argument("LSTM: proj_size must be >= 0");
     }
-    if (proj_size > 0) {
-        throw std::runtime_error("LSTM: projection not yet implemented");
+    // Audit G1: PyTorch convention — proj_size must be strictly less than
+    // hidden_size when projection is enabled (the projection compresses).
+    if (proj_size > 0 && proj_size >= hidden_size) {
+        throw std::invalid_argument(
+            "LSTM: proj_size (" + std::to_string(proj_size) +
+            ") must be less than hidden_size (" + std::to_string(hidden_size) +
+            ") when projection is enabled.");
     }
+
+    // With proj_size > 0, the inter-layer input AND the cell's recurrent
+    // input are the projected hidden state (PyTorch LSTMP convention).
+    // With proj_size == 0 the full hidden_size feeds both.
+    const int64_t inter_layer_dim = (proj_size > 0 ? proj_size : hidden_size);
+    const int64_t recurrent_dim   = inter_layer_dim;
 
     // Create forward cells for each layer
     for (int64_t i = 0; i < num_layers; ++i) {
-        int64_t layer_input_size = (i == 0) ? input_size : hidden_size * (bidirectional_ ? 2 : 1);
-        auto cell = std::make_shared<LSTMCell>(layer_input_size, hidden_size, bias);
+        int64_t layer_input_size = (i == 0)
+            ? input_size
+            : inter_layer_dim * (bidirectional_ ? 2 : 1);
+        auto cell = std::make_shared<LSTMCell>(layer_input_size, hidden_size,
+                                                 recurrent_dim, bias);
         forward_cells_.push_back(cell);
         register_module("forward_cell_" + std::to_string(i), cell);
     }
@@ -217,10 +238,31 @@ LSTM::LSTM(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     // Create backward cells for bidirectional LSTM
     if (bidirectional_) {
         for (int64_t i = 0; i < num_layers; ++i) {
-            int64_t layer_input_size = (i == 0) ? input_size : hidden_size * 2;
-            auto cell = std::make_shared<LSTMCell>(layer_input_size, hidden_size, bias);
+            int64_t layer_input_size = (i == 0)
+                ? input_size
+                : inter_layer_dim * 2;
+            auto cell = std::make_shared<LSTMCell>(layer_input_size, hidden_size,
+                                                     recurrent_dim, bias);
             backward_cells_.push_back(cell);
             register_module("backward_cell_" + std::to_string(i), cell);
+        }
+    }
+
+    // Audit G1: per-layer projection Linear(hidden_size → proj_size, no bias).
+    // Mirrors PyTorch's `weight_hr_l[k]`. Applied after each cell forward to
+    // produce the inter-layer input (and the final h_n).
+    if (proj_size_ > 0) {
+        for (int64_t i = 0; i < num_layers; ++i) {
+            auto proj = std::make_shared<Linear>(hidden_size, proj_size_, /*bias=*/false);
+            forward_projections_.push_back(proj);
+            register_module("forward_projection_" + std::to_string(i), proj);
+        }
+        if (bidirectional_) {
+            for (int64_t i = 0; i < num_layers; ++i) {
+                auto proj = std::make_shared<Linear>(hidden_size, proj_size_, /*bias=*/false);
+                backward_projections_.push_back(proj);
+                register_module("backward_projection_" + std::to_string(i), proj);
+            }
         }
     }
 
@@ -270,8 +312,13 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     Variable h = h0;
     Variable c = c0;
 
+    // Audit G1: with proj_size > 0, the externally-visible h state has
+    // proj_size as the trailing dim (PyTorch convention). The cell state
+    // always has hidden_size as the trailing dim.
+    const int64_t h_trailing = (proj_size_ > 0 ? proj_size_ : hidden_size_);
+
     if (!h.is_initialized() || h.tensor().numel() == 0) {
-        h = Variable(zeros({num_layers_ * num_directions, batch_size, hidden_size_},
+        h = Variable(zeros({num_layers_ * num_directions, batch_size, h_trailing},
                           input.dtype(), input.device()), false);
     }
     if (!c.is_initialized() || c.tensor().numel() == 0) {
@@ -283,7 +330,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     auto h_shape = h.shape();
     auto c_shape = c.shape();
     if (h_shape.size() != 3 || h_shape[0] != num_layers_ * num_directions ||
-        h_shape[1] != batch_size || h_shape[2] != hidden_size_) {
+        h_shape[1] != batch_size || h_shape[2] != h_trailing) {
         throw std::runtime_error("LSTM: invalid hidden state shape");
     }
     if (c_shape.size() != 3 || c_shape[0] != num_layers_ * num_directions ||
@@ -297,9 +344,17 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // CUDA: cuDNN LSTM forward/backward available in cudnn_ops.cu (enable #if 0 → #if 1)
     //        Requires reserve_space from forward to be passed to backward for correct gradients
     // =========================================================================
+    // Audit G1: the fused-kernel LSTM forward paths below do not yet
+    // implement the per-layer hidden→proj projection (weight_hr). When the
+    // user has enabled projection, fall through to the standard autograd
+    // path which composes the projection at the Variable level. This is a
+    // perf cliff but produces correct math; the fused path with projection
+    // is tracked as G1-followup (cuDNN/oneDNN both support projection in
+    // their LSTM primitives).
     bool can_use_fused = is_op_supported(OpId::LSTMForward, input.device().type) &&
                          input.dtype() == DType::Float32 &&
-                         !is_training();
+                         !is_training() &&
+                         proj_size_ == 0;
 
     // Special fast path for single-layer bidirectional LSTM
     if (can_use_fused && bidirectional_ && num_layers_ == 1) {
@@ -667,11 +722,21 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         forward_outputs.reserve(static_cast<size_t>(seq_len));
 
         // Per-timestep forward pass through the full cell.
+        // Audit G1: with proj_size > 0, project h_next via the layer's
+        // forward_projections_[layer] before storing/recurring. The cell
+        // produces an `hidden_size`-shaped h_next; the projection compresses
+        // to `proj_size`, which is what feeds the next timestep recurrence
+        // (cell's W_hh has proj_size columns when LSTMP) and also what
+        // ultimately becomes the layer's output and h_n.
         for (int64_t t = 0; t < seq_len; ++t) {
             auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);  // (1, batch, feat)
             auto x_t = ::tenzor::squeeze(x_t_raw, 0);                  // (batch, feat)
 
             auto [h_next, c_next] = forward_cell->forward(x_t, forward_h, forward_c);
+
+            if (proj_size_ > 0) {
+                h_next = forward_projections_[layer]->forward(h_next);
+            }
 
             if (have_lengths) {
                 // Preserve old state for padded positions. mask and
@@ -722,6 +787,11 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                 auto x_t = ::tenzor::squeeze(x_t_raw, 0);
 
                 auto [h_next, c_next] = backward_cell->forward(x_t, backward_h, backward_c);
+
+                // Audit G1: project the backward direction's hidden too.
+                if (proj_size_ > 0) {
+                    h_next = backward_projections_[layer]->forward(h_next);
+                }
 
                 if (have_lengths) {
                     auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());

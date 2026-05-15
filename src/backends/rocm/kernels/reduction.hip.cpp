@@ -17,6 +17,7 @@
 #include <climits>
 #include <algorithm>
 #include <stdexcept>
+#include "rocm_nan_helpers.hip.h"  // F7: IEEE-754 bit-pattern NaN check (HIP isnan unreliable under fast-math)
 #include <utility>
 #include "fp16_saturate.h"
 #include "reduction_utils.hip.h"
@@ -3981,7 +3982,7 @@ __global__ void nansum_all_f32(const float* __restrict__ input,
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
         float v = input[i];
-        if (!isnan(v)) local_sum += v;
+        if (!tenzor::rocm::is_nan_bits(v)) local_sum += v;
     }
     atomicAdd(&ssum, local_sum);
     __syncthreads();
@@ -3999,7 +4000,7 @@ __global__ void nansum_all_f64(const double* __restrict__ input,
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
         double v = input[i];
-        if (!isnan(v)) local_sum += v;
+        if (!tenzor::rocm::is_nan_bits(v)) local_sum += v;
     }
     // HIP supports atomicAdd for double
     atomicAdd(&ssum, local_sum);
@@ -4052,7 +4053,7 @@ __global__ void count_non_nan_all_f32(const float* __restrict__ input,
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
-        if (!isnan(input[i])) local_count++;
+        if (!tenzor::rocm::is_nan_bits(input[i])) local_count++;
     }
     atomicAdd(reinterpret_cast<unsigned long long*>(&scount),
               static_cast<unsigned long long>(local_count));
@@ -4242,7 +4243,7 @@ __global__ void nanvar_all_f32(const float* __restrict__ input,
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
         float v = input[i];
-        if (!isnan(v)) {
+        if (!tenzor::rocm::is_nan_bits(v)) {
             float diff = v - m;
             local_sum += diff * diff;
             local_count++;

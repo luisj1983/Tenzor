@@ -33,15 +33,30 @@ constexpr int BLOCK_SIZE = 256;
 // Block size for reduction operations (matches reduction.cu)
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
-// DimMeta for dim-specific reductions (matches reduction.cu)
+// DimMeta for dim-specific reductions (matches reduction.cu).
+//
+// Audit F3: lifted from rank 8 to rank 16. The previous cap silently
+// truncated higher-rank tensors — `make_dim_meta` filled only the first 8
+// dims and the kernel iterated only those slots, so dimensions >8 were
+// ignored. Modern transformer + 6D-attention models hit rank 9-12 routinely
+// (e.g. block-sparse attention with batch + heads + Q-blocks + K-blocks +
+// per-block H/W). 16 dims matches the maximum supported in any other
+// backend (CPU + ROCm).
+constexpr int DIM_META_MAX_RANK = 16;
 struct DimMeta {
-    int64_t shape[8];
-    int64_t strides[8];
+    int64_t shape[DIM_META_MAX_RANK];
+    int64_t strides[DIM_META_MAX_RANK];
 };
 
 static DimMeta make_dim_meta(const std::vector<int64_t>& shape, const std::vector<int64_t>& strides) {
+    if (shape.size() > DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA DimMeta: tensor rank " + std::to_string(shape.size()) +
+            " exceeds maximum " + std::to_string(DIM_META_MAX_RANK) +
+            " (raise DIM_META_MAX_RANK if needed).");
+    }
     DimMeta meta{};
-    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+    for (size_t i = 0; i < shape.size(); ++i) {
         meta.shape[i] = shape[i];
         meta.strides[i] = strides[i];
     }

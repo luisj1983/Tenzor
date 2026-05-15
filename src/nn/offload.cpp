@@ -4,6 +4,9 @@
  */
 
 #include "tenzor/nn/offload.hpp"
+#include "tenzor/ops/math.hpp"          // for clamp, abs, round (G3)
+#include "tenzor/ops/reduction.hpp"     // for tenzor::max (G3)
+#include "tenzor/ops/creation.hpp"
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
@@ -89,7 +92,11 @@ OffloadContext::~OffloadContext() {
                     Tensor restored = transfer_engine_->cpu_to_gpu(
                         info.cpu_copy, info.original_device);
                     // Phase C (C3): cast back to original dtype if cpu_copy was quantized.
-                    if (info.original_dtype != info.offload_dtype_used) {
+                    // Audit G3: Int8WithScale dequant — widen + multiply by scale.
+                    if (info.offload_dtype_used == DType::Int8 && info.quant_scale != 0.0f) {
+                        Tensor widened = restored.to(info.original_dtype);
+                        restored = widened * info.quant_scale;
+                    } else if (info.original_dtype != info.offload_dtype_used) {
                         restored = restored.to(info.original_dtype);
                     }
                     *tensor_ptr = restored;
@@ -480,7 +487,12 @@ auto OffloadContext::finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> v
         // correctly. Cast happens after the DMA completes -- the bytes-on-the-wire
         // savings still apply. is_pinned and CRITICAL tensors had cast skipped at
         // offload time, so original_dtype == offload_dtype_used and no cast runs.
-        if (info.original_dtype != info.offload_dtype_used) {
+        // Audit G3: Int8WithScale needs an extra step — widen Int8→target then
+        // multiply by the recorded scale to recover the fp32 (or original) value.
+        if (info.offload_dtype_used == DType::Int8 && info.quant_scale != 0.0f) {
+            Tensor widened = result.to(info.original_dtype);
+            *tensor_ptr = widened * info.quant_scale;
+        } else if (info.original_dtype != info.offload_dtype_used) {
             *tensor_ptr = result.to(info.original_dtype);
         } else {
             *tensor_ptr = result;
@@ -535,6 +547,7 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
         // their original dtype (no precision loss for activations whose backward
         // may be sensitive). Everything else honors Config::offload_dtype.
         DType cast_dtype = info.original_dtype;
+        bool use_int8_quant = false;
         const bool may_quant = !info.is_pinned
                             && info.priority != OffloadPriority::HIGH;
         if (may_quant && info.original_dtype == DType::Float32) {
@@ -548,23 +561,43 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
                     cast_dtype = DType::BFloat16;
                     break;
                 case Config::OffloadDType::Int8WithScale:
-                    // INT8 with per-tensor scale is recorded but the actual
-                    // quant/dequant kernels need extra plumbing (round + clamp
-                    // + dtype change with metadata). Until that lands, fall back
-                    // to BFloat16 -- still 2x savings vs full precision.
-                    cast_dtype = DType::BFloat16;
+                    // Audit G3: real INT8 quantize-on-offload + dequantize-on-fetch.
+                    // Per-tensor symmetric scale: scale = max(|t|) / 127.
+                    // Result is `Int8` on the wire (4x smaller than Float32 vs 2x
+                    // for Half/BFloat16). Reuses the same quantize math as
+                    // ZeROStage1Optimizer's `quantize_to_int8` helper.
+                    use_int8_quant = true;
+                    cast_dtype = DType::Int8;
                     break;
             }
         }
         info.offload_dtype_used = cast_dtype;
-        info.quant_scale = 0.0f;  // Reserved for the future Int8 path.
+        info.quant_scale = 0.0f;
 
         // Cast on-GPU (when needed) before DMA. The cast-result tensor is what
         // we send across PCIe -- so a Half cast halves the bytes-on-the-wire as
-        // well as the host-side residency.
-        Tensor src = (cast_dtype != info.original_dtype)
-                       ? tensor_ptr->to(cast_dtype)
-                       : *tensor_ptr;
+        // well as the host-side residency. Audit G3: Int8 path quantizes here
+        // and stores the scale in `info.quant_scale`.
+        Tensor src;
+        if (use_int8_quant) {
+            // scale = max(|t|) / 127. Pin to 1.0 if the entire tensor is zero so
+            // we don't emit a NaN-laden int8 payload.
+            Tensor abs_t = abs(*tensor_ptr);
+            Tensor max_t = tenzor::max(abs_t);
+            float max_val = max_t.item<float>();
+            float scale = (max_val > 0.0f) ? (max_val / 127.0f) : 1.0f;
+            info.quant_scale = scale;
+
+            // q = clamp(round(t / scale), -128, 127) cast to Int8.
+            Tensor scaled = (*tensor_ptr) * (1.0 / scale);
+            Tensor rounded = round(scaled);
+            Tensor clamped = clamp(rounded, -128.0f, 127.0f);
+            src = clamped.to(DType::Int8);
+        } else {
+            src = (cast_dtype != info.original_dtype)
+                    ? tensor_ptr->to(cast_dtype)
+                    : *tensor_ptr;
+        }
 
         // Issue async GPU→CPU transfer. The actual data motion runs on the TransferEngine's
         // dedicated stream, which lets it overlap with the next layer's compute on the
@@ -675,7 +708,12 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
                     it->second.cpu_copy, it->second.original_device);
                 // Phase C (C3): cast back to original dtype on GPU after DMA when
                 // the cpu_copy was quantized.
-                if (it->second.original_dtype != it->second.offload_dtype_used) {
+                // Audit G3: Int8WithScale dequant — widen + multiply by scale.
+                if (it->second.offload_dtype_used == DType::Int8 &&
+                    it->second.quant_scale != 0.0f) {
+                    Tensor widened = gpu_tensor.to(it->second.original_dtype);
+                    gpu_tensor = widened * it->second.quant_scale;
+                } else if (it->second.original_dtype != it->second.offload_dtype_used) {
                     gpu_tensor = gpu_tensor.to(it->second.original_dtype);
                 }
                 *tensor_ptr = gpu_tensor;

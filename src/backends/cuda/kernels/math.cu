@@ -4899,9 +4899,9 @@ auto create_shifted_window_mask_cuda(int64_t H, int64_t W,
     int64_t num_windows = (H / window_size) * (W / window_size);
     int64_t M = window_size * window_size;
 
-    // Reshape img_mask to window format
-    // This is a simplified version - we need to properly partition windows
-    // For now, create a simple partitioned version
+    // Reshape img_mask to window format. The actual window partitioning is
+    // performed below by `window_partition_kernel`, which writes the per-window
+    // [num_windows, M] view into this buffer.
     Tensor window_mask({num_windows, M}, DType::Float32, cuda_device);
 
     // Copy with window partitioning logic
@@ -9660,22 +9660,20 @@ __global__ void frexp_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* mantis
     }
 }
 
-// frexp returns two tensors packed into a single dispatch by returning the mantissa tensor.
-// The exponent tensor is stored in a second output. Since we only have
-// register_single_output_kernel, we pack both into a flat tensor: [mantissa..., exponent_as_float...]
-// Actually, let's return just the mantissa and encode the exponent as a second
-// "hidden" tensor approach. For now, frexp_dispatch returns the mantissa; callers
-// can use a dedicated frexp_full function. But to match the OpId contract, we
-// return mantissa only from the dispatch (the ops layer already computes frexp
-// using other ops; this kernel is an optimization for the mantissa path).
-Tensor frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+// F1: frexp_dispatch now honestly returns both (mantissa, exponent) so the
+// OpId::Frexp dispatch contract matches CPU. Previously the function returned
+// only the mantissa as a `Tensor` via `register_single_output_kernel`, and the
+// exponent — already computed inside the CUDA kernel — was simply discarded
+// at the dispatch boundary. Anyone calling `dispatch(OpId::Frexp, …)` on CUDA
+// got back a 1-element output vector and silently lost half the result.
+std::vector<Tensor> frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     const auto& input = inputs[0];
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor mantissa(shape, input.dtype(), input.device());
     Tensor exponent(shape, DType::Int32, input.device());
-    if (n == 0) return mantissa;
+    if (n == 0) return {mantissa, exponent};
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
     if (input.dtype() == DType::Float32) {
@@ -9698,7 +9696,7 @@ Tensor frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
         throw std::runtime_error("frexp only supports Float32, Float64, Float16, BFloat16");
     }
     CUDA_CHECK(cudaGetLastError());
-    return mantissa;
+    return {mantissa, exponent};
 }
 
 // ============================================================================

@@ -8,8 +8,11 @@
 
 #include "tenzor/nn/layers/sync_batchnorm.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/function_distributed.hpp"  // C1: distributed_all_reduce
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/distributed/distributed.hpp"        // for ReduceOp
+#include "tenzor/distributed/process_group.hpp"      // for ProcessGroupBase
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -36,11 +39,13 @@ public:
     SyncBatchNormBackward(bool affine,
                           int world_size,
                           AllReduceFn all_reduce_fn,
+                          std::shared_ptr<distributed::ProcessGroupBase> pg,
                           int64_t global_count,
                           std::vector<Tensor> tensors_to_save)
         : affine_(affine),
           world_size_(world_size),
           all_reduce_fn_(std::move(all_reduce_fn)),
+          pg_(std::move(pg)),
           global_count_(global_count) {
         save_for_backward(std::move(tensors_to_save));
     }
@@ -138,14 +143,27 @@ public:
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
         // Variable-level BN backward so create_graph=true produces a real
-        // 2nd-order graph. For world_size == 1 this is identical math to
-        // BatchNorm2d::backward_with_variables. For world_size > 1 the
-        // grad-side reductions would need to be all-reduced across workers;
-        // expressing an all-reduce inside the autograd graph is not yet
-        // supported, so we fall through to the tensor-level backward in
-        // that case (graph disconnects, flagged via is_higher_order_stub()
-        // below for the distributed path).
-        if (world_size_ > 1 || !all_reduce_fn_) {
+        // 2nd-order graph.
+        //
+        // Three regimes:
+        //   (a) `world_size_ == 1` (or `world_size_ > 1 && pg_ == nullptr`
+        //       with no callback): single-process math, identical to
+        //       BatchNorm2d::backward_with_variables.
+        //   (b) `world_size_ > 1 && pg_ != nullptr`: build the same formula
+        //       but route the gradient-side reductions through
+        //       `distributed_all_reduce` (audit C1). This keeps the
+        //       all-reduce inside the autograd graph; second-order grads
+        //       work without disconnection.
+        //   (c) Legacy: `world_size_ > 1 && pg_ == nullptr && all_reduce_fn_`
+        //       — no autograd-aware PG was provided, so fall back to the
+        //       tensor-level path with `is_higher_order_stub() = true`.
+        const bool distributed = (world_size_ > 1);
+        const bool pg_available = (pg_ != nullptr);
+
+        if (distributed && !pg_available) {
+            // Legacy regime: no autograd-aware PG. Same disconnection-on-
+            // higher-order behavior as before; `is_higher_order_stub()`
+            // returns true so the engine flags this path under Warn/Error.
             std::vector<Tensor> tensor_grads;
             tensor_grads.reserve(grad_outputs.size());
             for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
@@ -157,7 +175,7 @@ public:
             return var_results;
         }
 
-        // --- Single-process path: same shape handling as BatchNorm2d bwv ---
+        // --- Variable-level path (single-process OR distributed-with-pg) ---
         auto& grad_out = grad_outputs[0];
         auto saved = saved_tensors();
         Variable input_var(saved[0], false);
@@ -171,7 +189,10 @@ public:
         int64_t H = shape[2];
         int64_t W = shape[3];
         int64_t spatial = H * W;
-        int64_t batch = N * spatial;
+        int64_t local_batch = N * spatial;
+        // For distributed: the divisor is the *global* count, which the
+        // forward already accumulated via the forward all-reduce.
+        int64_t batch = distributed ? global_count_ : local_batch;
 
         auto mean_bc = unsqueeze(unsqueeze(unsqueeze(mean_var, 0), 2), 3);
         auto invstd_bc = unsqueeze(unsqueeze(unsqueeze(invstd_var, 0), 2), 3);
@@ -185,10 +206,23 @@ public:
         auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial});
         auto x_hat_r = reshape(x_hat, {N, C, spatial});
 
-        auto sum_g = sum(sum(grad_x_hat_r, 0, true), 2, true);
-        auto mean_gxh = sum_g / static_cast<float>(batch);
-        auto sum_gxh = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
-        auto mean_gxh_xh = sum_gxh / static_cast<float>(batch);
+        // Per-channel local reductions. Shape: [1, C, 1].
+        auto sum_g_local   = sum(sum(grad_x_hat_r, 0, true), 2, true);
+        auto sum_gxh_local = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+
+        // Distributed regime: all-reduce the per-channel sums into globals
+        // via the Variable-level autograd op. The all-reduce becomes a node
+        // in the graph, so its own backward (which is itself an all-reduce
+        // of the next-level grad) is automatic.
+        Variable sum_g_global   = distributed
+            ? distributed_all_reduce(sum_g_local, pg_, distributed::ReduceOp::SUM)
+            : sum_g_local;
+        Variable sum_gxh_global = distributed
+            ? distributed_all_reduce(sum_gxh_local, pg_, distributed::ReduceOp::SUM)
+            : sum_gxh_local;
+
+        auto mean_gxh    = sum_g_global   / static_cast<float>(batch);
+        auto mean_gxh_xh = sum_gxh_global / static_cast<float>(batch);
 
         auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
         auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
@@ -196,22 +230,38 @@ public:
 
         if (!affine_) return {grad_input};
 
+        // Per-channel parameter grads. Reduce locally then (if distributed)
+        // all-reduce to obtain the global sums.
         auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial});
-        auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);
+        auto grad_gamma_local = sum(sum(go_xhat, 0, false), 1, false);
         auto go_r = reshape(grad_out, {N, C, spatial});
-        auto grad_beta = sum(sum(go_r, 0, false), 1, false);
+        auto grad_beta_local = sum(sum(go_r, 0, false), 1, false);
+
+        Variable grad_gamma = distributed
+            ? distributed_all_reduce(grad_gamma_local, pg_, distributed::ReduceOp::SUM)
+            : grad_gamma_local;
+        Variable grad_beta  = distributed
+            ? distributed_all_reduce(grad_beta_local, pg_, distributed::ReduceOp::SUM)
+            : grad_beta_local;
+
         return {grad_input, grad_gamma, grad_beta};
     }
 
     auto supports_higher_order() const -> bool override { return true; }
-    // Single-process path has a proper Variable-level 2nd-derivative graph;
-    // the distributed (world_size > 1) path still disconnects.
-    auto is_higher_order_stub() const -> bool override { return world_size_ > 1; }
+    // Higher-order is honest in two regimes:
+    //   - single-process (`world_size_ == 1`)
+    //   - distributed with an autograd-aware process group (audit C1)
+    // It is still a stub when distributed but only a raw all-reduce
+    // callback is available (legacy constructor without `pg`).
+    auto is_higher_order_stub() const -> bool override {
+        return world_size_ > 1 && pg_ == nullptr;
+    }
 
 private:
     bool affine_;
     int world_size_;
     AllReduceFn all_reduce_fn_;
+    std::shared_ptr<distributed::ProcessGroupBase> pg_;
     int64_t global_count_;
 };
 
@@ -224,14 +274,16 @@ SyncBatchNorm::SyncBatchNorm(
     double eps,
     double momentum,
     bool affine,
-    bool track_running_stats)
+    bool track_running_stats,
+    std::shared_ptr<distributed::ProcessGroupBase> process_group)
     : num_features_(num_features),
       eps_(eps),
       momentum_(momentum),
       affine_(affine),
       track_running_stats_(track_running_stats),
       world_size_(world_size),
-      all_reduce_fn_(std::move(all_reduce_fn))
+      all_reduce_fn_(std::move(all_reduce_fn)),
+      pg_(std::move(process_group))
 {
     if (num_features <= 0) {
         throw std::invalid_argument("SyncBatchNorm: num_features must be positive");
@@ -253,6 +305,31 @@ SyncBatchNorm::SyncBatchNorm(
         register_buffer("num_batches_tracked", num_batches_tracked_);
     }
 }
+
+// PG-based constructor (audit C1). The forward all-reduce callback is
+// synthesized from `process_group` so the existing first-order forward
+// path is unchanged; the gradient path uses the PG directly via
+// `distributed_all_reduce` for autograd-aware higher-order support.
+SyncBatchNorm::SyncBatchNorm(
+    int64_t num_features,
+    std::shared_ptr<distributed::ProcessGroupBase> process_group,
+    int world_size,
+    double eps,
+    double momentum,
+    bool affine,
+    bool track_running_stats)
+    : SyncBatchNorm(
+          num_features,
+          [process_group](Tensor& t) {
+              if (process_group) {
+                  process_group->all_reduce(t, distributed::ReduceOp::SUM);
+              }
+          },
+          world_size > 0 ? world_size
+                         : (process_group ? process_group->world_size() : 1),
+          eps, momentum, affine, track_running_stats,
+          process_group)
+{}
 
 auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
     auto x = input.tensor();
@@ -404,7 +481,7 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         };
 
         auto grad_fn = std::make_shared<SyncBatchNormBackward>(
-            affine_, world_size_, all_reduce_fn_, global_count,
+            affine_, world_size_, all_reduce_fn_, pg_, global_count,
             std::move(tensors_to_save));
 
         Variable result(normalized, true);

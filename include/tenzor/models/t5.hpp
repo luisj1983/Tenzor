@@ -46,6 +46,16 @@ struct T5Config {
     bool is_gated_act = false;               ///< Use gated activation (T5.1.1)
     bool use_checkpoint = false;             ///< Enable gradient checkpointing for memory savings
 
+    // Audit G15: tokenizer config exposed on the model config so generate()
+    // can prime the decoder with the right first token. HuggingFace T5
+    // defaults: decoder_start_token_id=0 (pad), pad_token_id=0, eos_token_id=1.
+    // T5 itself has no separate BOS — it always starts decoding from
+    // `decoder_start_token_id`. Models with custom tokenizers (mT5, fine-tuned
+    // checkpoints) can set this differently.
+    int64_t decoder_start_token_id = 0;      ///< First decoder input token at inference
+    int64_t pad_token_id = 0;                ///< Pad token id
+    int64_t eos_token_id = 1;                ///< End-of-sequence token id (stop generation)
+
     /**
      * @brief Create T5-small configuration (60M params)
      */
@@ -414,6 +424,9 @@ public:
      */
     auto config() const -> const T5Config& { return config_; }
 
+    /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
+
 private:
     T5Config config_;
     std::shared_ptr<nn::Embedding> shared_embeddings_;
@@ -461,14 +474,25 @@ public:
     /**
      * @brief Generate text autoregressively
      *
+     * Audit G15: replaced the hard-coded "assume token 0" BOS with a real
+     * read from `config.decoder_start_token_id`. Callers can also pass an
+     * explicit `bos_token_id` override (e.g. when feeding a tokenizer whose
+     * decoder_start_token_id differs from the saved model config).
+     *
      * @param input_ids Encoder input [batch, source_seq_len]
      * @param max_length Maximum generation length
      * @param temperature Sampling temperature (default: 1.0)
+     * @param bos_token_id Explicit decoder start token; -1 (default) uses
+     *        `config.decoder_start_token_id`.
      * @return Generated token IDs [batch, max_length]
      */
     auto generate(const Variable& input_ids,
                  int64_t max_length,
-                 double temperature = 1.0) -> Tensor;
+                 double temperature = 1.0,
+                 int64_t bos_token_id = -1) -> Tensor;
+
+    /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
 
 private:
     T5Config config_;

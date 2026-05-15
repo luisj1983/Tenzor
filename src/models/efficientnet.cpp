@@ -208,6 +208,14 @@ MBConvBlock::MBConvBlock(int64_t in_channels,
 
     project_bn_ = std::make_shared<nn::BatchNorm2d>(out_channels, 0.99, 1e-3);
     register_module("project_bn", project_bn_);
+
+    // Audit G14: real stochastic depth. Only meaningful when the block has a
+    // skip connection AND drop_connect_rate > 0 — otherwise DropPath would be
+    // a no-op and we save a registered module that adds nothing.
+    if (has_skip_ && drop_connect_rate > 0.0) {
+        drop_path_ = std::make_shared<nn::DropPath>(drop_connect_rate);
+        register_module("drop_path", drop_path_);
+    }
 }
 
 auto MBConvBlock::forward_impl(const Variable& input) -> Variable {
@@ -234,19 +242,16 @@ auto MBConvBlock::forward_impl(const Variable& input) -> Variable {
     x = project_conv_->forward(x);
     x = project_bn_->forward(x);
 
-    // Skip connection with stochastic depth (drop connect)
+    // Audit G14: real stochastic depth (a.k.a. DropConnect / drop_path).
+    // Apply DropPath to the residual branch before adding the identity skip.
+    // DropPath itself handles train-vs-eval gating internally (returns input
+    // unchanged in eval mode), so the only condition here is "is there a
+    // skip path and was a DropPath module registered" (the ctor only
+    // registers one when has_skip_ && drop_connect_rate > 0).
     if (has_skip_) {
-        if (is_training() && drop_connect_rate_ > 0.0) {
-            // Apply stochastic depth during training
-            // This drops the entire residual path with probability drop_connect_rate
-            // Implementation: scale by survival probability and apply bernoulli mask
-            // Create random mask (simplified - in practice use proper random generation)
-            // For now, we'll skip the stochastic depth and just use the connection
-            // A full implementation would use:
-            // auto mask = bernoulli(keep_prob).to(x.device());
-            // x = x * mask / keep_prob;
+        if (drop_path_) {
+            x = drop_path_->forward(x);
         }
-
         x = x + input;
     }
 

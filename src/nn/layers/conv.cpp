@@ -275,27 +275,14 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
         throw std::invalid_argument("Input channels mismatch");
     }
 
-    // CPU Conv2d reads per-axis attr keys and handles rectangular configs
-    // natively. Other backends still read scalar AttrKey::Padding/Stride/
-    // Dilation; on those a rectangular config would silently apply the
-    // H-value to both axes. For rectangular padding specifically we can
-    // transparently pre-pad via functional::pad (autograd-tracked) on any
-    // backend; for rectangular stride/dilation on non-CPU backends we
-    // throw rather than silently produce wrong output.
+    // Audit E5: rectangular-stride / rectangular-dilation guard removed.
+    // Each backend now has an honest per-axis contract (E1: CUDA native;
+    // E2/E3/E4: ROCm/OneAPI/Vulkan throw cleanly when their kernels haven't
+    // been refactored yet). The CPU kernel handles rectangular configs
+    // natively. We retain the rectangular-padding pre-pad below so that the
+    // legacy non-CPU pad behavior continues to compose with backends whose
+    // native pad is not yet rectangular-aware.
     const bool is_cpu = input_orig.tensor().device() == Device::cpu();
-    if (!is_cpu && stride_h_ != stride_w_) {
-        throw std::runtime_error(
-            "Conv2d: rectangular stride (stride_h=" + std::to_string(stride_h_) +
-            ", stride_w=" + std::to_string(stride_w_) + ") on non-CPU backends "
-            "is not yet supported. Non-CPU backend kernels still read a single "
-            "scalar stride.");
-    }
-    if (!is_cpu && dilation_h_ != dilation_w_) {
-        throw std::runtime_error(
-            "Conv2d: rectangular dilation (dilation_h=" + std::to_string(dilation_h_) +
-            ", dilation_w=" + std::to_string(dilation_w_) + ") on non-CPU backends "
-            "is not yet supported.");
-    }
 
     Variable input = input_orig;
     int64_t effective_pad_h = padding_h_;
@@ -732,88 +719,94 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
 // ConvTranspose2d Implementation
 // ============================================================================
 
+// Audit I5-followup: per-axis ConvTranspose2dBackward. Stores sH/sW, pH/pW,
+// opH/opW, dH/dW; ctor with scalar args delegates with identical values.
+// Both backward() and backward_with_variables() pack per-axis attrs so the
+// adjoint Conv2d dispatch (Conv2dForward + Conv2dBackwardWeight via swapped
+// roles) sees the anisotropic config in its registered kernel.
 class ConvTranspose2dBackward : public Function {
 public:
+    ConvTranspose2dBackward(int64_t sH, int64_t sW,
+                            int64_t pH, int64_t pW,
+                            int64_t opH, int64_t opW,
+                            int64_t dH, int64_t dW,
+                            int64_t groups,
+                            std::vector<Tensor> tensors_to_save)
+        : sH_(sH), sW_(sW), pH_(pH), pW_(pW),
+          opH_(opH), opW_(opW), dH_(dH), dW_(dW), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    // Scalar ctor — delegates to per-axis with identical H/W values.
     ConvTranspose2dBackward(int64_t stride, int64_t padding, int64_t output_padding,
                             int64_t dilation, int64_t groups,
                             std::vector<Tensor> tensors_to_save)
-        : stride_(stride), padding_(padding), output_padding_(output_padding),
-          dilation_(dilation), groups_(groups) {
-        save_for_backward(std::move(tensors_to_save));
-    }
+        : ConvTranspose2dBackward(stride, stride, padding, padding,
+                                  output_padding, output_padding,
+                                  dilation, dilation, groups,
+                                  std::move(tensors_to_save)) {}
 
     auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ConvTranspose2dBackward::forward should not be called");
     }
 
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // ConvTranspose2d backward:
-        // - grad_input = conv2d(grad_output, weight) with adjusted padding
-        // - grad_weight computed from input and grad_output
-        // - grad_bias = sum(grad_output, dims=[0,2,3])
+    // Helper to pack per-axis attrs (with scalar fallback) for Conv2d adjoint
+    // dispatch. The Conv2d backend (E1-E5) reads StrideH/W, PaddingH/W,
+    // DilationH/W with scalar fallback.
+    void pack_conv2d_attrs(NewOpAttributes& a) const {
+        a.set(AttrKey::Stride,    sH_);
+        a.set(AttrKey::Padding,   pH_);
+        a.set(AttrKey::Dilation,  dH_);
+        a.set(AttrKey::StrideH,   sH_);
+        a.set(AttrKey::StrideW,   sW_);
+        a.set(AttrKey::PaddingH,  pH_);
+        a.set(AttrKey::PaddingW,  pW_);
+        a.set(AttrKey::DilationH, dH_);
+        a.set(AttrKey::DilationW, dW_);
+        a.set(AttrKey::Groups,    groups_);
+    }
 
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         const Tensor& grad_output = grad_outputs[0];
         const Tensor& input = saved_tensors_[0];
         const Tensor& weight = saved_tensors_[1];
-
         bool has_bias = saved_tensors_.size() > 2;
 
         auto input_shape = input.shape();
         auto weight_shape = weight.shape();
 
-        // grad_input: adjoint of ConvTranspose2d is a regular Conv2d of
-        // grad_output against the same weight (the weight is
-        // [C_in, C_out, kH, kW] for ConvTranspose; when used as a Conv2d
-        // weight [C_out_eff, C_in_eff, ...] the channel roles swap to match
-        // grad_input ← grad_output). No spatial flip is needed: the Conv2d
-        // kernel already implements the mathematical adjoint for
-        // cross-correlation convention.
+        // grad_input via Conv2d adjoint.
         NewOpAttributes conv_attrs;
-        conv_attrs.set(AttrKey::Stride, stride_);
-        conv_attrs.set(AttrKey::Padding, padding_);
-        conv_attrs.set(AttrKey::Dilation, dilation_);
-        conv_attrs.set(AttrKey::Groups, groups_);
-
+        pack_conv2d_attrs(conv_attrs);
         std::vector<Tensor> conv_inputs = {grad_output, weight};
-        auto conv_result = dispatch(OpId::Conv2dForward, std::span<const Tensor>(conv_inputs), conv_attrs);
-        Tensor grad_input = conv_result[0];
+        Tensor grad_input = dispatch(OpId::Conv2dForward,
+            std::span<const Tensor>(conv_inputs), conv_attrs)[0];
 
-        // Handle potential shape mismatch due to output_padding in the forward pass.
-        // Slice grad_input to match the original input shape if dimensions differ.
+        // Slice if output_padding caused a shape difference.
         if (!std::equal(grad_input.shape().begin(), grad_input.shape().end(),
                         input_shape.begin(), input_shape.end())) {
-            // Slice spatial dimensions to match input_shape
             auto gi_shape = grad_input.shape();
             if (gi_shape.size() == 4 && input_shape.size() == 4 &&
                 gi_shape[0] == input_shape[0] && gi_shape[1] == input_shape[1]) {
-                // Spatial dimensions may differ by output_padding amount - slice to match
                 grad_input = tenzor::slice(grad_input, 2, 0, input_shape[2]);
                 grad_input = tenzor::slice(grad_input, 3, 0, input_shape[3]);
             }
         }
 
-        // grad_weight: For ConvTranspose2d, the weight gradient involves correlating
-        // the input with grad_output. We dispatch to conv2d_backward_weight with swapped roles:
-        // input (to ConvTranspose2d) acts as grad_output, and grad_output acts as input.
+        // grad_weight via Conv2dBackwardWeight with role-swapped inputs.
         std::string ws_str = std::to_string(weight_shape[0]) + "," +
                              std::to_string(weight_shape[1]) + "," +
                              std::to_string(weight_shape[2]) + "," +
                              std::to_string(weight_shape[3]);
         NewOpAttributes weight_grad_attrs;
-        weight_grad_attrs.set(AttrKey::Stride, stride_);
-        weight_grad_attrs.set(AttrKey::Padding, padding_);
-        weight_grad_attrs.set(AttrKey::Dilation, dilation_);
-        weight_grad_attrs.set(AttrKey::Groups, groups_);
+        pack_conv2d_attrs(weight_grad_attrs);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
-        // Conv2dBackwardWeight expects [grad_output, input, weight]
-        // For ConvTranspose2d weight grad, we swap roles: input acts as grad_output, grad_output acts as input
         std::vector<Tensor> weight_grad_inputs = {input, grad_output, weight};
-        auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight, std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
-        Tensor grad_weight = weight_grad_result[0];
+        Tensor grad_weight = dispatch(OpId::Conv2dBackwardWeight,
+            std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs)[0];
 
         if (has_bias) {
-            // grad_bias = sum(grad_output, dims=[0,2,3])
             Tensor grad_bias = tenzor::sum(tenzor::sum(tenzor::sum(grad_output, 0, false), 1, false), 1, false);
             return {grad_input, grad_weight, grad_bias};
         }
@@ -821,8 +814,6 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Higher-order gradient support for ConvTranspose2d.
-        // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d.
         Variable grad_out_var = grad_outputs[0];
 
         Variable input_var, weight_var;
@@ -835,42 +826,33 @@ public:
         }
         bool has_bias = saved_tensors_.size() > 2;
 
-        // grad_input: regular conv2d(grad_output, weight) — preserves graph
+        // grad_input: regular conv2d with per-axis params.
         auto grad_input = ::tenzor::nn::functional::conv2d(
             grad_out_var, weight_var,
             std::nullopt,
-            {stride_, stride_},
-            {padding_, padding_},
-            {dilation_, dilation_},
+            {sH_, sW_},
+            {pH_, pW_},
+            {dH_, dW_},
             groups_);
 
-        // Handle potential shape mismatch due to output_padding in the forward pass.
         auto input_shape = input_var.tensor().shape();
         auto gi_shape = grad_input.tensor().shape();
         if (gi_shape.size() == 4 && input_shape.size() == 4 &&
             gi_shape[0] == input_shape[0] && gi_shape[1] == input_shape[1]) {
             if (gi_shape[2] != input_shape[2] || gi_shape[3] != input_shape[3]) {
-                // Slice spatial dimensions to match input — uses tensor-level slice
-                // then wrap as Variable (slicing is shape-only, not differentiable here).
                 auto sliced = tenzor::slice(grad_input.tensor(), 2, 0, input_shape[2]);
                 sliced = tenzor::slice(sliced, 3, 0, input_shape[3]);
                 grad_input = Variable(sliced, grad_out_var.requires_grad());
             }
         }
 
-        // grad_weight: dispatch at tensor level, wrap result.
-        // For ConvTranspose2d weight grad, we swap roles: input acts as
-        // grad_output, grad_output acts as input.
         auto weight_shape = weight_var.tensor().shape();
         std::string ws_str = std::to_string(weight_shape[0]) + "," +
                              std::to_string(weight_shape[1]) + "," +
                              std::to_string(weight_shape[2]) + "," +
                              std::to_string(weight_shape[3]);
         NewOpAttributes weight_grad_attrs;
-        weight_grad_attrs.set(AttrKey::Stride, stride_);
-        weight_grad_attrs.set(AttrKey::Padding, padding_);
-        weight_grad_attrs.set(AttrKey::Dilation, dilation_);
-        weight_grad_attrs.set(AttrKey::Groups, groups_);
+        pack_conv2d_attrs(weight_grad_attrs);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
         std::vector<Tensor> weight_grad_inputs = {input_var.tensor(), grad_out_var.tensor(), weight_var.tensor()};
@@ -879,10 +861,9 @@ public:
         Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
 
         if (has_bias) {
-            // grad_bias = sum(grad_output, dims=[0,2,3])
-            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // sum over batch
-            gb = ::tenzor::sum(gb, 1, false);                  // sum over H
-            gb = ::tenzor::sum(gb, 1, false);                  // sum over W
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);
+            gb = ::tenzor::sum(gb, 1, false);
+            gb = ::tenzor::sum(gb, 1, false);
             return {grad_input, grad_weight, gb};
         }
         return {grad_input, grad_weight};
@@ -892,32 +873,36 @@ public:
     auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
-    int64_t stride_;
-    int64_t padding_;
-    int64_t output_padding_;
-    int64_t dilation_;
+    int64_t sH_, sW_;
+    int64_t pH_, pW_;
+    int64_t opH_, opW_;
+    int64_t dH_, dW_;
     int64_t groups_;
 };
 
-ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
-                                 int64_t stride, int64_t padding, int64_t output_padding,
+// Audit I5: per-axis ConvTranspose2d ctor.
+ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels,
+                                 std::pair<int64_t, int64_t> kernel_size,
+                                 std::pair<int64_t, int64_t> stride,
+                                 std::pair<int64_t, int64_t> padding,
+                                 std::pair<int64_t, int64_t> output_padding,
+                                 std::pair<int64_t, int64_t> dilation,
                                  int64_t groups, bool bias)
     : in_channels_(in_channels), out_channels_(out_channels),
-      kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), output_padding_(output_padding), groups_(groups) {
+      kH_(kernel_size.first), kW_(kernel_size.second),
+      sH_(stride.first),      sW_(stride.second),
+      pH_(padding.first),     pW_(padding.second),
+      opH_(output_padding.first), opW_(output_padding.second),
+      dH_(dilation.first),    dW_(dilation.second),
+      groups_(groups) {
 
-    if (in_channels % groups != 0) {
-        throw std::invalid_argument("in_channels must be divisible by groups");
-    }
-    if (out_channels % groups != 0) {
-        throw std::invalid_argument("out_channels must be divisible by groups");
-    }
-    if (output_padding >= stride) {
-        throw std::invalid_argument("output_padding must be smaller than stride");
-    }
+    if (in_channels % groups != 0)  throw std::invalid_argument("in_channels must be divisible by groups");
+    if (out_channels % groups != 0) throw std::invalid_argument("out_channels must be divisible by groups");
+    if (opH_ >= sH_ && opH_ != 0)   throw std::invalid_argument("output_padding (H) must be smaller than stride (H)");
+    if (opW_ >= sW_ && opW_ != 0)   throw std::invalid_argument("output_padding (W) must be smaller than stride (W)");
 
-    std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kernel_size, kernel_size};
-    int64_t fan_in = in_channels * kernel_size * kernel_size;
+    std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kH_, kW_};
+    int64_t fan_in = in_channels * kH_ * kW_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     register_parameter("weight", Variable(weight_tensor, true));
@@ -929,6 +914,18 @@ ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int6
         register_parameter("bias", Variable(bias_tensor, true));
     }
 }
+
+// Scalar ctor — delegates to per-axis with identical H/W values.
+ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
+                                 int64_t stride, int64_t padding, int64_t output_padding,
+                                 int64_t groups, bool bias)
+    : ConvTranspose2d(in_channels, out_channels,
+                      std::make_pair(kernel_size, kernel_size),
+                      std::make_pair(stride, stride),
+                      std::make_pair(padding, padding),
+                      std::make_pair(output_padding, output_padding),
+                      std::make_pair<int64_t, int64_t>(1, 1),  // dilation default
+                      groups, bias) {}
 
 auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
@@ -969,12 +966,23 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
         inputs_vec.push_back(*bias_ptr);
     }
 
+    // Audit I5: pack per-axis attrs + scalar fallback. Both H/W are forwarded
+    // so backends that haven't been updated to per-axis still get a sensible
+    // (D-axis) scalar value.
     NewOpAttributes forward_attrs;
-    forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, padding_);
-    forward_attrs.set(AttrKey::OutputPadding, output_padding_);
-    forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));  // ConvTranspose2d uses dilation=1
-    forward_attrs.set(AttrKey::Groups, groups_);
+    forward_attrs.set(AttrKey::Stride,         sH_);
+    forward_attrs.set(AttrKey::Padding,        pH_);
+    forward_attrs.set(AttrKey::OutputPadding,  opH_);
+    forward_attrs.set(AttrKey::Dilation,       dH_);
+    forward_attrs.set(AttrKey::StrideH,        sH_);
+    forward_attrs.set(AttrKey::StrideW,        sW_);
+    forward_attrs.set(AttrKey::PaddingH,       pH_);
+    forward_attrs.set(AttrKey::PaddingW,       pW_);
+    forward_attrs.set(AttrKey::OutputPaddingH, opH_);
+    forward_attrs.set(AttrKey::OutputPaddingW, opW_);
+    forward_attrs.set(AttrKey::DilationH,      dH_);
+    forward_attrs.set(AttrKey::DilationW,      dW_);
+    forward_attrs.set(AttrKey::Groups,         groups_);
     DType original_dtype = input.dtype();
     auto output_result = dispatch(OpId::ConvTranspose2dForward,
         std::span<const Tensor>(inputs_vec),
@@ -995,8 +1003,11 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
             tensors_to_save = {input.tensor(), weight_matched.tensor()};
         }
 
+        // Audit I5-followup: per-axis ConvTranspose2dBackward (the H/W ctor
+        // overload). Asymmetric ConvT2d training now flows per-axis through
+        // the adjoint Conv2d dispatch.
         auto backward_fn = std::make_shared<ConvTranspose2dBackward>(
-            stride_, padding_, output_padding_, 1 /* dilation */, groups_,
+            sH_, sW_, pH_, pW_, opH_, opW_, dH_, dW_, groups_,
             std::move(tensors_to_save)
         );
 
@@ -1021,10 +1032,10 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto ConvTranspose2d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ * kernel_size_ * kernel_size_;
+    int64_t fan_in = in_channels_ * kH_ * kW_;
     float std = std::sqrt(2.0f / fan_in);
 
-    std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kernel_size_, kernel_size_};
+    std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kH_, kW_};
     auto new_weight_tensor = randn(weight_shape) * std;
     parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 
@@ -1041,13 +1052,29 @@ auto ConvTranspose2d::reset_parameters() -> void {
 // Conv3d Implementation
 // ============================================================================
 
+// Audit I5: Conv3dBackward now carries per-axis stride/padding/dilation. The
+// scalar-arg ctor delegates to the per-axis ctor with identical D/H/W values
+// to keep legacy callers compiling.
 class Conv3dBackward : public Function {
 public:
-    Conv3dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    Conv3dBackward(int64_t sD, int64_t sH, int64_t sW,
+                   int64_t pD, int64_t pH, int64_t pW,
+                   int64_t dD, int64_t dH, int64_t dW,
+                   int64_t groups,
                    std::vector<Tensor> tensors_to_save)
-        : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
+        : sD_(sD), sH_(sH), sW_(sW),
+          pD_(pD), pH_(pH), pW_(pW),
+          dD_(dD), dH_(dH), dW_(dW),
+          groups_(groups) {
         save_for_backward(std::move(tensors_to_save));
     }
+
+    Conv3dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                   std::vector<Tensor> tensors_to_save)
+        : Conv3dBackward(stride, stride, stride,
+                         padding, padding, padding,
+                         dilation, dilation, dilation,
+                         groups, std::move(tensors_to_save)) {}
 
     auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("Conv3dBackward::forward should not be called");
@@ -1059,33 +1086,39 @@ public:
         const Tensor& weight = saved_tensors_[1];
         bool has_bias = saved_tensors_.size() > 2;
 
-        // Build shape strings for dispatch
         auto shape_to_str = [](std::span<const int64_t> s) {
             std::string r;
-            for (size_t i = 0; i < s.size(); ++i) {
-                if (i > 0) r += ",";
-                r += std::to_string(s[i]);
-            }
+            for (size_t i = 0; i < s.size(); ++i) { if (i > 0) r += ","; r += std::to_string(s[i]); }
             return r;
         };
 
         NewOpAttributes common_attrs;
-        common_attrs.set(AttrKey::Stride, stride_);
-        common_attrs.set(AttrKey::Padding, padding_);
-        common_attrs.set(AttrKey::Dilation, dilation_);
-        common_attrs.set(AttrKey::Groups, groups_);
+        // Set per-axis AttrKeys (the CPU registry now reads these with scalar
+        // fallback, so this remains backward-compat for backends that only
+        // see the scalar Stride/Padding/Dilation keys).
+        common_attrs.set(AttrKey::StrideD,   sD_);
+        common_attrs.set(AttrKey::StrideH,   sH_);
+        common_attrs.set(AttrKey::StrideW,   sW_);
+        common_attrs.set(AttrKey::PaddingD,  pD_);
+        common_attrs.set(AttrKey::PaddingH,  pH_);
+        common_attrs.set(AttrKey::PaddingW,  pW_);
+        common_attrs.set(AttrKey::DilationD, dD_);
+        common_attrs.set(AttrKey::DilationH, dH_);
+        common_attrs.set(AttrKey::DilationW, dW_);
+        // Scalar fallback (taken from D axis) for backends that only read scalar.
+        common_attrs.set(AttrKey::Stride,    sD_);
+        common_attrs.set(AttrKey::Padding,   pD_);
+        common_attrs.set(AttrKey::Dilation,  dD_);
+        common_attrs.set(AttrKey::Groups,    groups_);
 
-        // Keep shape strings alive until after dispatch (string_view must not dangle)
         std::string input_shape_str = shape_to_str(input.shape());
         std::string weight_shape_str = shape_to_str(weight.shape());
 
-        // Backward input: inputs = {grad_output, input, weight}
         NewOpAttributes bi_attrs = common_attrs;
         bi_attrs.set(AttrKey::InputShape, std::string_view(input_shape_str));
         std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::Conv3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
-        // Backward weight: inputs = {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
         bw_attrs.set(AttrKey::WeightShape, std::string_view(weight_shape_str));
         std::vector<Tensor> bw_inputs = {grad_output, input, weight};
@@ -1100,7 +1133,6 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Higher-order gradient support for Conv3d (mirrors Conv2dBackward pattern).
         Variable grad_out_var = grad_outputs[0];
 
         Variable input_var, weight_var;
@@ -1113,33 +1145,37 @@ public:
         }
         bool has_bias = saved_tensors_.size() > 2;
 
-        // grad_input via conv_transpose3d (preserves computation graph)
         auto grad_input = ::tenzor::nn::functional::conv_transpose3d(
             grad_out_var, weight_var,
             std::nullopt,
-            {stride_, stride_, stride_},
-            {padding_, padding_, padding_},
+            {sD_, sH_, sW_},
+            {pD_, pH_, pW_},
             {0, 0, 0},
             groups_,
-            {dilation_, dilation_, dilation_});
+            {dD_, dH_, dW_});
 
-        // grad_weight via dispatch
         auto shape_to_str = [](std::span<const int64_t> s) {
             std::string r;
-            for (size_t i = 0; i < s.size(); ++i) {
-                if (i > 0) r += ",";
-                r += std::to_string(s[i]);
-            }
+            for (size_t i = 0; i < s.size(); ++i) { if (i > 0) r += ","; r += std::to_string(s[i]); }
             return r;
         };
 
         std::string ws_str = shape_to_str(weight_var.tensor().shape());
 
         NewOpAttributes bw_attrs;
-        bw_attrs.set(AttrKey::Stride, stride_);
-        bw_attrs.set(AttrKey::Padding, padding_);
-        bw_attrs.set(AttrKey::Dilation, dilation_);
-        bw_attrs.set(AttrKey::Groups, groups_);
+        bw_attrs.set(AttrKey::StrideD,   sD_);
+        bw_attrs.set(AttrKey::StrideH,   sH_);
+        bw_attrs.set(AttrKey::StrideW,   sW_);
+        bw_attrs.set(AttrKey::PaddingD,  pD_);
+        bw_attrs.set(AttrKey::PaddingH,  pH_);
+        bw_attrs.set(AttrKey::PaddingW,  pW_);
+        bw_attrs.set(AttrKey::DilationD, dD_);
+        bw_attrs.set(AttrKey::DilationH, dH_);
+        bw_attrs.set(AttrKey::DilationW, dW_);
+        bw_attrs.set(AttrKey::Stride,    sD_);
+        bw_attrs.set(AttrKey::Padding,   pD_);
+        bw_attrs.set(AttrKey::Dilation,  dD_);
+        bw_attrs.set(AttrKey::Groups,    groups_);
         bw_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
         std::vector<Tensor> bw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
@@ -1147,11 +1183,10 @@ public:
         Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
 
         if (has_bias) {
-            // grad_bias = sum over batch and spatial dims [0,2,3,4]
-            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // batch
-            gb = ::tenzor::sum(gb, 1, false);                  // D
-            gb = ::tenzor::sum(gb, 1, false);                  // H
-            gb = ::tenzor::sum(gb, 1, false);                  // W
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);
+            gb = ::tenzor::sum(gb, 1, false);
+            gb = ::tenzor::sum(gb, 1, false);
+            gb = ::tenzor::sum(gb, 1, false);
             return {grad_input, grad_weight, gb};
         }
         return {grad_input, grad_weight};
@@ -1161,9 +1196,9 @@ public:
     auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
-    int64_t stride_;
-    int64_t padding_;
-    int64_t dilation_;
+    int64_t sD_, sH_, sW_;
+    int64_t pD_, pH_, pW_;
+    int64_t dD_, dH_, dW_;
     int64_t groups_;
 };
 
@@ -1186,16 +1221,21 @@ auto make_conv_transpose2d_backward(int64_t stride, int64_t padding,
 }
 } // namespace internal
 
-Conv3d::Conv3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
-              int64_t stride, int64_t padding, int64_t dilation,
-              int64_t groups, bool bias)
+// Audit I5: per-axis Conv3d ctor. Each spatial axis (D/H/W) gets its own
+// kernel/stride/padding/dilation.
+Conv3d::Conv3d(int64_t in_channels, int64_t out_channels,
+               std::tuple<int64_t, int64_t, int64_t> kernel_size,
+               std::tuple<int64_t, int64_t, int64_t> stride,
+               std::tuple<int64_t, int64_t, int64_t> padding,
+               std::tuple<int64_t, int64_t, int64_t> dilation,
+               int64_t groups, bool bias)
     : in_channels_(in_channels), out_channels_(out_channels),
-      kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), dilation_(dilation), groups_(groups <= 0 ? 1 : groups) {
+      kD_(std::get<0>(kernel_size)), kH_(std::get<1>(kernel_size)), kW_(std::get<2>(kernel_size)),
+      sD_(std::get<0>(stride)),      sH_(std::get<1>(stride)),      sW_(std::get<2>(stride)),
+      pD_(std::get<0>(padding)),     pH_(std::get<1>(padding)),     pW_(std::get<2>(padding)),
+      dD_(std::get<0>(dilation)),    dH_(std::get<1>(dilation)),    dW_(std::get<2>(dilation)),
+      groups_(groups <= 0 ? 1 : groups) {
 
-    if (groups_ <= 0) {
-        groups_ = 1;
-    }
     if (in_channels % groups_ != 0) {
         throw std::invalid_argument("in_channels must be divisible by groups");
     }
@@ -1203,21 +1243,30 @@ Conv3d::Conv3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
         throw std::invalid_argument("out_channels must be divisible by groups");
     }
 
-    // Weight shape: (C_out, C_in/groups, K, K, K)
-    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_,
-                                         kernel_size, kernel_size, kernel_size};
-    int64_t fan_in = (in_channels / groups_) * kernel_size * kernel_size * kernel_size;
+    // Weight shape: (C_out, C_in/groups, kD, kH, kW)
+    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_, kD_, kH_, kW_};
+    int64_t fan_in = (in_channels / groups_) * kD_ * kH_ * kW_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     auto weight_init = Variable(weight_tensor, true);
     register_parameter("weight", weight_init);
 
     if (bias) {
-        std::vector<int64_t> bias_shape = {out_channels};
-        auto bias_init = Variable(zeros(bias_shape), true);
+        auto bias_init = Variable(zeros({out_channels}), true);
         register_parameter("bias", bias_init);
     }
 }
+
+// Scalar ctor — delegates to per-axis with identical D/H/W values.
+Conv3d::Conv3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
+              int64_t stride, int64_t padding, int64_t dilation,
+              int64_t groups, bool bias)
+    : Conv3d(in_channels, out_channels,
+             std::make_tuple(kernel_size, kernel_size, kernel_size),
+             std::make_tuple(stride, stride, stride),
+             std::make_tuple(padding, padding, padding),
+             std::make_tuple(dilation, dilation, dilation),
+             groups, bias) {}
 
 auto Conv3d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
@@ -1234,9 +1283,10 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Input channels mismatch");
     }
 
-    int64_t out_d = calculate_output_size(depth, kernel_size_, stride_, padding_, dilation_);
-    int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
-    int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
+    // Audit I5: per-axis output sizing.
+    int64_t out_d = calculate_output_size(depth,  kD_, sD_, pD_, dD_);
+    int64_t out_h = calculate_output_size(height, kH_, sH_, pH_, dH_);
+    int64_t out_w = calculate_output_size(width,  kW_, sW_, pW_, dW_);
 
     if (out_d <= 0 || out_h <= 0 || out_w <= 0) {
         throw std::runtime_error(
@@ -1249,7 +1299,6 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
     auto bias_it = parameters_.find("bias");
     Device original_device = input.tensor().device();
 
-    // Match weight dtype/device to input
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
         weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
@@ -1266,17 +1315,26 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
         bias_ptr = &bias_matched.tensor();
     }
 
-    // Backend dispatch
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
-    if (bias_ptr != nullptr) {
-        inputs_vec.push_back(*bias_ptr);
-    }
+    if (bias_ptr != nullptr) inputs_vec.push_back(*bias_ptr);
 
+    // Audit I5: pack BOTH scalar (back-compat for backends that haven't read
+    // per-axis yet) AND per-axis attribute keys. The CPU registry reads the
+    // per-axis keys with scalar fallback.
     NewOpAttributes forward_attrs;
-    forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, padding_);
-    forward_attrs.set(AttrKey::Dilation, dilation_);
-    forward_attrs.set(AttrKey::Groups, groups_);
+    forward_attrs.set(AttrKey::Stride,    sD_);
+    forward_attrs.set(AttrKey::Padding,   pD_);
+    forward_attrs.set(AttrKey::Dilation,  dD_);
+    forward_attrs.set(AttrKey::StrideD,   sD_);
+    forward_attrs.set(AttrKey::StrideH,   sH_);
+    forward_attrs.set(AttrKey::StrideW,   sW_);
+    forward_attrs.set(AttrKey::PaddingD,  pD_);
+    forward_attrs.set(AttrKey::PaddingH,  pH_);
+    forward_attrs.set(AttrKey::PaddingW,  pW_);
+    forward_attrs.set(AttrKey::DilationD, dD_);
+    forward_attrs.set(AttrKey::DilationH, dH_);
+    forward_attrs.set(AttrKey::DilationW, dW_);
+    forward_attrs.set(AttrKey::Groups,    groups_);
     DType original_dtype = input.dtype();
     auto output_result = dispatch<OpId::Conv3dForward>(inputs_vec, forward_attrs);
     auto output = output_result[0];
@@ -1295,20 +1353,17 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
         }
 
         auto backward_fn = std::make_shared<Conv3dBackward>(
-            stride_, padding_, dilation_, groups_, std::move(tensors_to_save));
+            sD_, sH_, sW_, pD_, pH_, pW_, dD_, dH_, dW_, groups_,
+            std::move(tensors_to_save));
 
         result.set_grad_fn(backward_fn);
 
         std::vector<Variable> input_vars = {input, *parameters_["weight"]};
-        if (bias_it != parameters_.end()) {
-            input_vars.push_back(*bias_it->second);
-        }
+        if (bias_it != parameters_.end()) input_vars.push_back(*bias_it->second);
         backward_fn->set_input_variables(input_vars);
 
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
-        }
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
         backward_fn->set_next_functions(next_funcs);
     }
 
@@ -1316,10 +1371,9 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto Conv3d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ / groups_ * kernel_size_ * kernel_size_ * kernel_size_;
+    int64_t fan_in = in_channels_ / groups_ * kD_ * kH_ * kW_;
     float std = std::sqrt(2.0f / fan_in);
-    auto new_weight = randn({out_channels_, in_channels_ / groups_,
-                            kernel_size_, kernel_size_, kernel_size_}) * std;
+    auto new_weight = randn({out_channels_, in_channels_ / groups_, kD_, kH_, kW_}) * std;
     auto weight_ = Variable(new_weight, true);
     parameters_["weight"] = std::make_shared<Variable>(weight_);
 }
@@ -1328,18 +1382,56 @@ auto Conv3d::reset_parameters() -> void {
 // ConvTranspose3d Implementation
 // ============================================================================
 
+// Audit I5-followup: per-axis ConvTranspose3dBackward.
 class ConvTranspose3dBackward : public Function {
 public:
-    ConvTranspose3dBackward(int64_t stride, int64_t padding, int64_t output_padding,
-                            int64_t dilation, int64_t groups,
+    ConvTranspose3dBackward(int64_t sD, int64_t sH, int64_t sW,
+                            int64_t pD, int64_t pH, int64_t pW,
+                            int64_t opD, int64_t opH, int64_t opW,
+                            int64_t dD, int64_t dH, int64_t dW,
+                            int64_t groups,
                             std::vector<Tensor> tensors_to_save)
-        : stride_(stride), padding_(padding), output_padding_(output_padding),
-          dilation_(dilation), groups_(groups) {
+        : sD_(sD), sH_(sH), sW_(sW),
+          pD_(pD), pH_(pH), pW_(pW),
+          opD_(opD), opH_(opH), opW_(opW),
+          dD_(dD), dH_(dH), dW_(dW),
+          groups_(groups) {
         save_for_backward(std::move(tensors_to_save));
     }
 
+    // Scalar ctor — delegates to per-axis with identical D/H/W values.
+    ConvTranspose3dBackward(int64_t stride, int64_t padding, int64_t output_padding,
+                            int64_t dilation, int64_t groups,
+                            std::vector<Tensor> tensors_to_save)
+        : ConvTranspose3dBackward(stride, stride, stride,
+                                  padding, padding, padding,
+                                  output_padding, output_padding, output_padding,
+                                  dilation, dilation, dilation,
+                                  groups, std::move(tensors_to_save)) {}
+
     auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ConvTranspose3dBackward::forward should not be called");
+    }
+
+    // Helper to pack ConvT3d per-axis attrs (with scalar fallback).
+    void pack_t3d_attrs(NewOpAttributes& a) const {
+        a.set(AttrKey::Stride,         sD_);
+        a.set(AttrKey::Padding,        pD_);
+        a.set(AttrKey::OutputPadding,  opD_);
+        a.set(AttrKey::Dilation,       dD_);
+        a.set(AttrKey::StrideD,        sD_);
+        a.set(AttrKey::StrideH,        sH_);
+        a.set(AttrKey::StrideW,        sW_);
+        a.set(AttrKey::PaddingD,       pD_);
+        a.set(AttrKey::PaddingH,       pH_);
+        a.set(AttrKey::PaddingW,       pW_);
+        a.set(AttrKey::OutputPaddingD, opD_);
+        a.set(AttrKey::OutputPaddingH, opH_);
+        a.set(AttrKey::OutputPaddingW, opW_);
+        a.set(AttrKey::DilationD,      dD_);
+        a.set(AttrKey::DilationH,      dH_);
+        a.set(AttrKey::DilationW,      dW_);
+        a.set(AttrKey::Groups,         groups_);
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
@@ -1349,7 +1441,6 @@ public:
         Tensor weight = saved[1];
         bool has_bias = saved.size() > 2;
 
-        // Float16: upcast to Float32 for cuDNN backend compatibility.
         DType orig_dtype = grad_output.dtype();
         bool needs_upcast = (orig_dtype == DType::Float16);
         if (needs_upcast) {
@@ -1360,22 +1451,13 @@ public:
 
         auto shape_to_str = [](std::span<const int64_t> s) {
             std::string r;
-            for (size_t i = 0; i < s.size(); ++i) {
-                if (i > 0) r += ",";
-                r += std::to_string(s[i]);
-            }
+            for (size_t i = 0; i < s.size(); ++i) { if (i > 0) r += ","; r += std::to_string(s[i]); }
             return r;
         };
 
         NewOpAttributes common_attrs;
-        common_attrs.set(AttrKey::Stride, stride_);
-        common_attrs.set(AttrKey::Padding, padding_);
-        common_attrs.set(AttrKey::OutputPadding, output_padding_);
-        common_attrs.set(AttrKey::Dilation, dilation_);
-        common_attrs.set(AttrKey::Groups, groups_);
+        pack_t3d_attrs(common_attrs);
 
-        // Backward input: cuDNN needs {grad_output, input, weight}
-        // Keep shape strings alive until after dispatch (string_view must not dangle)
         std::string input_shape_str = shape_to_str(input.shape());
         std::string weight_shape_str = shape_to_str(weight.shape());
 
@@ -1384,7 +1466,6 @@ public:
         std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::ConvTranspose3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
-        // Backward weight: cuDNN needs {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
         bw_attrs.set(AttrKey::WeightShape, std::string_view(weight_shape_str));
         std::vector<Tensor> bw_inputs = {grad_output, input, weight};
@@ -1405,8 +1486,6 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Higher-order gradient support for ConvTranspose3d.
-        // The backward of ConvTranspose3d w.r.t. input is a regular Conv3d.
         Variable grad_out_var = grad_outputs[0];
 
         Variable input_var, weight_var;
@@ -1419,16 +1498,14 @@ public:
         }
         bool has_bias = saved_tensors_.size() > 2;
 
-        // grad_input: regular conv3d(grad_output, weight) — preserves graph
         auto grad_input = ::tenzor::nn::functional::conv3d(
             grad_out_var, weight_var,
             std::nullopt,
-            {stride_, stride_, stride_},
-            {padding_, padding_, padding_},
-            {dilation_, dilation_, dilation_},
+            {sD_, sH_, sW_},
+            {pD_, pH_, pW_},
+            {dD_, dH_, dW_},
             groups_);
 
-        // Handle potential shape mismatch due to output_padding
         auto input_shape = input_var.tensor().shape();
         auto gi_shape = grad_input.tensor().shape();
         if (gi_shape.size() == 5 && input_shape.size() == 5 &&
@@ -1442,36 +1519,27 @@ public:
             }
         }
 
-        // grad_weight: dispatch at tensor level, swap roles of input and grad_output
         auto shape_to_str = [](std::span<const int64_t> s) {
             std::string r;
-            for (size_t i = 0; i < s.size(); ++i) {
-                if (i > 0) r += ",";
-                r += std::to_string(s[i]);
-            }
+            for (size_t i = 0; i < s.size(); ++i) { if (i > 0) r += ","; r += std::to_string(s[i]); }
             return r;
         };
 
         std::string ws_str = shape_to_str(weight_var.tensor().shape());
 
         NewOpAttributes bw_attrs;
-        bw_attrs.set(AttrKey::Stride, stride_);
-        bw_attrs.set(AttrKey::Padding, padding_);
-        bw_attrs.set(AttrKey::Dilation, dilation_);
-        bw_attrs.set(AttrKey::Groups, groups_);
+        pack_t3d_attrs(bw_attrs);
         bw_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
-        // Swap roles: input acts as grad_output, grad_output acts as input
         std::vector<Tensor> bw_inputs = {input_var.tensor(), grad_out_var.tensor(), weight_var.tensor()};
         auto grad_weight_t = dispatch<OpId::ConvTranspose3dBackwardWeight>(bw_inputs, bw_attrs)[0];
         Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
 
         if (has_bias) {
-            // grad_bias = sum over batch and spatial dims [0,2,3,4]
-            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // batch
-            gb = ::tenzor::sum(gb, 1, false);                  // D
-            gb = ::tenzor::sum(gb, 1, false);                  // H
-            gb = ::tenzor::sum(gb, 1, false);                  // W
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);
+            gb = ::tenzor::sum(gb, 1, false);
+            gb = ::tenzor::sum(gb, 1, false);
+            gb = ::tenzor::sum(gb, 1, false);
             return {grad_input, grad_weight, gb};
         }
         return {grad_input, grad_weight};
@@ -1481,35 +1549,37 @@ public:
     auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
-    int64_t stride_;
-    int64_t padding_;
-    int64_t output_padding_;
-    int64_t dilation_;
+    int64_t sD_, sH_, sW_;
+    int64_t pD_, pH_, pW_;
+    int64_t opD_, opH_, opW_;
+    int64_t dD_, dH_, dW_;
     int64_t groups_;
 };
 
-ConvTranspose3d::ConvTranspose3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
-                                  int64_t stride, int64_t padding, int64_t output_padding,
-                                  int64_t dilation, int64_t groups, bool bias)
+// Audit I5: per-axis ConvTranspose3d ctor.
+ConvTranspose3d::ConvTranspose3d(int64_t in_channels, int64_t out_channels,
+                                  std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                                  std::tuple<int64_t, int64_t, int64_t> stride,
+                                  std::tuple<int64_t, int64_t, int64_t> padding,
+                                  std::tuple<int64_t, int64_t, int64_t> output_padding,
+                                  std::tuple<int64_t, int64_t, int64_t> dilation,
+                                  int64_t groups, bool bias)
     : in_channels_(in_channels), out_channels_(out_channels),
-      kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), output_padding_(output_padding),
-      dilation_(dilation), groups_(groups) {
+      kD_(std::get<0>(kernel_size)), kH_(std::get<1>(kernel_size)), kW_(std::get<2>(kernel_size)),
+      sD_(std::get<0>(stride)),      sH_(std::get<1>(stride)),      sW_(std::get<2>(stride)),
+      pD_(std::get<0>(padding)),     pH_(std::get<1>(padding)),     pW_(std::get<2>(padding)),
+      opD_(std::get<0>(output_padding)), opH_(std::get<1>(output_padding)), opW_(std::get<2>(output_padding)),
+      dD_(std::get<0>(dilation)),    dH_(std::get<1>(dilation)),    dW_(std::get<2>(dilation)),
+      groups_(groups) {
 
-    if (in_channels % groups != 0) {
-        throw std::invalid_argument("in_channels must be divisible by groups");
-    }
-    if (out_channels % groups != 0) {
-        throw std::invalid_argument("out_channels must be divisible by groups");
-    }
-    if (output_padding >= stride) {
-        throw std::invalid_argument("output_padding must be smaller than stride");
-    }
+    if (in_channels % groups != 0)  throw std::invalid_argument("in_channels must be divisible by groups");
+    if (out_channels % groups != 0) throw std::invalid_argument("out_channels must be divisible by groups");
+    if (opD_ >= sD_ && opD_ != 0)   throw std::invalid_argument("output_padding (D) must be smaller than stride (D)");
+    if (opH_ >= sH_ && opH_ != 0)   throw std::invalid_argument("output_padding (H) must be smaller than stride (H)");
+    if (opW_ >= sW_ && opW_ != 0)   throw std::invalid_argument("output_padding (W) must be smaller than stride (W)");
 
-    // Weight shape: (C_in, C_out/groups, K, K, K)
-    std::vector<int64_t> weight_shape = {in_channels, out_channels / groups,
-                                         kernel_size, kernel_size, kernel_size};
-    int64_t fan_in = in_channels * kernel_size * kernel_size * kernel_size;
+    std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kD_, kH_, kW_};
+    int64_t fan_in = in_channels * kD_ * kH_ * kW_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     register_parameter("weight", Variable(weight_tensor, true));
@@ -1521,6 +1591,18 @@ ConvTranspose3d::ConvTranspose3d(int64_t in_channels, int64_t out_channels, int6
         register_parameter("bias", Variable(bias_tensor, true));
     }
 }
+
+// Scalar ctor — delegates to per-axis.
+ConvTranspose3d::ConvTranspose3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
+                                  int64_t stride, int64_t padding, int64_t output_padding,
+                                  int64_t dilation, int64_t groups, bool bias)
+    : ConvTranspose3d(in_channels, out_channels,
+                      std::make_tuple(kernel_size, kernel_size, kernel_size),
+                      std::make_tuple(stride, stride, stride),
+                      std::make_tuple(padding, padding, padding),
+                      std::make_tuple(output_padding, output_padding, output_padding),
+                      std::make_tuple(dilation, dilation, dilation),
+                      groups, bias) {}
 
 auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
@@ -1560,12 +1642,25 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
         inputs_vec.push_back(*bias_ptr);
     }
 
+    // Audit I5: per-axis attrs (with D-axis scalar fallback for back-compat).
     NewOpAttributes forward_attrs;
-    forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, padding_);
-    forward_attrs.set(AttrKey::OutputPadding, output_padding_);
-    forward_attrs.set(AttrKey::Dilation, dilation_);
-    forward_attrs.set(AttrKey::Groups, groups_);
+    forward_attrs.set(AttrKey::Stride,         sD_);
+    forward_attrs.set(AttrKey::Padding,        pD_);
+    forward_attrs.set(AttrKey::OutputPadding,  opD_);
+    forward_attrs.set(AttrKey::Dilation,       dD_);
+    forward_attrs.set(AttrKey::StrideD,        sD_);
+    forward_attrs.set(AttrKey::StrideH,        sH_);
+    forward_attrs.set(AttrKey::StrideW,        sW_);
+    forward_attrs.set(AttrKey::PaddingD,       pD_);
+    forward_attrs.set(AttrKey::PaddingH,       pH_);
+    forward_attrs.set(AttrKey::PaddingW,       pW_);
+    forward_attrs.set(AttrKey::OutputPaddingD, opD_);
+    forward_attrs.set(AttrKey::OutputPaddingH, opH_);
+    forward_attrs.set(AttrKey::OutputPaddingW, opW_);
+    forward_attrs.set(AttrKey::DilationD,      dD_);
+    forward_attrs.set(AttrKey::DilationH,      dH_);
+    forward_attrs.set(AttrKey::DilationW,      dW_);
+    forward_attrs.set(AttrKey::Groups,         groups_);
 
     DType original_dtype = input.dtype();
     auto output_result = dispatch<OpId::ConvTranspose3dForward>(inputs_vec, forward_attrs);
@@ -1576,7 +1671,6 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
-    // Set up autograd
     if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
         if (bias_ptr != nullptr) {
@@ -1585,8 +1679,9 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
             tensors_to_save = {input.tensor(), weight_matched.tensor()};
         }
 
+        // Audit I5-followup: per-axis ConvTranspose3dBackward.
         auto backward_fn = std::make_shared<ConvTranspose3dBackward>(
-            stride_, padding_, output_padding_, dilation_, groups_,
+            sD_, sH_, sW_, pD_, pH_, pW_, opD_, opH_, opW_, dD_, dH_, dW_, groups_,
             std::move(tensors_to_save)
         );
 
@@ -1609,11 +1704,10 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto ConvTranspose3d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ * kernel_size_ * kernel_size_ * kernel_size_;
+    int64_t fan_in = in_channels_ * kD_ * kH_ * kW_;
     float std = std::sqrt(2.0f / fan_in);
 
-    std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_,
-                                         kernel_size_, kernel_size_, kernel_size_};
+    std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kD_, kH_, kW_};
     auto new_weight_tensor = randn(weight_shape) * std;
     parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 

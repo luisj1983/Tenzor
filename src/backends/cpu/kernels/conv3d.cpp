@@ -25,6 +25,11 @@ static inline int64_t calc_out_size(int64_t in, int64_t kernel, int64_t stride,
 // ============================================================================
 // im3col: Convert 5D input (N,C,D,H,W) to 2D matrix for Conv3d
 // Output: (batch * out_d * out_h * out_w, C * kD * kH * kW)
+//
+// Audit I5: per-axis stride/padding/dilation. Previously stride/padding/
+// dilation were single scalars applied to all three spatial axes — making
+// anisotropic Conv3d (e.g., temporal/spatial-asymmetric volumetric models)
+// impossible to express on the CPU backend.
 // ============================================================================
 template<typename T>
 static void im3col_cpu(
@@ -33,7 +38,9 @@ static void im3col_cpu(
     int64_t batch, int64_t channels,
     int64_t depth, int64_t height, int64_t width,
     int64_t kD, int64_t kH, int64_t kW,
-    int64_t stride, int64_t padding, int64_t dilation,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
     int64_t out_d, int64_t out_h, int64_t out_w
 ) {
     int64_t col_cols = channels * kD * kH * kW;
@@ -51,9 +58,9 @@ static void im3col_cpu(
         int64_t od = tmp % out_d; tmp /= out_d;
         int64_t b  = tmp;
 
-        int64_t id = od * stride - padding + kd * dilation;
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
+        int64_t id = od * sD - pD + kd * dD;
+        int64_t ih = oh * sH - pH + kh * dH;
+        int64_t iw = ow * sW - pW + kw * dW;
 
         int64_t out_row = b * out_d * out_h * out_w + od * out_h * out_w + oh * out_w + ow;
         int64_t out_col = c * kD * kH * kW + kd * kH * kW + kh * kW + kw;
@@ -71,7 +78,7 @@ static void im3col_cpu(
 }
 
 // ============================================================================
-// col3im: Reverse of im3col for backward pass
+// col3im: Reverse of im3col for backward pass (audit I5: per-axis).
 // ============================================================================
 template<typename T>
 static void col3im_cpu(
@@ -80,7 +87,9 @@ static void col3im_cpu(
     int64_t batch, int64_t channels,
     int64_t depth, int64_t height, int64_t width,
     int64_t kD, int64_t kH, int64_t kW,
-    int64_t stride, int64_t padding, int64_t dilation,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
     int64_t out_d, int64_t out_h, int64_t out_w
 ) {
     int64_t output_size = batch * channels * depth * height * width;
@@ -98,13 +107,13 @@ static void col3im_cpu(
                         for (int64_t kd = 0; kd < kD; ++kd) {
                             for (int64_t kh = 0; kh < kH; ++kh) {
                                 for (int64_t kw = 0; kw < kW; ++kw) {
-                                    int64_t id_s = id + padding - kd * dilation;
-                                    int64_t ih_s = ih + padding - kh * dilation;
-                                    int64_t iw_s = iw + padding - kw * dilation;
-                                    if (id_s % stride == 0 && ih_s % stride == 0 && iw_s % stride == 0) {
-                                        int64_t od = id_s / stride;
-                                        int64_t oh = ih_s / stride;
-                                        int64_t ow = iw_s / stride;
+                                    int64_t id_s = id + pD - kd * dD;
+                                    int64_t ih_s = ih + pH - kh * dH;
+                                    int64_t iw_s = iw + pW - kw * dW;
+                                    if (id_s % sD == 0 && ih_s % sH == 0 && iw_s % sW == 0) {
+                                        int64_t od = id_s / sD;
+                                        int64_t oh = ih_s / sH;
+                                        int64_t ow = iw_s / sW;
                                         if (od >= 0 && od < out_d && oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                                             int64_t col_row = b * out_d * out_h * out_w + od * out_h * out_w + oh * out_w + ow;
                                             int64_t col_col = c * kD * kH * kW + kd * kH * kW + kh * kW + kw;
@@ -159,12 +168,16 @@ void gemm_local<float>(const float* A, const float* B, float* C,
 }
 
 // ============================================================================
-// Conv3d Forward Implementation (template)
+// Conv3d Forward Implementation (template) — audit I5: per-axis.
 // ============================================================================
 template<typename T>
 static void conv3d_forward_impl(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
-    Tensor& output, int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    Tensor& output,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) {
     auto is = input.shape();   // (N, C_in, D, H, W)
     auto ws = weight.shape();  // (C_out, C_in/g, kD, kH, kW)
@@ -182,7 +195,10 @@ static void conv3d_forward_impl(
     std::memset(output.data<T>(), 0, output.numel() * sizeof(T));
 
     // 1x1x1 fast path
-    if (kD == 1 && kH == 1 && kW == 1 && stride == 1 && padding == 0 && dilation == 1) {
+    if (kD == 1 && kH == 1 && kW == 1 &&
+        sD == 1 && sH == 1 && sW == 1 &&
+        pD == 0 && pH == 0 && pW == 0 &&
+        dD == 1 && dH == 1 && dW == 1) {
         const T* in_data = input.data<T>();
         const T* w_data = weight.data<T>();
         T* out_data = output.data<T>();
@@ -220,7 +236,8 @@ static void conv3d_forward_impl(
                 const T* in_ptr = input.data<T>() + (b * in_channels + in_start) * depth * height * width;
                 im3col_cpu(in_ptr, col_buf.data() + b * col_per_batch,
                            1, ic_per_g, depth, height, width,
-                           kD, kH, kW, stride, padding, dilation, out_d, out_h, out_w);
+                           kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW,
+                           out_d, out_h, out_w);
             }
 
             // GEMM: col_buf (M x K) @ weight^T (N x K) -> gemm_out (M x N)
@@ -268,13 +285,16 @@ static void conv3d_forward_impl(
 }
 
 // ============================================================================
-// Conv3d Backward Input Implementation
+// Conv3d Backward Input Implementation (audit I5: per-axis)
 // ============================================================================
 template<typename T>
 static void conv3d_backward_input_impl(
     const Tensor& grad_output, const Tensor& weight, Tensor& grad_input,
     const std::vector<int64_t>& input_shape,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) {
     auto ws = weight.shape();
     auto gs = grad_output.shape();
@@ -330,7 +350,8 @@ static void conv3d_backward_input_impl(
             std::vector<T> tmp(ic_per_g * depth * height * width, T(0));
             col3im_cpu(col_buf.data() + b * col_per_batch, tmp.data(),
                        1, ic_per_g, depth, height, width,
-                       kD, kH, kW, stride, padding, dilation, out_d, out_h, out_w);
+                       kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW,
+                       out_d, out_h, out_w);
             // Add to grad_input
             int64_t n = ic_per_g * depth * height * width;
             for (int64_t i = 0; i < n; ++i) {
@@ -341,13 +362,16 @@ static void conv3d_backward_input_impl(
 }
 
 // ============================================================================
-// Conv3d Backward Weight Implementation
+// Conv3d Backward Weight Implementation (audit I5: per-axis)
 // ============================================================================
 template<typename T>
 static void conv3d_backward_weight_impl(
     const Tensor& grad_output, const Tensor& input, Tensor& grad_weight,
     const std::vector<int64_t>& weight_shape,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) {
     auto is = input.shape();
     auto gs = grad_output.shape();
@@ -375,7 +399,8 @@ static void conv3d_backward_weight_impl(
             const T* in_ptr = input.data<T>() + (b * in_channels + in_start) * depth * height * width;
             im3col_cpu(in_ptr, col_buf.data() + b * col_per_batch,
                        1, ic_per_g, depth, height, width,
-                       kD, kH, kW, stride, padding, dilation, out_d, out_h, out_w);
+                       kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW,
+                       out_d, out_h, out_w);
         }
 
         // Pack grad_output: (batch * oD * oH * oW, oc_per_g)
@@ -423,23 +448,28 @@ static void conv3d_backward_weight_impl(
 // Public Kernel Functions
 // ============================================================================
 
+// Audit I5: per-axis public overload. Scalar overload delegates by passing
+// the same value for all three spatial dims.
 auto conv3d_forward_kernel(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) -> Tensor {
     auto is = input.shape();
     auto ws = weight.shape();
 
-    int64_t out_d = calc_out_size(is[2], ws[2], stride, padding, dilation);
-    int64_t out_h = calc_out_size(is[3], ws[3], stride, padding, dilation);
-    int64_t out_w = calc_out_size(is[4], ws[4], stride, padding, dilation);
+    int64_t out_d = calc_out_size(is[2], ws[2], sD, pD, dD);
+    int64_t out_h = calc_out_size(is[3], ws[3], sH, pH, dH);
+    int64_t out_w = calc_out_size(is[4], ws[4], sW, pW, dW);
 
     Tensor output({is[0], ws[0], out_d, out_h, out_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        conv3d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
+        conv3d_forward_impl<float>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv3d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
+        conv3d_forward_impl<double>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         auto in_f32 = input.to(DType::Float32);
@@ -448,7 +478,7 @@ auto conv3d_forward_kernel(
         const Tensor* b_ptr = nullptr;
         if (bias) { b_f32 = bias->to(DType::Float32); b_ptr = &b_f32; }
         Tensor out_f32({is[0], ws[0], out_d, out_h, out_w}, DType::Float32, input.device());
-        conv3d_forward_impl<float>(in_f32, w_f32, b_ptr, out_f32, stride, padding, dilation, groups);
+        conv3d_forward_impl<float>(in_f32, w_f32, b_ptr, out_f32, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         output = out_f32.to(orig);
     } else {
         throw std::runtime_error("Unsupported dtype for conv3d_forward");
@@ -456,23 +486,36 @@ auto conv3d_forward_kernel(
     return output;
 }
 
+// Scalar overload — delegates to per-axis with identical D/H/W values.
+auto conv3d_forward_kernel(
+    const Tensor& input, const Tensor& weight, const Tensor* bias,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv3d_forward_kernel(input, weight, bias,
+        stride, stride, stride, padding, padding, padding,
+        dilation, dilation, dilation, groups);
+}
+
 auto conv3d_backward_input_kernel(
     const Tensor& grad_output, const Tensor& weight,
     const std::vector<int64_t>& input_shape,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) -> Tensor {
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
-        conv3d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+        conv3d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv3d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+        conv3d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         Tensor gi_f32(input_shape, DType::Float32, grad_output.device());
-        conv3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, input_shape, stride, padding, dilation, groups);
+        conv3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         grad_input = gi_f32.to(orig);
     } else {
         throw std::runtime_error("Unsupported dtype for conv3d_backward_input");
@@ -480,28 +523,51 @@ auto conv3d_backward_input_kernel(
     return grad_input;
 }
 
+auto conv3d_backward_input_kernel(
+    const Tensor& grad_output, const Tensor& weight,
+    const std::vector<int64_t>& input_shape,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv3d_backward_input_kernel(grad_output, weight, input_shape,
+        stride, stride, stride, padding, padding, padding,
+        dilation, dilation, dilation, groups);
+}
+
 auto conv3d_backward_weight_kernel(
     const Tensor& grad_output, const Tensor& input,
     const std::vector<int64_t>& weight_shape,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) -> Tensor {
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
-        conv3d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+        conv3d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv3d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+        conv3d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
         Tensor gw_f32(weight_shape, DType::Float32, grad_output.device());
-        conv3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, weight_shape, stride, padding, dilation, groups);
+        conv3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         grad_weight = gw_f32.to(orig);
     } else {
         throw std::runtime_error("Unsupported dtype for conv3d_backward_weight");
     }
     return grad_weight;
+}
+
+auto conv3d_backward_weight_kernel(
+    const Tensor& grad_output, const Tensor& input,
+    const std::vector<int64_t>& weight_shape,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv3d_backward_weight_kernel(grad_output, input, weight_shape,
+        stride, stride, stride, padding, padding, padding,
+        dilation, dilation, dilation, groups);
 }
 
 auto conv3d_backward_bias_kernel(const Tensor& grad_output) -> Tensor {
@@ -559,15 +625,18 @@ template<typename T>
 static void conv_transpose3d_forward_impl(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
     Tensor& output,
-    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
-    int64_t dilation, int64_t groups)
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    [[maybe_unused]] int64_t opD, [[maybe_unused]] int64_t opH, [[maybe_unused]] int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups)
 {
+    // Audit I5: per-axis stride/padding/output_padding/dilation.
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
     int64_t batch = in_shape[0];
     int64_t in_channels = in_shape[1];
     int64_t in_d = in_shape[2], in_h = in_shape[3], in_w = in_shape[4];
-    // weight: (in_channels, out_channels/groups, kD, kH, kW)
     int64_t out_channels_per_group = w_shape[1];
     int64_t kD = w_shape[2], kH = w_shape[3], kW = w_shape[4];
     int64_t out_channels = out_channels_per_group * groups;
@@ -596,15 +665,12 @@ static void conv_transpose3d_forward_impl(
             const T* in_g = in_ptr + b * in_channels * in_spatial + g * in_channels_per_group * in_spatial;
             const T* w_g = w_ptr + g * in_channels_per_group * out_channels_per_group * kD * kH * kW;
 
-            // Transpose weight: (in_ch_per_g, col_h) → (col_h, in_ch_per_g)
             for (int64_t i = 0; i < in_channels_per_group; ++i)
                 for (int64_t j = 0; j < col_h; ++j)
                     wt_buf[j * in_channels_per_group + i] = w_g[i * col_h + j];
 
-            // GEMM: weight^T (col_h, in_ch_per_g) * input (in_ch_per_g, in_spatial) → col (col_h, in_spatial)
             gemm_local<T>(wt_buf.data(), in_g, col_buf.data(), col_h, col_w, in_channels_per_group, false);
 
-            // col3im: scatter col_buf into output
             T* out_g = out_ptr + b * out_channels * out_spatial + g * out_channels_per_group * out_spatial;
             for (int64_t c = 0; c < out_channels_per_group; ++c) {
                 for (int64_t kd = 0; kd < kD; ++kd) {
@@ -612,13 +678,13 @@ static void conv_transpose3d_forward_impl(
                         for (int64_t kw = 0; kw < kW; ++kw) {
                             int64_t col_row = ((c * kD + kd) * kH + kh) * kW + kw;
                             for (int64_t id = 0; id < in_d; ++id) {
-                                int64_t od = id * stride - padding + kd * dilation;
+                                int64_t od = id * sD - pD + kd * dD;
                                 if (od < 0 || od >= out_d) continue;
                                 for (int64_t ih = 0; ih < in_h; ++ih) {
-                                    int64_t oh = ih * stride - padding + kh * dilation;
+                                    int64_t oh = ih * sH - pH + kh * dH;
                                     if (oh < 0 || oh >= out_h) continue;
                                     for (int64_t iw = 0; iw < in_w; ++iw) {
-                                        int64_t ow = iw * stride - padding + kw * dilation;
+                                        int64_t ow = iw * sW - pW + kw * dW;
                                         if (ow < 0 || ow >= out_w) continue;
                                         int64_t col_col = (id * in_h + ih) * in_w + iw;
                                         out_g[c * out_spatial + (od * out_h + oh) * out_w + ow] +=
@@ -633,16 +699,13 @@ static void conv_transpose3d_forward_impl(
         }
     }
 
-    // Add bias
     if (bias) {
         const T* bias_ptr = bias->data<T>();
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t c = 0; c < out_channels; ++c) {
                 T bv = bias_ptr[c];
                 T* dst = out_ptr + b * out_channels * out_spatial + c * out_spatial;
-                for (int64_t s = 0; s < out_spatial; ++s) {
-                    dst[s] += bv;
-                }
+                for (int64_t s = 0; s < out_spatial; ++s) dst[s] += bv;
             }
         }
     }
@@ -653,8 +716,11 @@ template<typename T>
 static void conv_transpose3d_backward_input_impl(
     const Tensor& grad_output, const Tensor& weight,
     Tensor& grad_input,
-    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
-    int64_t dilation, int64_t groups)
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    [[maybe_unused]] int64_t opD, [[maybe_unused]] int64_t opH, [[maybe_unused]] int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups)
 {
     auto go_shape = grad_output.shape();
     auto w_shape = weight.shape();
@@ -698,11 +764,11 @@ static void conv_transpose3d_backward_input_impl(
                         for (int64_t kw = 0; kw < kW; ++kw) {
                             int64_t col_row = ((c * kD + kd) * kH + kh) * kW + kw;
                             for (int64_t id = 0; id < in_d; ++id) {
-                                int64_t od = id * stride - padding + kd * dilation;
+                                int64_t od = id * sD - pD + kd * dD;
                                 for (int64_t ih = 0; ih < in_h; ++ih) {
-                                    int64_t oh = ih * stride - padding + kh * dilation;
+                                    int64_t oh = ih * sH - pH + kh * dH;
                                     for (int64_t iw = 0; iw < in_w; ++iw) {
-                                        int64_t ow = iw * stride - padding + kw * dilation;
+                                        int64_t ow = iw * sW - pW + kw * dW;
                                         int64_t col_col = (id * in_h + ih) * in_w + iw;
                                         if (od >= 0 && od < out_d && oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                                             col_buf[col_row * col_w + col_col] =
@@ -727,13 +793,16 @@ static void conv_transpose3d_backward_input_impl(
     }
 }
 
-// ConvTranspose3d backward weight
+// ConvTranspose3d backward weight (audit I5: per-axis)
 template<typename T>
 static void conv_transpose3d_backward_weight_impl(
     const Tensor& grad_output, const Tensor& input,
     Tensor& grad_weight,
-    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
-    int64_t dilation, int64_t groups)
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    [[maybe_unused]] int64_t opD, [[maybe_unused]] int64_t opH, [[maybe_unused]] int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups)
 {
     auto go_shape = grad_output.shape();
     auto in_shape = input.shape();
@@ -774,11 +843,11 @@ static void conv_transpose3d_backward_weight_impl(
                         for (int64_t kw = 0; kw < kW; ++kw) {
                             int64_t col_row = ((c * kD + kd) * kH + kh) * kW + kw;
                             for (int64_t id = 0; id < in_d; ++id) {
-                                int64_t od = id * stride - padding + kd * dilation;
+                                int64_t od = id * sD - pD + kd * dD;
                                 for (int64_t ih = 0; ih < in_h; ++ih) {
-                                    int64_t oh = ih * stride - padding + kh * dilation;
+                                    int64_t oh = ih * sH - pH + kh * dH;
                                     for (int64_t iw = 0; iw < in_w; ++iw) {
-                                        int64_t ow = iw * stride - padding + kw * dilation;
+                                        int64_t ow = iw * sW - pW + kw * dW;
                                         int64_t col_col = (id * in_h + ih) * in_w + iw;
                                         if (od >= 0 && od < out_d && oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                                             col_buf[col_row * col_w + col_col] =
@@ -812,10 +881,14 @@ static void conv_transpose3d_backward_weight_impl(
 
 // Public kernel functions for ConvTranspose3d
 
+// Audit I5: per-axis public kernel. Scalar overload (further down) delegates.
 auto conv_transpose3d_forward_kernel(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
-    int64_t stride, int64_t padding, int64_t output_padding,
-    int64_t dilation, int64_t groups
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t opD, int64_t opH, int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
 ) -> Tensor {
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
@@ -825,16 +898,16 @@ auto conv_transpose3d_forward_kernel(
     int64_t out_channels = out_channels_per_group * groups;
     int64_t kD = w_shape[2], kH = w_shape[3], kW = w_shape[4];
 
-    int64_t out_d = calc_transpose_out_size(in_shape[2], kD, stride, padding, output_padding, dilation);
-    int64_t out_h = calc_transpose_out_size(in_shape[3], kH, stride, padding, output_padding, dilation);
-    int64_t out_w = calc_transpose_out_size(in_shape[4], kW, stride, padding, output_padding, dilation);
+    int64_t out_d = calc_transpose_out_size(in_shape[2], kD, sD, pD, opD, dD);
+    int64_t out_h = calc_transpose_out_size(in_shape[3], kH, sH, pH, opH, dH);
+    int64_t out_w = calc_transpose_out_size(in_shape[4], kW, sW, pW, opW, dW);
 
     Tensor output({batch, out_channels, out_d, out_h, out_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        conv_transpose3d_forward_impl<float>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose3d_forward_impl<float>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv_transpose3d_forward_impl<double>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose3d_forward_impl<double>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         auto in_f32 = input.to(DType::Float32);
@@ -843,12 +916,52 @@ auto conv_transpose3d_forward_kernel(
         Tensor b_f32;
         if (bias) { b_f32 = bias->to(DType::Float32); b_f32_ptr = &b_f32; }
         Tensor out_f32({batch, out_channels, out_d, out_h, out_w}, DType::Float32, input.device());
-        conv_transpose3d_forward_impl<float>(in_f32, w_f32, b_f32_ptr, out_f32, stride, padding, output_padding, dilation, groups);
+        conv_transpose3d_forward_impl<float>(in_f32, w_f32, b_f32_ptr, out_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
         output = out_f32.to(orig);
     } else {
         throw std::runtime_error("Unsupported dtype for conv_transpose3d_forward");
     }
     return output;
+}
+
+// Scalar overload — delegates with identical D/H/W values.
+auto conv_transpose3d_forward_kernel(
+    const Tensor& input, const Tensor& weight, const Tensor* bias,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv_transpose3d_forward_kernel(input, weight, bias,
+        stride, stride, stride, padding, padding, padding,
+        output_padding, output_padding, output_padding,
+        dilation, dilation, dilation, groups);
+}
+
+auto conv_transpose3d_backward_input_kernel(
+    const Tensor& grad_output, const Tensor& weight,
+    const std::vector<int64_t>& input_shape,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t opD, int64_t opH, int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
+) -> Tensor {
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        conv_transpose3d_backward_input_impl<float>(grad_output, weight, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+    } else if (grad_output.dtype() == DType::Float64) {
+        conv_transpose3d_backward_input_impl<double>(grad_output, weight, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        DType orig = grad_output.dtype();
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        Tensor gi_f32(input_shape, DType::Float32, grad_output.device());
+        conv_transpose3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        grad_input = gi_f32.to(orig);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv_transpose3d_backward_input");
+    }
+    return grad_input;
 }
 
 auto conv_transpose3d_backward_input_kernel(
@@ -857,23 +970,38 @@ auto conv_transpose3d_backward_input_kernel(
     int64_t stride, int64_t padding, int64_t output_padding,
     int64_t dilation, int64_t groups
 ) -> Tensor {
-    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+    return conv_transpose3d_backward_input_kernel(grad_output, weight, input_shape,
+        stride, stride, stride, padding, padding, padding,
+        output_padding, output_padding, output_padding,
+        dilation, dilation, dilation, groups);
+}
+
+auto conv_transpose3d_backward_weight_kernel(
+    const Tensor& grad_output, const Tensor& input,
+    const std::vector<int64_t>& weight_shape,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t opD, int64_t opH, int64_t opW,
+    int64_t dD, int64_t dH, int64_t dW,
+    int64_t groups
+) -> Tensor {
+    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
-        conv_transpose3d_backward_input_impl<float>(grad_output, weight, grad_input, stride, padding, output_padding, dilation, groups);
+        conv_transpose3d_backward_weight_impl<float>(grad_output, input, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv_transpose3d_backward_input_impl<double>(grad_output, weight, grad_input, stride, padding, output_padding, dilation, groups);
+        conv_transpose3d_backward_weight_impl<double>(grad_output, input, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
-        auto w_f32 = weight.to(DType::Float32);
-        Tensor gi_f32(input_shape, DType::Float32, grad_output.device());
-        conv_transpose3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, stride, padding, output_padding, dilation, groups);
-        grad_input = gi_f32.to(orig);
+        auto in_f32 = input.to(DType::Float32);
+        Tensor gw_f32(weight_shape, DType::Float32, grad_output.device());
+        conv_transpose3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        grad_weight = gw_f32.to(orig);
     } else {
-        throw std::runtime_error("Unsupported dtype for conv_transpose3d_backward_input");
+        throw std::runtime_error("Unsupported dtype for conv_transpose3d_backward_weight");
     }
-    return grad_input;
+    return grad_weight;
 }
 
 auto conv_transpose3d_backward_weight_kernel(
@@ -882,24 +1010,10 @@ auto conv_transpose3d_backward_weight_kernel(
     int64_t stride, int64_t padding, int64_t output_padding,
     int64_t dilation, int64_t groups
 ) -> Tensor {
-    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
-
-    if (grad_output.dtype() == DType::Float32) {
-        conv_transpose3d_backward_weight_impl<float>(grad_output, input, grad_weight, stride, padding, output_padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::Float64) {
-        conv_transpose3d_backward_weight_impl<double>(grad_output, input, grad_weight, stride, padding, output_padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        DType orig = grad_output.dtype();
-        auto go_f32 = grad_output.to(DType::Float32);
-        auto in_f32 = input.to(DType::Float32);
-        std::vector<int64_t> ws_f32 = weight_shape;
-        Tensor gw_f32(ws_f32, DType::Float32, grad_output.device());
-        conv_transpose3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, stride, padding, output_padding, dilation, groups);
-        grad_weight = gw_f32.to(orig);
-    } else {
-        throw std::runtime_error("Unsupported dtype for conv_transpose3d_backward_weight");
-    }
-    return grad_weight;
+    return conv_transpose3d_backward_weight_kernel(grad_output, input, weight_shape,
+        stride, stride, stride, padding, padding, padding,
+        output_padding, output_padding, output_padding,
+        dilation, dilation, dilation, groups);
 }
 
 } // namespace cpu

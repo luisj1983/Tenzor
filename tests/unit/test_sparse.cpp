@@ -425,6 +425,45 @@ TEST_P(SparseTest, Float64Support) {
     EXPECT_DOUBLE_EQ(d[3], 2.5);
 }
 
+// J16-followup: Complex64 coalesce — duplicates should sum on both
+// real and imag components independently. Previously the coalesce path
+// threw "unsupported value dtype Complex64"; now it splits values into
+// real+imag, recursively coalesces each, then recombines via complex().
+TEST_P(SparseTest, CoalesceComplex64) {
+    if (GetParam() != "cpu") {
+        GTEST_SKIP() << "Complex coalesce: CPU-only test for now";
+    }
+    auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
+    auto* idx = indices.data<int64_t>();
+    idx[0] = 0; idx[1] = 0; idx[2] = 1;  // rows: (0,0), (0,0), (1,1)
+    idx[3] = 0; idx[4] = 0; idx[5] = 1;  // cols
+
+    // Build Complex64 values: (1+2i), (3+4i), (5+6i).
+    // After coalesce on the duplicated (0,0): (1+3) + (2+4)i = 4 + 6i.
+    auto re = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
+    auto im = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
+    re.data<float>()[0] = 1.0f; re.data<float>()[1] = 3.0f; re.data<float>()[2] = 5.0f;
+    im.data<float>()[0] = 2.0f; im.data<float>()[1] = 4.0f; im.data<float>()[2] = 6.0f;
+    auto values = tenzor::complex(re, im);
+    EXPECT_EQ(values.dtype(), DType::Complex64);
+
+    auto sparse = SparseTensor::sparse_coo(indices, values, {2, 2});
+    EXPECT_FALSE(sparse.is_coalesced());
+    auto coalesced = sparse.coalesce();
+    EXPECT_TRUE(coalesced.is_coalesced());
+    EXPECT_EQ(coalesced.nnz(), 2);  // (0,0) merged, (1,1) separate
+    EXPECT_EQ(coalesced.values().dtype(), DType::Complex64);
+
+    auto out_re = tenzor::real(coalesced.values()).to(Device::cpu());
+    auto out_im = tenzor::imag(coalesced.values()).to(Device::cpu());
+    // The coalesced order may have (0,0) before (1,1) or after — we sort
+    // by row-major linearised index, so (0,0) comes first.
+    EXPECT_FLOAT_EQ(out_re.data<float>()[0], 4.0f);  // 1+3
+    EXPECT_FLOAT_EQ(out_im.data<float>()[0], 6.0f);  // 2+4
+    EXPECT_FLOAT_EQ(out_re.data<float>()[1], 5.0f);
+    EXPECT_FLOAT_EQ(out_im.data<float>()[1], 6.0f);
+}
+
 // ============================================================================
 // Instantiate for CPU backend
 // ============================================================================

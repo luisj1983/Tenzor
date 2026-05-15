@@ -239,12 +239,15 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // Debug: for the padded-F16 path return the padded scratch as-is so
-    // the caller sees every byte that was written. We'll re-add the slice
-    // once the bytes are confirmed correct.
+    // F17: slice off the padding element for odd-numel F16 outputs and
+    // reshape back to the 4D logical shape (the same slice/reshape path
+    // already used by `dispatchAvgPool2dForward` once the byte order was
+    // confirmed correct). Previously this function returned the padded
+    // 1D scratch tensor, so any caller assuming a 4D output got a shape
+    // mismatch and a stale final element.
     if (need_fp16_pad) {
-        // For now, return unshaped scratch (1D tensor of size numel+1).
-        return dispatch_output;
+        Tensor sliced = tenzor::slice(dispatch_output, 0, 0, logical_numel);
+        return sliced.reshape(out_shape).contiguous();
     }
     return dispatch_output;
 }

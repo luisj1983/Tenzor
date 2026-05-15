@@ -6,6 +6,8 @@
 #include "torch_interop.hpp"
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#include <ATen/DLConvertor.h>   // Audit J7: at::toDLPack / at::fromDLPack
+#include <tenzor/core/dlpack.hpp>  // Audit J7: tenzor::to_dlpack / from_dlpack
 #include <c10/core/ScalarType.h>
 #include <stdexcept>
 #include <sstream>
@@ -304,19 +306,41 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
         }
     }
 
-    // Create Tenzor tensor
-    Tensor tensor(shape, dtype, device);
-
-    // Copy data
-    if (can_zero_copy_from_torch(torch_tensor) && !target_device.has_value()) {
-        // Zero-copy by sharing data pointer (requires custom storage)
-        // For now, we'll copy to be safe
-        // TODO: Implement shared storage mechanism
+    // Audit J7: zero-copy via DLPack when source and destination devices
+    // agree. PyTorch's ATen exposes `at::toDLPack(t)` which returns a
+    // DLManagedTensor* whose `deleter` correctly decrements the underlying
+    // PyTorch storage refcount. Tenzor's `from_dlpack` wraps the buffer
+    // as a Tensor without copying. This eliminates the previous
+    // unconditional memcpy/cudaMemcpy on every torch→tenzor handoff —
+    // critical for training-loop performance.
+    //
+    // Conditions for zero-copy:
+    //   - target_device unset (we keep the source device), AND
+    //   - source tensor is contiguous (DLPack requires it; ATen will throw
+    //     otherwise), AND
+    //   - dtype is one Tenzor's DLPack importer handles (Float32/64/16/
+    //     BFloat16/Int8/16/32/64/UInt8/Bool — see src/core/dlpack.cpp).
+    if (!target_device.has_value() && torch_tensor.is_contiguous()) {
+        try {
+            DLManagedTensor* managed = at::toDLPack(torch_tensor);
+            Tensor t = tenzor::from_dlpack(managed);
+            // ATen's toDLPack hands ownership to the consumer; Tenzor's
+            // from_dlpack stores the DLManagedTensor* and calls its
+            // `deleter` on destruction. No need to free here.
+            return t;
+        } catch (const std::exception& e) {
+            // Fall through to the copy path on unsupported dtype / layout —
+            // some PyTorch dtypes (Float8E4M3, QInt4) aren't yet in Tenzor's
+            // DLPack importer. The copy path still handles those if dtype
+            // round-trips via Tenzor's enum.
+            (void)e;
+        }
     }
 
-    // Make torch tensor contiguous for copying
+    // Fallback copy path (used for target_device != source, non-contiguous
+    // inputs, or DLPack-rejected dtypes).
+    Tensor tensor(shape, dtype, device);
     auto contiguous_torch = torch_tensor.contiguous();
-
     if (device.type == Device::Type::CPU) {
         std::memcpy(tensor.data<void>(),
                    contiguous_torch.data_ptr(),

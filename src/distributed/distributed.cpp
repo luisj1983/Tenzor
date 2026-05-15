@@ -137,6 +137,55 @@ auto ProcessGroup::reduce_scatter_async(const std::vector<Tensor>& tensors, Tens
     backend_->reduce_scatter_async(tensors, output, op, stream);
 }
 
+// A4-extended: all-to-all single forwarder. Default backend impl is the
+// composed fallback (all_gather + slice); NCCL overrides with native
+// ncclGroupStart + ncclSend/Recv pairs (see NCCLBackend).
+auto ProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->all_to_all_single(output, input);
+}
+
+// A4-extended: default `all_to_all_single` for backends without a native
+// primitive. CommunicationBackend itself has no rank/world_size accessor
+// (those live on ProcessGroup), so the default fallback can only handle
+// the trivial world_size == 1 / single-rank case via memcpy. Multi-rank
+// callers MUST go through a backend that overrides this method (NCCL),
+// or use the newer `ProcessGroupBase` hierarchy where the
+// `all_gather + slice` fallback is rank-aware.
+auto CommunicationBackend::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+    auto input_shape = input.shape();
+    if (input_shape.empty()) {
+        throw std::invalid_argument(
+            "CommunicationBackend::all_to_all_single: input must have ≥ 1 dimension.");
+    }
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
+    std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
+    if (in_shape_vec != out_shape_vec) {
+        throw std::invalid_argument(
+            "CommunicationBackend::all_to_all_single: output and input must have identical shape.");
+    }
+    if (output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "CommunicationBackend::all_to_all_single: output and input must have identical dtype.");
+    }
+
+    // The trivial single-rank case is a memcpy. For multi-rank, the
+    // backend must override.
+    int64_t world_size_guess = input_shape[0];
+    if (world_size_guess == 1) {
+        std::memcpy(output.data_ptr(),
+                    input.data_ptr(),
+                    static_cast<size_t>(input.numel()) * dtype_size(input.dtype()));
+        return;
+    }
+
+    throw std::runtime_error(
+        "CommunicationBackend::all_to_all_single: no default fallback for "
+        "world_size > 1 (this backend lacks a rank accessor). Use NCCL which "
+        "overrides this method natively, or switch to the ProcessGroupBase "
+        "hierarchy whose default does support multi-rank via all_gather + slice.");
+}
+
 auto ProcessGroup::send(const Tensor& tensor, int dst_rank) -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     backend_->send(tensor, dst_rank);

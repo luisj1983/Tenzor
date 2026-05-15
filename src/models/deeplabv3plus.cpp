@@ -31,8 +31,10 @@ DeepLabV3PlusEncoder::DeepLabV3PlusEncoder(const std::string& backbone_name,
         throw std::invalid_argument("output_stride must be 8 or 16");
     }
 
-    // Create backbone
-    backbone_ = create_resnet_backbone(backbone_name, pretrained);
+    // Create backbone. Audit G11: pass output_stride through so the atrous
+    // variants of ResNet are used when output_stride < 32 (replaces the
+    // previous heuristic of regular ResNet + project+upsample fake).
+    backbone_ = create_resnet_backbone(backbone_name, pretrained, output_stride);
 
     // Determine channel dimensions based on backbone
     if (backbone_name == "resnet50" || backbone_name == "resnet101" ||
@@ -62,35 +64,58 @@ DeepLabV3PlusEncoder::DeepLabV3PlusEncoder(const std::string& backbone_name,
     aspp_ = std::make_shared<nn::ASPP>(high_level_channels_, 256, atrous_rates, true, 0.5f);
     register_module("aspp", aspp_);
 
-    // Create feature projection layer to convert ResNet output (2048 channels) to low-level channels (256)
-    // ResNet Bottleneck layer4 outputs 512 * 4 = 2048 channels
-    // This simulates extracting features from layer1 which would have low_level_channels_
-    feature_proj_ = std::make_shared<nn::Conv2d>(high_level_channels_, low_level_channels_, 1, 1, 0);
-    register_module("feature_proj", feature_proj_);
+    // Audit G11: feature_proj_ is only needed for the MobileNetV2 backbone
+    // path (which still uses the project+upsample heuristic until G11-followup
+    // adds atrous MobileNetV2 + real low-level features). For ResNet backbones
+    // the forward path now extracts real C2 features via forward_features_multi
+    // — the C2 channel count already matches `low_level_channels_` (256 for
+    // Bottleneck, 64 for BasicBlock), so no projection is needed.
+    const bool is_resnet = (backbone_name == "resnet50" || backbone_name == "resnet101" ||
+                            backbone_name == "resnet152" || backbone_name == "resnet18" ||
+                            backbone_name == "resnet34");
+    if (!is_resnet) {
+        feature_proj_ = std::make_shared<nn::Conv2d>(high_level_channels_, low_level_channels_, 1, 1, 0);
+        register_module("feature_proj", feature_proj_);
+    }
 }
 
 auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
-                                                   bool pretrained)
+                                                   bool pretrained,
+                                                   int64_t output_stride)
     -> std::shared_ptr<nn::Module>
 {
-    // Create backbone (ResNet or MobileNet)
-    // Note: We reuse the existing implementations
-    // In a full implementation, we would modify layer3 and layer4 to use
-    // atrous convolutions when output_stride < 32
-
+    // Audit G11: select atrous-modified ResNet variants when output_stride < 32.
+    // ResNet18/34 (BasicBlock) don't support atrous, so we require
+    // output_stride=32 for them.
     std::shared_ptr<nn::Module> backbone;
 
     if (name == "resnet50") {
-        backbone = resnet50(1000, pretrained);
+        backbone = (output_stride == 32) ? resnet50(1000, pretrained)
+                                         : resnet50_atrous(1000, output_stride, pretrained);
     } else if (name == "resnet101") {
-        backbone = resnet101(1000, pretrained);
+        backbone = (output_stride == 32) ? resnet101(1000, pretrained)
+                                         : resnet101_atrous(1000, output_stride, pretrained);
     } else if (name == "resnet152") {
-        backbone = resnet152(1000, pretrained);
+        backbone = (output_stride == 32) ? resnet152(1000, pretrained)
+                                         : resnet152_atrous(1000, output_stride, pretrained);
     } else if (name == "resnet18") {
+        if (output_stride != 32) {
+            throw std::invalid_argument(
+                "ResNet-18 (BasicBlock) does not support atrous output_stride < 32. "
+                "Use resnet50/101/152 for DeepLab-style decoders.");
+        }
         backbone = resnet18(1000, pretrained);
     } else if (name == "resnet34") {
+        if (output_stride != 32) {
+            throw std::invalid_argument(
+                "ResNet-34 (BasicBlock) does not support atrous output_stride < 32. "
+                "Use resnet50/101/152 for DeepLab-style decoders.");
+        }
         backbone = resnet34(1000, pretrained);
     } else if (name == "mobilenetv2") {
+        // MobileNetV2 atrous mode is G11-followup; keep the legacy
+        // construction for now (the encoder forward_multi still uses
+        // feature_proj_ + upsample for this path).
         backbone = mobilenet_v2(1000, pretrained);
     } else {
         throw std::invalid_argument("Unsupported backbone variant: " + name);
@@ -103,40 +128,39 @@ auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
 auto DeepLabV3PlusEncoder::forward_multi(const Variable& input)
     -> std::pair<Variable, Variable>
 {
-    Variable high_level_features;
-
-    // Try ResNet backbone first
+    // Audit G11: real low-level feature extraction.
+    //
+    // ResNet path: use forward_features_multi → (C2, C3, C4, C5). C2 is the
+    // canonical low-level feature (layer1 output, stride 4, 256 ch for
+    // Bottleneck variants — matches `low_level_channels_`). C5 is the
+    // high-level feature (with atrous applied per output_stride). ASPP runs
+    // on C5. No project+upsample fake.
+    //
+    // MobileNetV2 path: keep the legacy project+upsample heuristic until
+    // G11-followup adds atrous MobileNetV2 + real low-level features.
     auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
     if (resnet) {
-        // Extract high-level features using forward_features
-        // This returns features from layer4 before global pooling (2048 channels at 1/32 resolution)
-        high_level_features = resnet->forward_features(input);
-    } else {
-        // Try MobileNetV2 backbone
-        auto mobilenet = std::dynamic_pointer_cast<MobileNetV2>(backbone_);
-        if (mobilenet) {
-            // For MobileNet, extract features before the classifier
-            // This returns features after all conv layers (320 channels at 1/32 resolution)
-            high_level_features = mobilenet->forward_features(input);
-        } else {
-            throw std::runtime_error("Unsupported backbone type for DeepLabV3+");
-        }
+        auto [c2, c3, c4, c5] = resnet->forward_features_multi(input);
+        (void)c3; (void)c4;  // unused — single-scale ASPP for now.
+
+        Variable aspp_features      = aspp_->forward(c5);
+        Variable low_level_features = c2;
+        return {aspp_features, low_level_features};
     }
 
-    // Project high-level features to match expected low-level channel count (256 channels)
+    auto mobilenet = std::dynamic_pointer_cast<MobileNetV2>(backbone_);
+    if (!mobilenet) {
+        throw std::runtime_error("Unsupported backbone type for DeepLabV3+");
+    }
+
+    // MobileNetV2 legacy path (G11-followup to refactor).
+    Variable high_level_features = mobilenet->forward_features(input);
     auto projected = feature_proj_->forward(high_level_features);
-
-    // Upsample projected features to 1/4 resolution to simulate layer1 features
-    // Layer4 is at 1/32 resolution, layer1 is at 1/4 resolution
-    // Need to upsample by 8× to match decoder's expectation
     const auto& input_shape = input.tensor().shape();
-    int64_t target_h = input_shape[2] / 4;  // 1/4 of input height
-    int64_t target_w = input_shape[3] / 4;  // 1/4 of input width
+    int64_t target_h = input_shape[2] / 4;
+    int64_t target_w = input_shape[3] / 4;
     auto low_level_features = nn::upsample_bilinear(projected, target_h, target_w);
-
-    // Apply ASPP to high-level features
     auto aspp_features = aspp_->forward(high_level_features);
-
     return {aspp_features, low_level_features};
 }
 

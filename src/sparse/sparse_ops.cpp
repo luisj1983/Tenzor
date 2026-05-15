@@ -974,6 +974,28 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
     auto vals = sparse.values().contiguous();
     int64_t nnz = sparse.nnz();
 
+    // Audit J13: F16/BF16 widen-narrow. The branched scalar multiplication
+    // below has no native half-precision path; widen to F32 around the call.
+    if (vals.dtype() == DType::Float16 || vals.dtype() == DType::BFloat16) {
+        DType orig = vals.dtype();
+        SparseTensor widened = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(),
+                                       vals.to(DType::Float32),
+                                       std::vector<int64_t>(sparse.shape().begin(),
+                                                            sparse.shape().end()))
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       vals.to(DType::Float32),
+                                       std::vector<int64_t>(sparse.shape().begin(),
+                                                            sparse.shape().end()));
+        SparseTensor result = mul(widened, scalar);
+        Tensor narrowed = result.values().to(orig);
+        auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
+        return (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(result.indices(), narrowed, shape_vec)
+            : SparseTensor::sparse_csr(result.crow_indices(), result.col_indices(),
+                                       narrowed, shape_vec);
+    }
+
     auto new_values = Tensor({nnz}, vals.dtype(), vals.device());
     if (vals.dtype() == DType::Float32) {
         auto* src = vals.data<float>();
@@ -1164,6 +1186,24 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
     }
     if (a.dtype() == DType::Float64) {
         return cpu_spgemm_typed<double>(a_csr, b_csr, M, K, N);
+    }
+    // Audit J13: F16/BF16 widen-narrow. cpu_spgemm_typed is only specialized
+    // for float/double; widen the value buffers to F32, run, then narrow.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig = a.dtype();
+        auto widen_csr = [](const SparseTensor& s) {
+            auto sh = std::vector<int64_t>(s.shape().begin(), s.shape().end());
+            return SparseTensor::sparse_csr(
+                s.crow_indices(), s.col_indices(),
+                s.values().to(DType::Float32), sh);
+        };
+        SparseTensor a_w = widen_csr(a_csr);
+        SparseTensor b_w = widen_csr(b_csr);
+        SparseTensor c_w = cpu_spgemm_typed<float>(a_w, b_w, M, K, N);
+        return SparseTensor::sparse_csr(
+            c_w.crow_indices(), c_w.col_indices(),
+            c_w.values().to(orig),
+            std::vector<int64_t>{M, N});
     }
     throw std::runtime_error("spgemm: unsupported dtype " +
         std::string(dtype_name(a.dtype())));

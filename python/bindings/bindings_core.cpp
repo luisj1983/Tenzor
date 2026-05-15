@@ -856,14 +856,33 @@ Returns:
                 // tensors pointing at the original buffer — silently
                 // broke `parameter.tensor().copy_(...)` used throughout
                 // the parity tests and the ONNX import weight-copy path.
+                // Audit J10: real broadcasting. Previously copy_ required
+                // src.shape() == self.shape() exactly; now we broadcast `src`
+                // up to self's shape (the destination is the broadcast target,
+                // PyTorch convention) before doing the byte copy. `src` shapes
+                // that don't broadcast-compatible with self still throw.
                 auto ss = self.shape();
                 auto xs = src.shape();
+                tenzor::Tensor converted = src;
                 if (ss.size() != xs.size() ||
                     !std::equal(ss.begin(), ss.end(), xs.begin())) {
-                    throw py::value_error(
-                        "Tensor.copy_: shape mismatch (requires identical shapes for now)");
+                    // Try broadcasting src to self's shape. broadcast_shapes
+                    // returns the result of standard NumPy-style broadcasting;
+                    // we require the result equals self's shape (src can't
+                    // override dimensions where self already has size > 1).
+                    std::vector<int64_t> ss_vec(ss.begin(), ss.end());
+                    std::vector<int64_t> xs_vec(xs.begin(), xs.end());
+                    auto bs = tenzor::broadcast_shapes(
+                        std::span<const int64_t>(ss_vec),
+                        std::span<const int64_t>(xs_vec));
+                    if (bs.size() != ss_vec.size() ||
+                        !std::equal(bs.begin(), bs.end(), ss_vec.begin())) {
+                        throw py::value_error(
+                            "Tensor.copy_: src shape is not broadcast-compatible "
+                            "with self's shape");
+                    }
+                    converted = tenzor::broadcast_to(converted, ss_vec);
                 }
-                tenzor::Tensor converted = src;
                 if (converted.dtype() != self.dtype()) {
                     converted = converted.to(self.dtype());
                 }
@@ -1110,18 +1129,33 @@ Returns:
                 throw std::runtime_error("Buffer protocol requires a contiguous tensor. Call .contiguous() first.");
             }
 
-            // Map DType to Python struct format string
+            // Map DType to Python struct format string. Audit J9 added the
+            // Float16 / Complex64 / Complex128 cases. BF16 has no Python
+            // `struct` format code (and no native NumPy type without the
+            // optional ml_dtypes package) — throw with a clear, actionable
+            // error message rather than letting it silently fall through.
             std::string format;
             switch (t.dtype()) {
                 case tenzor::DType::Float32: format = py::format_descriptor<float>::format(); break;
                 case tenzor::DType::Float64: format = py::format_descriptor<double>::format(); break;
-                case tenzor::DType::Int32: format = py::format_descriptor<int32_t>::format(); break;
-                case tenzor::DType::Int64: format = py::format_descriptor<int64_t>::format(); break;
-                case tenzor::DType::Int16: format = py::format_descriptor<int16_t>::format(); break;
-                case tenzor::DType::Int8: format = py::format_descriptor<int8_t>::format(); break;
-                case tenzor::DType::UInt8: format = py::format_descriptor<uint8_t>::format(); break;
-                case tenzor::DType::Bool: format = py::format_descriptor<bool>::format(); break;
-                default: throw std::runtime_error("Buffer protocol not supported for dtype");
+                case tenzor::DType::Int32:   format = py::format_descriptor<int32_t>::format(); break;
+                case tenzor::DType::Int64:   format = py::format_descriptor<int64_t>::format(); break;
+                case tenzor::DType::Int16:   format = py::format_descriptor<int16_t>::format(); break;
+                case tenzor::DType::Int8:    format = py::format_descriptor<int8_t>::format(); break;
+                case tenzor::DType::UInt8:   format = py::format_descriptor<uint8_t>::format(); break;
+                case tenzor::DType::Bool:    format = py::format_descriptor<bool>::format(); break;
+                // Audit J9: Float16 / BFloat16 / Complex support.
+                case tenzor::DType::Float16:    format = "e"; break;   // half-precision (Python 3.6+, NumPy ≥1.21)
+                case tenzor::DType::Complex64:  format = "Zf"; break;  // 2 × float32 (NumPy convention)
+                case tenzor::DType::Complex128: format = "Zd"; break;  // 2 × float64
+                case tenzor::DType::BFloat16:
+                    throw std::runtime_error(
+                        "Buffer protocol: BFloat16 has no Python struct format "
+                        "code and no native NumPy dtype. Convert with "
+                        ".to(Float32).numpy() or install ml_dtypes for "
+                        "lossless interop.");
+                default:
+                    throw std::runtime_error("Buffer protocol not supported for dtype");
             }
 
             auto shape = t.shape();
@@ -1972,7 +2006,7 @@ Returns:
             enum class SetIndexKind { Int, Slice, Tuple };
             SetIndexKind kind;
             int64_t int_idx = 0;
-            int64_t slice_start = 0, slice_stop = 0;
+            int64_t slice_start = 0, slice_stop = 0, slice_step = 1;  // Audit J11: stepped slice for __setitem__
 
             struct SetTupleEntry {
                 bool is_int;
@@ -1997,10 +2031,8 @@ Returns:
                 if (!slice_obj.compute(shape[0], &start, &stop, &step, &length)) {
                     throw std::runtime_error("Invalid slice");
                 }
-                if (step != 1) {
-                    throw std::runtime_error("Slice step not supported yet for assignment");
-                }
-                slice_start = start; slice_stop = stop;
+                // Audit J11: stepped slice is supported via Tensor::slice(dim,start,stop,step).
+                slice_start = start; slice_stop = stop; slice_step = step;
             } else if (py::isinstance<py::tuple>(key)) {
                 kind = SetIndexKind::Tuple;
                 py::tuple indices = py::cast<py::tuple>(key);
@@ -2322,7 +2354,8 @@ Returns:
                     break;
                 }
                 case SetIndexKind::Slice: {
-                    target = self.slice(0, slice_start, slice_stop);
+                    // Audit J11: pass slice_step (was hard-coded to 1).
+                    target = self.slice(0, slice_start, slice_stop, slice_step);
                     break;
                 }
                 case SetIndexKind::Tuple: {
@@ -2363,10 +2396,8 @@ Returns:
                             else if (stop < 0) stop += dim_size;
                             start = std::clamp(start, int64_t(0), dim_size);
                             stop = std::clamp(stop, int64_t(0), dim_size);
-                            if (entry.step != 1) {
-                                throw std::runtime_error("Slice step not supported yet for assignment");
-                            }
-                            target = target.slice(adjusted_dim, start, stop);
+                            // Audit J11: stepped slice supported via Tensor::slice's step arg.
+                            target = target.slice(adjusted_dim, start, stop, entry.step);
                         }
                     }
                     // Squeeze indexed dimensions (from back to front)

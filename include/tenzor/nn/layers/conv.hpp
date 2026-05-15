@@ -9,6 +9,7 @@
 #pragma once
 
 #include <optional>
+#include <tuple>      // Audit I5: per-axis Conv3d/ConvTranspose{2,3}d ctors
 #include <utility>
 #include "../module.hpp"
 
@@ -300,49 +301,67 @@ public:
                     bool bias = true);
 
     /**
+     * @brief Audit I5: per-axis ConvTranspose2d ctor. Each spatial axis (H/W)
+     * gets its own kernel/stride/padding/output_padding/dilation value. Use
+     * this for anisotropic transposed-conv decoders.
+     */
+    ConvTranspose2d(int64_t in_channels,
+                    int64_t out_channels,
+                    std::pair<int64_t, int64_t> kernel_size,
+                    std::pair<int64_t, int64_t> stride,
+                    std::pair<int64_t, int64_t> padding,
+                    std::pair<int64_t, int64_t> output_padding,
+                    std::pair<int64_t, int64_t> dilation,
+                    int64_t groups = 1,
+                    bool bias = true);
+
+    /**
      * @brief Forward pass through transposed 2D convolution.
-     *
-     * @param input Input variable of shape (N, C_in, H_in, W_in)
-     * @return Output variable of shape (N, C_out, H_out, W_out)
-     *
-     * @throws std::runtime_error if input channels don't match
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto extra_repr() const -> std::string override {
         return "in_channels=" + std::to_string(in_channels_) +
                ", out_channels=" + std::to_string(out_channels_) +
-               ", kernel_size=" + std::to_string(kernel_size_) +
-               ", stride=" + std::to_string(stride_) +
-               ", padding=" + std::to_string(padding_) +
-               ", output_padding=" + std::to_string(output_padding_) +
+               ", kernel_size=(" + std::to_string(kH_) + "," + std::to_string(kW_) + ")" +
+               ", stride=(" + std::to_string(sH_) + "," + std::to_string(sW_) + ")" +
+               ", padding=(" + std::to_string(pH_) + "," + std::to_string(pW_) + ")" +
+               ", output_padding=(" + std::to_string(opH_) + "," + std::to_string(opW_) + ")" +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
-    // Accessors for ONNX export and introspection.
     auto in_channels() const -> int64_t { return in_channels_; }
     auto out_channels() const -> int64_t { return out_channels_; }
-    auto kernel_size() const -> int64_t { return kernel_size_; }
-    auto stride() const -> int64_t { return stride_; }
-    auto padding() const -> int64_t { return padding_; }
-    auto output_padding() const -> int64_t { return output_padding_; }
+    // Scalar accessors return the H-axis value (back-compat for isotropic callers).
+    auto kernel_size() const -> int64_t { return kH_; }
+    auto stride() const -> int64_t { return sH_; }
+    auto padding() const -> int64_t { return pH_; }
+    auto output_padding() const -> int64_t { return opH_; }
+    auto dilation() const -> int64_t { return dH_; }
     auto groups() const -> int64_t { return groups_; }
+    // Per-axis accessors (audit I5).
+    auto kernel_size_h() const -> int64_t { return kH_; }
+    auto kernel_size_w() const -> int64_t { return kW_; }
+    auto stride_h() const -> int64_t { return sH_; }
+    auto stride_w() const -> int64_t { return sW_; }
+    auto padding_h() const -> int64_t { return pH_; }
+    auto padding_w() const -> int64_t { return pW_; }
+    auto output_padding_h() const -> int64_t { return opH_; }
+    auto output_padding_w() const -> int64_t { return opW_; }
+    auto dilation_h() const -> int64_t { return dH_; }
+    auto dilation_w() const -> int64_t { return dW_; }
 
 private:
-    int64_t in_channels_;       ///< Number of input channels
-    int64_t out_channels_;      ///< Number of output channels
-    int64_t kernel_size_;       ///< Kernel size
-    int64_t stride_;            ///< Stride
-    int64_t padding_;           ///< Padding
-    int64_t output_padding_;    ///< Output padding
-    int64_t groups_;            ///< Number of groups
+    int64_t in_channels_;
+    int64_t out_channels_;
+    // Per-axis kernel / stride / padding / output_padding / dilation (audit I5).
+    int64_t kH_, kW_;
+    int64_t sH_, sW_;
+    int64_t pH_, pW_;
+    int64_t opH_, opW_;
+    int64_t dH_, dW_;
+    int64_t groups_;
 
-    // Parameters accessed via parameters_ map — no member variable duplicates.
-    // Use parameters_["weight"] and parameters_.find("bias") in forward().
-
-    /**
-     * @brief Initialize parameters using Kaiming uniform.
-     */
     auto reset_parameters() -> void;
 };
 
@@ -364,6 +383,9 @@ private:
  */
 class Conv3d : public Module {
 public:
+    /**
+     * @brief Construct 3-D convolutional layer (scalar = same value for D/H/W).
+     */
     Conv3d(int64_t in_channels,
            int64_t out_channels,
            int64_t kernel_size,
@@ -373,32 +395,62 @@ public:
            int64_t groups = 1,
            bool bias = true);
 
+    /**
+     * @brief Audit I5: per-axis Conv3d ctor. Each spatial axis (D/H/W) gets
+     * its own kernel/stride/padding/dilation value. Use this for anisotropic
+     * volumetric models — temporal convolutions, 3-D segmentation networks
+     * with different spatial vs depth strides, etc.
+     */
+    Conv3d(int64_t in_channels,
+           int64_t out_channels,
+           std::tuple<int64_t, int64_t, int64_t> kernel_size,
+           std::tuple<int64_t, int64_t, int64_t> stride,
+           std::tuple<int64_t, int64_t, int64_t> padding,
+           std::tuple<int64_t, int64_t, int64_t> dilation,
+           int64_t groups = 1,
+           bool bias = true);
+
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto extra_repr() const -> std::string override {
         return "in_channels=" + std::to_string(in_channels_) +
                ", out_channels=" + std::to_string(out_channels_) +
-               ", kernel_size=" + std::to_string(kernel_size_) +
-               ", stride=" + std::to_string(stride_) +
-               ", padding=" + std::to_string(padding_) +
+               ", kernel_size=(" + std::to_string(kD_) + "," + std::to_string(kH_) + "," + std::to_string(kW_) + ")" +
+               ", stride=(" + std::to_string(sD_) + "," + std::to_string(sH_) + "," + std::to_string(sW_) + ")" +
+               ", padding=(" + std::to_string(pD_) + "," + std::to_string(pH_) + "," + std::to_string(pW_) + ")" +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
     auto in_channels() const -> int64_t { return in_channels_; }
     auto out_channels() const -> int64_t { return out_channels_; }
-    auto kernel_size() const -> int64_t { return kernel_size_; }
-    auto stride() const -> int64_t { return stride_; }
-    auto padding() const -> int64_t { return padding_; }
-    auto dilation() const -> int64_t { return dilation_; }
+    // Scalar accessors return the D-axis value (back-compat for isotropic callers).
+    auto kernel_size() const -> int64_t { return kD_; }
+    auto stride() const -> int64_t { return sD_; }
+    auto padding() const -> int64_t { return pD_; }
+    auto dilation() const -> int64_t { return dD_; }
     auto groups() const -> int64_t { return groups_; }
+    // Per-axis accessors (audit I5).
+    auto kernel_size_d() const -> int64_t { return kD_; }
+    auto kernel_size_h() const -> int64_t { return kH_; }
+    auto kernel_size_w() const -> int64_t { return kW_; }
+    auto stride_d() const -> int64_t { return sD_; }
+    auto stride_h() const -> int64_t { return sH_; }
+    auto stride_w() const -> int64_t { return sW_; }
+    auto padding_d() const -> int64_t { return pD_; }
+    auto padding_h() const -> int64_t { return pH_; }
+    auto padding_w() const -> int64_t { return pW_; }
+    auto dilation_d() const -> int64_t { return dD_; }
+    auto dilation_h() const -> int64_t { return dH_; }
+    auto dilation_w() const -> int64_t { return dW_; }
 
 private:
     int64_t in_channels_;
     int64_t out_channels_;
-    int64_t kernel_size_;
-    int64_t stride_;
-    int64_t padding_;
-    int64_t dilation_;
+    // Per-axis kernel / stride / padding / dilation (audit I5).
+    int64_t kD_, kH_, kW_;
+    int64_t sD_, sH_, sW_;
+    int64_t pD_, pH_, pW_;
+    int64_t dD_, dH_, dW_;
     int64_t groups_;
 
     auto reset_parameters() -> void;
@@ -429,35 +481,62 @@ public:
                     int64_t groups = 1,
                     bool bias = true);
 
+    /// Audit I5: per-axis ConvTranspose3d ctor.
+    ConvTranspose3d(int64_t in_channels,
+                    int64_t out_channels,
+                    std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                    std::tuple<int64_t, int64_t, int64_t> stride,
+                    std::tuple<int64_t, int64_t, int64_t> padding,
+                    std::tuple<int64_t, int64_t, int64_t> output_padding,
+                    std::tuple<int64_t, int64_t, int64_t> dilation,
+                    int64_t groups = 1,
+                    bool bias = true);
+
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto extra_repr() const -> std::string override {
         return "in_channels=" + std::to_string(in_channels_) +
                ", out_channels=" + std::to_string(out_channels_) +
-               ", kernel_size=" + std::to_string(kernel_size_) +
-               ", stride=" + std::to_string(stride_) +
-               ", padding=" + std::to_string(padding_) +
-               ", output_padding=" + std::to_string(output_padding_) +
+               ", kernel_size=(" + std::to_string(kD_) + "," + std::to_string(kH_) + "," + std::to_string(kW_) + ")" +
+               ", stride=(" + std::to_string(sD_) + "," + std::to_string(sH_) + "," + std::to_string(sW_) + ")" +
+               ", padding=(" + std::to_string(pD_) + "," + std::to_string(pH_) + "," + std::to_string(pW_) + ")" +
+               ", output_padding=(" + std::to_string(opD_) + "," + std::to_string(opH_) + "," + std::to_string(opW_) + ")" +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
     auto in_channels() const -> int64_t { return in_channels_; }
     auto out_channels() const -> int64_t { return out_channels_; }
-    auto kernel_size() const -> int64_t { return kernel_size_; }
-    auto stride() const -> int64_t { return stride_; }
-    auto padding() const -> int64_t { return padding_; }
-    auto output_padding() const -> int64_t { return output_padding_; }
-    auto dilation() const -> int64_t { return dilation_; }
+    auto kernel_size() const -> int64_t { return kD_; }
+    auto stride() const -> int64_t { return sD_; }
+    auto padding() const -> int64_t { return pD_; }
+    auto output_padding() const -> int64_t { return opD_; }
+    auto dilation() const -> int64_t { return dD_; }
     auto groups() const -> int64_t { return groups_; }
+    // Per-axis accessors (audit I5).
+    auto kernel_size_d() const -> int64_t { return kD_; }
+    auto kernel_size_h() const -> int64_t { return kH_; }
+    auto kernel_size_w() const -> int64_t { return kW_; }
+    auto stride_d() const -> int64_t { return sD_; }
+    auto stride_h() const -> int64_t { return sH_; }
+    auto stride_w() const -> int64_t { return sW_; }
+    auto padding_d() const -> int64_t { return pD_; }
+    auto padding_h() const -> int64_t { return pH_; }
+    auto padding_w() const -> int64_t { return pW_; }
+    auto output_padding_d() const -> int64_t { return opD_; }
+    auto output_padding_h() const -> int64_t { return opH_; }
+    auto output_padding_w() const -> int64_t { return opW_; }
+    auto dilation_d() const -> int64_t { return dD_; }
+    auto dilation_h() const -> int64_t { return dH_; }
+    auto dilation_w() const -> int64_t { return dW_; }
 
 private:
     int64_t in_channels_;
     int64_t out_channels_;
-    int64_t kernel_size_;
-    int64_t stride_;
-    int64_t padding_;
-    int64_t output_padding_;
-    int64_t dilation_;
+    int64_t kD_, kH_, kW_;
+    int64_t sD_, sH_, sW_;
+    int64_t pD_, pH_, pW_;
+    int64_t opD_, opH_, opW_;
+    int64_t dD_, dH_, dW_;
     int64_t groups_;
 
     auto reset_parameters() -> void;

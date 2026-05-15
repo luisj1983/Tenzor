@@ -147,11 +147,31 @@ private:
     auto convert_exp(const ONNXImportNode& node) -> void;
     auto convert_log(const ONNXImportNode& node) -> void;
 
+    // Audit I6: additional op converters wiring through existing tensor ops.
+    auto convert_argmax(const ONNXImportNode& node) -> void;
+    auto convert_argmin(const ONNXImportNode& node) -> void;
+    auto convert_topk(const ONNXImportNode& node) -> void;
+    auto convert_tile(const ONNXImportNode& node) -> void;
+    auto convert_range(const ONNXImportNode& node) -> void;
+    auto convert_non_zero(const ONNXImportNode& node) -> void;
+    auto convert_round(const ONNXImportNode& node) -> void;
+    auto convert_einsum(const ONNXImportNode& node) -> void;
+    auto convert_trilu(const ONNXImportNode& node) -> void;
+
     // Layer conversion
     auto convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_conv_transpose(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_layer_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    // I6-followup: InstanceNormalization / GroupNormalization op converters.
+    auto convert_instance_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_group_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    // I6-followup: LSTM/GRU/RNN op converters. Each routes through the existing
+    // nn::LSTM/GRU/RNN modules with ONNX weight ordering remapped to the
+    // tenzor convention.
+    auto convert_lstm(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_gru(const ONNXImportNode& node)  -> std::shared_ptr<nn::Module>;
+    auto convert_rnn(const ONNXImportNode& node)  -> std::shared_ptr<nn::Module>;
 
     // Activation functions
     auto convert_relu(const ONNXImportNode& node) -> void;

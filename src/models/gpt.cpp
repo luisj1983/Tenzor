@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/models/gpt.hpp"
+#include "../../include/tenzor/models/hub.hpp"  // Audit H4
 #include "../../include/tenzor/autograd/variable.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/activations/activations.hpp"
@@ -220,6 +221,11 @@ auto GPT2Model::forward(const Variable& input_ids,
 
 auto GPT2Model::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Tensor{});
+}
+
+auto GPT2Model::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4. See AlbertModel::load_pretrained.
+    ModelHub::load_pretrained_weights(*this, path, strict);
 }
 
 // ============================================================================
@@ -648,95 +654,112 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
 auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> Tensor {
     model_.eval();
 
+    // Audit G16: batched beam search.
+    //
+    // Previously hard-coded to batch_size=1 (the function threw otherwise).
+    // Real beam search across a batch of inputs maintains B × num_beams beams
+    // total, with each batch's top-num_beams kept independently. We pack all
+    // beams into a single (B × num_beams, T) forward call per step rather
+    // than looping per-beam — the model sees a virtual batch of size
+    // B × num_beams, so latency is amortized across beams and batch items.
     auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
+    const int64_t flat_n = batch_size * num_beams;
 
-    if (batch_size != 1) {
-        throw std::runtime_error("Beam search currently only supports batch_size=1");
+    // Beams stored as variable-length token vectors plus a parallel score
+    // vector indexed as `bat * num_beams + b`.
+    std::vector<std::vector<int64_t>> beam_tokens(flat_n);
+    std::vector<float> beam_scores(flat_n, 0.0f);
+
+    Tensor input_cpu = input_ids.to(Device::cpu());
+    const int64_t* input_data = input_cpu.data<int64_t>();
+    for (int64_t bat = 0; bat < batch_size; ++bat) {
+        for (int64_t b = 0; b < num_beams; ++b) {
+            auto& v = beam_tokens[bat * num_beams + b];
+            v.resize(current_len);
+            for (int64_t i = 0; i < current_len; ++i) {
+                v[i] = input_data[bat * current_len + i];
+            }
+        }
     }
 
-    // Initialize beams: each beam is (sequence, score)
-    struct Beam {
-        std::vector<int64_t> tokens;
+    struct Cand {
+        int64_t src_beam;  // index within the batch's num_beams
+        int64_t token;
         float score;
     };
 
-    std::vector<Beam> beams(num_beams);
-
-    // Initialize with input sequence (move to CPU for data access)
-    Tensor input_cpu = input_ids.to(Device::cpu());
-    auto input_data = input_cpu.data<int64_t>();
-    for (int64_t b = 0; b < num_beams; ++b) {
-        beams[b].tokens.resize(current_len);
-        for (int64_t i = 0; i < current_len; ++i) {
-            beams[b].tokens[i] = input_data[i];
-        }
-        beams[b].score = 0.0f;
-    }
-
-    // Beam search
     for (int64_t step = current_len; step < config_.max_length; ++step) {
-        std::vector<Beam> candidates;
+        const int64_t cur_T = step;  // all beams currently this long
 
-        for (int64_t b = 0; b < num_beams; ++b) {
-            // Create tensor from beam tokens on CPU first
-            Tensor beam_tensor_cpu(std::vector<int64_t>{1, static_cast<int64_t>(beams[b].tokens.size())},
-                              DType::Int64, Device::cpu());
-            int64_t* beam_data = beam_tensor_cpu.data<int64_t>();
-            std::copy(beams[b].tokens.begin(), beams[b].tokens.end(), beam_data);
+        // Pack all B × num_beams beams into one (flat_n, cur_T) tensor.
+        Tensor stacked_cpu({flat_n, cur_T}, DType::Int64, Device::cpu());
+        int64_t* sp = stacked_cpu.data<int64_t>();
+        for (int64_t i = 0; i < flat_n; ++i) {
+            std::copy_n(beam_tokens[i].data(), cur_T, sp + i * cur_T);
+        }
+        Tensor stacked = (original_device == Device::cpu())
+            ? stacked_cpu : stacked_cpu.to(original_device);
+        Variable stacked_var(stacked, false);
 
-            // Move to original device for forward pass
-            Tensor beam_tensor = beam_tensor_cpu.to(original_device);
+        // Single batched forward — the model treats flat_n as the batch dim.
+        auto logits = model_.forward(stacked_var, Variable{}, Tensor{});
+        auto last = logits.tensor().slice(1, cur_T - 1, cur_T, 1).squeeze(1);  // (flat_n, V)
+        Variable last_var(last, false);
+        auto log_probs_t = nn::log_softmax(last_var, -1).tensor();
+        Tensor lp_cpu = log_probs_t.to(Device::cpu());
+        if (lp_cpu.dtype() != DType::Float32) lp_cpu = lp_cpu.to(DType::Float32);
+        const float* lp = lp_cpu.data<float>();
+        const int64_t vocab_size = lp_cpu.shape()[1];
 
-            // Forward pass
-            Variable beam_var(beam_tensor, false);
-            auto logits = model_.forward(beam_var, Variable{}, Tensor{});
+        // Per-batch top-k selection. New beams replace old in a separate
+        // buffer so within-step swaps don't corrupt the source token vectors.
+        std::vector<std::vector<int64_t>> new_beam_tokens(flat_n);
+        std::vector<float> new_beam_scores(flat_n);
 
-            // Get log probabilities for last position
-            auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze();
-            Variable last_var(last_logits, false);
-            auto log_probs_var = nn::log_softmax(last_var, -1);
-            auto log_probs = log_probs_var.tensor();
-
-            // Move to CPU and convert to Float32 for data access
-            Tensor log_probs_cpu = log_probs.to(Device::cpu());
-            if (log_probs_cpu.dtype() != DType::Float32) {
-                log_probs_cpu = log_probs_cpu.to(DType::Float32);
+        for (int64_t bat = 0; bat < batch_size; ++bat) {
+            std::vector<Cand> candidates;
+            candidates.reserve(static_cast<size_t>(num_beams * vocab_size));
+            for (int64_t b = 0; b < num_beams; ++b) {
+                const int64_t flat_idx = bat * num_beams + b;
+                const float prev = beam_scores[flat_idx];
+                const float* row = lp + flat_idx * vocab_size;
+                for (int64_t v = 0; v < vocab_size; ++v) {
+                    candidates.push_back({b, v, prev + row[v]});
+                }
             }
-            const float* log_probs_data = log_probs_cpu.data<float>();
-            auto vocab_size = log_probs.numel();
-
-            // Create candidates by extending current beam with each token
-            for (int64_t v = 0; v < vocab_size; ++v) {
-                Beam candidate;
-                candidate.tokens = beams[b].tokens;
-                candidate.tokens.push_back(v);
-                candidate.score = beams[b].score + log_probs_data[v];
-                candidates.push_back(candidate);
+            std::partial_sort(candidates.begin(),
+                              candidates.begin() + num_beams,
+                              candidates.end(),
+                              [](const Cand& a, const Cand& b) { return a.score > b.score; });
+            for (int64_t b = 0; b < num_beams; ++b) {
+                const int64_t dst = bat * num_beams + b;
+                const int64_t src = bat * num_beams + candidates[b].src_beam;
+                new_beam_tokens[dst] = beam_tokens[src];
+                new_beam_tokens[dst].push_back(candidates[b].token);
+                new_beam_scores[dst] = candidates[b].score;
             }
         }
+        beam_tokens = std::move(new_beam_tokens);
+        beam_scores = std::move(new_beam_scores);
+    }
 
-        // Select top num_beams candidates
-        std::partial_sort(candidates.begin(), candidates.begin() + num_beams, candidates.end(),
-                         [](const Beam& a, const Beam& b) { return a.score > b.score; });
-
-        // Update beams
-        for (int64_t b = 0; b < num_beams; ++b) {
-            beams[b] = candidates[b];
+    // Return the best (highest-score) beam per batch.
+    Tensor output_cpu({batch_size, config_.max_length}, DType::Int64, Device::cpu());
+    int64_t* od = output_cpu.data<int64_t>();
+    for (int64_t bat = 0; bat < batch_size; ++bat) {
+        const auto& best = beam_tokens[bat * num_beams + 0];
+        const int64_t n = std::min<int64_t>(config_.max_length, static_cast<int64_t>(best.size()));
+        for (int64_t i = 0; i < n; ++i) {
+            od[bat * config_.max_length + i] = best[i];
+        }
+        // Tail (if best is shorter than max_length) stays zero-initialized.
+        for (int64_t i = n; i < config_.max_length; ++i) {
+            od[bat * config_.max_length + i] = 0;
         }
     }
-
-    // Return best beam (create on CPU first)
-    Tensor output_cpu(std::vector<int64_t>{1, config_.max_length}, DType::Int64, Device::cpu());
-    int64_t* output_data = output_cpu.data<int64_t>();
-
-    for (int64_t i = 0; i < config_.max_length && i < static_cast<int64_t>(beams[0].tokens.size()); ++i) {
-        output_data[i] = beams[0].tokens[i];
-    }
-
-    // Return on original device
-    return output_cpu.to(original_device);
+    return (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 }
 
 } // namespace models

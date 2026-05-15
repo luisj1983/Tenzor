@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/roberta.hpp"
+#include "tenzor/models/hub.hpp"  // Audit H4
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -84,6 +85,11 @@ auto RobertaModel::forward(const Variable& input_ids,
 auto RobertaModel::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{}, Variable{});
     return outputs.sequence_output;
+}
+
+auto RobertaModel::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4. See AlbertModel::load_pretrained for details.
+    ModelHub::load_pretrained_weights(*this, path, strict);
 }
 
 // ============================================================================

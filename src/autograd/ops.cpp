@@ -2215,8 +2215,14 @@ auto dispatch_custom_op(CustomOpId id,
 
     auto& [backward_fn, save_fn] = *backward_info;
 
-    // Create the backward node
-    auto grad_fn = std::make_shared<CustomOpBackward>(backward_fn);
+    // Audit D2: also fetch the optional Variable-level backward. When
+    // present, `CustomOpBackward::backward_with_variables` will preserve
+    // the autograd graph for higher-order grads; when absent, the op
+    // honestly reports `is_higher_order_stub() = true`.
+    auto var_backward_opt = registry.get_var_backward(id);
+    auto grad_fn = var_backward_opt
+        ? std::make_shared<CustomOpBackward>(backward_fn, *var_backward_opt)
+        : std::make_shared<CustomOpBackward>(backward_fn);
 
     // Determine what to save for backward
     if (save_fn) {

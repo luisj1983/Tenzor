@@ -736,6 +736,61 @@ auto fold_cuda(const Tensor& input,
     return output;
 }
 
+// Audit D3: bilinear backward via atomicAdd scatter (device-resident — no
+// CPU fallback). Mirrors `interpolate_bilinear_kernel`'s clamping so the
+// adjoint exactly inverts the forward.
+template<typename T>
+__global__ void interpolate_bilinear_backward_kernel(
+    const T* grad_out, T* grad_in,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    bool align_corners
+) {
+    int64_t total = batch * channels * out_h * out_w;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float y, x;
+        if (align_corners) {
+            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
+            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+        } else {
+            float scale_h = static_cast<float>(in_h) / out_h;
+            float scale_w = static_cast<float>(in_w) / out_w;
+            y = (oh + 0.5f) * scale_h - 0.5f;
+            x = (ow + 0.5f) * scale_w - 0.5f;
+        }
+        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
+        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t y1 = min(y0 + 1, in_h - 1);
+        int64_t x1 = min(x0 + 1, in_w - 1);
+        float fy = y - y0;
+        float fx = x - x0;
+
+        float w00 = (1.0f - fy) * (1.0f - fx);
+        float w01 = (1.0f - fy) * fx;
+        float w10 = fy * (1.0f - fx);
+        float w11 = fy * fx;
+
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        // Typed atomicAdd: CUDA provides overloads for float (compute 2.0+),
+        // double (6.0+), __half (7.0+), and __nv_bfloat16 (8.0+).
+        atomicAdd(&grad_in[base_idx + y0 * in_w + x0], static_cast<T>(w00 * g));
+        atomicAdd(&grad_in[base_idx + y0 * in_w + x1], static_cast<T>(w01 * g));
+        atomicAdd(&grad_in[base_idx + y1 * in_w + x0], static_cast<T>(w10 * g));
+        atomicAdd(&grad_in[base_idx + y1 * in_w + x1], static_cast<T>(w11 * g));
+    }
+}
+
 // Interpolate host function
 auto interpolate_cuda(const Tensor& input,
                       const std::vector<int64_t>& size,
@@ -900,6 +955,70 @@ auto interpolate_cuda(const Tensor& input,
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
+}
+
+// ============================================================================
+// Audit D3: bilinear backward host dispatcher (device-resident scatter).
+// ============================================================================
+auto interpolate_backward_cuda(const Tensor& grad_output,
+                                const std::vector<int64_t>& input_size,
+                                const std::string& mode,
+                                bool align_corners) -> Tensor {
+    if (mode == "nearest") {
+        // Nearest-neighbor backward: each output pixel scatters its grad to
+        // its single source input pixel. Implement inline via a small
+        // dedicated kernel — simpler than the bilinear case.
+        // (Pragmatic short-form: compose via existing index_put_; here we
+        //  fall through to bilinear-with-zero-fractions for shape simplicity.)
+        // Pure bilinear works for nearest in the degenerate (integer-only)
+        // case but we want exact match: route to a dedicated path.
+    }
+    if (mode != "bilinear" && mode != "nearest") {
+        throw std::runtime_error("interpolate_backward_cuda: mode '" + mode +
+                                  "' not supported on CUDA. Use 'bilinear' or 'nearest'.");
+    }
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("interpolate_backward_cuda: only 4D (N,C,H,W) supported.");
+    }
+    if (input_size.size() != 2) {
+        throw std::runtime_error("interpolate_backward_cuda: input_size must be [in_h, in_w].");
+    }
+    const int64_t N     = shape[0];
+    const int64_t C     = shape[1];
+    const int64_t out_h = shape[2];
+    const int64_t out_w = shape[3];
+    const int64_t in_h  = input_size[0];
+    const int64_t in_w  = input_size[1];
+
+    Tensor grad_input({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
+    TENZOR_CUDA_CHECK(cudaMemset(grad_input.data_ptr(), 0,
+                                  static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype())));
+
+    int64_t total = N * C * out_h * out_w;
+    int threads = 256;
+    int blocks  = static_cast<int>((total + threads - 1) / threads);
+
+    if (mode == "bilinear") {
+        TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_bilinear_backward", [&]() {
+            interpolate_bilinear_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_output.data<scalar_t>(),
+                grad_input.data<scalar_t>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        });
+    } else {
+        // Nearest backward: scatter each output grad to its source input pixel.
+        // For exactness, we synthesize via the bilinear backward kernel with
+        // zero fractional parts (achieved by setting align_corners=false +
+        // integer scale). To keep nearest-correct, implement a tiny dedicated
+        // loop on host: dispatch tensor copies and use indexing. Simpler:
+        // require user to add a dedicated nearest backward kernel later.
+        throw std::runtime_error(
+            "interpolate_backward_cuda: nearest mode not yet implemented "
+            "on CUDA. Use 'bilinear' or do the backward on CPU.");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return grad_input;
 }
 
 // ============================================================================

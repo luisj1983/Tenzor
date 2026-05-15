@@ -98,6 +98,9 @@ public:
 
     auto recv(Tensor& tensor, int src_rank) -> void override;
 
+    // A4-extended: native NCCL all-to-all via ncclGroupStart + Send/Recv pairs.
+    auto all_to_all_single(Tensor& output, const Tensor& input) -> void override;
+
     auto barrier() -> void override;
 
     auto finalize() -> void override;

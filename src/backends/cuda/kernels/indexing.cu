@@ -27,6 +27,8 @@
 #include "cuda_common.cuh"
 
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"  // broadcast_to (F2)
+#include "tenzor/core/shape.hpp"     // broadcast_shapes (F2)
 
 namespace tenzor {
 namespace cuda {
@@ -1089,8 +1091,27 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
 
     if (n == 0) return output;
 
-    // Handle mask broadcasting if needed (assume same shape for now)
-    const bool* mask_ptr = reinterpret_cast<const bool*>(mask.data_ptr());
+    // F2: broadcast mask to input shape before kernel launch. Previously the
+    // kernel read `mask.data<bool>()` as a flat sequence of length `n` —
+    // when the mask had fewer dims or smaller dims (the common case is a
+    // (B, 1, S, S) attention mask broadcast across heads to (B, H, S, S)),
+    // the kernel either read past the end of the mask buffer (UB) or
+    // silently miscompiled the per-element gate. broadcasting via the
+    // existing `broadcast_to` op materialises a full mask once; the kernel
+    // then sees a 1:1 mapping with input.
+    Tensor mask_broadcast = mask;
+    std::vector<int64_t> input_shape_vec(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> mask_shape_vec(mask.shape().begin(), mask.shape().end());
+    if (mask_shape_vec != input_shape_vec) {
+        // Verify the broadcast is legal (will throw with a clear msg otherwise).
+        auto broadcast_shape = tenzor::broadcast_shapes(mask.shape(), input.shape());
+        if (broadcast_shape != input_shape_vec) {
+            throw std::invalid_argument(
+                "masked_fill: mask shape is not broadcast-compatible with input shape");
+        }
+        mask_broadcast = tenzor::broadcast_to(mask, input_shape_vec).contiguous();
+    }
+    const bool* mask_ptr = reinterpret_cast<const bool*>(mask_broadcast.data_ptr());
 
     #define LAUNCH_MASKED_FILL(T, cast_val) do { \
         auto [grid_size, block_size] = optimal_launch_config( \

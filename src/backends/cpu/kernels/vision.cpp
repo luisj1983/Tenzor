@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
+#include "tenzor/ops/creation.hpp"   // zeros()
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -517,6 +518,133 @@ auto interpolate_kernel(const Tensor& input,
     }
 
     return output;
+}
+
+// ============================================================================
+// Interpolate Backward Kernel (audit D3): device-resident bilinear scatter.
+// ============================================================================
+//
+// Computes grad_input from grad_output by distributing each output-pixel
+// gradient over the four nearest input pixels weighted by fractional source
+// coordinates. align_corners=false convention. Operates on CPU buffers
+// directly — no `.to(cpu)` round-trip needed when caller is already on CPU.
+
+template<typename T>
+static void interpolate_bilinear_backward_impl(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    bool align_corners)
+{
+    // align_corners=false: scale = in_h / out_h; src = (h + 0.5) * scale - 0.5.
+    // align_corners=true:  scale = (in_h - 1) / (out_h - 1); src = h * scale.
+    const float scale_h = align_corners && out_h > 1
+        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
+        : static_cast<float>(in_h) / static_cast<float>(out_h);
+    const float scale_w = align_corners && out_w > 1
+        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
+        : static_cast<float>(in_w) / static_cast<float>(out_w);
+
+    // grad_in is zero-initialized by the caller.
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + ((n * C + c) * out_h * out_w);
+            T* gi = grad_in + ((n * C + c) * in_h * in_w);
+            for (int64_t h = 0; h < out_h; ++h) {
+                const float src_h = align_corners
+                    ? h * scale_h
+                    : (h + 0.5f) * scale_h - 0.5f;
+                const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
+                const int64_t h1 = h0 + 1;
+                const float fh = src_h - h0;
+                for (int64_t w = 0; w < out_w; ++w) {
+                    const float src_w = align_corners
+                        ? w * scale_w
+                        : (w + 0.5f) * scale_w - 0.5f;
+                    const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
+                    const int64_t w1 = w0 + 1;
+                    const float fw = src_w - w0;
+                    const float g_val = static_cast<float>(go[h * out_w + w]);
+
+                    auto add = [&](int64_t hi, int64_t wi, float weight) {
+                        if (hi < 0 || hi >= in_h || wi < 0 || wi >= in_w) return;
+                        gi[hi * in_w + wi] = static_cast<T>(
+                            static_cast<float>(gi[hi * in_w + wi]) + g_val * weight);
+                    };
+                    add(h0, w0, (1.0f - fh) * (1.0f - fw));
+                    add(h0, w1, (1.0f - fh) * fw);
+                    add(h1, w0, fh * (1.0f - fw));
+                    add(h1, w1, fh * fw);
+                }
+            }
+        }
+    }
+}
+
+auto interpolate_backward_kernel(const Tensor& grad_output,
+                                  const std::vector<int64_t>& input_size,
+                                  const std::string& mode,
+                                  bool align_corners) -> Tensor {
+    if (mode != "bilinear" && mode != "nearest") {
+        throw std::runtime_error("interpolate_backward_kernel: mode '" + mode +
+                                 "' not yet supported (use 'bilinear' or 'nearest').");
+    }
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("interpolate_backward_kernel: only 4D (N,C,H,W) supported.");
+    }
+    if (input_size.size() != 2) {
+        throw std::runtime_error("interpolate_backward_kernel: input_size must be [in_h, in_w].");
+    }
+    const int64_t N      = shape[0];
+    const int64_t C      = shape[1];
+    const int64_t out_h  = shape[2];
+    const int64_t out_w  = shape[3];
+    const int64_t in_h   = input_size[0];
+    const int64_t in_w   = input_size[1];
+
+    Tensor grad_input = zeros({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        T* p = grad_input.data<T>();
+        if (mode == "bilinear") {
+            interpolate_bilinear_backward_impl<T>(
+                grad_output.data<T>(), p, N, C,
+                in_h, in_w, out_h, out_w, align_corners);
+        } else {
+            // 'nearest': adjoint is exact scatter to nearest input pixel.
+            // Each output pixel contributes its grad to one input pixel.
+            const float sh = static_cast<float>(in_h) / static_cast<float>(out_h);
+            const float sw = static_cast<float>(in_w) / static_cast<float>(out_w);
+            const T* go = grad_output.data<T>();
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    const T* go_nc = go + ((n * C + c) * out_h * out_w);
+                    T* gi_nc = p + ((n * C + c) * in_h * in_w);
+                    for (int64_t h = 0; h < out_h; ++h) {
+                        const int64_t hi = std::min<int64_t>(in_h - 1, static_cast<int64_t>(h * sh));
+                        for (int64_t w = 0; w < out_w; ++w) {
+                            const int64_t wi = std::min<int64_t>(in_w - 1, static_cast<int64_t>(w * sw));
+                            gi_nc[hi * in_w + wi] = static_cast<T>(
+                                static_cast<float>(gi_nc[hi * in_w + wi]) +
+                                static_cast<float>(go_nc[h * out_w + w]));
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    switch (grad_output.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr)); break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr)); break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr)); break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("interpolate_backward_kernel: unsupported dtype");
+    }
+    return grad_input;
 }
 
 // =========================================================================

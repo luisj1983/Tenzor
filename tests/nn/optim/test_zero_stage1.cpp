@@ -1386,3 +1386,114 @@ TEST_F(ZeROStage1Test, ElementLevel_CPUOffload_StepRuns) {
         EXPECT_TRUE(std::isfinite(d[i]));
     }
 }
+
+
+// ============================================================================
+// 14. Audit G2: ElementLevel + offload_to_nvme — was a throw, now functional.
+// ============================================================================
+
+TEST_F(ZeROStage1Test, ElementLevelNvmeOffload_ConstructsAndSteps) {
+    namespace fs = std::filesystem;
+    fs::path nvme_dir = fs::temp_directory_path() / "tenzor_zero_nvme_elementlevel_test";
+    fs::remove_all(nvme_dir);
+
+    auto params = create_test_params(/*count=*/3, /*shape=*/{16, 16});
+    for (auto& p : params) p->set_grad(ones_like(p->tensor()));
+    auto adam = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.offload_to_nvme = true;
+    cfg.nvme_path = nvme_dir.string();
+    // G2: previously threw at construction with "ElementLevel + offload_to_nvme
+    // is not yet supported (planned: Task 9.1)".
+    std::unique_ptr<ZeROStage1Optimizer> opt;
+    ASSERT_NO_THROW(
+        opt = std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg));
+
+    // ElementLevel produces a single flat slice per state (momentum + variance)
+    // — so exactly 2 blobs on disk per rank, regardless of param count.
+    ASSERT_TRUE(fs::exists(nvme_dir));
+    int blob_count = 0;
+    for (auto& e : fs::directory_iterator(nvme_dir)) {
+        if (e.is_regular_file()) ++blob_count;
+    }
+    EXPECT_EQ(blob_count, 2)
+        << "expected one momentum + one variance blob in ElementLevel NVMe mode";
+
+    // Drive a few steps end-to-end. The fetch_states_to_gpu / offload_states_to_cpu
+    // cycle should round-trip the slice through disk without throwing.
+    for (int s = 0; s < 3; ++s) {
+        ASSERT_NO_THROW(opt->step());
+        for (auto& p : params) p->set_grad(ones_like(p->tensor()));
+    }
+
+    // Param trajectory: all values finite (no NaN/Inf from corrupted IO).
+    for (auto& p : params) {
+        auto host = p->tensor().to(Device::cpu()).contiguous();
+        const float* d = host.data<float>();
+        for (int64_t i = 0; i < host.numel(); ++i) {
+            EXPECT_TRUE(std::isfinite(d[i]));
+        }
+    }
+
+    // Destructor should sweep the scratch blobs (same convention as ParamLevel).
+    opt.reset();
+    int leftover = 0;
+    if (fs::exists(nvme_dir)) {
+        for (auto& e : fs::directory_iterator(nvme_dir)) {
+            if (e.is_regular_file()) ++leftover;
+        }
+    }
+    EXPECT_EQ(leftover, 0) << "destructor should remove ElementLevel NVMe scratch files";
+
+    fs::remove_all(nvme_dir);
+}
+
+TEST_F(ZeROStage1Test, ElementLevelNvmeOffload_MatchesNoOffloadTrajectory) {
+    namespace fs = std::filesystem;
+    fs::path nvme_dir = fs::temp_directory_path() / "tenzor_zero_nvme_elementlevel_match";
+    fs::remove_all(nvme_dir);
+
+    constexpr int n_steps = 3;
+    constexpr int n_params = 3;
+
+    auto make_setup = [&](bool nvme) {
+        auto params = create_test_params(n_params, {16, 16});
+        for (auto& p : params) p->set_grad(ones_like(p->tensor()));
+        auto adam = std::make_unique<Adam>(params, 0.001);
+
+        ZeROStage1Config cfg = default_config;
+        cfg.partitioning_mode = PartitioningMode::ElementLevel;
+        cfg.offload_to_nvme = nvme;
+        cfg.nvme_path = nvme ? nvme_dir.string() : std::string{};
+
+        return std::pair{params, std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg)};
+    };
+
+    auto [ref_params, ref_opt]   = make_setup(false);
+    auto [nvme_params, nvme_opt] = make_setup(true);
+
+    for (int s = 0; s < n_steps; ++s) {
+        ASSERT_NO_THROW(ref_opt->step());
+        ASSERT_NO_THROW(nvme_opt->step());
+        for (auto& p : ref_params)  p->set_grad(ones_like(p->tensor()));
+        for (auto& p : nvme_params) p->set_grad(ones_like(p->tensor()));
+    }
+
+    // NVMe round-trip is bit-identical for fp32 (no quantization).
+    for (size_t i = 0; i < ref_params.size(); ++i) {
+        const auto& a = ref_params[i]->tensor();
+        const auto& b = nvme_params[i]->tensor();
+        ASSERT_EQ(a.numel(), b.numel());
+        const float* ad = a.data<float>();
+        const float* bd = b.data<float>();
+        for (int64_t k = 0; k < a.numel(); ++k) {
+            EXPECT_NEAR(ad[k], bd[k], 1e-6f)
+                << "ElementLevel NVMe drift at param[" << i << "][" << k << "]";
+        }
+    }
+
+    nvme_opt.reset();
+    fs::remove_all(nvme_dir);
+}

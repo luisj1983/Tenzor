@@ -522,10 +522,11 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
                input.dtype() == DType::Int8) {
         shader_name = "strided_copy_u8";
     } else if (input.dtype() == DType::Complex128) {
-        // 16-byte type — no existing shader; copy as 2x8-byte adjacent elements
-        // by treating the buffer as twice as long with 8-byte stride
-        throw std::runtime_error(
-            "Vulkan dispatchContiguous: Complex128 not yet supported");
+        // F18: 16-byte element wired through new `strided_copy_c128.comp`
+        // shader (a uvec4 port of strided_copy_f64.comp). Previously this
+        // path threw — every Complex128 op that needed contiguous input
+        // (FFT, MatMul, almost anything reshape-flavoured) failed outright.
+        shader_name = "strided_copy_c128";
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);

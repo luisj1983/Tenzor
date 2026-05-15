@@ -160,6 +160,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/special_math.cpp
     kernels/grid_sample.cpp
     kernels/sampling.cpp
+    kernels/philox_dropout.cpp   # F13-followup: device-side Philox dropout
     kernels/stft.cpp
     kernels/activations.cpp
     kernels/reduction.cpp

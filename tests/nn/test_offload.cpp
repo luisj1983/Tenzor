@@ -851,6 +851,94 @@ TEST_F(ParameterOffloadTest, AsyncOffloadEndsWithCommittedState) {
 }
 
 // ==========================
+// Audit G3: OffloadDType::Int8WithScale end-to-end.
+// ==========================
+//
+// Previously the Int8WithScale enum value was accepted but the code path
+// silently fell back to BFloat16 ("INT8 with per-tensor scale is recorded
+// but the actual quant/dequant kernels need extra plumbing"). G3 wires up
+// the real quantize-on-offload + dequantize-on-fetch flow.
+
+TEST_F(ParameterOffloadTest, Int8WithScale_OffloadFetch_DataApproximatelyPreserved) {
+    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+
+    auto model = createTestModule(64, 128, 32);
+    model->to(Device::cuda(0));
+
+    auto params = model->parameters();
+    std::vector<Tensor> params_before;
+    for (const auto& param : params) {
+        params_before.push_back(param->tensor().clone());
+    }
+
+    OffloadContext::Config config = default_config;
+    config.offload_dtype = OffloadContext::Config::OffloadDType::Int8WithScale;
+    config.offload_threshold = 0;
+
+    {
+        // OffloadContext restores on destruction, not on disable() (which is
+        // just a flag flip). Scope ctx so its destructor runs before the
+        // post-check.
+        OffloadContext ctx(*model, config);
+        ctx.enable();
+        ctx.disable();
+    }  // ~OffloadContext() runs — restores Int8 cpu_copy back to Float32 GPU.
+
+    // After round-trip via Int8 + scale, dequantized values match within
+    // ~scale/2 = max(|t|)/254. Use a tolerance proportional to the largest
+    // absolute parameter value seen.
+    float max_abs = 0.0f;
+    for (const auto& t : params_before) {
+        auto host = t.to(Device::cpu()).contiguous();
+        const float* d = host.data<float>();
+        for (int64_t i = 0; i < host.numel(); ++i) {
+            max_abs = std::max(max_abs, std::abs(d[i]));
+        }
+    }
+    const float tol = (max_abs / 254.0f) + 1e-6f;
+
+    for (size_t i = 0; i < params.size(); ++i) {
+        auto before_cpu = params_before[i].to(Device::cpu()).contiguous();
+        auto after_cpu  = params[i]->tensor().to(Device::cpu()).contiguous();
+        ASSERT_EQ(before_cpu.numel(), after_cpu.numel());
+        const float* b = before_cpu.data<float>();
+        const float* a = after_cpu.data<float>();
+        for (int64_t j = 0; j < before_cpu.numel(); ++j) {
+            EXPECT_NEAR(a[j], b[j], tol)
+                << "Int8 round-trip drift at param[" << i << "][" << j << "]";
+        }
+    }
+}
+
+TEST_F(ParameterOffloadTest, Int8WithScale_OffloadFetch_FiniteResults) {
+    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+
+    auto model = createTestModule(32, 64, 16);
+    model->to(Device::cuda(0));
+
+    OffloadContext::Config config = default_config;
+    config.offload_dtype = OffloadContext::Config::OffloadDType::Int8WithScale;
+    config.offload_threshold = 0;
+
+    {
+        OffloadContext ctx(*model, config);
+        ctx.enable();
+        ctx.disable();
+    }  // ~OffloadContext() restores params.
+
+    // All restored values must be finite — no NaN from a bug in the
+    // quant/dequant chain (e.g. division by an all-zero scale).
+    for (const auto& p : model->parameters()) {
+        auto host = p->tensor().to(Device::cpu()).contiguous();
+        const float* d = host.data<float>();
+        for (int64_t i = 0; i < host.numel(); ++i) {
+            EXPECT_TRUE(std::isfinite(d[i]))
+                << "non-finite value after Int8 round-trip at index " << i;
+        }
+    }
+}
+
+// ==========================
 // Main
 // ==========================
 

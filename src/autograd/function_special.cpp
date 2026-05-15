@@ -65,20 +65,54 @@ auto FusedLinearReLUBackward::backward(std::vector<Tensor> grad_outputs) -> std:
 }
 
 auto FusedLinearReLUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    std::vector<Tensor> tensor_grads;
-    tensor_grads.reserve(grad_outputs.size());
-    for (auto& var : grad_outputs) {
-        tensor_grads.push_back(var.tensor());
-    }
+    // Audit D1: real Variable-level backward. The previous body called the
+    // tensor backward then rewrapped results as `Variable(t, true)` with no
+    // grad_fn — silently severing the graph for `create_graph=true`. Now we
+    // compose with autograd-level ops so higher-order grads flow through.
+    //
+    // Forward:  z = ReLU(x @ W.T + b)  (PyTorch convention: W shape [out, in])
+    //           but this op stores W as [out, in] and computes
+    //           grad_input = (grad_out * mask) @ W   directly.
+    // Backward (linear in grad_out):
+    //   masked_grad = grad_out * (z > 0)
+    //   grad_input  = masked_grad @ W
+    //   grad_weight = x^T @ masked_grad
+    //
+    // The ReLU mask `(z > 0)` is a non-differentiable constant w.r.t. the
+    // graph, so we materialize it at tensor level and wrap as a non-grad
+    // Variable. The arithmetic flows through `Variable::operator*` /
+    // `autograd::matmul` and preserves grad_fn for higher-order.
+    validate_saved_tensors();
+    require_saved_tensors(2);
 
-    auto result_tensors = backward(tensor_grads);
+    const auto& grad_out = grad_outputs[0];
+    const Tensor& grad_out_t = grad_out.tensor();
 
-    std::vector<Variable> result_vars;
-    result_vars.reserve(result_tensors.size());
-    for (auto& t : result_tensors) {
-        result_vars.emplace_back(t, true);
-    }
-    return result_vars;
+    // Build the ReLU mask in grad_out's dtype/device. Non-differentiable.
+    auto relu_shape = std::vector<int64_t>(relu_output_.shape().begin(),
+                                            relu_output_.shape().end());
+    auto zero_tensor = full(relu_shape, 0.0f, relu_output_.dtype(),
+                             relu_output_.device());
+    auto mask_t = gt(relu_output_, zero_tensor).to(grad_out_t.dtype());
+    Variable mask_var(mask_t, /*requires_grad=*/false);
+
+    // Recover x and W as non-grad Variables. saved_tensors_[0] = input (x),
+    // saved_tensors_[1] = weight (W).
+    Variable x_var(saved_tensors_[0], /*requires_grad=*/false);
+    Variable W_var(saved_tensors_[1], /*requires_grad=*/false);
+
+    // masked_grad has grad_fn through grad_out (mask is a constant Variable).
+    Variable masked_grad = grad_out * mask_var;
+
+    // grad_input = masked_grad @ W
+    Variable grad_input = matmul(masked_grad, W_var);
+
+    // grad_weight = x^T @ masked_grad
+    int64_t xnd = static_cast<int64_t>(x_var.shape().size());
+    Variable x_t = transpose(x_var, xnd - 2, xnd - 1);
+    Variable grad_weight = matmul(x_t, masked_grad);
+
+    return {grad_input, grad_weight};
 }
 
 // ============================================================================
@@ -97,22 +131,45 @@ auto CustomOpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 }
 
 auto CustomOpBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Extract tensors for the user's backward function
+    // Audit D2: honest higher-order handling.
+    //
+    // If the user registered a Variable-level backward, call it directly so
+    // the user's gradient computation composes with the autograd graph and
+    // higher-order derivatives flow correctly.
+    //
+    // If only a tensor-level backward was registered, we cannot synthesize a
+    // Variable-level graph from a raw-tensor callback — the prior code did
+    // `Variable(t, /*requires_grad=*/true)` without a `grad_fn`, silently
+    // severing the graph. Now we still run the tensor backward (so first-
+    // order grads keep working) but report `is_higher_order_stub() = true`
+    // so the engine's Warn/Error mode fires correctly. Results are returned
+    // as non-grad Variables, matching the engine's contract for stubs.
+    validate_saved_tensors();
+
+    if (var_backward_fn_) {
+        // Wrap saved tensors as non-grad Variables for the user's backward.
+        std::vector<Variable> saved_vars;
+        saved_vars.reserve(saved_tensors_.size());
+        for (const auto& t : saved_tensors_) {
+            saved_vars.emplace_back(t, /*requires_grad=*/false);
+        }
+        return var_backward_fn_(saved_vars, grad_outputs);
+    }
+
+    // Legacy / tensor-only path: invoke the raw-tensor backward, return
+    // results without a grad_fn. The engine's stub-detection path will
+    // increment its disconnection counter for this op.
     std::vector<Tensor> tensor_grads;
     tensor_grads.reserve(grad_outputs.size());
     for (auto& var : grad_outputs) {
         tensor_grads.push_back(var.tensor());
     }
-
-    validate_saved_tensors();
     auto result_tensors = backward_fn_(saved_tensors_, tensor_grads);
 
-    // Wrap results as Variables with requires_grad=true so the gradient
-    // graph continues through the custom op for higher-order derivatives
     std::vector<Variable> result_vars;
     result_vars.reserve(result_tensors.size());
     for (auto& t : result_tensors) {
-        result_vars.emplace_back(t, true);
+        result_vars.emplace_back(t, /*requires_grad=*/false);
     }
     return result_vars;
 }

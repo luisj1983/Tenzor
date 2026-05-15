@@ -9,6 +9,7 @@
 #include "../../include/tenzor/jit/fusion_cost_model.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
+#include "../../include/tenzor/ops/transform.hpp"  // Audit J5-followup: reshape
 #include "../../include/tenzor/ops/creation.hpp"
 #include <iostream>
 #include <algorithm>
@@ -351,7 +352,11 @@ auto ConstantFoldingPass::can_fold(const Node& node) -> bool {
         }
     }
 
-    // Only fold simple arithmetic operations
+    // Audit J5 + J5-followup: extended op coverage for ConstantFolding.
+    // Phase 1 (J5): Add/Sub/Mul/Div/Exp/Log/Sqrt/Neg/Abs/MatMul/Bmm.
+    // Phase 2 (J5-followup): Sum/Mean/Max/Min reductions (with dim+keepdim
+    // attrs), Pow (via tenzor::float_power Tensor,Tensor overload), Reshape
+    // (when the shape input is itself a constant).
     switch (node.op_type()) {
         case OpType::Add:
         case OpType::Sub:
@@ -360,6 +365,16 @@ auto ConstantFoldingPass::can_fold(const Node& node) -> bool {
         case OpType::Exp:
         case OpType::Log:
         case OpType::Sqrt:
+        case OpType::Neg:
+        case OpType::Abs:
+        case OpType::MatMul:
+        case OpType::Bmm:
+        case OpType::Sum:
+        case OpType::Mean:
+        case OpType::Max:
+        case OpType::Min:
+        case OpType::Pow:
+        case OpType::Reshape:
             return true;
         default:
             return false;
@@ -376,22 +391,48 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
         }
     }
 
+    // Audit J5-followup: reduction helper reads `dim` (optional) and
+    // `keepdim` (default false) attrs from the node.
+    auto reduce_dim = [&node]() -> std::optional<int64_t> {
+        return node.has_attr("dim") ? std::optional<int64_t>{node.get_int_attr("dim")}
+                                    : std::nullopt;
+    };
+    auto reduce_keepdim = [&node]() -> bool {
+        return node.has_attr("keepdim") ? node.get_bool_attr("keepdim") : false;
+    };
+
     // Evaluate operation
     switch (node.op_type()) {
-        case OpType::Add:
-            return inputs[0] + inputs[1];
-        case OpType::Sub:
-            return inputs[0] - inputs[1];
-        case OpType::Mul:
-            return inputs[0] * inputs[1];
-        case OpType::Div:
-            return inputs[0] / inputs[1];
-        case OpType::Exp:
-            return tenzor::exp(inputs[0]);
-        case OpType::Log:
-            return tenzor::log(inputs[0]);
-        case OpType::Sqrt:
-            return tenzor::sqrt(inputs[0]);
+        case OpType::Add:    return inputs[0] + inputs[1];
+        case OpType::Sub:    return inputs[0] - inputs[1];
+        case OpType::Mul:    return inputs[0] * inputs[1];
+        case OpType::Div:    return inputs[0] / inputs[1];
+        case OpType::Exp:    return tenzor::exp(inputs[0]);
+        case OpType::Log:    return tenzor::log(inputs[0]);
+        case OpType::Sqrt:   return tenzor::sqrt(inputs[0]);
+        // Audit J5: new constant-foldable ops.
+        case OpType::Neg:    return tenzor::neg(inputs[0]);
+        case OpType::Abs:    return tenzor::abs(inputs[0]);
+        case OpType::MatMul: return tenzor::matmul(inputs[0], inputs[1]);
+        case OpType::Bmm:    return tenzor::bmm(inputs[0], inputs[1]);
+        // Audit J5-followup: reductions with dim/keepdim attrs.
+        case OpType::Sum:    return tenzor::sum(inputs[0], reduce_dim(), reduce_keepdim());
+        case OpType::Mean:   return tenzor::mean(inputs[0], reduce_dim(), reduce_keepdim());
+        case OpType::Max:    return tenzor::max(inputs[0], reduce_dim(), reduce_keepdim());
+        case OpType::Min:    return tenzor::min(inputs[0], reduce_dim(), reduce_keepdim());
+        // Audit J5-followup: Pow via float_power (Tensor, Tensor overload).
+        case OpType::Pow:    return tenzor::float_power(inputs[0], inputs[1]);
+        // Audit J5-followup: Reshape — second input is a 1-D Int64 shape tensor.
+        case OpType::Reshape: {
+            const Tensor& shape_t = inputs[1];
+            if (shape_t.dtype() != DType::Int64) {
+                throw std::runtime_error(
+                    "Reshape constant folding: shape input must be Int64");
+            }
+            const int64_t* p = shape_t.data<int64_t>();
+            std::vector<int64_t> shape_vec(p, p + shape_t.numel());
+            return tenzor::reshape(inputs[0], std::move(shape_vec));
+        }
         default:
             throw std::runtime_error("Unsupported operation for constant folding");
     }
@@ -2296,23 +2337,53 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
         }
     }
 
-    // Insert Cast nodes at graph outputs to ensure Float32 output
+    // Audit J4: insert Cast nodes at graph outputs to bring downcast (Float16/
+    // BFloat16) values back to Float32. Previously this branch only marked
+    // the insertions and then the apply-loop bailed on the `nullptr consumer`
+    // case (`// Skip output-only casts for now`). The result was that
+    // downcast outputs leaked Float16 to callers that expected Float32 —
+    // breaking eager/JIT parity for autocast-traced models.
+    //
+    // Phase 1: identify which graph outputs need casting. Build a map from
+    //   {original value id → cast value id} so we can rewrite the outputs
+    //   vector after we walk through it.
+    std::unordered_map<std::string, std::shared_ptr<Value>> output_casts;
     for (auto& output : graph.outputs()) {
-        if (downcast_values.count(output->id()) > 0) {
-            // Find the output node and add a cast
-            auto producer = output->node();
-            if (producer) {
-                // We'll handle this by inserting a cast before the Output node
-                // For simplicity, just mark the output - the execution engine
-                // will handle the final cast
-                insertions.push_back({output, nullptr, 0, DType::Float32});
-            }
+        if (downcast_values.count(output->id()) > 0 && output->node()) {
+            auto cast_output = std::make_shared<Value>(
+                output->id() + "_cast_out",
+                output->shape(),
+                DType::Float32,
+                output->device());
+
+            auto cast_node = std::make_shared<Node>(OpType::Cast);
+            cast_node->add_input(output);
+            cast_node->add_output(cast_output);
+            cast_node->set_int_attr("target_dtype", static_cast<int64_t>(DType::Float32));
+            cast_output->set_node(cast_node);
+            output->add_use(cast_node);
+
+            graph.add_node(cast_node);
+            output_casts[output->id()] = cast_output;
+            changed = true;
         }
     }
+    // Phase 2: rewrite graph outputs to point at the cast values.
+    if (!output_casts.empty()) {
+        std::vector<std::shared_ptr<Value>> new_outputs;
+        new_outputs.reserve(graph.outputs().size());
+        for (auto& output : graph.outputs()) {
+            auto it = output_casts.find(output->id());
+            new_outputs.push_back(it != output_casts.end() ? it->second : output);
+        }
+        graph.set_outputs(std::move(new_outputs));
+    }
 
-    // Apply cast insertions (same pattern as LayoutOptimizationPass)
+    // Apply input-side cast insertions (downcast-to-target for compute-heavy
+    // ops + upcast-to-Float32 for stability-critical ops). Output-side casts
+    // are handled separately above.
     for (auto& ins : insertions) {
-        if (!ins.consumer) continue;  // Skip output-only casts for now
+        if (!ins.consumer) continue;  // Output-only entries: handled above.
 
         auto cast_output = std::make_shared<Value>(
             ins.value->id() + "_cast",

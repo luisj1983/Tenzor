@@ -72,4 +72,20 @@ auto compile_script(const char* source) -> std::shared_ptr<CompiledModule>;
 auto compile_script(const char* source, const Tensor& dummy)
     -> std::shared_ptr<CompiledModule>;
 
+/**
+ * @brief Compile and trace a multi-argument script (audit J6).
+ *
+ * Supports scripts with N > 1 input arguments. The number of dummies must
+ * match the script's declared arg count. The returned CompiledModule's
+ * `forward(std::vector<Variable>)` overload is the user-facing entry.
+ *
+ * Single-argument scripts can still use the `(source, dummy)` overload above.
+ *
+ * @param source The script source
+ * @param dummies One example tensor per script argument (same dtype/device/
+ *        shape as production inputs)
+ */
+auto compile_script(const char* source, const std::vector<Tensor>& dummies)
+    -> std::shared_ptr<CompiledModule>;
+
 } // namespace tenzor::jit

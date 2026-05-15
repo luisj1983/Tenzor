@@ -44,6 +44,8 @@
 
 namespace tenzor {
 
+class Variable;  // forward declaration (full type in autograd/variable.hpp)
+
 /**
  * @brief Opaque handle for custom operations.
  *
@@ -84,6 +86,20 @@ using CustomBackwardFn = std::function<std::vector<Tensor>(
 /// If nullptr, all inputs are saved by default.
 using CustomSaveForBackwardFn = std::function<std::vector<Tensor>(
     std::span<const Tensor> inputs, const Tensor& output)>;
+
+/// Variable-level custom backward (audit D2). When supplied, the engine
+/// invokes it via `CustomOpBackward::backward_with_variables` so the user's
+/// gradient computation composes with the autograd graph and preserves
+/// higher-order grads. Receives the saved tensors wrapped as non-grad
+/// Variables along with the incoming Variable gradients, and must return
+/// Variable gradients per input.
+///
+/// If only the tensor-level `CustomBackwardFn` is registered,
+/// `CustomOpBackward::is_higher_order_stub()` honestly returns `true`
+/// and the engine's disconnection counter fires under Warn/Error mode.
+using CustomBackwardVariableFn = std::function<std::vector<Variable>(
+    std::span<const Variable> saved_variables,
+    std::span<const Variable> grad_outputs)>;
 
 /**
  * @brief Singleton registry for custom operations.
@@ -160,11 +176,14 @@ public:
      * @brief Register backward function for a custom op.
      *
      * @param id Custom op ID
-     * @param backward Backward function computing gradients
-     * @param save_fn Function selecting which tensors to save (nullptr = save all inputs)
+     * @param backward Tensor-level backward function (always required).
+     * @param save_fn Function selecting which tensors to save (nullptr = save all inputs).
+     * @param var_backward Optional Variable-level backward (audit D2). When
+     *        provided, enables autograd-aware higher-order gradients.
      */
     void register_backward(CustomOpId id, CustomBackwardFn backward,
-                           CustomSaveForBackwardFn save_fn = nullptr);
+                           CustomSaveForBackwardFn save_fn = nullptr,
+                           CustomBackwardVariableFn var_backward = nullptr);
 
     /**
      * @brief Get backward function for a custom op.
@@ -174,6 +193,15 @@ public:
      */
     auto get_backward(CustomOpId id) const
         -> std::optional<std::pair<CustomBackwardFn, CustomSaveForBackwardFn>>;
+
+    /**
+     * @brief Get the Variable-level backward function for a custom op (audit D2).
+     *
+     * @param id Custom op ID
+     * @return The Variable-level backward if registered, nullopt otherwise.
+     */
+    auto get_var_backward(CustomOpId id) const
+        -> std::optional<CustomBackwardVariableFn>;
 
     /**
      * @brief Check if a backward function is registered for a custom op.
@@ -198,7 +226,8 @@ private:
     // Backward function storage
     struct BackwardInfo {
         CustomBackwardFn backward;
-        CustomSaveForBackwardFn save_fn;  // nullptr means save all inputs
+        CustomSaveForBackwardFn save_fn;        // nullptr means save all inputs
+        CustomBackwardVariableFn var_backward;  // nullptr = no autograd-aware higher-order (D2)
     };
     mutable std::shared_mutex backward_mutex_;
     std::unordered_map<uint32_t, BackwardInfo> backward_fns_;
@@ -278,7 +307,8 @@ auto register_custom_op_with_backward(
     Device::Type device_type,
     CustomKernelFn forward_kernel,
     CustomBackwardFn backward_fn,
-    CustomSaveForBackwardFn save_fn = nullptr) -> CustomOpId;
+    CustomSaveForBackwardFn save_fn = nullptr,
+    CustomBackwardVariableFn var_backward_fn = nullptr) -> CustomOpId;
 
 /**
  * @brief Register a custom operation with backward on multiple devices.
@@ -287,7 +317,8 @@ auto register_custom_op_with_backward(
     const std::string& name,
     std::initializer_list<std::pair<Device::Type, CustomKernelFn>> kernels,
     CustomBackwardFn backward_fn,
-    CustomSaveForBackwardFn save_fn = nullptr) -> CustomOpId;
+    CustomSaveForBackwardFn save_fn = nullptr,
+    CustomBackwardVariableFn var_backward_fn = nullptr) -> CustomOpId;
 
 // ============================================================================
 // Autograd-aware dispatch (Variable-based)

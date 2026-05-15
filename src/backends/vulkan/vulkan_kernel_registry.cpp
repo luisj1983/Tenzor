@@ -18,6 +18,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/philox_dropout.hpp"   // F13/F22-followup: Philox-keyed dropout
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/indexing.hpp"
@@ -776,26 +777,74 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Convolution Operations
     // ========================================================================
+    // Audit E4: per-axis honest contract on Vulkan. Symmetric runs fall
+    // through to the existing compute-shader path; asymmetric throws cleanly
+    // — replacing the previous silent miscompute (Vulkan's conv2d compute
+    // shaders read scalar AttrKey::Stride/Padding/Dilation only). Native
+    // per-axis push-constants in the shaders are tracked as E4-followup.
     table.register_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
+            throw std::runtime_error(
+                "Vulkan conv2d_forward: asymmetric stride/padding/dilation "
+                "is not yet supported (E4-followup: extend the compute-shader "
+                "push-constant struct + scalar reads in conv2d_*.comp).");
+        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
 
     // Conv2dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
+            throw std::runtime_error(
+                "Vulkan conv2d_backward_input: asymmetric stride/padding/dilation "
+                "is not yet supported (E4-followup).");
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardInput(
-            inputs[0], inputs[2],  // grad_output, weight
-            attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
-            attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::InputShape),
+            inputs[0], inputs[2],
+            stride_h, pad_h, dil_h,
+            attrs.get_int_list(AttrKey::InputShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
     // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
+            throw std::runtime_error(
+                "Vulkan conv2d_backward_weight: asymmetric stride/padding/dilation "
+                "is not yet supported (E4-followup).");
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardWeight(
-            inputs[0], inputs[1],  // grad_output, input
-            attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
-            attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::WeightShape),
+            inputs[0], inputs[1],
+            stride_h, pad_h, dil_h,
+            attrs.get_int_list(AttrKey::WeightShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
@@ -845,6 +894,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Conv3d Operations
     // ========================================================================
     table.register_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Audit I5-followup: honest contract for Vulkan Conv3d. The Vulkan
+        // dispatchConv3dForward reads scalar Stride/Padding/Dilation only;
+        // throw clearly when per-axis attrs disagree.
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s),   sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p),  pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
+        if (sD != sH || sH != sW || pD != pH || pH != pW || dD != dH || dH != dW) {
+            throw std::runtime_error(
+                "Vulkan Conv3d: asymmetric stride/padding/dilation is not yet "
+                "supported (I5-followup: extend the conv3d compute-shader push-"
+                "constants + dispatch to read per-axis).");
+        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
@@ -873,6 +937,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     // ConvTranspose3d Operations (use Conv3d shader duality)
     table.register_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Audit I5-followup: honest contract.
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s),   sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p),  pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
+        if (sD != sH || sH != sW || pD != pH || pH != pW ||
+            opD != opH || opH != opW || dD != dH || dH != dW) {
+            throw std::runtime_error(
+                "Vulkan ConvTranspose3d: asymmetric stride/padding/output_padding/"
+                "dilation is not yet supported (I5-followup).");
+        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose3dForward(
             inputs[0], inputs[1], bias_ptr, attrs)};
@@ -893,6 +972,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Audit I5-followup: honest contract for Vulkan ConvT2d.
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
+        if (sH != sW || pH != pW || opH != opW || dH != dW) {
+            throw std::runtime_error(
+                "Vulkan ConvTranspose2d: asymmetric stride/padding/output_padding/"
+                "dilation is not yet supported (I5-followup).");
+        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose2dForward(
             inputs[0], inputs[1], bias_ptr, attrs)};
@@ -1318,6 +1411,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchInterpolate(inputs[0], attrs)};
+    });
+    // D3-followup Vulkan: bilinear backward via the new
+    // `interpolate_bilinear_backward.comp` shader + dispatchInterpolateBackward
+    // host method (both added this audit pass). Float32 only — F64 atomicAdd
+    // requires the separate `GL_EXT_shader_atomic_float2` extension.
+    table.register_kernel(OpId::InterpolateBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto input_size = attrs.get_int_list(AttrKey::InputShape);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchInterpolateBackward(
+                inputs[0], input_size, mode, align_corners)};
     });
 
     // ========================================================================
@@ -2399,24 +2504,127 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Expected speedup: 2-4x for long sequences (memory-bandwidth-bound).
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // Per docs/internals/attention-contract.md: returns 4-tuple
-            // [output, lse, philox_seed, philox_offset]. The Vulkan compute
-            // shader currently only emits output (audit C1 Vulkan); LSE +
-            // Philox arrive with the shader-level refit (M8). Until then,
-            // emit empty placeholders so consumers using .is_valid() detect
-            // the contract gap and fall back to composed backward.
+            // F22: emit a real LSE alongside the output so the
+            // FlashAttentionBackward contract is satisfied. The Vulkan
+            // compute shader doesn't surface the per-row logsumexp from its
+            // online softmax, so we fall back to the composed-ops form
+            // `logsumexp(Q @ K^T * scale [+ mask], dim=-1)`. Both matmul
+            // and logsumexp route through Vulkan kernels — the cost is one
+            // extra (B, H, S, S) materialisation (the very thing FA's
+            // forward avoids), but only when the contract requires LSE.
+            // Once the shader-level fused LSE export lands (followup) the
+            // composed-ops branch will collapse to a noop.
+            //
+            // Philox seed/offset stay as `Tensor{}` placeholders because
+            // dropout > 0 still throws (the shader-level Philox refit is
+            // F13/F22-followup).
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
             float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
             bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
+
+            // F22: composed-ops fallback when dropout > 0 in training mode.
+            // F13/F22-followup: Philox-keyed Bernoulli mask (deterministic from
+            // (seed, offset)) so the backward path can replay bit-exactly.
+            // Counter convention matches the CUDA/ROCm FA kernels.
             if (dropout_p > 0.0f && is_training) {
-                throw std::runtime_error(
-                    "FlashAttention Vulkan: dropout > 0 not yet supported. Routes "
-                    "through BMM fallback in nn::functional::scaled_dot_product_attention.");
+                const Tensor& Q = inputs[0];
+                const Tensor& K = inputs[1];
+                const Tensor& V = inputs[2];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::matmul(Q, Kt);
+                Tensor scaled = tenzor::mul(scores, static_cast<double>(scale));
+                if (causal) {
+                    auto ss = scaled.shape();
+                    int64_t S_q = ss[ss.size() - 2];
+                    int64_t S_k = ss[ss.size() - 1];
+                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    Tensor col_idx = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                    Tensor rows_2d = tenzor::reshape(row_idx, std::vector<int64_t>{S_q, 1});
+                    Tensor cols_2d = tenzor::reshape(col_idx, std::vector<int64_t>{1, S_k});
+                    Tensor future = tenzor::gt(cols_2d, rows_2d);
+                    std::vector<int64_t> bshape(ss.size(), 1);
+                    bshape[ss.size() - 2] = S_q;
+                    bshape[ss.size() - 1] = S_k;
+                    Tensor future_b = tenzor::reshape(future, bshape);
+                    Tensor neg_inf = tenzor::full(
+                        std::vector<int64_t>(ss.begin(), ss.end()),
+                        -std::numeric_limits<double>::infinity(),
+                        scaled.dtype(), scaled.device());
+                    scaled = tenzor::where(future_b, neg_inf, scaled);
+                }
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scaled};
+                Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+                // F22-followup: device-side Philox via the
+                // `philox_dropout_mask.comp` compute shader — no CPU host
+                // loop, no CPU→GPU copy. Counter convention matches every
+                // other backend's Philox path so backward replay is
+                // bit-exact across backends.
+                auto philox = tenzor::new_philox_stream();
+                uint64_t seed_v = static_cast<uint64_t>(philox.seed.data<int64_t>()[0]);
+                uint64_t offset_v = static_cast<uint64_t>(philox.offset.data<int64_t>()[0]);
+                std::vector<int64_t> attn_shape(attn.shape().begin(), attn.shape().end());
+                // Shader emits Float32; cast to the attention dtype on-device
+                // (the cast itself is a Vulkan dispatch, not a CPU round-trip).
+                Tensor mask_dev = get_vulkan_backend()->dispatchPhiloxDropoutMask(
+                    attn_shape, dropout_p, seed_v, offset_v);
+                if (mask_dev.dtype() != attn.dtype()) {
+                    mask_dev = mask_dev.to(attn.dtype());
+                }
+                Tensor attn_dropped = tenzor::mul(attn, mask_dev);
+
+                Tensor output_comp = tenzor::matmul(attn_dropped, V);
+                Tensor lse_comp = tenzor::logsumexp(scaled, -1, /*keepdim=*/false);
+                return {output_comp, lse_comp, philox.seed, philox.offset};
             }
+
             Tensor output = get_vulkan_backend()->dispatchFlashAttention(
                 inputs[0], inputs[1], inputs[2], scale, causal);
-            return {output, Tensor{}, Tensor{}, Tensor{}};
+
+            // Compute LSE via composed ops. Q shape: [B, H, S_q, D].
+            // K shape: [B, H, S_kv, D]. scores = Q @ K^T * scale, with optional
+            // causal mask, then logsumexp(dim=-1) gives LSE of shape [B, H, S_q].
+            const Tensor& Q = inputs[0];
+            const Tensor& K = inputs[1];
+            Tensor lse;
+            if (Q.ndim() == 4 && K.ndim() == 4) {
+                // K^T over the last two dims: transpose(-2, -1).
+                Tensor K_t = tenzor::transpose(K, -2, -1);
+                Tensor scores = tenzor::matmul(Q, K_t);
+                // Multiply by scale via broadcast (scalar via mul-add helpers).
+                scores = tenzor::mul(scores, static_cast<double>(scale));
+                if (causal) {
+                    // Apply -inf to upper triangle (j > i) so logsumexp skips it.
+                    auto sshape = scores.shape();
+                    int64_t S_q = sshape[sshape.size() - 2];
+                    int64_t S_kv = sshape[sshape.size() - 1];
+                    // Build a broadcasted causal mask of shape (1, 1, S_q, S_kv).
+                    // We compose with `where` after building i<j as a bool tensor.
+                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    Tensor col_idx = tenzor::arange(0, S_kv, 1, DType::Int64, Q.device());
+                    Tensor row_v = tenzor::reshape(row_idx, {S_q, 1});
+                    Tensor col_v = tenzor::reshape(col_idx, {1, S_kv});
+                    Tensor future = tenzor::gt(col_v, row_v);  // bool [S_q, S_kv]
+                    Tensor neg_inf = tenzor::full(
+                        std::vector<int64_t>(scores.shape().begin(), scores.shape().end()),
+                        -std::numeric_limits<double>::infinity(),
+                        scores.dtype(), scores.device());
+                    // Broadcast future to scores shape via where:
+                    // result = where(future_broadcast, neg_inf, scores)
+                    // future has shape [S_q, S_kv]; need to reshape/broadcast.
+                    Tensor future_b = tenzor::reshape(future, {1, 1, S_q, S_kv});
+                    scores = tenzor::where(future_b, neg_inf, scores);
+                }
+                lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+            }
+            // 3D / other shapes: leave lse empty (caller falls back to
+            // composed backward). 4D is the only flash-shape that flows
+            // through Q @ K^T here.
+
+            return {output, lse, Tensor{}, Tensor{}};
         });
     // FlashAttentionBackward — composed from Vulkan matmul + softmax backward
     table.register_kernel(OpId::FlashAttentionBackward,

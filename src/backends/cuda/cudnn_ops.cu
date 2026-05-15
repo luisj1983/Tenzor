@@ -449,13 +449,14 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
 // cuDNN Conv2d Forward Implementation
 // ============================================================================
 
+// Per-axis primary impl (audit E1). The scalar overload below delegates here.
 auto cudnn_conv2d_forward(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
@@ -472,9 +473,9 @@ auto cudnn_conv2d_forward(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions
-    int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    // Calculate output dimensions (per-axis)
+    int64_t out_h = (height + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (width  + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
@@ -503,17 +504,17 @@ auto cudnn_conv2d_forward(
     input_desc.set(cudnn_dtype, batch, in_channels, height, width);
     output_desc.set(cudnn_dtype, batch, out_channels, out_h, out_w);
     filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
-    conv_desc.set(padding, padding, stride, stride, dilation, dilation, cudnn_dtype);
+    conv_desc.set(pad_h, pad_w, stride_h, stride_w, dil_h, dil_w, cudnn_dtype);
 
     if (groups > 1) {
         conv_desc.set_group_count(groups);
     }
 
-    // Create cache key for algorithm lookup (NCHW format)
+    // Create cache key for algorithm lookup (NCHW format) — per-axis (E1).
     Conv2dCacheKey cache_key{
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
-        stride, padding, dilation, groups,
+        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
         cudnn_dtype, TensorFormat::NCHW,
         /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
                                 !::tenzor::cuda::matmul::allow_tf32()
@@ -839,6 +840,24 @@ auto cudnn_conv2d_forward(
     return output;
 }
 
+// Scalar-form back-compat overload — delegates to the per-axis impl (E1).
+auto cudnn_conv2d_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_conv2d_forward(input, weight, bias,
+                                 stride, stride,
+                                 padding, padding,
+                                 dilation, dilation,
+                                 groups, stream);
+}
+
 // ============================================================================
 // Fused Conv2d + Bias + Activation using cudnnConvolutionBiasActivationForward
 // ============================================================================
@@ -1046,13 +1065,14 @@ auto cudnn_fused_conv2d_swish_forward(
 // cuDNN Conv2d Backward Implementation
 // ============================================================================
 
+// Per-axis primary impl (audit E1). Scalar delegate below.
 auto cudnn_conv2d_backward(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups,
     bool compute_grad_input,
     bool compute_grad_weight,
@@ -1104,17 +1124,17 @@ auto cudnn_conv2d_backward(
     input_desc.set(cudnn_dtype, batch, in_channels, height, width);
     grad_output_desc.set(cudnn_dtype, batch, out_channels, out_h, out_w);
     filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
-    conv_desc.set(padding, padding, stride, stride, dilation, dilation, cudnn_dtype);
+    conv_desc.set(pad_h, pad_w, stride_h, stride_w, dil_h, dil_w, cudnn_dtype);
 
     if (groups > 1) {
         conv_desc.set_group_count(groups);
     }
 
-    // Create cache key for algorithm lookup (NCHW format)
+    // Create cache key for algorithm lookup (NCHW format) — per-axis (E1).
     Conv2dCacheKey cache_key{
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
-        stride, padding, dilation, groups,
+        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
         cudnn_dtype, TensorFormat::NCHW,
         /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
                                 !::tenzor::cuda::matmul::allow_tf32()
@@ -1454,6 +1474,29 @@ auto cudnn_conv2d_backward(
     return std::make_tuple(grad_input, grad_weight, grad_bias);
 }
 
+// Scalar-form back-compat overload (E1).
+auto cudnn_conv2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    return cudnn_conv2d_backward(grad_output, input, weight,
+                                  stride, stride,
+                                  padding, padding,
+                                  dilation, dilation,
+                                  groups,
+                                  compute_grad_input, compute_grad_weight, compute_grad_bias,
+                                  stream);
+}
+
 // ============================================================================
 // NHWC-Optimized Conv2d Forward Implementation
 // ============================================================================
@@ -1639,11 +1682,13 @@ auto cudnn_conv2d_forward_nhwc(
         conv_desc.set_group_count(groups);
     }
 
-    // Create cache key for NHWC algorithm lookup
+    // Create cache key for NHWC algorithm lookup (still scalar API — E1
+    // extends the cache key struct to per-axis fields, so we replicate
+    // each scalar across both axes here).
     Conv2dCacheKey cache_key{
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
-        stride, padding, dilation, groups,
+        stride, stride, padding, padding, dilation, dilation, groups,
         cudnn_dtype, TensorFormat::NHWC,
         /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
                                 !::tenzor::cuda::matmul::allow_tf32()
@@ -1933,11 +1978,11 @@ auto cudnn_conv2d_backward_nhwc(
         conv_desc.set_group_count(groups);
     }
 
-    // Create cache key for NHWC algorithm lookup
+    // Create cache key for NHWC algorithm lookup (scalar API → replicated).
     Conv2dCacheKey cache_key{
         batch, in_channels, height, width,
         out_channels, kernel_h, kernel_w,
-        stride, padding, dilation, groups,
+        stride, stride, padding, padding, dilation, dilation, groups,
         cudnn_dtype, TensorFormat::NHWC,
         /*prefer_precise_f32=*/(cudnn_dtype == CUDNN_DATA_FLOAT) &&
                                 !::tenzor::cuda::matmul::allow_tf32()

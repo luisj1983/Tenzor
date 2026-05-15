@@ -301,6 +301,9 @@ add_parity_test(test_stable_math_parity test_stable_math_parity.cpp)
 # NaN-aware stats + quantiles + Cov/Corrcoef.
 add_parity_test(test_nanstats_parity test_nanstats_parity.cpp)
 
+# Audit E1: asymmetric (per-axis) Conv2d stride/padding/dilation.
+add_parity_test(test_conv2d_asymmetric_parity test_conv2d_asymmetric_parity.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================

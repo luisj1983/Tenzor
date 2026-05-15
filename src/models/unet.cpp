@@ -92,9 +92,13 @@ Up::Up(int64_t in_channels, int64_t out_channels, bool bilinear)
     : bilinear_(bilinear)
 {
     if (bilinear) {
-        // Bilinear upsampling + 1x1 conv to reduce channels
-        // We'll implement bilinear upsampling in forward pass using interpolate
-        // For now, use a 1x1 conv to adjust channels before concatenation
+        // Bilinear mode: real spatial upsampling via `nn::upsample_bilinear`
+        // (autograd-aware, dispatches to OpId::Interpolate) in `forward`,
+        // followed by this 1×1 conv that halves the channel count. Matches
+        // PyTorch's UNet bilinear path. Audit G10 caught a stale comment
+        // here ("For now, use a 1x1 conv to adjust channels") that no longer
+        // reflects the implementation — the forward path was already doing
+        // real bilinear upsample. Removed the misleading comment.
         up_ = std::make_shared<nn::Conv2d>(in_channels, in_channels / 2, 1, 1, 0);
         conv_ = std::make_shared<DoubleConv>(in_channels, out_channels);
     } else {

@@ -808,6 +808,12 @@ public:
         return evaluator_.evaluate({x});
     }
 
+    // Audit J6: needed by `compile_script_multi_with_dummies` to construct
+    // the function-tracing closure. Returns a reference so the closure can
+    // capture the evaluator without copying its body (which contains
+    // unique_ptr-held AST nodes).
+    auto evaluator() const -> const ScriptEvaluator& { return evaluator_; }
+
 private:
     ScriptEvaluator evaluator_;
 };
@@ -830,8 +836,10 @@ auto compile_script_with_dummy(const char* source, const Tensor& dummy)
 
     if (fn.args.size() != 1) {
         throw std::runtime_error(
-            "compile_script: single-argument functions only (got " +
-            std::to_string(fn.args.size()) + " args)");
+            "compile_script(source, dummy): single-argument scripts only — "
+            "use compile_script(source, std::vector<Tensor> dummies) for "
+            "multi-argument scripts (got " +
+            std::to_string(fn.args.size()) + " args).");
     }
 
     auto module = std::make_shared<ScriptModule>(fn.args, std::move(fn.body));
@@ -846,6 +854,53 @@ auto compile_script_with_dummy(const char* source, const Tensor& dummy)
     return compiled;
 }
 
+// Audit J6: multi-argument compile_script. Parses an N-arg script, builds a
+// ScriptModule with the same N-arg evaluator (which has always supported
+// multi-arg internally — the gate was only at this top-level entry point),
+// then traces via the function-based jit::trace overload which accepts a
+// vector of input Variables. The resulting Graph is wrapped in a
+// CompiledModule whose `forward(std::vector<Variable>)` overload (already
+// declared on CompiledModule) is the user-facing entry point.
+auto compile_script_multi_with_dummies(const char* source,
+                                        const std::vector<Tensor>& dummies)
+    -> std::shared_ptr<CompiledModule> {
+    if (source == nullptr) {
+        throw std::runtime_error("compile_script: null source");
+    }
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(std::move(tokens));
+    FuncDef fn = parser.parse_function();
+
+    if (fn.args.size() != dummies.size()) {
+        throw std::runtime_error(
+            "compile_script: script expects " + std::to_string(fn.args.size()) +
+            " args but " + std::to_string(dummies.size()) + " dummies were provided");
+    }
+
+    auto module = std::make_shared<ScriptModule>(fn.args, std::move(fn.body));
+
+    // Build input Variables from the dummy Tensors and invoke the function-
+    // based trace. Each ScriptEvaluator call returns a single Variable; wrap
+    // it in a 1-element vector for the closure's return type.
+    std::vector<Variable> input_vars;
+    input_vars.reserve(dummies.size());
+    for (const auto& d : dummies) input_vars.emplace_back(d, /*requires_grad=*/false);
+
+    auto closure = [module](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {module->evaluator().evaluate(args)};
+    };
+
+    auto graph = jit::trace(closure, input_vars);
+    if (!graph) {
+        throw std::runtime_error("compile_script: jit::trace produced null graph");
+    }
+    auto compiled = std::make_shared<CompiledModule>(graph);
+    auto module_base = std::static_pointer_cast<nn::Module>(module);
+    compiled->set_source_module(module_base);
+    return compiled;
+}
+
 } // namespace
 
 auto compile_script(const char* source) -> std::shared_ptr<CompiledModule> {
@@ -856,6 +911,15 @@ auto compile_script(const char* source) -> std::shared_ptr<CompiledModule> {
 auto compile_script(const char* source, const Tensor& dummy)
     -> std::shared_ptr<CompiledModule> {
     return compile_script_with_dummy(source, dummy);
+}
+
+// Audit J6: multi-arg public API.
+auto compile_script(const char* source, const std::vector<Tensor>& dummies)
+    -> std::shared_ptr<CompiledModule> {
+    if (dummies.size() == 1) {
+        return compile_script_with_dummy(source, dummies[0]);
+    }
+    return compile_script_multi_with_dummies(source, dummies);
 }
 
 } // namespace tenzor::jit

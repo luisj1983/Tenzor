@@ -1672,10 +1672,11 @@ void conv_transpose2d_forward_impl(
     const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
     const Tensor* bias,           // (out_channels) or nullptr
     Tensor& output,               // (batch, out_channels, out_h, out_w)
-    int64_t stride,
-    int64_t padding,
-    [[maybe_unused]] int64_t output_padding,
-    int64_t dilation,
+    // Audit I5: per-axis stride/padding/output_padding/dilation.
+    int64_t sH, int64_t sW,
+    int64_t pH, int64_t pW,
+    [[maybe_unused]] int64_t opH, [[maybe_unused]] int64_t opW,
+    int64_t dH, int64_t dW,
     int64_t groups
 ) {
     auto input_shape = input.shape();
@@ -1732,15 +1733,15 @@ void conv_transpose2d_forward_impl(
                     // ih * stride = oh + padding - kh * dilation
                     // ih = (oh + padding - kh * dilation) / stride (must be integer and in bounds)
 
-                    int64_t h_shifted = h + padding - kh * dilation;
-                    int64_t w_shifted = w + padding - kw * dilation;
+                    int64_t h_shifted = h + pH - kh * dH;
+                    int64_t w_shifted = w + pW - kw * dW;
 
                     // Check if this maps to a valid input position
-                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                        w_shifted >= 0 && w_shifted % stride == 0) {
+                    if (h_shifted >= 0 && h_shifted % sH == 0 &&
+                        w_shifted >= 0 && w_shifted % sW == 0) {
 
-                        int64_t ih = h_shifted / stride;
-                        int64_t iw = w_shifted / stride;
+                        int64_t ih = h_shifted / sH;
+                        int64_t iw = w_shifted / sW;
 
                         if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                             // Get input value
@@ -1772,21 +1773,20 @@ void conv_transpose2d_forward_impl(
     }
 }
 
+// Audit I5: per-axis public kernel (primary). Scalar overload (below) delegates.
 auto conv_transpose2d_forward_kernel(
-    const Tensor& input_orig,     // (batch, in_channels, in_h, in_w)
-    const Tensor& weight_orig,    // (in_channels, out_channels/groups, kernel_h, kernel_w)
-    const Tensor* bias,           // (out_channels) or nullptr
-    int64_t stride,
-    int64_t padding,
-    int64_t output_padding,
-    int64_t dilation,
+    const Tensor& input_orig,
+    const Tensor& weight_orig,
+    const Tensor* bias,
+    int64_t sH, int64_t sW,
+    int64_t pH, int64_t pW,
+    int64_t opH, int64_t opW,
+    int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
-    // Ensure contiguous layout for pointer-arithmetic kernels
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
 
-    // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -1799,9 +1799,8 @@ auto conv_transpose2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions for transposed convolution
-    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, stride, padding, output_padding, dilation);
-    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, stride, padding, output_padding, dilation);
+    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, sH, pH, opH, dH);
+    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, sW, pW, opW, dW);
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
@@ -1810,24 +1809,33 @@ auto conv_transpose2d_forward_kernel(
         );
     }
 
-    // Create output tensor with correct dtype
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
-    // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        conv_transpose2d_forward_impl<float>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose2d_forward_impl<float>(input, weight, bias, output, sH, sW, pH, pW, opH, opW, dH, dW, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv_transpose2d_forward_impl<double>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose2d_forward_impl<double>(input, weight, bias, output, sH, sW, pH, pW, opH, opW, dH, dW, groups);
     } else if (input.dtype() == DType::Float16) {
-        conv_transpose2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose2d_forward_impl<Float16>(input, weight, bias, output, sH, sW, pH, pW, opH, opW, dH, dW, groups);
     } else if (input.dtype() == DType::BFloat16) {
-        conv_transpose2d_forward_impl<BFloat16>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+        conv_transpose2d_forward_impl<BFloat16>(input, weight, bias, output, sH, sW, pH, pW, opH, opW, dH, dW, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv_transpose2d_forward");
     }
 
     return output;
+}
+
+// Scalar overload — delegates to per-axis with identical H/W values.
+auto conv_transpose2d_forward_kernel(
+    const Tensor& input, const Tensor& weight, const Tensor* bias,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv_transpose2d_forward_kernel(input, weight, bias,
+        stride, stride, padding, padding, output_padding, output_padding,
+        dilation, dilation, groups);
 }
 
 // ============================================================================

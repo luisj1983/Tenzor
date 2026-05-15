@@ -1141,14 +1141,28 @@ auto LinalgVectorNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
         return {mul(grad_expanded, tenzor::sign(input))};
     }
 
-    if (std::isinf(ord_) && ord_ > 0) {
-        // Linf norm: grad at position where |x| == norm
+    if (std::isinf(ord_)) {
+        // Audit D4: ±inf vector norm. Both share the same math —
+        //   ||x||_{+inf} = max(|x|),  ||x||_{-inf} = min(|x|)
+        // — and in both cases the gradient is supported only on the index
+        // where |x_i| equals the norm value, with magnitude sign(x_i).
         auto abs_x = abs(input);
         auto eps_t = full(input_shape, detail::dtype_epsilon(input.dtype()),
                           input.dtype(), input.device());
         auto mask = lt(abs(sub(abs_x, norm_expanded)), eps_t);
         auto sgn = tenzor::sign(input);
         return {mul(grad_expanded, where(mask, sgn, zeros_like(input)))};
+    }
+
+    if (ord_ == 0.0) {
+        // Audit D4: L0 "norm" (count of nonzero entries) is piecewise
+        // constant — gradient is 0 a.e. and undefined at x_i = 0. PyTorch
+        // throws here too; mirror that contract rather than silently
+        // returning zeros, which would mask a user bug.
+        throw std::runtime_error(
+            "LinalgVectorNormBackward: ord=0 (L0 norm) has no defined "
+            "gradient — it is piecewise constant. Detach the input or use "
+            "an order in [1, inf] for differentiable norms.");
     }
 
     // General p-norm: grad * sign(x) * |x|^(p-1) / norm^(p-1)
@@ -1165,8 +1179,73 @@ auto LinalgVectorNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
 }
 
 auto LinalgVectorNormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // Audit D4: real Variable-level backward. The previous body called the
+    // tensor backward then wrapped its result as `Variable(t, ...)` with no
+    // `grad_fn` — silently severing the autograd graph.
+    //
+    // The closed-form vector-norm backward factorises as
+    //   grad_input = grad_expanded * deriv(x, ||x||, ord)
+    // where `deriv` depends only on the saved input and norm (constants in
+    // this backward) and `grad_expanded` is the incoming gradient lifted to
+    // the input's shape via unsqueeze + expand. By computing `deriv` at
+    // tensor level (with the math implemented in `backward()` above) and
+    // wrapping it as a non-grad Variable, the final `grad_expanded *
+    // deriv_var` is a Variable-level multiplication that preserves
+    // `grad_fn` through the incoming gradient — enabling `create_graph=true`.
+    require_saved_tensors(2);
+    const Tensor& input = saved_tensors_[0];
+
+    // Compute the input-shape derivative tensor by running the existing
+    // tensor-level backward against a ones gradient; that gives us
+    // `1 * deriv = deriv` (since the tensor path's last step is
+    // `mul(grad_expanded, deriv)`). The early ord==0 branch in `backward()`
+    // throws, which we want to propagate untouched.
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto ones_grad = full(input_shape, 1.0, input.dtype(), input.device());
+
+    // To extract just `deriv`, we feed `ones_grad` directly to `backward()`,
+    // but `backward()` expects a grad shaped like the norm output. Build
+    // a ones grad of that shape instead.
+    auto reduced_shape = input_shape;
+    if (!dim_.empty()) {
+        if (keepdim_) {
+            for (auto d : dim_) {
+                int64_t dd = d < 0 ? d + static_cast<int64_t>(input.ndim()) : d;
+                reduced_shape[dd] = 1;
+            }
+        } else {
+            // Build a new shape with reduced dims removed (in descending order).
+            auto sorted_dims = dim_;
+            for (auto& d : sorted_dims) {
+                d = d < 0 ? d + static_cast<int64_t>(input.ndim()) : d;
+            }
+            std::sort(sorted_dims.begin(), sorted_dims.end(), std::greater<int64_t>());
+            for (auto d : sorted_dims) reduced_shape.erase(reduced_shape.begin() + d);
+        }
+    } else {
+        reduced_shape = keepdim_
+            ? std::vector<int64_t>(input.ndim(), 1)
+            : std::vector<int64_t>{};
+    }
+    Tensor ones_grad_for_norm = full(reduced_shape, 1.0, input.dtype(), input.device());
+    Tensor deriv = backward({ones_grad_for_norm})[0];
+
+    // Wrap deriv as a non-grad Variable: it depends only on saved (x, norm).
+    Variable deriv_var(deriv, /*requires_grad=*/false);
+
+    // Lift the incoming gradient to the input's shape using autograd-level
+    // unsqueeze + expand so `grad_fn` flows through `grad_outputs[0]`.
+    Variable grad_expanded = grad_outputs[0];
+    if (!keepdim_) {
+        for (auto d : dim_) {
+            int64_t dd = d < 0 ? d + static_cast<int64_t>(input.ndim()) : d;
+            grad_expanded = unsqueeze(grad_expanded, dd);
+        }
+    }
+    grad_expanded = expand(grad_expanded, input_shape);
+
+    // Final multiply preserves grad_fn through grad_outputs[0].
+    return {grad_expanded * deriv_var};
 }
 
 // LinalgMatrixNormBackward:
@@ -1183,26 +1262,34 @@ auto LinalgMatrixNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
     const auto& input = saved_tensors_[0];
     const auto& grad = grad_outputs[0];
 
-    if (std::abs(ord_ - 2.0) < 1e-10) {
-        // Spectral norm: σ_max = Σ[0,0]. Leading left/right singular vectors
-        // u_1 = U[:, 0], v_1 = V[:, 0]. ∂σ_max/∂A = u_1 v_1^T (sign-invariant
-        // since u_1, v_1 flip together).
+    if (std::abs(ord_ - 2.0) < 1e-10 || std::abs(ord_ + 2.0) < 1e-10) {
+        // Spectral norm (ord=±2): gradient is u_k v_k^T where k is the
+        // index of the corresponding singular value.
+        //   ord = +2: σ_max (first SV) → u_1, v_1 = U[:, 0], Vh[0, :]
+        //   ord = -2: σ_min (last SV)  → u_K, v_K = U[:, -1], Vh[-1, :]
+        // Sign-invariant since u_k and v_k flip together.
+        // Audit D5: ord = -2 was missing; previously fell through to the
+        // col-sum mask code below, which is the wrong math.
         auto [U, S, Vh] = tenzor::linalg::svd(input, /*full_matrices=*/false);
-        // U is (..., M, K), Vh is (..., K, N). Take first column of U
-        // (== U[..., :, 0]) and first row of Vh (== Vh[..., 0, :]) and
-        // outer-product them. grad scales the whole thing.
-        int64_t U_ndim = U.ndim();
-        int64_t Vh_ndim = Vh.ndim();
-        // Slice U[..., :, 0:1] → (..., M, 1)
-        auto u1 = tenzor::slice(U, /*dim=*/U_ndim - 1, /*start=*/0, /*end=*/1);
-        // Slice Vh[..., 0:1, :] → (..., 1, N)
-        auto v1h = tenzor::slice(Vh, /*dim=*/Vh_ndim - 2, /*start=*/0, /*end=*/1);
-        auto outer = matmul(u1, v1h);  // (..., M, N)
-        // grad has the norm's shape (... after reducing 2 dims to scalar);
-        // expand to broadcast against outer.
+        const int64_t U_ndim  = U.ndim();
+        const int64_t Vh_ndim = Vh.ndim();
+        const int64_t K = U.size(U_ndim - 1);    // number of singular values
+
+        const bool use_smallest = (ord_ < 0.0);
+        const int64_t sv_idx = use_smallest ? K - 1 : 0;
+
+        // Slice U[..., :, sv_idx:sv_idx+1] → (..., M, 1)
+        auto uk = tenzor::slice(U, /*dim=*/U_ndim - 1, /*start=*/sv_idx,
+                                /*end=*/sv_idx + 1);
+        // Slice Vh[..., sv_idx:sv_idx+1, :] → (..., 1, N)
+        auto vkh = tenzor::slice(Vh, /*dim=*/Vh_ndim - 2, /*start=*/sv_idx,
+                                 /*end=*/sv_idx + 1);
+        auto outer = matmul(uk, vkh);  // (..., M, N)
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
-        // Add two trailing 1s for matrix dims (if grad is scalar-like).
-        while (grad_shape.size() < outer.ndim()) grad_shape.push_back(1);
+        // Append trailing 1s for the matrix dims.
+        while (grad_shape.size() < static_cast<size_t>(outer.ndim())) {
+            grad_shape.push_back(1);
+        }
         auto grad_reshaped = reshape(grad, grad_shape);
         return {mul(grad_reshaped, outer)};
     }
@@ -1259,8 +1346,35 @@ auto LinalgMatrixNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
 }
 
 auto LinalgMatrixNormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // Audit D5: real Variable-level backward. Same factoring as D4:
+    //   grad_input = grad_reshaped * deriv(A, ord)
+    // where `deriv` (= `u_k v_k^T` for ord=±2 or `mask * sign(A)` for
+    // ord ∈ {±1, ±inf}) depends only on the saved input. Compute it at
+    // tensor level by feeding a ones grad through `backward()`, then
+    // compose the final multiply at Variable level so `grad_fn` flows
+    // through `grad_outputs[0]`.
+    require_saved_tensors(2);
+    const Tensor& input = saved_tensors_[0];
+    const int64_t ndim = input.ndim();
+
+    // Norm output shape = input.shape[:-2] (reduce both matrix dims).
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> norm_shape(input_shape.begin(),
+                                     input_shape.begin() + (ndim - 2));
+    Tensor ones_grad = full(norm_shape, 1.0, input.dtype(), input.device());
+    Tensor deriv = backward({ones_grad})[0];   // shape (..., M, N)
+    Variable deriv_var(deriv, /*requires_grad=*/false);
+
+    // Lift grad_outputs[0] (shape input.shape[:-2]) to (..., M, N) by
+    // reshaping to append two trailing 1 dims, then expand. Both steps
+    // are autograd-level so `grad_fn` flows through.
+    auto grad_shape_v2 = norm_shape;
+    grad_shape_v2.push_back(1);
+    grad_shape_v2.push_back(1);
+    Variable grad_reshaped = reshape(grad_outputs[0], grad_shape_v2);
+    Variable grad_expanded = expand(grad_reshaped, input_shape);
+
+    return {grad_expanded * deriv_var};
 }
 
 // LinalgVecdotBackward:

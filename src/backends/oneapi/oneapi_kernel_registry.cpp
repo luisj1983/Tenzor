@@ -28,6 +28,8 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "kernels/fp16_saturate.hpp"
+#include "tenzor/nn/layers/flex_attention.hpp"  // F14: process-wide score_mod registry
+#include "tenzor/ops/philox_dropout.hpp"        // F13/F22-followup: Philox-keyed dropout
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -459,7 +461,7 @@ namespace oneapi {
                                     const Tensor& gamma, const Tensor& beta, float epsilon,
                                     sycl::queue& queue) -> Tensor;
     auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
-                              const Tensor& variance, const Tensor& gamma, float epsilon,
+                              const Tensor& invstd, const Tensor& gamma, float epsilon,
                               sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Group normalization
@@ -488,6 +490,58 @@ namespace oneapi {
                                 int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                                 sycl::queue& queue) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
+    // Audit E3: per-axis honest contract on OneAPI. Symmetric runs delegate
+    // to the scalar kernels above (zero behavior change). Asymmetric runs
+    // throw cleanly — eliminating the previous silent miscompute where the
+    // scalar Stride/Padding/Dilation attrs were used regardless of any
+    // per-axis values set by the autograd Function. The oneDNN inner kernel
+    // refactor (oneDNN supports `memory::dims` per-axis natively) is
+    // tracked as E3-followup.
+    inline auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                int64_t stride_h, int64_t stride_w,
+                                int64_t pad_h, int64_t pad_w,
+                                int64_t dil_h, int64_t dil_w,
+                                int64_t groups, sycl::queue& queue) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_forward(input, weight, bias, stride_h, pad_h, dil_h, groups, queue);
+        }
+        throw std::runtime_error(
+            "OneAPI conv2d_forward: asymmetric stride/padding/dilation "
+            "(stride " + std::to_string(stride_h) + "x" + std::to_string(stride_w) +
+            ", pad " + std::to_string(pad_h) + "x" + std::to_string(pad_w) +
+            ", dil " + std::to_string(dil_h) + "x" + std::to_string(dil_w) +
+            ") is not yet supported on OneAPI — the oneDNN-descriptor / SYCL "
+            "kernel refactor is tracked as E3-followup. Use the CUDA backend "
+            "for asymmetric convolutions.");
+    }
+    inline auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                                        const std::vector<int64_t>& input_shape,
+                                        int64_t stride_h, int64_t stride_w,
+                                        int64_t pad_h, int64_t pad_w,
+                                        int64_t dil_h, int64_t dil_w,
+                                        int64_t groups, sycl::queue& queue) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_backward_input(grad_output, weight, input_shape,
+                                          stride_h, pad_h, dil_h, groups, queue);
+        }
+        throw std::runtime_error(
+            "OneAPI conv2d_backward_input: asymmetric stride/padding/dilation "
+            "is not yet supported on OneAPI (E3-followup).");
+    }
+    inline auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                                        const std::vector<int64_t>& weight_shape,
+                                        int64_t stride_h, int64_t stride_w,
+                                        int64_t pad_h, int64_t pad_w,
+                                        int64_t dil_h, int64_t dil_w,
+                                        int64_t groups, sycl::queue& queue) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_backward_weight(grad_output, input, weight_shape,
+                                           stride_h, pad_h, dil_h, groups, queue);
+        }
+        throw std::runtime_error(
+            "OneAPI conv2d_backward_weight: asymmetric stride/padding/dilation "
+            "is not yet supported on OneAPI (E3-followup).");
+    }
     auto conv_transpose2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                   int64_t stride, int64_t padding, int64_t output_padding,
                                   int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
@@ -655,6 +709,11 @@ namespace oneapi {
     auto flash_attention_kernel_with_lse(const Tensor& Q, const Tensor& K, const Tensor& V,
                                           const Tensor* mask, float scale, bool is_causal,
                                           sycl::queue& queue, Tensor* L_out) -> Tensor;
+    // F13-followup: device-side Philox4x32-10 Bernoulli mask generator (eliminates
+    // the prior CPU-host fallback in the FlashAttention composed-ops dropout path).
+    auto philox_dropout_mask_kernel(const std::vector<int64_t>& shape,
+                                     float p, uint64_t seed, uint64_t offset,
+                                     DType dtype, sycl::queue& queue) -> Tensor;
     // Phase 8.2: fused FlashAttention backward (Float32, head_dim ∈ {32, 64, 128}).
     auto flash_attention_backward_oneapi_f32(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
@@ -730,6 +789,11 @@ namespace oneapi {
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners,
                             sycl::queue& queue) -> Tensor;
+    // D3-followup OneAPI: sycl::atomic_ref<float/double> scatter for bilinear backward.
+    auto interpolate_backward_kernel(const Tensor& grad_output,
+                                      const std::vector<int64_t>& input_size,
+                                      const std::string& mode, bool align_corners,
+                                      sycl::queue& queue) -> Tensor;
     auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type,
                         sycl::queue& queue) -> Tensor;
 
@@ -867,6 +931,8 @@ namespace oneapi {
     auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    // Audit F9: real Francis double-shift QR eigensolver (linalg.cpp:2682).
+    auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue) -> Tensor;
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
@@ -1970,15 +2036,26 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Convolution Operations
     // =========================================================================
 
+    // Audit E3: read per-axis stride/padding/dilation with scalar fallback.
+    // The per-axis OneAPI overload routes symmetric runs to the existing
+    // scalar kernel (no behavior change) and throws cleanly on asymmetric
+    // — replacing the previous silent wrong-output behavior.
     table.register_kernel(OpId::Conv2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
             auto result = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                                           stride, padding, dilation, groups, get_q(inputs));
+                                           stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                           groups, get_q(inputs));
             oneapi::fp16_saturate_if_needed(result, get_q(inputs));
             return {result};
         });
@@ -1987,26 +2064,38 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Conv2dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            // inputs[0]=grad_output, inputs[2]=weight
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv2d_backward_input(inputs[0], inputs[2], input_shape,
-                                                   stride, padding, dilation, groups, get_q(inputs))};
+                                                   stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                                   groups, get_q(inputs))};
         });
 
     // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            // inputs[0]=grad_output, inputs[1]=input
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
-                                                    stride, padding, dilation, groups, get_q(inputs))};
+                                                    stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                                    groups, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Conv2dBackwardBias,
@@ -2054,53 +2143,74 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {result[0]};
         });
 
+    // Audit I5-followup: ConvT2d on OneAPI is scalar-only. Honest contract:
+    // read per-axis with scalar fallback; throw on asymmetric.
     table.register_kernel(OpId::ConvTranspose2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t stride         = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding        = attrs.get_int(AttrKey::Padding, 0);
             int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t dilation       = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sH = attrs.get_int(AttrKey::StrideH,        stride);
+            int64_t sW = attrs.get_int(AttrKey::StrideW,        stride);
+            int64_t pH = attrs.get_int(AttrKey::PaddingH,       padding);
+            int64_t pW = attrs.get_int(AttrKey::PaddingW,       padding);
+            int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, output_padding);
+            int64_t opW= attrs.get_int(AttrKey::OutputPaddingW, output_padding);
+            int64_t dH = attrs.get_int(AttrKey::DilationH,      dilation);
+            int64_t dW = attrs.get_int(AttrKey::DilationW,      dilation);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            if (sH != sW || pH != pW || opH != opW || dH != dW) {
+                throw std::runtime_error(
+                    "OneAPI ConvTranspose2d: asymmetric stride/padding/"
+                    "output_padding/dilation is not yet supported (I5-followup).");
+            }
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias,
                                                       stride, padding, output_padding,
                                                       dilation, groups, get_q(inputs))};
         });
 
-    // Conv3d operations
+    // Audit I5-followup: Conv3d on OneAPI takes std::vector<int64_t> per axis,
+    // so we natively pass the per-axis values through (no isotropic throw).
+    // Helper macro for reading a per-axis triple (raw function-pointer kernel
+    // registration here disallows capturing lambdas).
+#   define TENZOR_ONEAPI_READ_TRIPLE(scalar_key, kD, kH, kW, default_val, out) \
+        std::vector<int64_t> out; \
+        { \
+            int64_t _s = attrs.get_int(scalar_key, default_val); \
+            out = { attrs.get_int(kD, _s), attrs.get_int(kH, _s), attrs.get_int(kW, _s) }; \
+        }
+
     table.register_kernel(OpId::Conv3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv3d_forward(inputs[0], inputs[1], bias,
                                             stride, padding, dilation, groups, get_q(inputs))};
         });
 
-    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            // inputs[0]=grad_output, inputs[2]=weight
             return {oneapi::conv3d_backward_input(inputs[0], inputs[2], input_shape,
                                                     stride, padding, dilation, groups, get_q(inputs))};
         });
 
-    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-            // inputs[0]=grad_output, inputs[1]=input
             return {oneapi::conv3d_backward_weight(inputs[0], inputs[1], weight_shape,
                                                      stride, padding, dilation, groups, get_q(inputs))};
         });
@@ -2110,13 +2220,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::conv3d_backward_bias(inputs[0], get_q(inputs))};
         });
 
-    // ConvTranspose3d operations
+    // Audit I5-followup: ConvT3d on OneAPI uses the same READ_TRIPLE macro.
     table.register_kernel(OpId::ConvTranspose3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto output_padding = attrs.get_int_list(AttrKey::OutputPadding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,        AttrKey::StrideD,        AttrKey::StrideH,        AttrKey::StrideW,        1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,       AttrKey::PaddingD,       AttrKey::PaddingH,       AttrKey::PaddingW,       0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::OutputPadding, AttrKey::OutputPaddingD, AttrKey::OutputPaddingH, AttrKey::OutputPaddingW, 0, output_padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation,      AttrKey::DilationD,      AttrKey::DilationH,      AttrKey::DilationW,      1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv_transpose3d_forward(inputs[0], inputs[1], bias,
@@ -2126,9 +2236,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ConvTranspose3dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
             return {oneapi::conv_transpose3d_backward_input(inputs[0], inputs[2], input_shape,
@@ -2138,9 +2248,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto stride = attrs.get_int_list(AttrKey::Stride);
-            auto padding = attrs.get_int_list(AttrKey::Padding);
-            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
+            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
             return {oneapi::conv_transpose3d_backward_weight(inputs[0], inputs[1], weight_shape,
@@ -2405,29 +2515,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BatchNorm2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-            // Dispatch provides: [grad_output, input, weight/gamma, mean, invstd]
-            // Kernel expects:    (grad_output, input, mean, variance, gamma, epsilon)
-            // The backward saves invstd = 1/sqrt(var+eps), convert back to variance
-            // var = (1/invstd)^2 - eps
-            const auto& grad_output = inputs[0];
-            const auto& input = inputs[1];
-            const auto& gamma = inputs[2];
-            const auto& mean = inputs[3];
-            const auto& invstd = inputs[4];
-
-            // Convert invstd back to variance: var = 1/invstd^2 - eps
-            auto invstd_sq = tenzor::mul(invstd, invstd);
-            auto one_over_invstd_sq = tenzor::div(
-                tenzor::ones(std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
-                             invstd.dtype(), invstd.device()),
-                invstd_sq);
-            auto eps_tensor = tenzor::full(
-                std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
-                static_cast<double>(epsilon), invstd.dtype(), invstd.device());
-            auto variance = tenzor::sub(one_over_invstd_sq, eps_tensor);
-
+            // Audit F12: pass `invstd` directly. The autograd packs
+            //   [grad_output, input, weight/gamma, mean, invstd]
+            // where `invstd = 1/sqrt(var+eps)`. Previously the registry
+            // reconstructed `variance` host-side via 4 host-launched tensor
+            // ops (`mul`, `ones`, `div`, `full`, `sub`) — 1 extra allocation
+            // per op and 1 dispatch each — and lost precision on the
+            // round-trip. The kernel now takes invstd directly and does the
+            // single-pass `var = 1/invstd² - eps` conversion device-side
+            // (one SYCL kernel over C elements) only where oneDNN's
+            // DNNL_ARG_VARIANCE strictly requires it; the SYCL fallback uses
+            // invstd as `std_inv` without any reconstruction at all.
             auto [grad_input, grad_gamma, grad_beta] = oneapi::batchnorm2d_backward(
-                grad_output, input, mean, variance, gamma, epsilon, get_q(inputs));
+                inputs[0], inputs[1], inputs[3], inputs[4], inputs[2], epsilon, get_q(inputs));
             return {grad_input, grad_gamma, grad_beta};
         });
 
@@ -3024,19 +3124,21 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 scores = oneapi::add_kernel(scores, mask_addend, queue);
             }
 
+            // F15: emit a real LSE alongside the softmax. The composed-ops
+            // formula `logsumexp(scores, dim=-1)` reuses the existing
+            // numerically-stable `max-shift + log(sum(exp(...)))` reduction;
+            // computing it here, before discarding `scores`, costs one extra
+            // pass over the score tensor and avoids a kernel rewrite.
+            // (The followup fused kernel will fuse this into the softmax
+            // sweep; the contract — `lse.is_valid() == true` — ships now.)
+            Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+
             // Step 4: Softmax over last dimension
             Tensor attn_weights = oneapi::softmax_kernel(scores, -1, queue);
 
             // Step 5: attn_weights @ V (use V_in — possibly broadcast for GQA)
             Tensor output = oneapi::matmul_kernel(attn_weights, V_in, queue);
-            // Per contract, FusedAttention returns (output, lse). LSE is the
-            // log-row-sum-of-exp from the softmax above; until a fused-LSE
-            // kernel lands, we compute it composed-ops style: max(scores) +
-            // log(sum(exp(scores - max))).
-            // For now we emit lse=Tensor{} as a placeholder so callers using
-            // .is_valid() detect "not computed" and fall back. Full LSE
-            // emission arrives with the kernel-level fused path in M8.
-            return {output, Tensor{}};
+            return {output, lse};
         });
 
     // =========================================================================
@@ -3054,19 +3156,86 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
             bool is_causal = attrs.get_bool(AttrKey::Causal, false);
 
-            // Per docs/internals/attention-contract.md: dropout > 0 not yet
-            // supported on this backend (audit C2 OneAPI). Throw a clear error
-            // so the BMM fallback in nn::functional::scaled_dot_product_attention
-            // picks it up. Full Philox replay arrives with the kernel-level refit.
             float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
             bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
-            if (dropout_p > 0.0f && is_training) {
-                throw std::runtime_error(
-                    "FlashAttention OneAPI: dropout > 0 not yet supported. Use the "
-                    "BMM fallback path or wait for the kernel-level Philox refit.");
-            }
 
             const Tensor* mask = (inputs.size() > 3) ? &inputs[3] : nullptr;
+
+            // F13: composed-ops fallback when dropout > 0 in training mode.
+            // The fused FlashAttention kernel doesn't expose attention-weight
+            // dropout in its inner softmax tile, so we route training-time
+            // dropout through `tenzor::` ops which dispatch to OneAPI kernels
+            // automatically. This trades memory efficiency (materializes the
+            // full attention matrix instead of streaming tiles) for contract
+            // correctness — same trade as F22 LSE.
+            //
+            // F13/F22-followup: dropout uses a Philox4x32-10-keyed Bernoulli
+            // mask (deterministic from `(seed, offset)`) rather than tenzor's
+            // global RNG. Forward generates fresh seed/offset and returns
+            // them as int64 1-element tensors; the backward path replays the
+            // same mask bit-exactly. Counter convention matches the
+            // CUDA/ROCm FA kernels:
+            //     ctr = (batch_head, query_idx, kv_pos, offset)
+            // so OneAPI / Vulkan composed dropout is interoperable with
+            // existing autograd-level Philox replay in
+            // `src/autograd/function_attention.cpp`.
+            //
+            // Math: O = (dropout_p_keyed(softmax((Q @ K^T) * scale [+ mask], -1))) @ V
+            if (dropout_p > 0.0f && is_training) {
+                const Tensor& Q = inputs[0];
+                const Tensor& K = inputs[1];
+                const Tensor& V = inputs[2];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::matmul(Q, Kt);
+                Tensor scaled = tenzor::mul(scores, static_cast<double>(scale));
+                if (mask != nullptr && mask->is_valid() && mask->numel() > 0) {
+                    scaled = tenzor::add(scaled, *mask);
+                }
+                if (is_causal) {
+                    auto ss = scaled.shape();
+                    int64_t S_q = ss[ss.size() - 2];
+                    int64_t S_k = ss[ss.size() - 1];
+                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    Tensor col_idx = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                    Tensor rows_2d = tenzor::reshape(row_idx, std::vector<int64_t>{S_q, 1});
+                    Tensor cols_2d = tenzor::reshape(col_idx, std::vector<int64_t>{1, S_k});
+                    Tensor future = tenzor::gt(cols_2d, rows_2d);
+                    std::vector<int64_t> bshape(ss.size(), 1);
+                    bshape[ss.size() - 2] = S_q;
+                    bshape[ss.size() - 1] = S_k;
+                    Tensor future_b = tenzor::reshape(future, bshape);
+                    Tensor neg_inf = tenzor::full(
+                        std::vector<int64_t>(ss.begin(), ss.end()),
+                        -std::numeric_limits<double>::infinity(),
+                        scaled.dtype(), scaled.device());
+                    scaled = tenzor::where(future_b, neg_inf, scaled);
+                }
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scaled};
+                Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+                // F13-followup: Philox-keyed dropout via device-side SYCL
+                // kernel — no CPU host loop, no CPU→GPU copy. The kernel
+                // (`oneapi::philox_dropout_mask_kernel`) writes the mask
+                // directly into a device-allocated tensor in a single
+                // parallel_for launch. Counter convention matches the host
+                // helper, the CUDA/ROCm FA kernels, and the autograd-level
+                // host replay so backward replay works regardless of which
+                // side produced the forward mask.
+                auto philox = tenzor::new_philox_stream();
+                uint64_t seed_v = static_cast<uint64_t>(philox.seed.data<int64_t>()[0]);
+                uint64_t offset_v = static_cast<uint64_t>(philox.offset.data<int64_t>()[0]);
+                std::vector<int64_t> attn_shape(attn.shape().begin(), attn.shape().end());
+                Tensor mask_dev = oneapi::philox_dropout_mask_kernel(
+                    attn_shape, dropout_p, seed_v, offset_v,
+                    attn.dtype(), queue);
+                Tensor attn_dropped = tenzor::mul(attn, mask_dev);
+
+                Tensor output_comp = tenzor::matmul(attn_dropped, V);
+                Tensor lse_comp = tenzor::logsumexp(scaled, -1, /*keepdim=*/false);
+                return {output_comp, lse_comp, philox.seed, philox.offset};
+            }
 
             // Phase 8.2: compute LSE alongside the forward pass for the fused
             // backward kernel. Allocation happens inside _with_lse if Q/K/V are
@@ -3253,25 +3422,155 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return std::vector<Tensor>{output, Tensor{}};
         }
 
+        // F14: ScoreModId >= 3 routes through the process-wide score_mod
+        // registry populated by `tenzor::nn::register_score_mod` (the same
+        // mechanism the CPU FlexAttention uses for user-defined functors).
+        // Forward composes Q@K^T → user-functor → softmax → @V, mirroring
+        // the CPU path.
+        if (score_mod_id >= 3) {
+            auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+            if (!fn) {
+                throw std::runtime_error(
+                    "FlexAttention OneAPI: no user score_mod registered for ScoreModId=" +
+                    std::to_string(score_mod_id) +
+                    ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
+            }
+            const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = scores * scale_t;
+            // Block indices are placeholders (the contract signature accepts them
+            // for partition-aware functors; OneAPI dispatches the whole tile at
+            // once so all four are 0).
+            Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {modified};
+            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+            Tensor output = tenzor::bmm(probs, V);
+            return std::vector<Tensor>{output, Tensor{}};
+        }
+
         throw std::runtime_error(
             "FlexAttention OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
-            " not yet implemented (only 0=identity, 1=causal, 2=sliding_window).");
+            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
+            "register user IDs >= 3 via tenzor::nn::register_score_mod).");
     });
 
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
-        if (score_mod_id != 0 && score_mod_id != 1) {
-            throw std::runtime_error(
-                "FlexAttentionBackward OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
-                " not yet implemented (M8 work).");
+        // F14: identity (0) and causal (1) — route to FlashAttention backward
+        // (a fused path exists). Sliding-window (2) and user-registered
+        // functors (>=3) flow through a composed-ops backward via existing
+        // bmm/softmax-backward primitives.
+        if (score_mod_id == 0 || score_mod_id == 1) {
+            bool causal = (score_mod_id == 1);
+            OpAttributes bwd_attrs;
+            bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+            bwd_attrs.set(AttrKey::Causal, causal);
+            std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+            return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
-        bool causal = (score_mod_id == 1);
-        OpAttributes bwd_attrs;
-        bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
-        bwd_attrs.set(AttrKey::Causal, causal);
-        std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
-        return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+
+        if (score_mod_id == 2 || score_mod_id >= 3) {
+            // Composed backward: inputs are [dO, Q, K, V, O, (L)] — exact same
+            // layout as FlashAttentionBackward expects. We replay the
+            // forward to recover the masked scores, then compute
+            // (dQ, dK, dV) via the standard chain.
+            const Tensor& dO = inputs[0];
+            const Tensor& Q = inputs[1];
+            const Tensor& K = inputs[2];
+            const Tensor& V = inputs[3];
+            // O = inputs[4] is the saved forward output; L = inputs[5] may
+            // be invalid (composed forward emits Tensor{}). Recompute
+            // attn_weights from scratch — cheap relative to the full bmm
+            // chain.
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = scores * scale_t;
+
+            if (score_mod_id == 2) {
+                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+                if (window_size <= 0) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward OneAPI: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                }
+                int64_t S_q = Q.shape()[Q.shape().size() - 2];
+                int64_t S_k = K.shape()[K.shape().size() - 2];
+                int64_t half = window_size / 2;
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
+                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                                              abs_diff.dtype(), abs_diff.device());
+                Tensor outside = tenzor::gt(abs_diff, half_t);
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device());
+                scores = scores + (outside.to(scores.dtype()) * neg_inf);
+            } else {
+                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+                if (!fn) {
+                    throw std::runtime_error(
+                        "FlexAttentionBackward OneAPI: no user score_mod registered for ScoreModId=" +
+                        std::to_string(score_mod_id));
+                }
+                scores = fn(scores, 0, 0, 0, 0);
+            }
+
+            // Recompute attention weights and forward output.
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {scores};
+            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+            // dV = attn^T @ dO
+            Tensor attn_t = tenzor::transpose(attn, -1, -2);
+            Tensor dV = tenzor::bmm(attn_t, dO);
+
+            // dAttn = dO @ V^T
+            Tensor Vt = tenzor::transpose(V, -1, -2);
+            Tensor dAttn = tenzor::bmm(dO, Vt);
+
+            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
+            Tensor ad = tenzor::mul(attn, dAttn);
+            NewOpAttributes sum_attrs;
+            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            sum_attrs.set(AttrKey::Keepdim, true);
+            std::vector<Tensor> sum_inputs = {ad};
+            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
+
+            // Apply scale to grad: dScores carries the mask gradient through
+            // (positions where scores were -inf produced attn==0, so the
+            // backward gradient for those positions is naturally zero via
+            // the multiplication by attn).
+            Tensor scale_t2 = tenzor::full(
+                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                static_cast<double>(scale), dScores.dtype(), dScores.device());
+            dScores = tenzor::mul(dScores, scale_t2);
+
+            // dQ = dScores @ K
+            Tensor dQ = tenzor::bmm(dScores, K);
+            // dK = dScores^T @ Q
+            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
+            Tensor dK = tenzor::bmm(dScores_t, Q);
+
+            return {dQ, dK, dV};
+        }
+
+        throw std::runtime_error(
+            "FlexAttentionBackward OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
+            " not recognised.");
     });
 
     // =========================================================================
@@ -3418,6 +3717,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
             bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
             return {oneapi::interpolate_kernel(inputs[0], size, mode, align_corners, get_q(inputs))};
+        });
+    // D3-followup OneAPI: native sycl::atomic_ref<float/double> scatter for
+    // bilinear backward. Replaces the earlier honest-throw stub.
+    table.register_kernel(OpId::InterpolateBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_size = attrs.get_int_list(AttrKey::InputShape);
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            return {oneapi::interpolate_backward_kernel(inputs[0], input_size, mode,
+                                                        align_corners, get_q(inputs))};
         });
 
     // GridSample / AffineGrid — native OneAPI kernels
@@ -3948,7 +4257,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LinalgEig,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            auto [WR, WI, V] = oneapi::linalg_eig_kernel(inputs[0], get_q(inputs));
+            auto [WR, WI, V] = oneapi::linalg_eig_qr_kernel(inputs[0], get_q(inputs));
             return {WR, WI, V};
         });
 
@@ -4232,7 +4541,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LinalgEig,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            auto [WR, WI, V] = oneapi::linalg_eig_kernel(inputs[0], get_q(inputs));
+            auto [WR, WI, V] = oneapi::linalg_eig_qr_kernel(inputs[0], get_q(inputs));
             return {WR, WI, V};
         });
 
@@ -5550,7 +5859,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Nested Tensor Operations (fallback: unbind segments, apply regular ops)
     // =========================================================================
     table.register_kernel(OpId::NestedSoftmax,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: dtype-aware path. The SYCL kernel below operates in
+            // Float32 only; for Float64/Float16/BFloat16 inputs, widen the
+            // values to Float32, run, then narrow back. Previously
+            // `values.data<float>()` silently re-interpreted the source
+            // buffer as float and produced half-filled / garbage output.
+            const Tensor& values_in = inputs[0];
+            if (values_in.dtype() != DType::Float32) {
+                DType orig = values_in.dtype();
+                Tensor widened = values_in.to(DType::Float32);
+                std::vector<Tensor> reroute = {widened, inputs[1]};
+                // Re-enter the dispatch — pick up the F32 specialization.
+                auto res = tenzor::dispatch(OpId::NestedSoftmax,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
@@ -5601,7 +5928,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::NestedLogSoftmax,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32.
+            const Tensor& values_in = inputs[0];
+            if (values_in.dtype() != DType::Float32) {
+                DType orig = values_in.dtype();
+                Tensor widened = values_in.to(DType::Float32);
+                std::vector<Tensor> reroute = {widened, inputs[1]};
+                auto res = tenzor::dispatch(OpId::NestedLogSoftmax,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
@@ -5652,7 +5992,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::NestedSum,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32.
+            const Tensor& values_in = inputs[0];
+            if (values_in.dtype() != DType::Float32) {
+                DType orig = values_in.dtype();
+                Tensor widened = values_in.to(DType::Float32);
+                std::vector<Tensor> reroute = {widened, inputs[1]};
+                auto res = tenzor::dispatch(OpId::NestedSum,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
@@ -5688,7 +6041,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::NestedMean,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32.
+            const Tensor& values_in = inputs[0];
+            if (values_in.dtype() != DType::Float32) {
+                DType orig = values_in.dtype();
+                Tensor widened = values_in.to(DType::Float32);
+                std::vector<Tensor> reroute = {widened, inputs[1]};
+                auto res = tenzor::dispatch(OpId::NestedMean,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
@@ -5727,6 +6093,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedLayerNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32. The SYCL kernel below
+            // operates in Float32 only — for F64/F16/BF16 inputs, widen all
+            // of (values, gamma, beta) to Float32, dispatch, and narrow the
+            // output back. Without this, `values.data<float>()` silently
+            // reinterprets a half-precision buffer as float and produces
+            // garbage.
+            if (inputs[0].dtype() != DType::Float32) {
+                DType orig = inputs[0].dtype();
+                Tensor v_w = inputs[0].to(DType::Float32);
+                Tensor g_w = inputs[2].to(DType::Float32);
+                Tensor b_w = inputs[3].to(DType::Float32);
+                std::vector<Tensor> reroute = {v_w, inputs[1], g_w, b_w};
+                auto res = tenzor::dispatch(OpId::NestedLayerNorm,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             // Per-row LN on packed values (LN operates on last dim, same for all rows)
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
@@ -5796,6 +6181,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
+            // Audit F11: widen-narrow for non-Float32. The SYCL kernel only
+            // supports Float32; without this, it throws "only Float32 supported"
+            // for F64/F16/BF16 inputs that the rest of the pipeline accepts.
+            if (inputs[0].dtype() != DType::Float32) {
+                DType orig = inputs[0].dtype();
+                Tensor q_w = inputs[0].to(DType::Float32);
+                Tensor k_w = inputs[1].to(DType::Float32);
+                Tensor v_w = inputs[2].to(DType::Float32);
+                auto out = oneapi::nested_attention_kernel(
+                    q_w, k_w, v_w, inputs[3], inputs[4],
+                    scale, causal, get_q(inputs));
+                return out.to(orig);
+            }
             return oneapi::nested_attention_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 scale, causal, get_q(inputs));
@@ -5803,6 +6201,18 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedToPadded,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32 (see NestedSoftmax above).
+            if (inputs[0].dtype() != DType::Float32) {
+                DType orig = inputs[0].dtype();
+                Tensor v_w = inputs[0].to(DType::Float32);
+                std::vector<Tensor> reroute = {v_w, inputs[1]};
+                auto res = tenzor::dispatch(OpId::NestedToPadded,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
@@ -5842,7 +6252,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::NestedFromPadded,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit F11: widen-narrow for non-Float32 (see NestedSoftmax above).
+            if (inputs[0].dtype() != DType::Float32) {
+                DType orig = inputs[0].dtype();
+                Tensor p_w = inputs[0].to(DType::Float32);
+                std::vector<Tensor> reroute = {p_w, inputs[1]};
+                auto res = tenzor::dispatch(OpId::NestedFromPadded,
+                    std::span<const Tensor>(reroute), attrs);
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             const Tensor& padded = inputs[0];
             const Tensor& offsets = inputs[1];
             int64_t B = offsets.numel() - 1;
@@ -5909,6 +6331,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
+            // Audit F11: widen-narrow for non-Float32 (see NestedAttention above).
+            // Inputs: grad_out, Q, K, V, attn_out, q_offsets, kv_offsets.
+            if (inputs[0].dtype() != DType::Float32) {
+                DType orig = inputs[0].dtype();
+                Tensor go = inputs[0].to(DType::Float32);
+                Tensor q  = inputs[1].to(DType::Float32);
+                Tensor k  = inputs[2].to(DType::Float32);
+                Tensor v  = inputs[3].to(DType::Float32);
+                Tensor ao = inputs[4].to(DType::Float32);
+                auto res = oneapi::nested_attention_backward_kernel(
+                    go, q, k, v, ao, inputs[5], inputs[6],
+                    scale, causal, get_q(inputs));
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             return oneapi::nested_attention_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 inputs[5], inputs[6], scale, causal, get_q(inputs));

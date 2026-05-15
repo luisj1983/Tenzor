@@ -103,9 +103,65 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusParameterCount) {
         total_params += param_size;
     }
 
-    // DeepLabV3+ ResNet50 should have ~40M parameters (allow 30% tolerance)
-    EXPECT_GT(total_params, 30'000'000);
+    // DeepLabV3+ ResNet50: torchvision reference is ~40M parameters. Tenzor
+    // uses single-scale ASPP (no multi-scale FPN routing, G11-followup) so it
+    // lands lower. Audit G11 also removed the fake feature_proj_ (525K params)
+    // — real C2 features don't need a 2048→256 projection — pushing the model
+    // from ~30.08M to ~29.56M. Widened the lower bound to reflect the audit's
+    // structural cleanup.
+    EXPECT_GT(total_params, 25'000'000);
     EXPECT_LT(total_params, 55'000'000);
+}
+
+// G11 regression: atrous ResNet variants must produce features at the
+// requested output_stride, not stride 32. Specifically, ResNet50 with
+// output_stride=16 should give a C5 spatial size of input/16 (not input/32).
+TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride16_G11) {
+    using namespace tenzor::models;
+    auto backbone = resnet50_atrous(/*num_classes=*/1000, /*output_stride=*/16, /*pretrained=*/false);
+    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    auto c5 = backbone->forward_features(img);
+
+    // With output_stride=16, the layer4 stride was replaced by dilation=2,
+    // so C5 is at input/16 = 16x16, not the regular 8x8.
+    auto shape = c5.tensor().shape();
+    EXPECT_EQ(shape[2], 16);
+    EXPECT_EQ(shape[3], 16);
+    EXPECT_EQ(shape[1], 2048);  // channel count unchanged by atrous
+}
+
+TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride8_G11) {
+    using namespace tenzor::models;
+    auto backbone = resnet50_atrous(1000, /*output_stride=*/8, false);
+    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    auto c5 = backbone->forward_features(img);
+
+    auto shape = c5.tensor().shape();
+    EXPECT_EQ(shape[2], 32);  // input/8 = 32
+    EXPECT_EQ(shape[3], 32);
+    EXPECT_EQ(shape[1], 2048);
+}
+
+// G11: regular resnet50 must still produce stride 32 (no regression).
+TEST_F(DeepLabV3PlusTest, RegularResNet50StillStride32_G11) {
+    using namespace tenzor::models;
+    auto backbone = resnet50(1000, false);
+    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    auto c5 = backbone->forward_features(img);
+
+    auto shape = c5.tensor().shape();
+    EXPECT_EQ(shape[2], 8);  // input/32 = 8
+    EXPECT_EQ(shape[3], 8);
+}
+
+// G11: ResNet18/34 (BasicBlock) must reject atrous construction with a
+// clear error message. Documented in resnet.hpp / deeplabv3plus.cpp.
+TEST_F(DeepLabV3PlusTest, BasicBlockRejectsAtrous_G11) {
+    EXPECT_THROW(
+        std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{2, 2, 2, 2}, 1000, /*use_basic_block=*/true,
+            /*groups=*/1, /*width_per_group=*/64, /*output_stride=*/16),
+        std::invalid_argument);
 }
 
 TEST_F(DeepLabV3PlusTest, DeepLabV3PlusBinarySegmentation) {

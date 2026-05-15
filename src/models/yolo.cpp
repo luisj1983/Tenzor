@@ -916,6 +916,87 @@ YOLOv5::YOLOv5(Size size, int64_t num_classes, bool pretrained,
     }
 }
 
+// ----------------------------------------------------------------------------
+// Audit G17: dataset-aware anchor refit via k=9 k-means.
+//
+// Ultralytics-style: distance = 1 - IoU between (w, h) pairs treated as boxes
+// centered at the origin. IoU between (w₁, h₁) and (w₂, h₂) is
+//   min(w₁, w₂) * min(h₁, h₂) / (w₁·h₁ + w₂·h₂ - min(w₁, w₂)·min(h₁, h₂))
+// This rewards centroids whose aspect ratio AND size both match cluster
+// members — which is the actual quantity anchor matching cares about.
+//
+// k-means seeding: pick 9 evenly spaced quantile box sizes (rather than
+// random init) so results are deterministic.
+// ----------------------------------------------------------------------------
+auto YOLOv5::refit_anchors_kmeans(const std::vector<std::pair<float, float>>& box_sizes,
+                                   int64_t iters) -> void {
+    constexpr int K = 9;
+    if (static_cast<int64_t>(box_sizes.size()) < K) {
+        throw std::invalid_argument(
+            "YOLOv5::refit_anchors_kmeans requires at least 9 boxes; got " +
+            std::to_string(box_sizes.size()));
+    }
+
+    auto iou_wh = [](float w1, float h1, float w2, float h2) -> float {
+        const float inter = std::min(w1, w2) * std::min(h1, h2);
+        const float uni   = w1 * h1 + w2 * h2 - inter;
+        return uni > 0.0f ? inter / uni : 0.0f;
+    };
+
+    // Seed centroids: pick 9 boxes spread by area (deterministic, robust).
+    std::vector<std::pair<float, float>> sorted_by_area = box_sizes;
+    std::sort(sorted_by_area.begin(), sorted_by_area.end(),
+              [](auto& a, auto& b) { return a.first * a.second < b.first * b.second; });
+    std::vector<std::pair<float, float>> centroids(K);
+    const size_t N = sorted_by_area.size();
+    for (int k = 0; k < K; ++k) {
+        // Spread across the size distribution: indices 0, N/8, 2N/8, …, 7N/8.
+        const size_t idx = std::min(N - 1, static_cast<size_t>((static_cast<double>(k) / K) * N));
+        centroids[k] = sorted_by_area[idx];
+    }
+
+    // Lloyd's algorithm with 1-IoU distance.
+    std::vector<int> assign(N, 0);
+    for (int64_t it = 0; it < iters; ++it) {
+        bool changed = false;
+        for (size_t i = 0; i < N; ++i) {
+            int best = 0;
+            float best_iou = -1.0f;
+            for (int k = 0; k < K; ++k) {
+                float ki = iou_wh(box_sizes[i].first, box_sizes[i].second,
+                                  centroids[k].first, centroids[k].second);
+                if (ki > best_iou) { best_iou = ki; best = k; }
+            }
+            if (assign[i] != best) { assign[i] = best; changed = true; }
+        }
+        if (!changed) break;
+
+        // Update centroids as median of cluster members. Median is more robust
+        // than mean to outlier huge/tiny boxes (Ultralytics uses mean; median
+        // is a reasonable variant).
+        for (int k = 0; k < K; ++k) {
+            std::vector<float> ws, hs;
+            for (size_t i = 0; i < N; ++i) {
+                if (assign[i] == k) {
+                    ws.push_back(box_sizes[i].first);
+                    hs.push_back(box_sizes[i].second);
+                }
+            }
+            if (ws.empty()) continue;  // empty cluster: keep previous centroid.
+            std::sort(ws.begin(), ws.end());
+            std::sort(hs.begin(), hs.end());
+            centroids[k] = {ws[ws.size() / 2], hs[hs.size() / 2]};
+        }
+    }
+
+    // Sort the 9 centroids by area ascending, then assign 3 to each pyramid level.
+    std::sort(centroids.begin(), centroids.end(),
+              [](auto& a, auto& b) { return a.first * a.second < b.first * b.second; });
+    anchors_p3_.assign(centroids.begin(),     centroids.begin() + 3);  // smallest
+    anchors_p4_.assign(centroids.begin() + 3, centroids.begin() + 6);  // mid
+    anchors_p5_.assign(centroids.begin() + 6, centroids.begin() + 9);  // largest
+}
+
 auto YOLOv5::get_size_params(Size size) -> std::pair<double, double> {
     switch (size) {
         case Size::Nano:   return {0.33, 0.25};

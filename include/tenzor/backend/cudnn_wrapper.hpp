@@ -139,7 +139,8 @@ enum class TensorFormat {
     NHWC = 1
 };
 
-// Key for conv2d algorithm cache
+// Key for conv2d algorithm cache. Audit E1: per-axis stride/padding/dilation
+// so asymmetric convolutions get distinct cache entries.
 struct Conv2dCacheKey {
     int64_t batch;
     int64_t in_channels;
@@ -148,9 +149,12 @@ struct Conv2dCacheKey {
     int64_t out_channels;
     int64_t kernel_h;
     int64_t kernel_w;
-    int64_t stride;
-    int64_t padding;
-    int64_t dilation;
+    int64_t stride_h;
+    int64_t stride_w;
+    int64_t pad_h;
+    int64_t pad_w;
+    int64_t dil_h;
+    int64_t dil_w;
     int64_t groups;
     cudnnDataType_t dtype;
     TensorFormat format;  // NCHW or NHWC
@@ -168,9 +172,12 @@ struct Conv2dCacheKey {
                out_channels == other.out_channels &&
                kernel_h == other.kernel_h &&
                kernel_w == other.kernel_w &&
-               stride == other.stride &&
-               padding == other.padding &&
-               dilation == other.dilation &&
+               stride_h == other.stride_h &&
+               stride_w == other.stride_w &&
+               pad_h == other.pad_h &&
+               pad_w == other.pad_w &&
+               dil_h == other.dil_h &&
+               dil_w == other.dil_w &&
                groups == other.groups &&
                dtype == other.dtype &&
                format == other.format &&
@@ -193,9 +200,12 @@ struct Conv2dCacheKeyHash {
         hash_combine(k.out_channels);
         hash_combine(k.kernel_h);
         hash_combine(k.kernel_w);
-        hash_combine(k.stride);
-        hash_combine(k.padding);
-        hash_combine(k.dilation);
+        hash_combine(k.stride_h);
+        hash_combine(k.stride_w);
+        hash_combine(k.pad_h);
+        hash_combine(k.pad_w);
+        hash_combine(k.dil_h);
+        hash_combine(k.dil_w);
         hash_combine(k.groups);
         hash_combine(static_cast<int>(k.dtype));
         hash_combine(static_cast<int>(k.format));
@@ -701,6 +711,27 @@ auto cudnn_conv2d_forward(
 ) -> Tensor;
 
 /**
+ * @brief Per-axis Conv2D forward (audit E1).
+ *
+ * Accepts separate `stride_h`/`stride_w`, `pad_h`/`pad_w`, `dil_h`/`dil_w`,
+ * which cuDNN's `cudnnSetConvolution2dDescriptor` supports natively. The
+ * scalar overload above delegates to this one with duplicated values.
+ *
+ * Removes the "asymmetric stride/padding/dilation not supported" gate that
+ * existed on GPU backends.
+ */
+auto cudnn_conv2d_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+/**
  * @brief NHWC-optimized Conv2D forward using cuDNN
  *
  * Uses NHWC tensor format internally which enables:
@@ -801,6 +832,23 @@ auto cudnn_conv2d_backward(
     int64_t stride,
     int64_t padding,
     int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief Per-axis Conv2D backward (audit E1). See per-axis forward above.
+ */
+auto cudnn_conv2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups,
     bool compute_grad_input,
     bool compute_grad_weight,

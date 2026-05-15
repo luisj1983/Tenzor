@@ -65,3 +65,23 @@ tenzor_discover_tests(test_launch LABELS "distributed" DISCOVERY_TIMEOUT 60)
 add_executable(test_sequence_parallel_cpp test_sequence_parallel.cpp)
 target_link_libraries(test_sequence_parallel_cpp PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_sequence_parallel_cpp LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation A5: DistributedAllReduce autograd Function.
+add_executable(test_distributed_all_reduce_autograd test_distributed_all_reduce_autograd.cpp)
+target_link_libraries(test_distributed_all_reduce_autograd PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distributed_all_reduce_autograd LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation C1: SyncBatchNorm autograd-aware all-reduce path.
+add_executable(test_sync_batchnorm_autograd_aware test_sync_batchnorm_autograd_aware.cpp)
+target_link_libraries(test_sync_batchnorm_autograd_aware PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sync_batchnorm_autograd_aware LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation B2: DTensor::redistribute collective wiring.
+add_executable(test_dtensor_redistribute test_dtensor_redistribute.cpp)
+target_link_libraries(test_dtensor_redistribute PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dtensor_redistribute LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation B4: FSDP2 backward_hook collective wiring integration.
+add_executable(test_fsdp2_collective_wiring test_fsdp2_collective_wiring.cpp)
+target_link_libraries(test_fsdp2_collective_wiring PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fsdp2_collective_wiring LABELS "distributed" DISCOVERY_TIMEOUT 60)

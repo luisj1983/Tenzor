@@ -7,6 +7,7 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/nn/layers/flex_attention.hpp"  // F6: process-wide score_mod registry
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -312,6 +313,7 @@ namespace cuda {
     auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
                           bool align_corners) -> Tensor;
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
+    auto interpolate_backward_cuda(const Tensor& grad_output, const std::vector<int64_t>& input_size, const std::string& mode, bool align_corners) -> Tensor;
     auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
@@ -899,7 +901,7 @@ namespace cuda {
     Tensor float_power_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor xlog1py_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor ldexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
-    Tensor frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    std::vector<Tensor> frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // DiagEmbed dispatch wrapper (diagflat is implemented inline in registry)
     Tensor diag_embed_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -1962,34 +1964,147 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return std::vector<Tensor>{output, Tensor{}};
         }
 
+                // F6: ScoreModId >= 3 routes through the process-wide score_mod
+        // registry populated by `tenzor::nn::register_score_mod` — same
+        // mechanism the CPU and OneAPI backends use. Forward composes
+        // Q@K^T → user functor → softmax → @V via tenzor:: ops (which
+        // dispatch to CUDA automatically).
+        if (score_mod_id >= 3) {
+            auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+            if (!fn) {
+                throw std::runtime_error(
+                    "FlexAttention CUDA: no user score_mod registered for ScoreModId=" +
+                    std::to_string(score_mod_id) +
+                    ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
+            }
+            const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = scores * scale_t;
+            Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {modified};
+            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+            Tensor output = tenzor::bmm(probs, V);
+            return std::vector<Tensor>{output, Tensor{}};
+        }
+
         throw std::runtime_error(
             "FlexAttention CUDA: ScoreModId=" + std::to_string(score_mod_id) +
-            " not yet implemented (only 0=identity, 1=causal, 2=sliding_window).");
+            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
+            "register user IDs >= 3 via tenzor::nn::register_score_mod).");
     });
 
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
-        if (score_mod_id != 0 && score_mod_id != 1) {
-            throw std::runtime_error(
-                "FlexAttentionBackward CUDA: ScoreModId=" + std::to_string(score_mod_id) +
-                " not yet implemented (M8 work).");
+        // F6: identity (0) and causal (1) — route to the fused FlashAttention
+        // backward when applicable. Sliding-window (2) and user-registered
+        // functors (>= 3) flow through a composed-ops backward (same pattern
+        // as F14 OneAPI).
+        if (score_mod_id == 0 || score_mod_id == 1) {
+            bool causal = (score_mod_id == 1);
+            const Tensor& dO = inputs[0], &Q = inputs[1], &K = inputs[2], &V = inputs[3], &O = inputs[4];
+            int64_t head_dim = Q.shape().back();
+            bool has_lse = inputs.size() >= 6;
+            if (has_lse && (head_dim == 32 || head_dim == 64 || head_dim == 128) && Q.dtype() == DType::Float32) {
+                return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, inputs[5],
+                                                           scale, causal, 0.0f, Tensor{}, Tensor{});
+            }
+            OpAttributes bwd_attrs;
+            bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+            bwd_attrs.set(AttrKey::Causal, causal);
+            std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+            return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
-        bool causal = (score_mod_id == 1);
-        const Tensor& dO = inputs[0], &Q = inputs[1], &K = inputs[2], &V = inputs[3], &O = inputs[4];
-        int64_t head_dim = Q.shape().back();
-        bool has_lse = inputs.size() >= 6;
-        if (has_lse && (head_dim == 32 || head_dim == 64 || head_dim == 128) && Q.dtype() == DType::Float32) {
-            return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, inputs[5],
-                                                       scale, causal, 0.0f, Tensor{}, Tensor{});
+
+        if (score_mod_id == 2 || score_mod_id >= 3) {
+            // Composed backward replaying the forward to recover masked scores
+            // (inputs: [dO, Q, K, V, O, (L)]).
+            const Tensor& dO = inputs[0];
+            const Tensor& Q = inputs[1];
+            const Tensor& K = inputs[2];
+            const Tensor& V = inputs[3];
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = scores * scale_t;
+
+            if (score_mod_id == 2) {
+                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+                if (window_size <= 0) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward CUDA: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                }
+                int64_t S_q = Q.shape()[Q.shape().size() - 2];
+                int64_t S_k = K.shape()[K.shape().size() - 2];
+                int64_t half = window_size / 2;
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
+                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                                              abs_diff.dtype(), abs_diff.device());
+                Tensor outside = tenzor::gt(abs_diff, half_t);
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device());
+                scores = scores + (outside.to(scores.dtype()) * neg_inf);
+            } else {
+                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+                if (!fn) {
+                    throw std::runtime_error(
+                        "FlexAttentionBackward CUDA: no user score_mod registered for ScoreModId=" +
+                        std::to_string(score_mod_id));
+                }
+                scores = fn(scores, 0, 0, 0, 0);
+            }
+
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {scores};
+            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+            // dV = attn^T @ dO
+            Tensor attn_t = tenzor::transpose(attn, -1, -2);
+            Tensor dV = tenzor::bmm(attn_t, dO);
+
+            // dAttn = dO @ V^T
+            Tensor Vt = tenzor::transpose(V, -1, -2);
+            Tensor dAttn = tenzor::bmm(dO, Vt);
+
+            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
+            Tensor ad = tenzor::mul(attn, dAttn);
+            NewOpAttributes sum_attrs;
+            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            sum_attrs.set(AttrKey::Keepdim, true);
+            std::vector<Tensor> sum_inputs = {ad};
+            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
+
+            // Apply scale to grad.
+            Tensor scale_t2 = tenzor::full(
+                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                static_cast<double>(scale), dScores.dtype(), dScores.device());
+            dScores = tenzor::mul(dScores, scale_t2);
+
+            Tensor dQ = tenzor::bmm(dScores, K);
+            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
+            Tensor dK = tenzor::bmm(dScores_t, Q);
+
+            return {dQ, dK, dV};
         }
-        // Composed-ops fallback for unsupported head_dim or dtype: defer to
-        // FlashAttentionBackward dispatch which already implements it.
-        OpAttributes bwd_attrs;
-        bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
-        bwd_attrs.set(AttrKey::Causal, causal);
-        std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
-        return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+
+        throw std::runtime_error(
+            "FlexAttentionBackward CUDA: ScoreModId=" + std::to_string(score_mod_id) +
+            " not recognised.");
     });
 
     // =========================================================================
@@ -2240,6 +2355,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::interpolate_cuda(inputs[0], size, mode, align_corners);
     });
 
+    // Audit D3: device-resident bilinear backward (atomicAdd scatter) —
+    // no CPU fallback. Inputs: [grad_output]. Attrs: InputShape, Mode, AlignCorners.
+    table.register_single_output_kernel(OpId::InterpolateBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_size = attrs.get_int_list(AttrKey::InputShape);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cuda::interpolate_backward_cuda(inputs[0], input_size, mode, align_corners);
+    });
+
     table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
         std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
@@ -2291,29 +2415,57 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input, weight] or [input, weight, bias]
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        // Audit E1: read per-axis stride/padding/dilation, falling back to
+        // the scalar attribute for back-compat. cuDNN supports asymmetric
+        // values natively via cudnnSetConvolution2dDescriptor.
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias,
+                                           stride_h, stride_w, pad_h, pad_w,
+                                           dil_h, dil_w, groups,
+                                           get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[2],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[2],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
     // Conv2dBackwardBias: inputs = {grad_output}
@@ -2400,14 +2552,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {result[0]};
     });
 
+    // Audit I5-followup: per-axis honest contract. Read per-axis attrs with
+    // scalar fallback; delegate to scalar wrapper when isotropic; throw clear
+    // error on asymmetric (the cuDNN wrapper is scalar-only; native per-axis
+    // is a deeper followup paralleling E1's cuDNN work for Conv2d).
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sH = attrs.get_int(AttrKey::StrideH,        s),  sW = attrs.get_int(AttrKey::StrideW,        s);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH,       p),  pW = attrs.get_int(AttrKey::PaddingW,       p);
+        int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, op), opW= attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dH = attrs.get_int(AttrKey::DilationH,      d),  dW = attrs.get_int(AttrKey::DilationW,      d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        if (sH != sW || pH != pW || opH != opW || dH != dW) {
+            throw std::runtime_error(
+                "CUDA ConvTranspose2d: asymmetric stride/padding/output_padding/"
+                "dilation is not yet supported on CUDA (I5-followup: extend the "
+                "cuDNN ConvTranspose2d wrapper to per-axis).");
+        }
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cuda::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, sH, pH, opH, dH, groups, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2485,28 +2651,40 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Conv3d Operations (cuDNN Nd)
     // =========================================================================
 #ifdef TENZOR_HAS_CUDNN
+    // Audit I5-followup: per-axis honest contract for Conv3d on CUDA.
+    // cuDNN's wrapper here is scalar-only; native per-axis is a deeper
+    // followup paralleling E1's Conv2d work. The asymmetric-detection
+    // sequence is inlined per lambda (auto-lambdas can't be captured by
+    // std::function-typed kernel registrations).
+#   define TENZOR_CUDA_READ_3D_ISO_OR_THROW(OP_NAME) \
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1); \
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0); \
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1); \
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1); \
+        { \
+            int64_t sD = attrs.get_int(AttrKey::StrideD,   stride),   sH = attrs.get_int(AttrKey::StrideH,   stride),   sW = attrs.get_int(AttrKey::StrideW,   stride); \
+            int64_t pD = attrs.get_int(AttrKey::PaddingD,  padding),  pH = attrs.get_int(AttrKey::PaddingH,  padding),  pW = attrs.get_int(AttrKey::PaddingW,  padding); \
+            int64_t dD = attrs.get_int(AttrKey::DilationD, dilation), dH = attrs.get_int(AttrKey::DilationH, dilation), dW = attrs.get_int(AttrKey::DilationW, dilation); \
+            if (sD != sH || sH != sW || pD != pH || pH != pW || dD != dH || dH != dW) { \
+                throw std::runtime_error( \
+                    std::string("CUDA ") + (OP_NAME) + ": asymmetric stride/" \
+                    "padding/dilation is not yet supported on CUDA (I5-followup: " \
+                    "extend cuDNN ConvNd wrapper to per-axis)."); \
+            } \
+        }
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3d")
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv3d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3dBackwardInput")
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3dBackwardWeight")
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
@@ -2525,32 +2703,38 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // ConvTranspose3d Operations (cuDNN Nd)
     // =========================================================================
+    // Audit I5-followup: ConvT3d honest contract (cuDNN). Same inlined macro
+    // pattern as Conv3d above, plus output_padding axes.
+#   define TENZOR_CUDA_READ_T3D_ISO_OR_THROW(OP_NAME) \
+        int64_t stride         = attrs.get_int(AttrKey::Stride, 1); \
+        int64_t padding        = attrs.get_int(AttrKey::Padding, 0); \
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0); \
+        int64_t dilation       = attrs.get_int(AttrKey::Dilation, 1); \
+        int64_t groups         = attrs.get_int(AttrKey::Groups, 1); \
+        { \
+            int64_t sD = attrs.get_int(AttrKey::StrideD,        stride),         sH = attrs.get_int(AttrKey::StrideH,        stride),         sW = attrs.get_int(AttrKey::StrideW,        stride); \
+            int64_t pD = attrs.get_int(AttrKey::PaddingD,       padding),        pH = attrs.get_int(AttrKey::PaddingH,       padding),        pW = attrs.get_int(AttrKey::PaddingW,       padding); \
+            int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, output_padding), opH= attrs.get_int(AttrKey::OutputPaddingH, output_padding), opW= attrs.get_int(AttrKey::OutputPaddingW, output_padding); \
+            int64_t dD = attrs.get_int(AttrKey::DilationD,      dilation),       dH = attrs.get_int(AttrKey::DilationH,      dilation),       dW = attrs.get_int(AttrKey::DilationW,      dilation); \
+            if (sD != sH || sH != sW || pD != pH || pH != pW || \
+                opD != opH || opH != opW || dD != dH || dH != dW) { \
+                throw std::runtime_error( \
+                    std::string("CUDA ") + (OP_NAME) + ": asymmetric stride/" \
+                    "padding/output_padding/dilation is not yet supported (I5-followup)."); \
+            } \
+        }
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3d")
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv_transpose3d_forward(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    // ConvTranspose3dBackward: use ABI-safe wrappers that return single Tensor
-    // instead of std::tuple, avoiding potential nvcc/g++ tuple ABI mismatch.
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3dBackwardInput")
         return cuda::cudnn_conv_transpose3d_backward_input(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3dBackwardWeight")
         return cuda::cudnn_conv_transpose3d_backward_weight(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
@@ -2569,28 +2753,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Conv3d / ConvTranspose3d fallback registrations (no cuDNN).
     // Direct-convolution kernels in src/backends/cuda/kernels/conv3d.cu.
     // -------------------------------------------------------------------------
+    // Audit I5-followup: non-cuDNN fallback Conv3d honest contract. Reuses
+    // the same macro defined above in the cuDNN branch (still in scope here).
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3d (non-cuDNN fallback)")
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3dBackwardInput (non-cuDNN fallback)")
         auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_3D_ISO_OR_THROW("Conv3dBackwardWeight (non-cuDNN fallback)")
         auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
@@ -2604,30 +2781,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_bias};
     });
 
+    // Audit I5-followup: non-cuDNN fallback ConvT3d honest contract.
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3d (non-cuDNN fallback)")
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv_transpose3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3dBackwardInput (non-cuDNN fallback)")
         return cuda::conv_transpose3d_backward_input_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_CUDA_READ_T3D_ISO_OR_THROW("ConvTranspose3dBackwardWeight (non-cuDNN fallback)")
         return cuda::conv_transpose3d_backward_weight_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
@@ -4691,7 +4857,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::FloatPower, cuda::float_power_dispatch);
     table.register_single_output_kernel(OpId::Xlog1py, cuda::xlog1py_dispatch);
     table.register_single_output_kernel(OpId::Ldexp, cuda::ldexp_dispatch);
-    table.register_single_output_kernel(OpId::Frexp, cuda::frexp_dispatch);
+    table.register_kernel(OpId::Frexp, cuda::frexp_dispatch);  // F1: multi-output (mantissa, exponent)
     table.register_single_output_kernel(OpId::DiagEmbed, cuda::diag_embed_dispatch);
     table.register_single_output_kernel(OpId::Diagflat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
@@ -4728,20 +4894,50 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::nested_log_softmax_cuda(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 
+    // F4 sub-followup: widen-narrow for F16/BF16 on the CUDA nested kernels.
+    // The kernel impls support Float32 + Float64 natively (F4); F16/BF16
+    // widen at the registry entry to Float32, dispatch, and narrow back.
+    // (Inline check rather than a captured helper because
+    // `SingleOutputKernelFn` is a raw function pointer, not a `std::function`,
+    // and capturing lambdas can't decay to function pointers — same constraint
+    // hit by the I5-followup CUDA Conv3d registry macros.)
     table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto v = inputs[0].to(DType::Float32);
+            auto r = cuda::nested_sum_cuda(v, inputs[1], get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_sum_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedMean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto v = inputs[0].to(DType::Float32);
+            auto r = cuda::nested_mean_cuda(v, inputs[1], get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_mean_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float eps = attrs.get_float(AttrKey::Eps, 1e-5f);
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto v = inputs[0].to(DType::Float32);
+            auto w = inputs[2].to(DType::Float32);
+            auto b = inputs[3].to(DType::Float32);
+            auto r = cuda::nested_layer_norm_cuda(v, inputs[1], w, b, eps, get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_layer_norm_cuda(inputs[0], inputs[1], inputs[2], inputs[3], eps, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // NestedLinear delegates to `cuda::nested_linear_cuda` which itself
+        // routes through MatMul + Add dispatch — those already handle every
+        // floating dtype, so no widen-narrow needed here.
         const Tensor* bias = (inputs.size() > 3) ? &inputs[3] : nullptr;
         return cuda::nested_linear_cuda(inputs[0], inputs[2], bias, get_cuda_stream(attrs));
     });
@@ -4749,6 +4945,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float scale = attrs.get_float(AttrKey::Scale, 1.0f);
         bool causal = attrs.get_bool(AttrKey::Causal, false);
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto Q = inputs[0].to(DType::Float32);
+            auto K = inputs[1].to(DType::Float32);
+            auto V = inputs[2].to(DType::Float32);
+            auto r = cuda::nested_attention_cuda(Q, K, V, inputs[3], inputs[4],
+                                                  scale, causal, get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_attention_cuda(inputs[0], inputs[1], inputs[2],
                                            inputs[3], inputs[4], scale, causal, get_cuda_stream(attrs));
     });
@@ -4756,10 +4961,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedToPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
         float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto v = inputs[0].to(DType::Float32);
+            auto r = cuda::nested_to_padded_cuda(v, inputs[1], max_len, padding_value, get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_to_padded_cuda(inputs[0], inputs[1], max_len, padding_value, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedFromPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        DType d = inputs[0].dtype();
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto v = inputs[0].to(DType::Float32);
+            auto r = cuda::nested_from_padded_cuda(v, inputs[1], get_cuda_stream(attrs));
+            return r.to(d);
+        }
         return cuda::nested_from_padded_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 
@@ -4807,6 +5024,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = attrs.get_float(AttrKey::Scale, 1.0f);
             bool causal = attrs.get_bool(AttrKey::Causal, false);
+            // F4 sub-followup: widen-narrow for F16/BF16. inputs are
+            // [grad_out, Q, K, V, attn_out, q_offsets, kv_offsets].
+            if (inputs[0].dtype() == DType::Float16 || inputs[0].dtype() == DType::BFloat16) {
+                DType orig = inputs[0].dtype();
+                auto go = inputs[0].to(DType::Float32);
+                auto q  = inputs[1].to(DType::Float32);
+                auto k  = inputs[2].to(DType::Float32);
+                auto v  = inputs[3].to(DType::Float32);
+                auto ao = inputs[4].to(DType::Float32);
+                auto res = cuda::nested_attention_backward_cuda(
+                    go, q, k, v, ao, inputs[5], inputs[6],
+                    scale, causal, get_cuda_stream(attrs));
+                std::vector<Tensor> narrowed;
+                narrowed.reserve(res.size());
+                for (auto& t : res) narrowed.push_back(t.to(orig));
+                return narrowed;
+            }
             return cuda::nested_attention_backward_cuda(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 inputs[5], inputs[6], scale, causal, get_cuda_stream(attrs));

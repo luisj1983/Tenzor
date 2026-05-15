@@ -735,6 +735,19 @@ public:
 
     // Interpolation operation
     auto dispatchInterpolate(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    // D3-followup-Vulkan-host: bilinear backward via `interpolate_bilinear_backward.comp`
+    // (uses VK_EXT_shader_atomic_float for the 4-weight scatter).
+    auto dispatchInterpolateBackward(const Tensor& grad_output,
+                                      const std::vector<int64_t>& input_size,
+                                      const std::string& mode,
+                                      bool align_corners) -> Tensor;
+    // F22-followup: device-side Philox4x32-10 Bernoulli mask via the
+    // `philox_dropout_mask.comp` compute shader. Output is Float32; callers
+    // requesting F16/BF16 should cast via dispatchCast after this returns.
+    auto dispatchPhiloxDropoutMask(const std::vector<int64_t>& shape,
+                                    float p,
+                                    uint64_t seed,
+                                    uint64_t offset) -> Tensor;
 
     // ROI Align operations
     auto dispatchROIAlignForward(const Tensor& features, const Tensor& rois, const OpAttributes& attrs) -> Tensor;

@@ -2113,8 +2113,63 @@ auto quantize_per_tensor(const Tensor& input, double scale, int64_t zero_point,
             int64_t q = static_cast<int64_t>(std::round(in[i] / scale)) + zero_point;
             out[i] = static_cast<int8_t>(std::clamp(q, int64_t(-128), int64_t(127)));
         }
+    } else if (dtype == DType::QInt4x2) {
+        // Audit J1: real Int4 packing — two 4-bit signed values per byte.
+        //
+        // Layout: the last dim is "packed" (halved with ceil-rounding for
+        // odd lengths). For an input shape of `[..., N]`, the output
+        // QInt4x2 tensor has shape `[..., (N + 1) / 2]`. Each output byte
+        // stores two 4-bit signed values: bits 0..3 hold the even-indexed
+        // value and bits 4..7 hold the odd-indexed value (low/high nibble).
+        // Odd N leaves the high nibble of the last byte zero.
+        //
+        // Quantization: q = round(x / scale) + zero_point, clamped to the
+        // signed 4-bit range [-8, 7]. The clamped value is masked to
+        // 4 bits via `& 0xF` (two's-complement preserved).
+        const int64_t Q_MIN = -8;
+        const int64_t Q_MAX =  7;
+
+        const auto& in_shape = cpu_input.shape();
+        const int64_t last_in = in_shape.empty() ? 0 : in_shape.back();
+        const int64_t last_packed = (last_in + 1) / 2;
+        std::vector<int64_t> packed_shape(in_shape.begin(), in_shape.end());
+        if (packed_shape.empty()) {
+            packed_shape.push_back(0);  // empty input → empty output
+        } else {
+            packed_shape.back() = last_packed;
+        }
+
+        // Re-allocate `result` with the packed shape (the earlier
+        // shape-preserving allocation is wrong for QInt4x2).
+        result = Tensor(packed_shape, dtype, Device::cpu());
+
+        const float* in = cpu_input.data<float>();
+        uint8_t* out = reinterpret_cast<uint8_t*>(result.data<int8_t>());
+
+        const int64_t outer = (last_in == 0) ? 0 :
+            (static_cast<int64_t>(n) / last_in);
+
+        for (int64_t row = 0; row < outer; ++row) {
+            const float* in_row = in + row * last_in;
+            uint8_t* out_row = out + row * last_packed;
+            for (int64_t j = 0; j < last_packed; ++j) {
+                int64_t i_lo = 2 * j;
+                int64_t i_hi = i_lo + 1;
+                int64_t q_lo = static_cast<int64_t>(std::round(in_row[i_lo] / scale)) + zero_point;
+                q_lo = std::clamp(q_lo, Q_MIN, Q_MAX);
+                uint8_t lo_nibble = static_cast<uint8_t>(q_lo & 0xF);
+
+                uint8_t hi_nibble = 0;
+                if (i_hi < last_in) {
+                    int64_t q_hi = static_cast<int64_t>(std::round(in_row[i_hi] / scale)) + zero_point;
+                    q_hi = std::clamp(q_hi, Q_MIN, Q_MAX);
+                    hi_nibble = static_cast<uint8_t>(q_hi & 0xF);
+                }
+                out_row[j] = static_cast<uint8_t>((hi_nibble << 4) | lo_nibble);
+            }
+        }
     } else {
-        throw std::runtime_error("quantize_per_tensor: QInt4x2 not yet implemented");
+        throw std::runtime_error("quantize_per_tensor: unsupported dtype");
     }
 
     // Store quantization parameters

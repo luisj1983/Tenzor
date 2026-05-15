@@ -744,8 +744,16 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         return {empty_vals, empty_inv, empty_cnt};
     }
 
-    // For Int8/UInt8/Bool: cast to Int32, run unique on GPU, cast results back
-    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
+    // F20: Int8/UInt8/Bool AND Int16/UInt16 — cast to Int32, run unique on
+    // GPU, cast unique values back. Previously only Int8/UInt8/Bool were
+    // cast; Int16/UInt16 fell through to the dtype reject below and threw
+    // "Unique not supported for dtype Int16". The sort + mark/compact
+    // pipeline only has Int32/Int64/F32/F64 shaders, so the int16/uint16
+    // widen-narrow is the honest way to support them without a new shader
+    // pair.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 ||
+        input.dtype() == DType::Int16 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
         DType orig_dtype = input.dtype();
         Tensor int32_input = input.to(DType::Int32);
         auto results = dispatchUnique(int32_input, sorted, return_inverse, return_counts);

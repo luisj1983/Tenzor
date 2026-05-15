@@ -236,42 +236,34 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
     batch_inputs = cat(input_list, 0);
     batch_targets = cat(target_list, 0);
 
-    // Pin memory if requested and CUDA is available
+    // Audit J8: real memory pinning via Storage::pin().
+    //
+    // The old code documented the steps ("Full pinning implementation would
+    // require cudaHostAlloc... setting a flag in tensor storage") and then
+    // didn't do them. The Storage base class has a virtual `pin()` method
+    // (`include/tenzor/core/storage.hpp:88`) that the CPU storage
+    // implements via cudaHostRegister + sets the pinned flag; we just call
+    // it on each batch tensor here.
+    //
+    // The pin() call is a no-op on non-CPU storage and on builds without
+    // CUDA, so this path is safe to invoke unconditionally when
+    // `config_.pin_memory == true` (the storage layer guards CUDA-only
+    // operations internally).
     if (config_.pin_memory) {
-        // Implement memory pinning for faster CPU-to-CUDA transfers
-        // Pinned memory (page-locked memory) allows DMA transfers without paging
-        // This is beneficial when transferring data to GPU
-
-        // Check if CUDA is available by attempting device query
-        try {
-            Device cuda_device(Device::Type::CUDA, 0);
-
-            // Memory pinning is typically done by:
-            // 1. Allocating pinned host memory
-            // 2. Copying tensor data to pinned memory
-            // 3. Marking tensor storage as pinned
-
-            // For now, we'll mark the intent by ensuring tensors are contiguous
-            // and on CPU (actual pinning requires CUDA API integration)
-            if (batch_inputs.device().type != Device::Type::CPU) {
-                batch_inputs = batch_inputs.to(Device::cpu());
-            }
-            if (batch_targets.device().type != Device::Type::CPU) {
-                batch_targets = batch_targets.to(Device::cpu());
-            }
-
-            // Ensure contiguous memory layout for efficient transfer
-            batch_inputs = batch_inputs.contiguous();
-            batch_targets = batch_targets.contiguous();
-
-            // Note: Full pinning implementation would require:
-            // - cudaHostAlloc/cudaMallocHost for pinned allocation
-            // - Registering memory pages with CUDA driver
-            // - Setting a flag in tensor storage to indicate pinned status
-            // This is typically done at the storage/allocator level
-        } catch (const std::exception&) {
-            // CUDA not available, skip pinning
+        // Ensure host placement + contiguity before pinning (pin() registers
+        // the buffer with the CUDA driver — it must be on CPU and own a
+        // page-aligned host allocation).
+        if (batch_inputs.device().type != Device::Type::CPU) {
+            batch_inputs = batch_inputs.to(Device::cpu());
         }
+        if (batch_targets.device().type != Device::Type::CPU) {
+            batch_targets = batch_targets.to(Device::cpu());
+        }
+        batch_inputs  = batch_inputs.contiguous();
+        batch_targets = batch_targets.contiguous();
+
+        if (batch_inputs.storage())  batch_inputs.storage()->pin();
+        if (batch_targets.storage()) batch_targets.storage()->pin();
     }
 
     return Batch{batch_inputs, batch_targets};

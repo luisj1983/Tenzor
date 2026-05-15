@@ -375,3 +375,28 @@ tenzor_discover_tests(test_gradcheck_missing_multidtype LABELS "autograd" DISCOV
 add_executable(test_autograd_additional_multidtype test_autograd_additional_multidtype.cpp)
 target_link_libraries(test_autograd_additional_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_autograd_additional_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
+# Audit remediation D1: FusedLinearReLUBackward Variable-level backward.
+add_executable(test_fused_linear_relu_higher_order test_fused_linear_relu_higher_order.cpp)
+target_link_libraries(test_fused_linear_relu_higher_order PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_linear_relu_higher_order LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation D2: CustomOpBackward optional Variable-level backward.
+add_executable(test_custom_op_higher_order test_custom_op_higher_order.cpp)
+target_link_libraries(test_custom_op_higher_order PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_custom_op_higher_order LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation D4: LinalgVectorNormBackward Variable-level backward + ord coverage.
+add_executable(test_linalg_vector_norm_higher_order test_linalg_vector_norm_higher_order.cpp)
+target_link_libraries(test_linalg_vector_norm_higher_order PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_vector_norm_higher_order LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation D5: LinalgMatrixNormBackward Variable-level backward + ord=-2.
+add_executable(test_linalg_matrix_norm_higher_order test_linalg_matrix_norm_higher_order.cpp)
+target_link_libraries(test_linalg_matrix_norm_higher_order PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_matrix_norm_higher_order LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit remediation D3: device-resident UpsampleBilinearBackward + higher-order adjoint.
+add_executable(test_upsample_bilinear_higher_order test_upsample_bilinear_higher_order.cpp)
+target_link_libraries(test_upsample_bilinear_higher_order PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_upsample_bilinear_higher_order LABELS "autograd" DISCOVERY_TIMEOUT 60)

@@ -26,12 +26,31 @@ namespace elastic {
 /**
  * @brief Configuration for elastic training.
  */
+/**
+ * @brief Audit J15: real checkpoint callback hook.
+ *
+ * `auto_checkpoint=true` requires a user-supplied callback that can serialize
+ * the model/optimizer/scheduler state to `path` (the trainer constructs the
+ * destination path from `checkpoint_dir`). The trainer itself doesn't see the
+ * user's model — it lives inside the `TrainFunction` closure — so the only
+ * honest way to expose checkpointing is via this callback.
+ *
+ * Receives the destination path and the current worker rank.
+ */
+using CheckpointFunction = std::function<void(const std::string& path, int32_t rank)>;
+
 struct ElasticConfig {
     RendezvousConfig rendezvous;
     HealthMonitorConfig health;
     std::string checkpoint_dir{"/tmp/tenzor_elastic"};
     int32_t max_restarts{3};           ///< Maximum recovery attempts
     bool auto_checkpoint{true};        ///< Checkpoint on failure detection
+    /// User-provided checkpoint callback (audit J15). When `auto_checkpoint`
+    /// is true AND this is set, the trainer invokes it on failure
+    /// detection with the destination path and current rank. When unset,
+    /// the trainer only writes a minimal "recovery marker" file so users
+    /// have evidence the hook fired.
+    CheckpointFunction checkpoint_fn{};
 };
 
 /**

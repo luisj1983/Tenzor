@@ -96,9 +96,54 @@ TEST_F(UNetTest, UNetGrayscaleInput) {
               (std::vector<int64_t>{1, 21, 256, 256}));
 }
 
+// G10 regression: Up in bilinear mode must do real spatial upsampling
+// (not just a channel-adjust 1x1 conv). Verify by feeding a small input and
+// a larger skip and confirming the upsample target size is honored.
+TEST_F(UNetTest, BilinearUpDoesRealSpatialUpsample_G10) {
+    // 64 in, 32 out, bilinear=true. The up_ 1x1 conv maps 64→32 channels;
+    // the bilinear upsample resizes to skip's spatial dims.
+    auto up = std::make_shared<Up>(/*in_channels=*/64, /*out_channels=*/32, /*bilinear=*/true);
+
+    // input : (1, 64, 8, 8)  — small "bottom" feature
+    // skip  : (1, 32, 16, 16) — twice the spatial size (the encoder skip)
+    Variable input(Tensor({1, 64, 8, 8}, DType::Float32, device_), false);
+    Variable skip(Tensor({1, 32, 16, 16}, DType::Float32, device_), false);
+
+    Variable output = up->forward(input, skip);
+    auto shape = output.tensor().shape();
+
+    // forward: bilinear-upsample input 8→16, 1×1 conv 64→32 → (1, 32, 16, 16),
+    // cat with skip on dim 1 → (1, 64, 16, 16), DoubleConv → (1, 32, 16, 16).
+    ASSERT_EQ(shape.size(), 4u);
+    EXPECT_EQ(shape[0], 1);
+    EXPECT_EQ(shape[1], 32);  // out_channels
+    EXPECT_EQ(shape[2], 16);  // upsampled spatial — NOT 8 (input H)
+    EXPECT_EQ(shape[3], 16);
+}
+
+// G10: bilinear-mode UNet must restore the full input spatial dims at the
+// output — same as transposed-conv mode. A regression to "channel-adjust only"
+// (no real upsample) would leave the output at bottleneck spatial size.
+TEST_F(UNetTest, UNetBilinearMatchesOutputShape_G10) {
+    auto model_bilinear  = std::make_shared<UNet>(3, 21, /*bilinear=*/true);
+    auto model_transpose = std::make_shared<UNet>(3, 21, /*bilinear=*/false);
+
+    Variable images(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    Variable out_bi = model_bilinear->forward(images);
+    Variable out_tr = model_transpose->forward(images);
+
+    auto sb = out_bi.tensor().shape();
+    auto st = out_tr.tensor().shape();
+    EXPECT_EQ(std::vector<int64_t>(sb.begin(), sb.end()),
+              std::vector<int64_t>(st.begin(), st.end()));
+    // Both must restore the input spatial dims.
+    EXPECT_EQ(sb[2], 256);
+    EXPECT_EQ(sb[3], 256);
+}
+
 
 // ============================================================================
-// Main  
+// Main
 // ============================================================================
 
 int main(int argc, char** argv) {

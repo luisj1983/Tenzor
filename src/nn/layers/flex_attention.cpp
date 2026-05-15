@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>            // Audit J12: registry guards
 #include <stdexcept>
+#include <unordered_map>    // Audit J12: registry map
 #include <vector>
 
 namespace tenzor {
@@ -123,6 +125,38 @@ auto BlockMask::is_active(int64_t q_block, int64_t kv_block) const -> bool {
 // =============================================================================
 // Predefined score modifications
 // =============================================================================
+
+// Audit J12: user-defined ScoreModFn registry. Backed by a process-wide
+// map keyed by integer ScoreModId. Reserved IDs 0-2 are built-ins
+// (identity / causal / sliding-window); IDs ≥ 3 are user-registered.
+// Mutex-guarded for thread safety; lookups are O(1) average via hash.
+namespace {
+std::unordered_map<int64_t, ScoreModFn>& score_mod_registry() {
+    static std::unordered_map<int64_t, ScoreModFn> registry;
+    return registry;
+}
+std::mutex& score_mod_registry_mutex() {
+    static std::mutex m;
+    return m;
+}
+} // namespace
+
+auto register_score_mod(int64_t id, ScoreModFn fn) -> void {
+    if (id < 3) {
+        throw std::invalid_argument(
+            "register_score_mod: IDs 0-2 are reserved for built-in score "
+            "mods (identity, causal, sliding-window). Use id >= 3 for "
+            "user-defined functors.");
+    }
+    std::lock_guard<std::mutex> lock(score_mod_registry_mutex());
+    score_mod_registry()[id] = std::move(fn);
+}
+
+auto find_registered_score_mod(int64_t id) -> ScoreModFn {
+    std::lock_guard<std::mutex> lock(score_mod_registry_mutex());
+    auto it = score_mod_registry().find(id);
+    return it != score_mod_registry().end() ? it->second : ScoreModFn{};
+}
 
 auto causal_score_mod() -> ScoreModFn {
     return [](const Tensor& score, [[maybe_unused]] int64_t b,

@@ -172,6 +172,26 @@ public:
     }
 
     /**
+     * @brief All-to-all single — chunked exchange across all ranks.
+     *
+     * A4-extended: equivalent to NCCL ncclAlltoall / MPI MPI_Alltoall.
+     * Each rank holds an input of shape `[world_size, ...]`, sends the
+     * `r`-th chunk to rank `r`, and receives `world_size` chunks back
+     * into `output`. Required by DTensor's Shard(a) → Shard(b) redistribute
+     * (B2). Output must be pre-allocated with the same shape and dtype as
+     * input.
+     *
+     * Default implementation: routes through `all_gather` and then per-rank
+     * `slice` — works on every backend but is `world_size` × less efficient
+     * than the native primitive. NCCL/MPI backends override with native
+     * ncclSend/ncclRecv or MPI_Alltoall.
+     *
+     * @param output Pre-allocated output tensor, same shape & dtype as input.
+     * @param input  Local input buffer to be split across peers.
+     */
+    virtual auto all_to_all_single(Tensor& output, const Tensor& input) -> void;
+
+    /**
      * @brief Point-to-point send to a specific rank.
      *
      * Sends the tensor to the destination rank. Blocks until the send
@@ -344,6 +364,19 @@ public:
      */
     auto reduce_scatter_async(const std::vector<Tensor>& tensors, Tensor& output,
                               ReduceOp op, void* stream) -> void;
+
+    /**
+     * @brief All-to-all single — chunked exchange across all ranks.
+     *
+     * A4-extended: forwards to the backend's `all_to_all_single`. NCCL
+     * overrides with native ncclSend/Recv pairs; Gloo and MPI use the
+     * default `all_gather + slice` fallback. Required by DTensor's
+     * Shard(a) → Shard(b) redistribute on the rich-hierarchy code path.
+     *
+     * @param output Pre-allocated output, same shape & dtype as input.
+     * @param input  Local input split across peers.
+     */
+    auto all_to_all_single(Tensor& output, const Tensor& input) -> void;
 
     /**
      * @brief Point-to-point send to a specific rank.

@@ -167,8 +167,14 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
             }
         }
 
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        // Audit J14: widen to Float32, generate, then narrow to half. The
+        // standard library has no `<random>` distribution that accepts
+        // half-precision types directly. Output values stay in [0, 1).
+        Tensor tmp = rand_kernel(shape, DType::Float32, device);
+        return tmp.to(dtype);
     } else {
-        throw std::runtime_error("rand operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("rand operation supports Float32/Float64/Float16/BFloat16");
     }
 
     return result;
@@ -236,8 +242,12 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
             }
         }
 
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        // Audit J14: widen to Float32, generate normals, then narrow.
+        Tensor tmp = randn_kernel(shape, DType::Float32, device);
+        return tmp.to(dtype);
     } else {
-        throw std::runtime_error("randn operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("randn operation supports Float32/Float64/Float16/BFloat16");
     }
 
     return result;
@@ -249,8 +259,16 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 
 auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
                     DType dtype, const Device& device) -> Tensor {
+    // Audit J14: widen smaller integer dtypes to Int32, generate, then narrow.
+    // Range validation: caller must pass `low`/`high` that fit the target.
+    if (dtype == DType::Int8 || dtype == DType::UInt8 ||
+        dtype == DType::Int16 || dtype == DType::UInt16) {
+        Tensor tmp = randint_kernel(low, high, shape, DType::Int32, device);
+        return tmp.to(dtype);
+    }
     if (dtype != DType::Int32 && dtype != DType::Int64) {
-        throw std::runtime_error("randint operation only supports Int32 and Int64 dtypes");
+        throw std::runtime_error(
+            "randint operation supports Int8/UInt8/Int16/UInt16/Int32/Int64 dtypes");
     }
 
     Tensor result(shape, dtype, device);

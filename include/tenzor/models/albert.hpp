@@ -267,6 +267,19 @@ public:
      */
     auto config() const -> const AlbertConfig& { return config_; }
 
+    /**
+     * @brief Load pretrained weights (audit H4).
+     *
+     * Routes through `ModelHub::load_pretrained_weights` which dispatches by
+     * file extension: `.safetensors` → SafeTensorsSerializer, native Tenzor
+     * checkpoints → Serializer, `.pth` throws a clear error pointing to the
+     * SafeTensors variant.
+     *
+     * @param path Local path to weights file
+     * @param strict If true, throw on architecture mismatch (default: true)
+     */
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
+
 private:
     AlbertConfig config_;
     std::shared_ptr<AlbertEmbeddings> embeddings_;

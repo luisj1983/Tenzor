@@ -4,6 +4,8 @@
  */
 
 #include "tenzor/distributed/elastic/elastic_trainer.hpp"
+#include <filesystem>  // Audit J15: checkpoint dir creation
+#include <fstream>     // Audit J15: marker file write
 #include <iostream>
 #include <stdexcept>
 
@@ -42,10 +44,35 @@ auto ElasticTrainer::run(TrainFunction train_fn) -> void {
                       << restart_count_ + 1 << "/" << config_.max_restarts + 1
                       << "): " << e.what() << std::endl;
 
-            // Phase 3: Checkpoint if configured
+            // Audit J15: real checkpoint hook.
+            //
+            // Phase 3: Checkpoint if configured. The trainer doesn't have
+            // direct access to the user's model/optimizer (they live inside
+            // train_fn's closure), so checkpointing goes through the user-
+            // provided callback. If no callback was registered, we still
+            // write a small recovery-marker file so failures are observable
+            // in the checkpoint dir.
             if (config_.auto_checkpoint) {
-                // In production: save model, optimizer, scheduler state
-                // using nn::ModelCheckpoint
+                try {
+                    std::filesystem::create_directories(config_.checkpoint_dir);
+                    if (config_.checkpoint_fn) {
+                        std::string path = config_.checkpoint_dir +
+                            "/rank" + std::to_string(current_rank_) +
+                            "_attempt" + std::to_string(restart_count_) + ".ckpt";
+                        config_.checkpoint_fn(path, current_rank_);
+                    } else {
+                        std::string marker = config_.checkpoint_dir +
+                            "/recovery_rank" + std::to_string(current_rank_) +
+                            "_attempt" + std::to_string(restart_count_) + ".marker";
+                        std::ofstream m(marker);
+                        m << "elastic_trainer recovery: rank=" << current_rank_
+                          << " attempt=" << restart_count_ << "\n"
+                          << "exception=" << e.what() << "\n";
+                    }
+                } catch (const std::exception& ce) {
+                    std::cerr << "[ElasticTrainer] auto_checkpoint hook failed: "
+                              << ce.what() << " (continuing recovery)" << std::endl;
+                }
             }
 
             // Phase 4: Leave current rendezvous
@@ -73,9 +100,28 @@ auto ElasticTrainer::check_and_recover() -> bool {
     std::cerr << "[ElasticTrainer] Detected " << dead.size() << " dead worker(s), recovering..."
               << std::endl;
 
-    // Checkpoint
+    // Audit J15: real checkpoint hook (mirror of the failure-path branch
+    // above). Invoked on health-monitor-detected dead workers.
     if (config_.auto_checkpoint) {
-        // Save state to config_.checkpoint_dir
+        try {
+            std::filesystem::create_directories(config_.checkpoint_dir);
+            if (config_.checkpoint_fn) {
+                std::string path = config_.checkpoint_dir +
+                    "/rank" + std::to_string(current_rank_) +
+                    "_recover.ckpt";
+                config_.checkpoint_fn(path, current_rank_);
+            } else {
+                std::string marker = config_.checkpoint_dir +
+                    "/recovery_rank" + std::to_string(current_rank_) +
+                    "_dead_worker.marker";
+                std::ofstream m(marker);
+                m << "elastic_trainer recovery on dead-worker detection: rank="
+                  << current_rank_ << "\n";
+            }
+        } catch (const std::exception& ce) {
+            std::cerr << "[ElasticTrainer] auto_checkpoint hook failed: "
+                      << ce.what() << " (continuing recovery)" << std::endl;
+        }
     }
 
     // Re-rendezvous

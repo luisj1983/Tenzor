@@ -323,9 +323,14 @@ auto nested_sum_cuda(const Tensor& values, const Tensor& offsets,
 // Segmented Mean Reduction
 // ============================================================================
 
-__global__ void nested_mean_kernel(
-    const float* __restrict__ values,
-    float* __restrict__ output,
+// F4: templated on element type so we can add a Float64 specialisation
+// without copying the kernel body. The accumulator type follows the
+// element type (float for F32, double for F64) which keeps precision in
+// the reduction sum.
+template <typename T>
+__global__ void nested_mean_kernel_t(
+    const T* __restrict__ values,
+    T* __restrict__ output,
     const int64_t* __restrict__ offsets,
     int64_t D, int64_t B)
 {
@@ -337,10 +342,10 @@ __global__ void nested_mean_kernel(
     int64_t len = end - start;
     if (len <= 0) return;
 
-    float inv_len = 1.0f / static_cast<float>(len);
+    T inv_len = T(1) / static_cast<T>(len);
 
     for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
-        float sum = 0.0f;
+        T sum = T(0);
         for (int64_t s = start; s < end; ++s) {
             sum += values[s * D + d];
         }
@@ -359,11 +364,16 @@ auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (values.dtype() == DType::Float32) {
-        nested_mean_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_mean_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             values.data<float>(), output.data<float>(),
             offsets.data<int64_t>(), D, B);
+    } else if (values.dtype() == DType::Float64) {
+        // F4: native Float64 path — accumulates in double for precision.
+        nested_mean_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            values.data<double>(), output.data<double>(),
+            offsets.data<int64_t>(), D, B);
     } else {
-        throw std::runtime_error("nested_mean_cuda: only Float32 currently supported");
+        throw std::runtime_error("nested_mean_cuda: only Float32 and Float64 currently supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());
@@ -374,14 +384,28 @@ auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
 // Nested Attention (variable-length scaled dot-product attention)
 // ============================================================================
 
-__global__ void nested_attention_kernel(
-    const float* __restrict__ Q,            // [total_q_len, head_dim]
-    const float* __restrict__ K,            // [total_kv_len, head_dim]
-    const float* __restrict__ V,            // [total_kv_len, head_dim]
-    float* __restrict__ output,             // [total_q_len, head_dim]
-    const int64_t* __restrict__ q_offsets,  // [B+1]
-    const int64_t* __restrict__ kv_offsets, // [B+1]
-    float scale,
+// F4 followup: templated for Float64 support. Online softmax is numerically
+// stable in both precisions; the only T-specific helpers are `nested_exp`
+// (expf vs exp) and `nested_neg_max` (the negative-infinity sentinel).
+template <typename T>
+__device__ inline T nested_exp(T x) { return expf(static_cast<float>(x)); }
+template <>
+__device__ inline double nested_exp<double>(double x) { return exp(x); }
+
+template <typename T>
+__device__ inline T nested_neg_max() { return -FLT_MAX; }
+template <>
+__device__ inline double nested_neg_max<double>() { return -DBL_MAX; }
+
+template <typename T>
+__global__ void nested_attention_kernel_t(
+    const T* __restrict__ Q,                 // [total_q_len, head_dim]
+    const T* __restrict__ K,                 // [total_kv_len, head_dim]
+    const T* __restrict__ V,                 // [total_kv_len, head_dim]
+    T* __restrict__ output,                  // [total_q_len, head_dim]
+    const int64_t* __restrict__ q_offsets,   // [B+1]
+    const int64_t* __restrict__ kv_offsets,  // [B+1]
+    T scale,
     int64_t head_dim,
     int64_t B,
     bool causal)
@@ -397,27 +421,27 @@ __global__ void nested_attention_kernel(
 
     // Each thread handles one query row using online softmax attention
     for (int64_t qi = threadIdx.x; qi < Lq; qi += blockDim.x) {
-        const float* q_row = Q + (q_start + qi) * head_dim;
-        float* out_row = output + (q_start + qi) * head_dim;
+        const T* q_row = Q + (q_start + qi) * head_dim;
+        T* out_row = output + (q_start + qi) * head_dim;
 
         // Initialize online softmax accumulators
-        float max_score = -FLT_MAX;
-        float sum_exp = 0.0f;
+        T max_score = nested_neg_max<T>();
+        T sum_exp = T(0);
 
         // Zero output accumulator
         for (int64_t hd = 0; hd < head_dim; ++hd) {
-            out_row[hd] = 0.0f;
+            out_row[hd] = T(0);
         }
 
         for (int64_t ki = 0; ki < Lkv; ++ki) {
             // Causal mask: skip future positions
             if (causal && ki > qi) break;
 
-            const float* k_row = K + (kv_start + ki) * head_dim;
-            const float* v_row = V + (kv_start + ki) * head_dim;
+            const T* k_row = K + (kv_start + ki) * head_dim;
+            const T* v_row = V + (kv_start + ki) * head_dim;
 
             // Compute dot(q, k) * scale
-            float score = 0.0f;
+            T score = T(0);
             for (int64_t hd = 0; hd < head_dim; ++hd) {
                 score += q_row[hd] * k_row[hd];
             }
@@ -425,14 +449,14 @@ __global__ void nested_attention_kernel(
 
             // Online softmax update
             if (score > max_score) {
-                float correction = expf(max_score - score);
-                sum_exp = sum_exp * correction + 1.0f;
+                T correction = nested_exp<T>(max_score - score);
+                sum_exp = sum_exp * correction + T(1);
                 for (int64_t hd = 0; hd < head_dim; ++hd) {
                     out_row[hd] = out_row[hd] * correction + v_row[hd];
                 }
                 max_score = score;
             } else {
-                float w = expf(score - max_score);
+                T w = nested_exp<T>(score - max_score);
                 sum_exp += w;
                 for (int64_t hd = 0; hd < head_dim; ++hd) {
                     out_row[hd] += w * v_row[hd];
@@ -441,8 +465,8 @@ __global__ void nested_attention_kernel(
         }
 
         // Normalize
-        if (sum_exp > 0.0f) {
-            float inv_sum = 1.0f / sum_exp;
+        if (sum_exp > T(0)) {
+            T inv_sum = T(1) / sum_exp;
             for (int64_t hd = 0; hd < head_dim; ++hd) {
                 out_row[hd] *= inv_sum;
             }
@@ -463,13 +487,20 @@ auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V,
     int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
 
     if (Q.dtype() == DType::Float32) {
-        nested_attention_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_attention_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(),
             output.data<float>(),
             q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
             scale, head_dim, B, causal);
+    } else if (Q.dtype() == DType::Float64) {
+        // F4 followup: native Float64 attention with double-precision online softmax.
+        nested_attention_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            Q.data<double>(), K.data<double>(), V.data<double>(),
+            output.data<double>(),
+            q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
+            static_cast<double>(scale), head_dim, B, causal);
     } else {
-        throw std::runtime_error("nested_attention_cuda: only Float32 currently supported");
+        throw std::runtime_error("nested_attention_cuda: only Float32 and Float64 currently supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());
@@ -480,17 +511,20 @@ auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V,
 // Nested Attention Backward
 // ============================================================================
 
-__global__ void nested_attention_backward_kernel(
-    const float* __restrict__ grad_out,     // [total_q_len, head_dim]
-    const float* __restrict__ Q,            // [total_q_len, head_dim]
-    const float* __restrict__ K,            // [total_kv_len, head_dim]
-    const float* __restrict__ V,            // [total_kv_len, head_dim]
-    float* __restrict__ grad_Q,             // [total_q_len, head_dim]
-    float* __restrict__ grad_K,             // [total_kv_len, head_dim]
-    float* __restrict__ grad_V,             // [total_kv_len, head_dim]
-    const int64_t* __restrict__ q_offsets,  // [B+1]
-    const int64_t* __restrict__ kv_offsets, // [B+1]
-    float scale,
+// F4 followup: templated for Float64 support. Uses the same nested_exp /
+// nested_neg_max helpers as the forward kernel.
+template <typename T>
+__global__ void nested_attention_backward_kernel_t(
+    const T* __restrict__ grad_out,          // [total_q_len, head_dim]
+    const T* __restrict__ Q,                 // [total_q_len, head_dim]
+    const T* __restrict__ K,                 // [total_kv_len, head_dim]
+    const T* __restrict__ V,                 // [total_kv_len, head_dim]
+    T* __restrict__ grad_Q,                  // [total_q_len, head_dim]
+    T* __restrict__ grad_K,                  // [total_kv_len, head_dim]
+    T* __restrict__ grad_V,                  // [total_kv_len, head_dim]
+    const int64_t* __restrict__ q_offsets,   // [B+1]
+    const int64_t* __restrict__ kv_offsets,  // [B+1]
+    T scale,
     int64_t head_dim,
     int64_t B,
     bool causal)
@@ -506,18 +540,18 @@ __global__ void nested_attention_backward_kernel(
 
     // Each thread handles one query row
     for (int64_t qi = threadIdx.x; qi < Lq; qi += blockDim.x) {
-        const float* q_row = Q + (q_start + qi) * head_dim;
-        const float* do_row = grad_out + (q_start + qi) * head_dim;
-        float* gq_row = grad_Q + (q_start + qi) * head_dim;
+        const T* q_row = Q + (q_start + qi) * head_dim;
+        const T* do_row = grad_out + (q_start + qi) * head_dim;
+        T* gq_row = grad_Q + (q_start + qi) * head_dim;
 
         int64_t ki_end = causal ? min(Lkv, qi + 1) : Lkv;
 
         // Step 1: Recompute attention weights via online softmax
         // First pass: find max score
-        float max_score = -FLT_MAX;
+        T max_score = nested_neg_max<T>();
         for (int64_t ki = 0; ki < ki_end; ++ki) {
-            const float* k_row = K + (kv_start + ki) * head_dim;
-            float score = 0.0f;
+            const T* k_row = K + (kv_start + ki) * head_dim;
+            T score = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 score += q_row[d] * k_row[d];
             }
@@ -525,66 +559,63 @@ __global__ void nested_attention_backward_kernel(
             if (score > max_score) max_score = score;
         }
 
-        // Second pass: compute softmax weights and d_attn dot products simultaneously
-        float sum_exp = 0.0f;
+        // Second pass: sum_exp
+        T sum_exp = T(0);
         for (int64_t ki = 0; ki < ki_end; ++ki) {
-            const float* k_row = K + (kv_start + ki) * head_dim;
-            float score = 0.0f;
+            const T* k_row = K + (kv_start + ki) * head_dim;
+            T score = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 score += q_row[d] * k_row[d];
             }
             score *= scale;
-            sum_exp += expf(score - max_score);
+            sum_exp += nested_exp<T>(score - max_score);
         }
-        float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
+        T inv_sum = (sum_exp > T(0)) ? T(1) / sum_exp : T(0);
 
-        // Step 2: Compute softmax_dot = sum_ki(attn_w[ki] * d_attn[ki])
-        // where d_attn[ki] = dot(do_row, v_row[ki])
-        float softmax_dot = 0.0f;
+        // Step 2: softmax_dot = sum_ki(attn_w[ki] * d_attn[ki])
+        T softmax_dot = T(0);
         for (int64_t ki = 0; ki < ki_end; ++ki) {
-            const float* k_row = K + (kv_start + ki) * head_dim;
-            const float* v_row = V + (kv_start + ki) * head_dim;
-            float score = 0.0f;
+            const T* k_row = K + (kv_start + ki) * head_dim;
+            const T* v_row = V + (kv_start + ki) * head_dim;
+            T score = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 score += q_row[d] * k_row[d];
             }
             score *= scale;
-            float w = expf(score - max_score) * inv_sum;
+            T w = nested_exp<T>(score - max_score) * inv_sum;
 
-            float dot_dov = 0.0f;
+            T dot_dov = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 dot_dov += do_row[d] * v_row[d];
             }
             softmax_dot += w * dot_dov;
         }
 
-        // Step 3: Compute gradients
+        // Step 3: gradients
         for (int64_t ki = 0; ki < ki_end; ++ki) {
-            const float* k_row = K + (kv_start + ki) * head_dim;
-            const float* v_row = V + (kv_start + ki) * head_dim;
-            float* gk_row = grad_K + (kv_start + ki) * head_dim;
-            float* gv_row = grad_V + (kv_start + ki) * head_dim;
+            const T* k_row = K + (kv_start + ki) * head_dim;
+            const T* v_row = V + (kv_start + ki) * head_dim;
+            T* gk_row = grad_K + (kv_start + ki) * head_dim;
+            T* gv_row = grad_V + (kv_start + ki) * head_dim;
 
-            float score = 0.0f;
+            T score = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 score += q_row[d] * k_row[d];
             }
             score *= scale;
-            float w = expf(score - max_score) * inv_sum;
+            T w = nested_exp<T>(score - max_score) * inv_sum;
 
             // grad_V += w * do_row
             for (int64_t d = 0; d < head_dim; ++d) {
                 atomicAdd(&gv_row[d], w * do_row[d]);
             }
 
-            // d_attn = dot(do_row, v_row)
-            float dot_dov = 0.0f;
+            T dot_dov = T(0);
             for (int64_t d = 0; d < head_dim; ++d) {
                 dot_dov += do_row[d] * v_row[d];
             }
 
-            // d_score = w * (d_attn - softmax_dot) * scale
-            float ds = w * (dot_dov - softmax_dot) * scale;
+            T ds = w * (dot_dov - softmax_dot) * scale;
 
             // grad_Q += ds * k_row
             for (int64_t d = 0; d < head_dim; ++d) {
@@ -617,13 +648,20 @@ auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q,
     int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
 
     if (Q.dtype() == DType::Float32) {
-        nested_attention_backward_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_attention_backward_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             grad_out.data<float>(), Q.data<float>(), K.data<float>(), V.data<float>(),
             grad_Q.data<float>(), grad_K.data<float>(), grad_V.data<float>(),
             q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
             scale, head_dim, B, causal);
+    } else if (Q.dtype() == DType::Float64) {
+        // F4 followup: native Float64 attention backward.
+        nested_attention_backward_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            grad_out.data<double>(), Q.data<double>(), K.data<double>(), V.data<double>(),
+            grad_Q.data<double>(), grad_K.data<double>(), grad_V.data<double>(),
+            q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
+            static_cast<double>(scale), head_dim, B, causal);
     } else {
-        throw std::runtime_error("nested_attention_backward_cuda: only Float32 supported");
+        throw std::runtime_error("nested_attention_backward_cuda: only Float32 and Float64 supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());
@@ -634,12 +672,14 @@ auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q,
 // Nested to Padded (convert ragged -> dense padded tensor)
 // ============================================================================
 
-__global__ void nested_to_padded_kernel(
-    const float* __restrict__ values,   // [total_len, D]
-    float* __restrict__ padded,         // [B, max_len, D]
+// F4: templated on element type to add Float64 support without code duplication.
+template <typename T>
+__global__ void nested_to_padded_kernel_t(
+    const T* __restrict__ values,        // [total_len, D]
+    T* __restrict__ padded,              // [B, max_len, D]
     const int64_t* __restrict__ offsets, // [B+1]
     int64_t max_len, int64_t D, int64_t B,
-    float padding_value)
+    T padding_value)
 {
     int64_t b = blockIdx.x;
     if (b >= B) return;
@@ -673,11 +713,19 @@ auto nested_to_padded_cuda(const Tensor& values, const Tensor& offsets,
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (values.dtype() == DType::Float32) {
-        nested_to_padded_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_to_padded_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             values.data<float>(), padded.data<float>(),
             offsets.data<int64_t>(), max_len, D, B, padding_value);
+    } else if (values.dtype() == DType::Float64) {
+        // F4: native Float64 path. padding_value comes in as float — widen
+        // to double for the kernel parameter so no precision is lost in the
+        // pad cells.
+        nested_to_padded_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            values.data<double>(), padded.data<double>(),
+            offsets.data<int64_t>(), max_len, D, B,
+            static_cast<double>(padding_value));
     } else {
-        throw std::runtime_error("nested_to_padded_cuda: only Float32 currently supported");
+        throw std::runtime_error("nested_to_padded_cuda: only Float32 and Float64 currently supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());
@@ -688,9 +736,11 @@ auto nested_to_padded_cuda(const Tensor& values, const Tensor& offsets,
 // Nested from Padded (convert dense padded -> ragged values)
 // ============================================================================
 
-__global__ void nested_from_padded_kernel(
-    const float* __restrict__ padded,   // [B, max_len, D]
-    float* __restrict__ values,         // [total_len, D]
+// F4: templated for Float64 support.
+template <typename T>
+__global__ void nested_from_padded_kernel_t(
+    const T* __restrict__ padded,        // [B, max_len, D]
+    T* __restrict__ values,              // [total_len, D]
     const int64_t* __restrict__ offsets, // [B+1]
     int64_t max_len, int64_t D, int64_t B)
 {
@@ -724,11 +774,16 @@ auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets,
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (padded.dtype() == DType::Float32) {
-        nested_from_padded_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_from_padded_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             padded.data<float>(), values.data<float>(),
             offsets.data<int64_t>(), max_len, D, B);
+    } else if (padded.dtype() == DType::Float64) {
+        // F4: native Float64 path.
+        nested_from_padded_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            padded.data<double>(), values.data<double>(),
+            offsets.data<int64_t>(), max_len, D, B);
     } else {
-        throw std::runtime_error("nested_from_padded_cuda: only Float32 currently supported");
+        throw std::runtime_error("nested_from_padded_cuda: only Float32 and Float64 currently supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());
@@ -739,13 +794,21 @@ auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets,
 // Nested Layer Norm
 // ============================================================================
 
-__global__ void nested_layer_norm_kernel(
-    const float* __restrict__ values,   // [total_len, D]
-    float* __restrict__ output,         // [total_len, D]
-    const float* __restrict__ weight,   // [D]
-    const float* __restrict__ bias,     // [D]
+// F4: templated for Float64 support. `inv_std` uses `rsqrt`/`rsqrtf` selected
+// by the element type so reduction precision is preserved end-to-end.
+template <typename T>
+__device__ inline T nested_rsqrt(T x) { return rsqrtf(static_cast<float>(x)); }
+template <>
+__device__ inline double nested_rsqrt<double>(double x) { return rsqrt(x); }
+
+template <typename T>
+__global__ void nested_layer_norm_kernel_t(
+    const T* __restrict__ values,        // [total_len, D]
+    T* __restrict__ output,              // [total_len, D]
+    const T* __restrict__ weight,        // [D]
+    const T* __restrict__ bias,          // [D]
     const int64_t* __restrict__ offsets, // [B+1]
-    int64_t D, int64_t B, float eps)
+    int64_t D, int64_t B, T eps)
 {
     int64_t b = blockIdx.x;
     if (b >= B) return;
@@ -757,26 +820,26 @@ __global__ void nested_layer_norm_kernel(
 
     // For each row in the segment, compute LN across the D dimension
     for (int64_t row = start; row < end; ++row) {
-        // Compute mean
-        float mean = 0.0f;
+        // Compute mean (T-precision accumulator)
+        T mean = T(0);
         for (int64_t d = 0; d < D; ++d) {
             mean += values[row * D + d];
         }
-        mean /= static_cast<float>(D);
+        mean /= static_cast<T>(D);
 
         // Compute variance
-        float var = 0.0f;
+        T var = T(0);
         for (int64_t d = 0; d < D; ++d) {
-            float diff = values[row * D + d] - mean;
+            T diff = values[row * D + d] - mean;
             var += diff * diff;
         }
-        var /= static_cast<float>(D);
+        var /= static_cast<T>(D);
 
-        float inv_std = rsqrtf(var + eps);
+        T inv_std = nested_rsqrt<T>(var + eps);
 
         // Normalize and apply affine
         for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
-            float normalized = (values[row * D + d] - mean) * inv_std;
+            T normalized = (values[row * D + d] - mean) * inv_std;
             output[row * D + d] = normalized * weight[d] + bias[d];
         }
     }
@@ -794,12 +857,18 @@ auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets,
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (values.dtype() == DType::Float32) {
-        nested_layer_norm_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+        nested_layer_norm_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             values.data<float>(), output.data<float>(),
             weight.data<float>(), bias.data<float>(),
             offsets.data<int64_t>(), D, B, eps);
+    } else if (values.dtype() == DType::Float64) {
+        // F4 followup: native Float64 path with double-precision accumulators.
+        nested_layer_norm_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            values.data<double>(), output.data<double>(),
+            weight.data<double>(), bias.data<double>(),
+            offsets.data<int64_t>(), D, B, static_cast<double>(eps));
     } else {
-        throw std::runtime_error("nested_layer_norm_cuda: only Float32 currently supported");
+        throw std::runtime_error("nested_layer_norm_cuda: only Float32 and Float64 currently supported");
     }
 
     CUDA_CHECK_NESTED(cudaGetLastError());

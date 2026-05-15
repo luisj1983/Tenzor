@@ -27,6 +27,7 @@
 #include "../nn/layers/linear.hpp"
 #include "../nn/layers/pooling.hpp"
 #include "../nn/layers/dropout.hpp"
+#include "../nn/layers/drop_path.hpp"  // Audit G14: real stochastic depth
 #include "../nn/activations/activations.hpp"
 
 namespace tenzor {
@@ -205,6 +206,12 @@ private:
     // Projection phase
     std::shared_ptr<nn::Conv2d> project_conv_;
     std::shared_ptr<nn::BatchNorm2d> project_bn_;
+
+    // Audit G14: real stochastic depth. nullptr when the block has no skip
+    // connection or drop_connect_rate <= 0 (DropPath becomes a no-op in
+    // either case). When non-null, applied to the residual branch before
+    // adding `input` in `forward_impl`.
+    std::shared_ptr<nn::DropPath> drop_path_;
 
     nn::Swish swish_;
 };

@@ -6001,4 +6001,232 @@ auto VulkanBackend::dispatchTriuIndices(int64_t row, int64_t col, int64_t offset
     return dispatchCat({row_i64.reshape({1, n}), col_i64.reshape({1, n})}, 0);
 }
 
+// =========================================================================
+// D3-followup-Vulkan-host: bilinear backward dispatch.
+//
+// Wires the new `interpolate_bilinear_backward.comp` shader (added in the
+// D3-followup-Vulkan pass). The shader uses `GL_EXT_shader_atomic_float`
+// for a 4-weight scatter: each work-item processes one output gradient
+// element and atomicAdd-s four weighted contributions into the input-shape
+// grad_input buffer. The descriptor-set / cmd-buffer layout matches the
+// `dispatchAdaptiveAvgPool2dBackward` Float32 atomic path (the `fill`
+// shader is used to zero-init grad_input before scattering).
+// =========================================================================
+auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
+                                                 const std::vector<int64_t>& input_size,
+                                                 const std::string& mode,
+                                                 bool align_corners) -> Tensor {
+    if (mode != "bilinear") {
+        throw std::runtime_error(
+            "dispatchInterpolateBackward (Vulkan): mode '" + mode +
+            "' not supported. Only 'bilinear' is wired (the only mode the "
+            "audit-shipped shader implements).");
+    }
+    if (grad_output.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            "dispatchInterpolateBackward (Vulkan): only Float32 supported "
+            "(VK_EXT_shader_atomic_float covers F32; F64 needs "
+            "GL_EXT_shader_atomic_float2 which is a separate extension).");
+    }
+    auto gshape = grad_output.shape();
+    if (gshape.size() != 4) {
+        throw std::runtime_error(
+            "dispatchInterpolateBackward (Vulkan): only 4D (N,C,H,W) supported.");
+    }
+    if (input_size.size() != 2) {
+        throw std::runtime_error(
+            "dispatchInterpolateBackward (Vulkan): input_size must be [in_h, in_w].");
+    }
+
+    auto cont_grad = grad_output.contiguous();
+    const int64_t N     = gshape[0];
+    const int64_t C     = gshape[1];
+    const int64_t out_h = gshape[2];
+    const int64_t out_w = gshape[3];
+    const int64_t in_h  = input_size[0];
+    const int64_t in_w  = input_size[1];
+
+    int32_t device_id = cont_grad.device().index;
+
+    auto* pipeline = getPipeline("interpolate_bilinear_backward", device_id);
+
+    Tensor grad_input(std::vector<int64_t>{N, C, in_h, in_w}, cont_grad.dtype(), cont_grad.device());
+
+    // Zero-init grad_input via the `fill` shader (the atomic scatter
+    // accumulates onto whatever's there; we need a clean baseline).
+    {
+        auto* fill_pipeline = getPipeline("fill", device_id);
+
+        struct FillPushConstants {
+            uint32_t n_elements;
+            uint32_t value_bits;
+        } fpc;
+        fpc.n_elements = static_cast<uint32_t>(grad_input.numel());
+        fpc.value_bits = 0;  // 0.0f
+
+        const void* buffer_fill = grad_input.data_ptr();
+        size_t fill_size = grad_input.numel() * grad_input.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> fill_bindings = {{0, buffer_fill}};
+        std::vector<size_t> fill_sizes = {fill_size};
+
+        VkDescriptorSet fillDescSet = allocateAndWriteDescriptorSet(
+            device_id, fill_pipeline, fill_bindings, fill_sizes);
+
+        VkCommandBuffer fillCmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(fillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, fill_pipeline->pipeline());
+        vkCmdBindDescriptorSets(fillCmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 fill_pipeline->layout(), 0, 1, &fillDescSet, 0, nullptr);
+        vkCmdPushConstants(fillCmd, fill_pipeline->layout(),
+                            VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(FillPushConstants), &fpc);
+        uint32_t fill_wg = div_wg(fpc.n_elements, devices_[device_id].workgroupSize);
+        vkCmdDispatch(fillCmd, fill_wg, 1, 1);
+
+        VkMemoryBarrier fillBarrier{};
+        fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        fillBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(fillCmd,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+        endSingleTimeCommands(fillCmd, device_id);
+    }
+
+    // Push constants must match the shader's struct.
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t batch;
+        uint32_t channels;
+        uint32_t in_h;
+        uint32_t in_w;
+        uint32_t out_h;
+        uint32_t out_w;
+        uint32_t align_corners;
+    } pc;
+    pc.n_elements    = static_cast<uint32_t>(N * C * out_h * out_w);
+    pc.batch         = static_cast<uint32_t>(N);
+    pc.channels      = static_cast<uint32_t>(C);
+    pc.in_h          = static_cast<uint32_t>(in_h);
+    pc.in_w          = static_cast<uint32_t>(in_w);
+    pc.out_h         = static_cast<uint32_t>(out_h);
+    pc.out_w         = static_cast<uint32_t>(out_w);
+    pc.align_corners = align_corners ? 1u : 0u;
+
+    const void* buf_grad_out = cont_grad.data_ptr();
+    const void* buf_grad_in  = grad_input.data_ptr();
+    size_t grad_out_size = cont_grad.numel() * cont_grad.dtype_size();
+    size_t grad_in_size  = grad_input.numel() * grad_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buf_grad_out},
+        {1, buf_grad_in}
+    };
+    std::vector<size_t> sizes = {grad_out_size, grad_in_size};
+
+    VkDescriptorSet descSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                             pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(PushConstants), &pc);
+    uint32_t workgroups = div_wg(pc.n_elements, devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_input;
+}
+
+// =========================================================================
+// F22-followup: device-side Philox4x32-10 Bernoulli mask via the
+// `philox_dropout_mask.comp` compute shader. Replaces the prior CPU-host
+// generation + .to(device) copy. The shader writes a Float32 pre-scaled
+// mask (keep_scale = 1/(1-p) on kept positions, 0 on dropped) directly
+// into a device-allocated buffer in a single dispatch.
+// =========================================================================
+auto VulkanBackend::dispatchPhiloxDropoutMask(const std::vector<int64_t>& shape,
+                                                float p,
+                                                uint64_t seed,
+                                                uint64_t offset) -> Tensor {
+    if (p < 0.0f || p >= 1.0f) {
+        throw std::invalid_argument(
+            "dispatchPhiloxDropoutMask (Vulkan): dropout probability must be "
+            "in [0, 1), got " + std::to_string(p));
+    }
+
+    int64_t total = 1;
+    for (auto d : shape) total *= d;
+
+    // Attention-shape decode (3-D `[BH, Sq, Sk]` or 4-D `[B, H, Sq, Sk]`)
+    // matches every other Philox path so cross-backend backward replay
+    // produces identical masks.
+    int64_t bh = 0, sq = 0, sk = 0;
+    if (shape.size() == 4) {
+        bh = shape[0] * shape[1];
+        sq = shape[2];
+        sk = shape[3];
+    } else if (shape.size() == 3) {
+        bh = shape[0];
+        sq = shape[1];
+        sk = shape[2];
+    }
+
+    // Single Vulkan device — index 0 matches the rest of the FA path.
+    int32_t device_id = 0;
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
+                   DType::Float32, Device::vulkan(device_id));
+
+    auto* pipeline = getPipeline("philox_dropout_mask", device_id);
+
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t bh_dim;
+        uint32_t sq_dim;
+        uint32_t sk_dim;
+        uint32_t seed_low;
+        uint32_t offset_low;
+        float    p;
+        float    keep_scale;
+    } pc;
+    pc.n_elements = static_cast<uint32_t>(total);
+    pc.bh_dim     = static_cast<uint32_t>(bh);
+    pc.sq_dim     = static_cast<uint32_t>(sq);
+    pc.sk_dim     = static_cast<uint32_t>(sk);
+    pc.seed_low   = static_cast<uint32_t>(seed & 0xFFFFFFFFu);
+    pc.offset_low = static_cast<uint32_t>(offset & 0xFFFFFFFFu);
+    pc.p          = p;
+    pc.keep_scale = 1.0f / (1.0f - p);
+
+    const void* buf_out = output.data_ptr();
+    size_t buf_size = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
+    std::vector<size_t> sizes = {buf_size};
+
+    VkDescriptorSet descSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                             pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(PushConstants), &pc);
+    uint32_t workgroups = div_wg(pc.n_elements, devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
 } // namespace tenzor

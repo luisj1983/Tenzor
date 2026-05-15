@@ -1,6 +1,10 @@
 #include "tenzor/models/hub.hpp"
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
+#include "tenzor/nn/safetensors.hpp"  // Audit H2: format-aware loader
+#include "tenzor/io/torch_pickle.hpp" // H2-followup: native .pth pickle parser
+#include <unordered_set>  // H3-followup-keyremap
+#include <cctype>          // H3-followup-keyremap
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <fstream>
@@ -421,6 +425,40 @@ std::string ModelHub::download_pretrained(
     return download_weights(model_name, info.url, info.sha256, show_progress, progress_callback);
 }
 
+std::string ModelHub::download_pretrained_safetensors(
+    const std::string& model_name,
+    bool prefer_safetensors,
+    bool show_progress,
+    ProgressCallback progress_callback)
+{
+    ensure_initialized();
+
+    ModelWeightInfo info;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = impl_->registry.find(model_name);
+        if (it == impl_->registry.end()) {
+            throw std::runtime_error("Model not registered: " + model_name);
+        }
+        info = it->second;
+    }
+
+    // H3-followup: route to SafeTensors mirror when one is registered and
+    // the caller opted in. The downloaded file flows through H2's format
+    // dispatcher, which handles `.safetensors` natively without the
+    // PyTorch-pickle parser dependency.
+    if (prefer_safetensors && !info.safetensors_url.empty()) {
+        // Use a different cache key (".safetensors" suffix) so the legacy
+        // .pth cache doesn't collide with the safetensors download.
+        std::string st_key = model_name + ".safetensors";
+        return download_weights(st_key, info.safetensors_url, /*sha256=*/"",
+                                 show_progress, progress_callback);
+    }
+    // Fall through to legacy .pth URL — the caller will get H2's actionable
+    // error if the format isn't supported.
+    return download_weights(model_name, info.url, info.sha256, show_progress, progress_callback);
+}
+
 void ModelHub::load_pretrained_weights(
     nn::Module& model,
     const std::string& weights_path,
@@ -433,20 +471,116 @@ void ModelHub::load_pretrained_weights(
     std::unordered_map<std::string, Tensor> state_dict;
     std::string load_error;
 
+    // Audit H2: dispatch to the right deserializer by file extension or
+    // first-bytes sniff. Previously this always called `Serializer::load`
+    // (Tenzor native format) and would fail with a cryptic "Invalid file
+    // format: magic number mismatch" for any .safetensors or .pth file.
+    auto ends_with = [](const std::string& s, const std::string& suffix) {
+        return s.size() >= suffix.size() &&
+               s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+
     try {
-        // Load checkpoint from file using Serializer
-        state_dict = nn::Serializer::load(weights_path);
+        if (ends_with(weights_path, ".safetensors")) {
+            // HuggingFace SafeTensors format — preferred for new models.
+            state_dict = nn::SafeTensorsSerializer::load(weights_path);
+        } else if (ends_with(weights_path, ".pth") || ends_with(weights_path, ".pt") ||
+                   ends_with(weights_path, ".bin")) {
+            // H2-followup: native C++ PyTorch checkpoint loader. Parses the
+            // torch.save ZIP archive (data.pkl + data/N entries), decodes the
+            // Python pickle stream (protocol 2-5 subset that torch.save uses),
+            // and reconstructs each `_rebuild_tensor_v2(storage, offset, size,
+            // stride, ...)` call into a Tenzor CPU Tensor. Handles
+            // Float32/64/16/BFloat16/Int8/16/32/64/UInt8/Bool storages.
+            // Non-contiguous strides and DEFLATEd entries are rejected with
+            // actionable errors; legacy pre-1.6 non-zipfile pickles are
+            // pointed at the safetensors conversion workflow.
+            state_dict = tenzor::io::load_torch_pickle(weights_path);
+        } else {
+            // Tenzor native format (or unknown extension — try native).
+            state_dict = nn::Serializer::load(weights_path);
+        }
     } catch (const std::exception& e) {
         load_error = e.what();
-        if (!strict) {
-            std::cerr << "Warning: Partial weight loading - " << load_error << std::endl;
-            // In non-strict mode, continue with empty state_dict
+        if (strict) {
+            // Audit H2: in strict mode, throw the deserialization error
+            // immediately so the user sees the *actual* cause (e.g. "use the
+            // .safetensors variant"). Previously the code continued to
+            // `load_state_dict(empty)` which threw "Missing keys ..." first
+            // and masked the real error.
+            throw std::runtime_error(std::string("Failed to load weights: ") + load_error);
         }
-        // In strict mode, defer throwing until after load_state_dict is attempted
+        std::cerr << "Warning: Partial weight loading - " << load_error << std::endl;
     }
 
-    // Attempt to load state into model
-    // This allows the module to see the load attempt even if deserialization failed
+    // H3-followup-keyremap: rewrite common torchvision/timm naming conventions
+    // into tenzor's. The biggest mechanical difference is that tenzor's
+    // `Sequential::add_module` names submodules `module_0`, `module_1`, ...
+    // while torchvision (and timm, which preserves torchvision's names)
+    // uses `0`, `1`, ... — so the same ResNet-50 has e.g.
+    //   timm:    `layer1.0.conv1.weight`
+    //   tenzor:  `layer1.module_0.conv1.weight`
+    // The remap below also drops keys that exist in PyTorch but not in
+    // tenzor (`num_batches_tracked` on BatchNorm), since otherwise the
+    // strict `load_state_dict` errors out on those extras.
+    if (!state_dict.empty()) {
+        // Build the target set of parameter+buffer names from the model
+        // itself so we only remap keys that wouldn't otherwise match.
+        std::unordered_set<std::string> target_keys;
+        for (const auto& [n, p] : model.named_parameters())  target_keys.insert(n);
+        for (const auto& [n, b] : model.named_buffers())     target_keys.insert(n);
+
+        std::unordered_map<std::string, Tensor> remapped;
+        remapped.reserve(state_dict.size());
+        for (auto& [k, t] : state_dict) {
+            // Drop PyTorch-only BatchNorm bookkeeping (tenzor doesn't store it).
+            if (k.size() >= 19 &&
+                k.compare(k.size() - 19, 19, "num_batches_tracked") == 0) {
+                continue;
+            }
+            // If the key already matches, keep as-is.
+            if (target_keys.count(k)) {
+                remapped.emplace(k, t);
+                continue;
+            }
+            // Try `.{N}.` → `.module_{N}.` rewrite over every digit-run.
+            // Walk the key; whenever we see `.<digits>.` or a trailing
+            // `.<digits>` segment, prepend `module_` to the digit run.
+            std::string rk;
+            rk.reserve(k.size() + 16);
+            size_t i = 0;
+            while (i < k.size()) {
+                if (k[i] == '.') {
+                    // Look ahead for a digit run.
+                    size_t j = i + 1;
+                    while (j < k.size() && std::isdigit(static_cast<unsigned char>(k[j]))) ++j;
+                    if (j > i + 1 && (j == k.size() || k[j] == '.')) {
+                        // Found `.<digits>` boundary — rewrite.
+                        rk.push_back('.');
+                        rk.append("module_");
+                        rk.append(k, i + 1, j - (i + 1));
+                        i = j;
+                        continue;
+                    }
+                }
+                rk.push_back(k[i]);
+                ++i;
+            }
+            if (target_keys.count(rk)) {
+                remapped.emplace(rk, t);
+                continue;
+            }
+            // Couldn't match — keep the original key so the strict-mode
+            // error message lists the actual unmatched name.
+            remapped.emplace(k, t);
+        }
+        state_dict = std::move(remapped);
+    }
+
+    // Attempt to load state into model. Only meaningful if deserialization
+    // succeeded (load_error empty) — otherwise we'd just be calling
+    // load_state_dict with an empty map, which throws "Missing keys" and
+    // masks the real cause.
     try {
         model.load_state_dict(state_dict);
     } catch (const std::exception& e) {
@@ -455,11 +589,6 @@ void ModelHub::load_pretrained_weights(
         } else {
             std::cerr << "Warning: Model state_dict loading failed - " << e.what() << std::endl;
         }
-    }
-
-    // If there was a load error in strict mode, throw it now after load_state_dict was attempted
-    if (strict && !load_error.empty()) {
-        throw std::runtime_error(std::string("Failed to load weights: ") + load_error);
     }
 }
 
@@ -692,39 +821,72 @@ std::string get_pytorch_model_url(const std::string& model_name) {
     return "https://download.pytorch.org/models/" + model_name + ".pth";
 }
 
+// H3-followup: build a SafeTensors mirror URL for a `timm`-hosted model.
+// HuggingFace's `timm` org mirrors the canonical torchvision weights in
+// safetensors format under model names like `timm/resnet50.a1_in1k`.
+// This is the only mirror that's been kept in sync with the upstream
+// torchvision recipes, so it's a stable target for the H3-followup-keyremap
+// post-load weight renaming.
+std::string get_timm_safetensors_url(const std::string& timm_model_id) {
+    return "https://huggingface.co/timm/" + timm_model_id +
+           "/resolve/main/model.safetensors";
+}
+
 void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry) {
     std::vector<ModelWeightInfo> models;
 
-    // ResNet models
+    // ResNet models. The .pth URL is the legacy torchvision path; the
+    // safetensors URL points at timm's HuggingFace mirror of the same weights.
+    // Note: the timm parameter names differ from torchvision's — full weight
+    // load requires the H3-followup-keyremap step (tracked separately). The
+    // mirror is still useful today because the file format parses cleanly
+    // through H2's safetensors loader; key-mapping is the remaining piece.
     models.push_back({std::string("resnet18"), get_pytorch_model_url("resnet18-5c106cde"),
-                     std::string("5c106cde18a16fb8e3af86a0c103ec7d8e84d1e"), 0, std::string("ResNet-18")});
+                     std::string("5c106cde18a16fb8e3af86a0c103ec7d8e84d1e"), 0, std::string("ResNet-18"),
+                     get_timm_safetensors_url("resnet18.a1_in1k")});
     models.push_back({std::string("resnet34"), get_pytorch_model_url("resnet34-333f7ec4"),
-                     std::string("333f7ec4d632f71d4d0af73aa97397a5af72cb4"), 0, std::string("ResNet-34")});
+                     std::string("333f7ec4d632f71d4d0af73aa97397a5af72cb4"), 0, std::string("ResNet-34"),
+                     get_timm_safetensors_url("resnet34.a1_in1k")});
     models.push_back({std::string("resnet50"), get_pytorch_model_url("resnet50-19c8e357"),
-                     std::string("19c8e357e6f093d1c0ed6b6a7fa3bcf0a3b7db8"), 0, std::string("ResNet-50")});
+                     std::string("19c8e357e6f093d1c0ed6b6a7fa3bcf0a3b7db8"), 0, std::string("ResNet-50"),
+                     get_timm_safetensors_url("resnet50.a1_in1k")});
     models.push_back({std::string("resnet101"), get_pytorch_model_url("resnet101-5d3b4d8f"),
-                     std::string("5d3b4d8ffa1b64c89c8a5c1cf738db78b83c0f9"), 0, std::string("ResNet-101")});
+                     std::string("5d3b4d8ffa1b64c89c8a5c1cf738db78b83c0f9"), 0, std::string("ResNet-101"),
+                     get_timm_safetensors_url("resnet101.a1_in1k")});
     models.push_back({std::string("resnet152"), get_pytorch_model_url("resnet152-b121ed2d"),
-                     std::string("b121ed2d73e9fb437f1a89a0e6b4f8ed70f9fc8"), 0, std::string("ResNet-152")});
+                     std::string("b121ed2d73e9fb437f1a89a0e6b4f8ed70f9fc8"), 0, std::string("ResNet-152"),
+                     get_timm_safetensors_url("resnet152.a1h_in1k")});
 
-    // VGG models
+    // VGG models — torchvision-canonical VGG isn't mirrored in safetensors,
+    // so leave the safetensors_url empty. download_pretrained_safetensors
+    // falls back to the legacy .pth URL (which will throw H2's actionable
+    // error until H2-followup ships the pickle parser).
     models.push_back({std::string("vgg11"), get_pytorch_model_url("vgg11-bbd30ac9"),
-                     std::string("bbd30ac9d1a59e5f2e8bb17a57e3d7da5e3e5e8"), 0, std::string("VGG-11")});
+                     std::string("bbd30ac9d1a59e5f2e8bb17a57e3d7da5e3e5e8"), 0, std::string("VGG-11"),
+                     std::string("")});
     models.push_back({std::string("vgg13"), get_pytorch_model_url("vgg13-c768596a"),
-                     std::string("c768596aa57f0e4b05b58e8bc1e2c3b9e4e4b5e"), 0, std::string("VGG-13")});
+                     std::string("c768596aa57f0e4b05b58e8bc1e2c3b9e4e4b5e"), 0, std::string("VGG-13"),
+                     std::string("")});
     models.push_back({std::string("vgg16"), get_pytorch_model_url("vgg16-397923af"),
-                     std::string("397923af2e8d8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("VGG-16")});
+                     std::string("397923af2e8d8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("VGG-16"),
+                     std::string("")});
     models.push_back({std::string("vgg19"), get_pytorch_model_url("vgg19-dcbb9e9d"),
-                     std::string("dcbb9e9d8c3a3e8d8c3a3e8d8c3a3e8d8c3a3e8"), 0, std::string("VGG-19")});
+                     std::string("dcbb9e9d8c3a3e8d8c3a3e8d8c3a3e8d8c3a3e8"), 0, std::string("VGG-19"),
+                     std::string("")});
 
-    // MobileNet
+    // MobileNet — timm mirrors mobilenetv2_100 as the canonical 1.0-width
+    // weights. mobilenet_v2 -> timm/mobilenetv2_100.ra_in1k
     models.push_back({std::string("mobilenet_v2"), get_pytorch_model_url("mobilenet_v2-b0353104"),
-                     std::string("b03531044c7f8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("MobileNet V2")});
+                     std::string("b03531044c7f8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("MobileNet V2"),
+                     get_timm_safetensors_url("mobilenetv2_100.ra_in1k")});
 
-    // EfficientNet
+    // EfficientNet — timm mirrors as `tf_efficientnet_b{0..7}.in1k`.
     for (int i = 0; i <= 7; i++) {
         std::string name = "efficientnet_b" + std::to_string(i);
-        models.push_back({name, get_pytorch_model_url(name), std::string(""), 0, std::string("EfficientNet-B") + std::to_string(i)});
+        std::string timm_id = "tf_efficientnet_b" + std::to_string(i) + ".in1k";
+        models.push_back({name, get_pytorch_model_url(name), std::string(""), 0,
+                          std::string("EfficientNet-B") + std::to_string(i),
+                          get_timm_safetensors_url(timm_id)});
     }
 
     // Directly add to registry without locking (already locked by caller)

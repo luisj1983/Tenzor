@@ -1,4 +1,6 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"            // F16: broadcast_shapes
+#include "tenzor/ops/transform.hpp"         // F16: broadcast_to
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <limits>
@@ -2231,26 +2233,42 @@ auto flash_attention_impl(
         l_ptr = get_data_ptr<float>(*L_out);
     }
 
-    // Audit C4 OneAPI fix: actually honor the `mask` parameter. Previously it
-    // was passed in but never captured by the kernel lambda, so callers'
-    // attn_mask was silently ignored. We support a mask shape of
-    // [batch_heads, seq_len_q, seq_len_k] (or any prefix that broadcasts);
-    // for now require exactly that 3D shape and bounds-check at the host.
+    // Audit F16: accept any mask shape broadcast-compatible with
+    // [batch_heads, seq_q, seq_k]. The kernel itself reads from a 3D
+    // [batch_heads, seq_q, seq_k] strided view, so when the caller supplies
+    // a smaller mask (e.g. an attention mask [seq_q, seq_k] shared across
+    // heads, or [1, 1, seq_k] for KV-padding-only) we broadcast it to the
+    // full 3D shape host-side via the existing `broadcast_to` op. This
+    // matches the CPU FlashAttention contract — previously, anything other
+    // than the exact 3D shape threw on this code path.
     const float* mask_ptr = nullptr;
     int64_t mask_b_stride = 0, mask_q_stride = 0;
+    Tensor broadcasted_mask;  // owns the (optional) materialised broadcast.
     if (mask != nullptr && mask->is_valid() && mask->numel() > 0) {
         if (mask->dtype() != DType::Float32) {
             throw std::invalid_argument(
                 "FlashAttention OneAPI: mask must be Float32 (cast at host).");
         }
-        if (mask->ndim() != 3
-            || mask->shape()[0] != batch_heads
-            || mask->shape()[1] != seq_len_q
-            || mask->shape()[2] != seq_len_k) {
-            throw std::invalid_argument(
-                "FlashAttention OneAPI: mask must be shape [batch_heads, seq_q, seq_k].");
+        std::vector<int64_t> target_shape = {batch_heads, seq_len_q, seq_len_k};
+        std::vector<int64_t> mask_shape_vec(mask->shape().begin(), mask->shape().end());
+        const Tensor* effective_mask = mask;
+        if (mask_shape_vec != target_shape) {
+            // Verify broadcast compatibility before materialising.
+            try {
+                auto bs = tenzor::broadcast_shapes(mask->shape(), std::span<const int64_t>(target_shape));
+                if (bs != target_shape) {
+                    throw std::invalid_argument(
+                        "FlashAttention OneAPI: mask shape is not broadcast-compatible with "
+                        "[batch_heads, seq_q, seq_k].");
+                }
+            } catch (const std::exception& e) {
+                throw std::invalid_argument(
+                    std::string("FlashAttention OneAPI: mask broadcast error: ") + e.what());
+            }
+            broadcasted_mask = tenzor::broadcast_to(*mask, target_shape).contiguous();
+            effective_mask = &broadcasted_mask;
         }
-        mask_ptr = get_data_ptr<const float>(*mask);
+        mask_ptr = get_data_ptr<const float>(*effective_mask);
         mask_b_stride = seq_len_q * seq_len_k;
         mask_q_stride = seq_len_k;
     }

@@ -877,15 +877,28 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
                 ? 0
                 : partition.master_params[0].numel() * dtype_size(DType::Float32));
 
-        // If we're going to int8-quantize fp32 optimizer states on CPU, the offload path
-        // (offload_states_to_cpu / fetch_states_to_gpu) writes/reads per-tensor scale
-        // tensors out of partition.momentum_scales / variance_scales. In ElementLevel mode
-        // each of momentum and variance is a single flat slice, so we allocate exactly one
-        // scale slot per state, default-constructed. They are populated lazily on the first
-        // quantize-and-offload pass — same pattern as ParamLevel (see line ~782).
-        if (config_.offload_to_cpu && config_.quantize_offloaded_states_int8) {
+        // If we're going to int8-quantize fp32 optimizer states (on CPU or NVMe),
+        // the offload path (offload_states_to_cpu / fetch_states_to_gpu) writes/reads
+        // per-tensor scale tensors out of partition.momentum_scales / variance_scales.
+        // In ElementLevel mode each of momentum and variance is a single flat slice,
+        // so we allocate exactly one scale slot per state, default-constructed. They
+        // are populated lazily on the first quantize-and-offload pass — same pattern
+        // as ParamLevel (see line ~782).
+        const bool any_offload = config_.offload_to_cpu || config_.offload_to_nvme;
+        if (any_offload && config_.quantize_offloaded_states_int8) {
             partition.momentum_scales.assign(1, Tensor());
             partition.variance_scales.assign(1, Tensor());
+        }
+        // Audit G2: NVMe disk-slot metadata mirrors momentum/variance — one slot
+        // each in ElementLevel mode. Sized here so subsequent offload_states_to_cpu()
+        // / fetch_states_to_gpu() cycles can write/read without a re-alloc.
+        if (config_.offload_to_nvme) {
+            partition.momentum_disk.assign(1, StatePartition::DiskSlot{});
+            partition.variance_disk.assign(1, StatePartition::DiskSlot{});
+            if (config_.quantize_offloaded_states_int8) {
+                partition.momentum_scale_disk.assign(1, StatePartition::DiskSlot{});
+                partition.variance_scale_disk.assign(1, StatePartition::DiskSlot{});
+            }
         }
 
         // CPU offload: pull each freshly-zeroed slice to CPU now to keep peak GPU memory
@@ -903,10 +916,36 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
             states_on_cpu_ = true;
         }
 
-        // NVMe path for ElementLevel is added in Task 9.1 (NVMe interaction).
+        // Audit G2: NVMe path for ElementLevel. Previously threw with a
+        // "planned: Task 9.1" message — now writes the freshly-zeroed flat
+        // slice to disk via the same `write_tensor_blob` helpers that ParamLevel
+        // uses, clears the in-memory tensor, and records the slot metadata
+        // (path + shape + dtype). The existing `offload_states_to_cpu` and
+        // `fetch_states_to_gpu` already iterate `partition.momentum.size()` and
+        // handle the NVMe branch generically, so no further changes are needed
+        // for step-time. Master copies (when fp32 master is used) stay in
+        // memory — same convention as ParamLevel: master is high-precision on
+        // the hot path and serialising it defeats the purpose.
         if (config_.offload_to_nvme) {
-            throw std::runtime_error(
-                "ElementLevel + offload_to_nvme is not yet supported (planned: Task 9.1)");
+            std::filesystem::path nvme_dir = resolve_nvme_dir(config_.nvme_path);
+
+            auto shape = std::vector<int64_t>{slice_n};
+
+            partition.momentum_disk[0] = StatePartition::DiskSlot{
+                state_blob_path(nvme_dir, partition.rank, /*slot_idx=*/0, "momentum").string(),
+                shape, state_dtype
+            };
+            write_tensor_blob(partition.momentum[0], partition.momentum_disk[0].path);
+            partition.momentum[0] = Tensor();  // free the GPU/CPU buffer
+
+            partition.variance_disk[0] = StatePartition::DiskSlot{
+                state_blob_path(nvme_dir, partition.rank, /*slot_idx=*/0, "variance").string(),
+                shape, state_dtype
+            };
+            write_tensor_blob(partition.variance[0], partition.variance_disk[0].path);
+            partition.variance[0] = Tensor();
+
+            states_on_cpu_ = true;  // "not on GPU device, needs fetch before step()"
         }
         return;
     }

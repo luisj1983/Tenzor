@@ -10,6 +10,7 @@
 #endif
 #include <hipcub/hipcub.hpp>
 #include <cmath>
+#include "rocm_nan_helpers.hip.h"  // F7/F8: IEEE-754 bit-pattern NaN check
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -343,13 +344,39 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 
 /**
  * @brief Element-wise division kernel for half precision
- * Uses float conversion for correct division and infinity handling
+ *
+ * F8: emits NaN / ±Inf as explicit Float16 bit patterns rather than relying
+ * on `__float2half(NaN)` to forward the special value through. On some HIP
+ * builds the conversion silently canonicalises NaN to a finite value (the
+ * same root cause documented in `transform.hip.cpp::cast_to_f16_kernel`).
+ *
+ * Float divide returns NaN for 0/0 and ±Inf for x/0 with x ≠ 0 per IEEE 754;
+ * the bit-pattern check below catches both cases and reroutes them to the
+ * canonical Float16 NaN payload (0x7E00) or signed Inf (sign | 0x7C00).
  */
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
-    // Float divide returns NaN for 0/0 and ±Inf for x/0 with x ≠ 0 per IEEE 754.
-    // __float2half preserves NaN/Inf through conversion.
     HIP_KERNEL_LOOP(idx, n) {
-        c[idx] = __float2half(__half2float(a[idx]) / __half2float(b[idx]));
+        float fa = __half2float(a[idx]);
+        float fb = __half2float(b[idx]);
+        float fv = fa / fb;
+        unsigned int vb = __float_as_uint(fv);
+        unsigned int exp  = (vb >> 23) & 0xFFu;
+        unsigned int mant =  vb        & 0x7FFFFFu;
+        unsigned short bits16;
+        if (exp == 0xFFu) {
+            // NaN or Inf in Float32 — emit Float16 special-value bits directly.
+            if (mant != 0u) {
+                bits16 = 0x7E00u;                                           // quiet NaN
+            } else {
+                unsigned int sign16 = (vb >> 16) & 0x8000u;
+                bits16 = static_cast<unsigned short>(sign16 | 0x7C00u);     // ±Inf
+            }
+            __half h;
+            *reinterpret_cast<unsigned short*>(&h) = bits16;
+            c[idx] = h;
+        } else {
+            c[idx] = __float2half(fv);
+        }
     }
 }
 
@@ -8080,7 +8107,10 @@ __global__ void nanquantile_hip_kernel(
         int64_t count = 0;
         for (int64_t i = 0; i < dim_size; ++i) {
             T val = input[outer * dim_size * inner_size + i * inner_size + inner];
-            if (!isnan(static_cast<float>(val))) {
+            // F7: use IEEE-754 bit pattern via `is_nan_bits(val)` — HIP's
+            // `isnan` is unreliable under fast-math and the static_cast to
+            // float drops precision for f64 inputs.
+            if (!tenzor::rocm::is_nan_bits(val)) {
                 ws[count++] = val;
             }
         }

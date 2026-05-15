@@ -488,6 +488,51 @@ TEST_F(GPTTest, GeneratorBeamSearch) {
     EXPECT_EQ(output_data[1], 200);
 }
 
+// G16 regression: beam_search must accept batch_size > 1 and preserve each
+// batch's input tokens at the head of its corresponding output row. The
+// previous implementation threw `runtime_error` when batch_size != 1.
+TEST_F(GPTTest, BeamSearchBatchedBatchSize3_G16) {
+    GPT2LMHeadModel model(config_);
+    model.train(false);
+
+    GenerationConfig gen_config;
+    gen_config.max_length = 8;
+    gen_config.strategy = GenerationStrategy::BeamSearch;
+    gen_config.num_beams = 2;
+    TextGenerator generator(model, gen_config);
+
+    // 3-sample batch with distinct prefixes per row.
+    const int64_t B = 3;
+    const int64_t T = 3;
+    Tensor input_ids({B, T}, DType::Int64, device_);
+    auto* d = input_ids.data<int64_t>();
+    // Batch 0: [1, 2, 3]
+    d[0] = 1; d[1] = 2; d[2] = 3;
+    // Batch 1: [4, 5, 6]
+    d[T] = 4; d[T + 1] = 5; d[T + 2] = 6;
+    // Batch 2: [7, 8, 9]
+    d[2 * T] = 7; d[2 * T + 1] = 8; d[2 * T + 2] = 9;
+
+    Tensor output;
+    ASSERT_NO_THROW({
+        output = generator.beam_search(input_ids, gen_config.num_beams);
+    });
+
+    ASSERT_EQ(output.shape()[0], B);
+    ASSERT_EQ(output.shape()[1], gen_config.max_length);
+
+    auto* o = output.data<int64_t>();
+    // Each row's first T tokens must match that row's input — proves the
+    // batched implementation kept per-batch beam state separate (no cross-
+    // contamination between batches).
+    for (int64_t bat = 0; bat < B; ++bat) {
+        for (int64_t i = 0; i < T; ++i) {
+            EXPECT_EQ(o[bat * gen_config.max_length + i], d[bat * T + i])
+                << "Output mismatch at batch=" << bat << ", pos=" << i;
+        }
+    }
+}
+
 TEST_F(GPTTest, GeneratorGenericGenerate) {
     GPT2LMHeadModel model(config_);
     model.train(false);

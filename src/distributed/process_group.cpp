@@ -10,6 +10,8 @@
 #include "tenzor/distributed/process_group.hpp"
 #include "tenzor/distributed/distributed.hpp"
 #include "tenzor/distributed/gloo_backend.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 #include <memory>
 #include <cstdlib>
@@ -168,11 +170,102 @@ auto GlooProcessGroup::barrier() -> void {
     pg_->barrier();
 }
 
+auto GlooProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+    // Gloo lacks a native `all_to_all` in this codebase; fall back to the
+    // base-class all_gather-based default. This is bandwidth-suboptimal
+    // (uses world_size * input_size) but is correct on top of Gloo's
+    // existing all_gather. The native primitive (when added to GlooBackend)
+    // should override this method.
+    ProcessGroupBase::all_to_all_single(output, input);
+}
+
+// ============================================================================
+// ProcessGroupBase::split default: throw. Backends override.
+// ============================================================================
+auto ProcessGroupBase::split(int color, int key)
+    -> std::shared_ptr<ProcessGroupBase>
+{
+    (void)color; (void)key;
+    throw std::runtime_error(
+        "ProcessGroupBase::split: not implemented for this backend. "
+        "NCCLProcessGroup supports ncclCommSplit; other backends require a "
+        "concrete override.");
+}
+
+// ============================================================================
+// ProcessGroupBase non-pure default: all_to_all_single via all_gather + slice.
+// ============================================================================
+//
+// Contract:
+//   * `input` and `output` must have the same shape and dtype.
+//   * `input.shape()[0]` must be divisible by `world_size()`.
+//   * On return, `output` is rebound to a freshly-allocated tensor produced
+//     by `cat()`; the caller's pre-allocated buffer is discarded. Backends
+//     that override this method (e.g. NCCL) preserve the pre-allocated buffer.
+//
+// This default is bandwidth-suboptimal (uses world_size^2 chunk volume across
+// the wire instead of world_size). Production GPU paths should override
+// with a native group-Send/Recv-pair primitive — see NCCLProcessGroup.
+auto ProcessGroupBase::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+    const int ws = world_size();
+    if (input.shape().empty()) {
+        throw std::invalid_argument(
+            "ProcessGroupBase::all_to_all_single: input must have at least 1 dimension");
+    }
+    const int64_t total = input.shape()[0];
+    if (total % ws != 0) {
+        throw std::invalid_argument(
+            "ProcessGroupBase::all_to_all_single: input.shape[0] (" +
+            std::to_string(total) + ") must be divisible by world_size (" +
+            std::to_string(ws) + ")"
+        );
+    }
+    auto same_shape = [](std::span<const int64_t> a, std::span<const int64_t> b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    };
+    if (!same_shape(output.shape(), input.shape()) || output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "ProcessGroupBase::all_to_all_single: output must match input shape and dtype");
+    }
+
+    // 1. all_gather: every rank receives every peer's full input.
+    std::vector<Tensor> gathered(ws);
+    all_gather(gathered, input);
+
+    // 2. From peer r's gathered tensor, take the slice destined for *my* rank.
+    //    That slice goes into position r of the output (we receive peer-ordered
+    //    contributions).
+    const int my_rank = rank();
+    const int64_t chunk = total / ws;
+    std::vector<Tensor> per_peer(ws);
+    for (int r = 0; r < ws; ++r) {
+        per_peer[r] = gathered[r].slice(0, my_rank * chunk, (my_rank + 1) * chunk);
+    }
+    output = cat(per_peer, 0);
+}
+
 // ============================================================================
 // NCCLProcessGroup Implementation
 // ============================================================================
 
 #ifdef TENZOR_HAS_NCCL
+
+// Private constructor (audit A3-extended): wraps an already-created
+// ncclComm_t produced by `ncclCommSplit`. Skips the TCP bootstrap — the
+// caller (`NCCLProcessGroup::split`) has already done the synchronous
+// collective that constructs the new communicator.
+NCCLProcessGroup::NCCLProcessGroup(int rank, int world_size, void* comm)
+    : rank_(rank), world_size_(world_size), comm_(comm) {
+    if (rank < 0 || rank >= world_size) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup(split): rank " + std::to_string(rank) +
+            " must be in range [0, " + std::to_string(world_size) + ")");
+    }
+    if (comm == nullptr) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup(split): comm must not be null");
+    }
+}
 
 NCCLProcessGroup::NCCLProcessGroup(int rank, int world_size,
                                    const std::string& master_addr,
@@ -618,6 +711,111 @@ auto NCCLProcessGroup::barrier() -> void {
     all_reduce(dummy, ReduceOp::SUM);
 #else
     throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+#endif
+}
+
+auto NCCLProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(input);
+    validate_gpu_tensor(output);
+
+    if (input.shape().empty()) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup::all_to_all_single: input must have at least 1 dimension");
+    }
+    const int64_t total = input.shape()[0];
+    if (total % world_size_ != 0) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup::all_to_all_single: input.shape[0] (" +
+            std::to_string(total) + ") must be divisible by world_size (" +
+            std::to_string(world_size_) + ")"
+        );
+    }
+    auto same_shape = [](std::span<const int64_t> a, std::span<const int64_t> b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    };
+    if (!same_shape(output.shape(), input.shape()) || output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup::all_to_all_single: output must match input shape and dtype");
+    }
+
+    // Each rank sends/receives `chunk_elems` elements per peer.
+    const int64_t per_peer_elems = input.numel() / world_size_;
+    const int64_t elem_bytes = static_cast<int64_t>(dtype_size(input.dtype()));
+    const int64_t per_peer_bytes = per_peer_elems * elem_bytes;
+
+    auto* send_base = static_cast<const std::byte*>(input.data_ptr());
+    auto* recv_base = static_cast<std::byte*>(output.data_ptr());
+
+    ncclComm_t nccl_comm = static_cast<ncclComm_t>(comm_);
+    ncclDataType_t nccl_dtype = to_nccl_datatype(input.dtype());
+
+    // Group the W * 2 - 2 (skip self) ncclSend/ncclRecv calls so NCCL can fuse
+    // them into a single kernel launch and avoid deadlocks.
+    NCCL_PG_CHECK(ncclGroupStart());
+    for (int peer = 0; peer < world_size_; ++peer) {
+        const std::byte* send_chunk = send_base + peer * per_peer_bytes;
+        std::byte* recv_chunk = recv_base + peer * per_peer_bytes;
+        if (peer == rank_) {
+            // Self-copy via cudaMemcpy on the default stream. ncclSend/Recv to
+            // self is supported but a direct copy avoids the NCCL group cost.
+            NCCL_PG_GPU_CHECK(cudaMemcpyAsync(
+                recv_chunk, send_chunk, per_peer_bytes,
+                cudaMemcpyDeviceToDevice, /*stream=*/0));
+            continue;
+        }
+        NCCL_PG_CHECK(ncclSend(
+            send_chunk, per_peer_elems, nccl_dtype, peer, nccl_comm,
+            /*stream=*/nullptr));
+        NCCL_PG_CHECK(ncclRecv(
+            recv_chunk, per_peer_elems, nccl_dtype, peer, nccl_comm,
+            /*stream=*/nullptr));
+    }
+    NCCL_PG_CHECK(ncclGroupEnd());
+
+    NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)output;
+    (void)input;
+    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+#endif
+}
+
+auto NCCLProcessGroup::split(int color, int key)
+    -> std::shared_ptr<ProcessGroupBase>
+{
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    // NCCL_SPLIT_NOCOLOR (-1): rank opts out, receives nullptr.
+    if (color == NCCL_SPLIT_NOCOLOR) {
+        // Still collective — must participate so peers don't deadlock.
+        ncclComm_t parent = static_cast<ncclComm_t>(comm_);
+        ncclComm_t new_comm = nullptr;
+        NCCL_PG_CHECK(ncclCommSplit(parent, NCCL_SPLIT_NOCOLOR, key,
+                                    &new_comm, /*config=*/nullptr));
+        return nullptr;
+    }
+
+    ncclComm_t parent = static_cast<ncclComm_t>(comm_);
+    ncclComm_t new_comm = nullptr;
+    NCCL_PG_CHECK(ncclCommSplit(parent, color, key, &new_comm,
+                                /*config=*/nullptr));
+    if (new_comm == nullptr) {
+        throw std::runtime_error("NCCLProcessGroup::split: ncclCommSplit "
+                                  "returned a null communicator");
+    }
+
+    int new_rank = -1;
+    int new_size = -1;
+    NCCL_PG_CHECK(ncclCommUserRank(new_comm, &new_rank));
+    NCCL_PG_CHECK(ncclCommCount(new_comm, &new_size));
+
+    // `std::make_shared` can't access the private constructor, so use
+    // shared_ptr directly with a fresh allocation.
+    return std::shared_ptr<NCCLProcessGroup>(
+        new NCCLProcessGroup(new_rank, new_size, new_comm));
+#else
+    (void)color; (void)key;
+    throw std::runtime_error("NCCLProcessGroup::split: NCCL not available");
 #endif
 }
 

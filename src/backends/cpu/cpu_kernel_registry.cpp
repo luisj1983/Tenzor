@@ -12,6 +12,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/nn/layers/flex_attention.hpp"  // Audit J12: find_registered_score_mod
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
@@ -315,6 +316,8 @@ namespace cpu {
     auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto conv2d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
+    // Audit I5: per-axis overload.
+    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sH, int64_t sW, int64_t pH, int64_t pW, int64_t opH, int64_t opW, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
 
     // Deformable Conv2d (DCNv2)
@@ -322,16 +325,22 @@ namespace cpu {
     auto deformable_conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& offset, const Tensor& weight, const Tensor& mask, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups, int64_t offset_groups) -> std::vector<Tensor>;
     auto deformable_conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& offset, const Tensor& mask, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups, int64_t offset_groups, const std::vector<int64_t>& weight_shape) -> Tensor;
 
-    // Conv3d
+    // Conv3d (audit I5: per-axis overloads added; scalar overloads delegate)
     auto conv3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto conv3d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv3d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto conv3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto conv3d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
 
     // ConvTranspose3d
     auto conv_transpose3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv_transpose3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t opD, int64_t opH, int64_t opW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto conv_transpose3d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv_transpose3d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t opD, int64_t opH, int64_t opW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto conv_transpose3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv_transpose3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t opD, int64_t opH, int64_t opW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
 
     // Pooling
     auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation = 1) -> std::pair<Tensor, Tensor>;
@@ -456,6 +465,9 @@ namespace cpu {
     // Vision operations
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners) -> Tensor;
+    auto interpolate_backward_kernel(const Tensor& grad_output,
+                                      const std::vector<int64_t>& input_size,
+                                      const std::string& mode, bool align_corners) -> Tensor;
     auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
                                    int64_t output_h, int64_t output_w,
                                    float spatial_scale, int64_t sampling_ratio,
@@ -1661,35 +1673,64 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // Conv3d
+    // Audit I5: read per-axis attrs with scalar fallback. When per-axis
+    // keys are missing the scalar is used for all three axes — backward-
+    // compatible with callers that haven't yet been updated.
     table.register_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD,   s);
+        int64_t sH = attrs.get_int(AttrKey::StrideH,   s);
+        int64_t sW = attrs.get_int(AttrKey::StrideW,   s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD,  p);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH,  p);
+        int64_t pW = attrs.get_int(AttrKey::PaddingW,  p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d);
+        int64_t dH = attrs.get_int(AttrKey::DilationH, d);
+        int64_t dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::conv3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv3d_forward_kernel(
+            inputs[0], inputs[1], bias, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups)};
     });
 
-    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD,   s);
+        int64_t sH = attrs.get_int(AttrKey::StrideH,   s);
+        int64_t sW = attrs.get_int(AttrKey::StrideW,   s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD,  p);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH,  p);
+        int64_t pW = attrs.get_int(AttrKey::PaddingW,  p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d);
+        int64_t dH = attrs.get_int(AttrKey::DilationH, d);
+        int64_t dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        // inputs[0]=grad_output, inputs[2]=weight
-        return std::vector<Tensor>{cpu::conv3d_backward_input_kernel(inputs[0], inputs[2], input_shape, stride, padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv3d_backward_input_kernel(
+            inputs[0], inputs[2], input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups)};
     });
 
-    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD,   s);
+        int64_t sH = attrs.get_int(AttrKey::StrideH,   s);
+        int64_t sW = attrs.get_int(AttrKey::StrideW,   s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD,  p);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH,  p);
+        int64_t pW = attrs.get_int(AttrKey::PaddingW,  p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d);
+        int64_t dH = attrs.get_int(AttrKey::DilationH, d);
+        int64_t dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-        // inputs[0]=grad_output, inputs[1]=input
-        return std::vector<Tensor>{cpu::conv3d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv3d_backward_weight_kernel(
+            inputs[0], inputs[1], weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups)};
     });
 
     table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -1697,53 +1738,76 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // ConvTranspose3d
+    // Audit I5: ConvT3d registrations read per-axis attrs with scalar fallback.
+    // The per-axis extraction is inlined per lambda (auto-lambdas can't be
+    // captured by other lambdas without messing up the std::function type).
     table.register_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s),  sH = attrs.get_int(AttrKey::StrideH, s),  sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::conv_transpose3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv_transpose3d_forward_kernel(
+            inputs[0], inputs[1], bias, sD,sH,sW, pD,pH,pW, opD,opH,opW, dD,dH,dW, groups)};
     });
 
-    // ConvTranspose3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s),  sH = attrs.get_int(AttrKey::StrideH, s),  sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        // inputs[0]=grad_output, inputs[2]=weight
-        return std::vector<Tensor>{cpu::conv_transpose3d_backward_input_kernel(inputs[0], inputs[2], input_shape, stride, padding, output_padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv_transpose3d_backward_input_kernel(
+            inputs[0], inputs[2], input_shape, sD,sH,sW, pD,pH,pW, opD,opH,opW, dD,dH,dW, groups)};
     });
 
-    // ConvTranspose3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s),  sH = attrs.get_int(AttrKey::StrideH, s),  sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-        // inputs[0]=grad_output, inputs[1]=input
-        return std::vector<Tensor>{cpu::conv_transpose3d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, output_padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv_transpose3d_backward_weight_kernel(
+            inputs[0], inputs[1], weight_shape, sD,sH,sW, pD,pH,pW, opD,opH,opW, dD,dH,dW, groups)};
     });
 
     table.register_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // Reuse conv3d bias backward - same operation (sum over batch and spatial dims)
         return std::vector<Tensor>{cpu::conv3d_backward_bias_kernel(inputs[0])};
     });
 
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Audit I5: per-axis with scalar fallback (ConvT2d).
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sH = attrs.get_int(AttrKey::StrideH,        s);
+        int64_t sW = attrs.get_int(AttrKey::StrideW,        s);
+        int64_t pH = attrs.get_int(AttrKey::PaddingH,       p);
+        int64_t pW = attrs.get_int(AttrKey::PaddingW,       p);
+        int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, op);
+        int64_t opW= attrs.get_int(AttrKey::OutputPaddingW, op);
+        int64_t dH = attrs.get_int(AttrKey::DilationH,      d);
+        int64_t dW = attrs.get_int(AttrKey::DilationW,      d);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups)};
+        return std::vector<Tensor>{cpu::conv_transpose2d_forward_kernel(
+            inputs[0], inputs[1], bias, sH, sW, pH, pW, opH, opW, dH, dW, groups)};
     });
 
     table.register_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2203,6 +2267,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return cpu::interpolate_kernel(inputs[0], size, mode, align_corners);
+    });
+    // Audit D3: device-resident bilinear (and nearest) backward.
+    // Inputs: [grad_output]. Attrs: InputShape (= [in_h, in_w]), Mode, AlignCorners.
+    table.register_single_output_kernel(OpId::InterpolateBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_size = attrs.get_int_list(AttrKey::InputShape);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cpu::interpolate_backward_kernel(inputs[0], input_size, mode, align_corners);
     });
 
     // =========================================================================
@@ -2833,11 +2905,41 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return {output, Tensor{}};  // LSE not computed in composed path
         }
 
+        // Audit J12: user-registered score-mod functors for ScoreModId >= 3.
+        // Falls through to throw only if no functor was registered.
+        if (score_mod_id >= 3) {
+            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+            if (user_fn) {
+                // Apply user score-mod over the full (Q, K) score matrix.
+                // We compute scores = Q @ K^T * scale, run the user functor
+                // (which sees b=0, h=0, q_start=0, kv_start=0 — the
+                // whole-grid call signature), softmax, then bmm with V.
+                const Tensor& Q = inputs[0];
+                const Tensor& K = inputs[1];
+                const Tensor& V = inputs[2];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::bmm(Q, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                               scores.dtype(), scores.device());
+                scores = scores * scale_t;
+                scores = user_fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                Tensor output = tenzor::bmm(probs, V);
+                return {output, Tensor{}};
+            }
+        }
         throw std::runtime_error(
             "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
-            " is not yet implemented (only 0=identity, 1=causal, 2=sliding_window). "
-            "Use the host-side reference at src/nn/layers/flex_attention.cpp for "
-            "arbitrary score_mod functors.");
+            " is not yet implemented and no user functor is registered for "
+            "this ID. Built-ins: 0=identity, 1=causal, 2=sliding_window. "
+            "For custom score mods, register via "
+            "`tenzor::register_score_mod(id, fn)` (see "
+            "include/tenzor/nn/layers/flex_attention.hpp).");
     };
     table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
 

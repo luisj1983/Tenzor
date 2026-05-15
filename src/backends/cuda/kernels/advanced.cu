@@ -877,6 +877,33 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
             Tensor uniq_bool = uniq.to(DType::Bool);
             return {uniq_bool, inv, cnt};
         }
+        case DType::Float16:
+        case DType::BFloat16: {
+            // F5: F16 / BF16 — widen to F32 for the thrust unique kernel,
+            // narrow the unique values back. Inverse and counts are
+            // dtype-independent (Int64). Previously this case fell through
+            // to the "unsupported dtype" throw; widen-narrow is the same
+            // pattern the launch_half / launch_bfloat16 paths use for
+            // topk/sort in this file.
+            DType orig_dtype = input.dtype();
+            Tensor flat_f32 = flat.to(DType::Float32);
+            auto [uniq, inv, cnt] = unique_thrust<float>(flat_f32, sorted_output, return_inverse, return_counts, stream);
+            Tensor uniq_narrow = uniq.to(orig_dtype);
+            return {uniq_narrow, inv, cnt};
+        }
+        case DType::Int8:
+        case DType::UInt8:
+        case DType::Int16:
+        case DType::UInt16: {
+            // F5 sibling fix: small-int dtypes that thrust unique doesn't
+            // template over — widen to Int32, run unique, narrow the unique
+            // values back. Same pattern as Bool above.
+            DType orig_dtype = input.dtype();
+            Tensor flat_i32 = flat.to(DType::Int32);
+            auto [uniq, inv, cnt] = unique_thrust<int32_t>(flat_i32, sorted_output, return_inverse, return_counts, stream);
+            Tensor uniq_narrow = uniq.to(orig_dtype);
+            return {uniq_narrow, inv, cnt};
+        }
         default:
             throw std::runtime_error("unique CUDA: unsupported dtype");
     }

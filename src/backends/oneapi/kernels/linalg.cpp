@@ -122,6 +122,69 @@ static void col_to_row_major(T* dst, const T* src, int64_t rows, int64_t cols,
     sycl_transpose<T, KernelName>(dst, src, cols, rows, queue);
 }
 
+// ============================================================================
+// Shared helpers — unconditional (used by both the MKL path and the native
+// SYCL fallback, as well as by `linalg_eig_qr_kernel` which is always
+// compiled and used as the registered backend for `OpId::LinalgEig`).
+// ============================================================================
+
+namespace {
+
+/// Max matrix dimension for local-memory fallback kernels.
+/// Local memory usage is ~2*N*N*sizeof(T) + scratch, capped at 48 KB.
+constexpr int MAX_N_FLOAT  = 90;
+constexpr int MAX_N_DOUBLE = 64;
+
+/// Convert span to vector.
+inline std::vector<int64_t> to_vec(std::span<const int64_t> s) {
+    return {s.begin(), s.end()};
+}
+
+/// Get batch count from shape (product of all dims except last two).
+inline int64_t batch_size(const Tensor& t) {
+    auto shape = t.shape();
+    int64_t batch = 1;
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch *= shape[i];
+    return batch;
+}
+
+/// Get square matrix size and validate.
+inline std::pair<int64_t, int64_t> check_square(const Tensor& t) {
+    auto shape = t.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) throw std::invalid_argument("linalg: input must be at least 2D");
+    int64_t m = shape[ndim - 2];
+    int64_t n = shape[ndim - 1];
+    if (m != n) throw std::invalid_argument("linalg: expected square matrix");
+    return {m, ndim};
+}
+
+/// Validate dtype for linalg ops.
+inline void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
+    auto dt = t.dtype();
+    if (dt != DType::Float32 && dt != DType::Float64 &&
+        dt != DType::Float16 && dt != DType::BFloat16) {
+        throw std::invalid_argument(
+            "linalg::" + op_name + ": unsupported dtype " +
+            std::string(dtype_name(dt)) +
+            ". Supported: Float32, Float64 (Float16/BFloat16 auto-upcast to Float32).");
+    }
+}
+
+/// Check matrix size limit for local-memory fallback.
+template<typename T>
+inline void check_size_limit(int64_t n, const std::string& op_name) {
+    constexpr int max_n = std::is_same_v<T, float> ? MAX_N_FLOAT : MAX_N_DOUBLE;
+    if (n > max_n) {
+        throw std::runtime_error(
+            "linalg::" + op_name + ": matrix size " + std::to_string(n) +
+            " exceeds native SYCL fallback limit of " + std::to_string(max_n) +
+            " (build with oneMKL for larger matrices)");
+    }
+}
+
+} // anonymous namespace
+
 #ifdef TENZOR_HAS_ONEMKL
 
 // ============================================================================
@@ -1547,66 +1610,10 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
 
 #else // !TENZOR_HAS_ONEMKL — native SYCL shared-memory linalg fallback kernels
 
-// ============================================================================
-// Constants and utilities (mirrored from CUDA/ROCm native fallback)
-// ============================================================================
-
-namespace {
-
-/// Max matrix dimension for local-memory fallback kernels.
-/// Local memory usage is ~2*N*N*sizeof(T) + scratch, capped at 48 KB.
-constexpr int MAX_N_FLOAT  = 90;
-constexpr int MAX_N_DOUBLE = 64;
-
-/// Convert span to vector.
-std::vector<int64_t> to_vec(std::span<const int64_t> s) {
-    return {s.begin(), s.end()};
-}
-
-/// Get batch count from shape (product of all dims except last two).
-int64_t batch_size(const Tensor& t) {
-    auto shape = t.shape();
-    int64_t batch = 1;
-    for (size_t i = 0; i + 2 < shape.size(); i++) batch *= shape[i];
-    return batch;
-}
-
-/// Get square matrix size and validate.
-std::pair<int64_t, int64_t> check_square(const Tensor& t) {
-    auto shape = t.shape();
-    auto ndim = static_cast<int64_t>(shape.size());
-    if (ndim < 2) throw std::invalid_argument("linalg: input must be at least 2D");
-    int64_t m = shape[ndim - 2];
-    int64_t n = shape[ndim - 1];
-    if (m != n) throw std::invalid_argument("linalg: expected square matrix");
-    return {m, ndim};
-}
-
-/// Validate dtype for linalg ops.
-void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
-    auto dt = t.dtype();
-    if (dt != DType::Float32 && dt != DType::Float64 &&
-        dt != DType::Float16 && dt != DType::BFloat16) {
-        throw std::invalid_argument(
-            "linalg::" + op_name + ": unsupported dtype " +
-            std::string(dtype_name(dt)) +
-            ". Supported: Float32, Float64 (Float16/BFloat16 auto-upcast to Float32).");
-    }
-}
-
-/// Check matrix size limit for local-memory fallback.
-template<typename T>
-void check_size_limit(int64_t n, const std::string& op_name) {
-    constexpr int max_n = std::is_same_v<T, float> ? MAX_N_FLOAT : MAX_N_DOUBLE;
-    if (n > max_n) {
-        throw std::runtime_error(
-            "linalg::" + op_name + ": matrix size " + std::to_string(n) +
-            " exceeds native SYCL fallback limit of " + std::to_string(max_n) +
-            " (build with oneMKL for larger matrices)");
-    }
-}
-
-} // anonymous namespace
+// (Shared helpers — to_vec / batch_size / check_square / validate_linalg_dtype /
+//  check_size_limit — are now defined unconditionally above the `#ifdef
+//  TENZOR_HAS_ONEMKL` block so they are available to both this fallback
+//  branch AND to `linalg_eig_qr_kernel` which is always compiled.)
 
 // ============================================================================
 // Determinant
@@ -2674,285 +2681,10 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, sycl::queue& queue)
     return {U, S, Vt};
 }
 
-// ============================================================================
-// Non-symmetric Eigendecomposition (eig) — native SYCL Hessenberg QR algorithm
-// Always compiled; used as fallback when oneMKL geev is not available.
-// ============================================================================
+// (`linalg_eig_qr_kernel` has been relocated to outside the
+//  `#ifdef TENZOR_HAS_ONEMKL` block — see end of file. It is registered as
+//  the backend for `OpId::LinalgEig` and must compile unconditionally.)
 
-auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
-    validate_linalg_dtype(A, "eig");
-    if (A.dtype() == DType::Float16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
-    if (A.dtype() == DType::BFloat16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
-
-    auto work = A.contiguous().clone();
-    auto [n, ndim] = check_square(work);
-    int64_t nbatch = batch_size(work);
-
-    std::vector<int64_t> batch_dims;
-    auto shape = A.shape();
-    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
-
-    std::vector<int64_t> w_shape = batch_dims; w_shape.push_back(n);
-    auto WR = zeros(w_shape, A.dtype(), A.device());
-    auto WI = zeros(w_shape, A.dtype(), A.device());
-
-    std::vector<int64_t> v_shape = batch_dims; v_shape.push_back(n); v_shape.push_back(n);
-    auto V = zeros(v_shape, A.dtype(), A.device());
-
-    auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr) {
-        using T = std::remove_pointer_t<decltype(work_ptr)>;
-        check_size_limit<T>(n, "eig");
-        size_t smem_bytes = (2 * n * n + 4) * sizeof(T);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        int max_iter = 30 * static_cast<int>(n);
-
-        queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
-            int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
-                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* H = reinterpret_cast<T*>(smem_raw);
-                    T* Q = H + n_ * n_;
-                    T* scratch = Q + n_ * n_;
-
-                    const T* As = work_ptr + batch_idx * n_ * n_;
-                    T* wr = wr_ptr + batch_idx * n_;
-                    T* wi = wi_ptr + batch_idx * n_;
-                    T* Vs = v_ptr + batch_idx * n_ * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
-                        H[idx] = As[idx];
-                        int row = idx/n_, col = idx%n_;
-                        Q[idx] = (row==col) ? T(1) : T(0);
-                    }
-                    sycl::group_barrier(item.get_group());
-
-                    // Hessenberg reduction
-                    for (int k = 0; k + 2 < n_; k++) {
-                        if (tid == 0) {
-                            T sigma = T(0);
-                            for (int i = k+1; i < n_; i++) sigma += H[i*n_+k]*H[i*n_+k];
-                            T norm_x = sycl::sqrt(sigma);
-                            if (norm_x < zero_tol) scratch[1]=T(0);
-                            else {
-                                T a = -sycl::copysign(norm_x, H[(k+1)*n_+k]);
-                                T v0_val = H[(k+1)*n_+k]-a;
-                                T v_norm_sq = v0_val*v0_val;
-                                for (int i = k+2; i < n_; i++) v_norm_sq += H[i*n_+k]*H[i*n_+k];
-                                if (v_norm_sq < zero_tol) scratch[1]=T(0);
-                                else { scratch[0]=v0_val; scratch[1]=T(2)/v_norm_sq; scratch[2]=a; }
-                            }
-                        }
-                        sycl::group_barrier(item.get_group());
-                        T tau = scratch[1];
-                        if (tau == T(0)) { sycl::group_barrier(item.get_group()); continue; }
-                        T v0 = scratch[0]; T alpha = scratch[2];
-
-                        for (int j = k+tid; j < n_; j += num_threads) {
-                            T dot = v0 * H[(k+1)*n_+j];
-                            for (int i = k+2; i < n_; i++) dot += H[i*n_+k]*H[i*n_+j];
-                            dot *= tau;
-                            H[(k+1)*n_+j] -= v0*dot;
-                            for (int i = k+2; i < n_; i++) H[i*n_+j] -= H[i*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        for (int i = tid; i < n_; i += num_threads) {
-                            T dot = v0 * H[i*n_+(k+1)];
-                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*H[i*n_+j];
-                            dot *= tau;
-                            H[i*n_+(k+1)] -= v0*dot;
-                            for (int j = k+2; j < n_; j++) H[i*n_+j] -= H[j*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        for (int i = tid; i < n_; i += num_threads) {
-                            T dot = v0 * Q[i*n_+(k+1)];
-                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*Q[i*n_+j];
-                            dot *= tau;
-                            Q[i*n_+(k+1)] -= v0*dot;
-                            for (int j = k+2; j < n_; j++) Q[i*n_+j] -= H[j*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        if (tid == 0) { H[(k+1)*n_+k]=alpha; for (int i=k+2;i<n_;i++) H[i*n_+k]=T(0); }
-                        sycl::group_barrier(item.get_group());
-                    }
-
-                    // QR iteration with implicit double shifts
-                    if (tid == 0) { scratch[3] = static_cast<T>(n_); }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int iter = 0; iter < max_iter; iter++) {
-                        int nn = static_cast<int>(scratch[3]);
-                        if (nn <= 0) break;
-
-                        if (tid == 0) {
-                            bool deflated = false;
-                            if (nn >= 2) {
-                                T tst = sycl::fabs(H[(nn-2)*n_+(nn-2)])+sycl::fabs(H[(nn-1)*n_+(nn-1)]);
-                                if (tst == T(0)) tst = T(1);
-                                if (sycl::fabs(H[(nn-1)*n_+(nn-2)]) < eps*tst) {
-                                    wr[nn-1]=H[(nn-1)*n_+(nn-1)]; wi[nn-1]=T(0);
-                                    H[(nn-1)*n_+(nn-2)]=T(0); scratch[3]=static_cast<T>(nn-1); deflated=true;
-                                }
-                            }
-                            if (!deflated && nn >= 3) {
-                                T tst = sycl::fabs(H[(nn-3)*n_+(nn-3)])+sycl::fabs(H[(nn-2)*n_+(nn-2)]);
-                                if (tst == T(0)) tst = T(1);
-                                if (sycl::fabs(H[(nn-2)*n_+(nn-3)]) < eps*tst) {
-                                    T a=H[(nn-2)*n_+(nn-2)], b=H[(nn-2)*n_+(nn-1)];
-                                    T c=H[(nn-1)*n_+(nn-2)], dd=H[(nn-1)*n_+(nn-1)];
-                                    T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
-                                    if (disc>=T(0)) {
-                                        T sq=sycl::sqrt(disc);
-                                        wr[nn-2]=T(0.5)*(trace+sq); wi[nn-2]=T(0);
-                                        wr[nn-1]=T(0.5)*(trace-sq); wi[nn-1]=T(0);
-                                    } else {
-                                        T sq=sycl::sqrt(-disc);
-                                        wr[nn-2]=T(0.5)*trace; wi[nn-2]=T(0.5)*sq;
-                                        wr[nn-1]=T(0.5)*trace; wi[nn-1]=T(-0.5)*sq;
-                                    }
-                                    H[(nn-2)*n_+(nn-3)]=T(0); scratch[3]=static_cast<T>(nn-2); deflated=true;
-                                }
-                            }
-                            if (!deflated && nn == 1) { wr[0]=H[0]; wi[0]=T(0); scratch[3]=T(0); deflated=true; }
-                            scratch[2] = deflated ? T(1) : T(0);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        if (scratch[2] != T(0)) continue;
-
-                        nn = static_cast<int>(scratch[3]);
-                        T x, y, z;
-                        if (tid == 0) {
-                            T s = H[(nn-2)*n_+(nn-2)]+H[(nn-1)*n_+(nn-1)];
-                            T t = H[(nn-2)*n_+(nn-2)]*H[(nn-1)*n_+(nn-1)]-H[(nn-2)*n_+(nn-1)]*H[(nn-1)*n_+(nn-2)];
-                            scratch[0] = H[0]*H[0]+H[1]*H[n_]-s*H[0]+t;
-                            scratch[1] = H[n_]*(H[0]+H[n_+1]-s);
-                            scratch[2] = (nn>2) ? H[n_]*H[2*n_+1] : T(0);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        x=scratch[0]; y=scratch[1]; z=scratch[2];
-
-                        for (int k = 0; k+2 < nn; k++) {
-                            T norm_v = sycl::sqrt(x*x+y*y+z*z);
-                            if (norm_v < zero_tol) {
-                                if (tid == 0) {
-                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
-                            }
-                            T alpha_h = -sycl::copysign(norm_v, x);
-                            T v0h=x-alpha_h, v1h=y, v2h=z;
-                            T v_sq = v0h*v0h+v1h*v1h+v2h*v2h;
-                            if (v_sq < zero_tol) {
-                                if (tid == 0) {
-                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
-                            }
-                            T tau_h = T(2)/v_sq;
-                            int m_lim = (k+4<nn) ? k+4 : nn;
-
-                            for (int j = k+tid; j < nn; j += num_threads) {
-                                T dot = v0h*H[k*n_+j]+v1h*H[(k+1)*n_+j];
-                                if (k+2<nn) dot += v2h*H[(k+2)*n_+j];
-                                dot *= tau_h;
-                                H[k*n_+j]-=v0h*dot; H[(k+1)*n_+j]-=v1h*dot;
-                                if (k+2<nn) H[(k+2)*n_+j]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            for (int i = tid; i < m_lim; i += num_threads) {
-                                T dot = v0h*H[i*n_+k]+v1h*H[i*n_+(k+1)];
-                                if (k+2<nn) dot += v2h*H[i*n_+(k+2)];
-                                dot *= tau_h;
-                                H[i*n_+k]-=v0h*dot; H[i*n_+(k+1)]-=v1h*dot;
-                                if (k+2<nn) H[i*n_+(k+2)]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            for (int i = tid; i < n_; i += num_threads) {
-                                T dot = v0h*Q[i*n_+k]+v1h*Q[i*n_+(k+1)];
-                                if (k+2<nn) dot += v2h*Q[i*n_+(k+2)];
-                                dot *= tau_h;
-                                Q[i*n_+k]-=v0h*dot; Q[i*n_+(k+1)]-=v1h*dot;
-                                if (k+2<nn) Q[i*n_+(k+2)]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            if (tid == 0) {
-                                if (k>0) H[k*n_+(k-1)]=alpha_h;
-                                if (k+2<nn) H[(k+2)*n_+k]=T(0);
-                                if (k+3<nn) H[(k+3)*n_+k]=T(0);
-                                x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                scratch[0]=x; scratch[1]=y; scratch[2]=z;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            x=scratch[0]; y=scratch[1]; z=scratch[2];
-                        }
-
-                        if (nn >= 2) {
-                            T norm_v = sycl::sqrt(x*x+y*y);
-                            if (norm_v > zero_tol) {
-                                int kk = nn-2;
-                                T c_v=x/norm_v, s_v=-y/norm_v;
-                                for (int j = kk+tid; j < nn; j += num_threads) {
-                                    T tmp = c_v*H[kk*n_+j]-s_v*H[(kk+1)*n_+j];
-                                    H[(kk+1)*n_+j] = s_v*H[kk*n_+j]+c_v*H[(kk+1)*n_+j];
-                                    H[kk*n_+j] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                for (int i = tid; i < nn; i += num_threads) {
-                                    T tmp = c_v*H[i*n_+kk]-s_v*H[i*n_+(kk+1)];
-                                    H[i*n_+(kk+1)] = s_v*H[i*n_+kk]+c_v*H[i*n_+(kk+1)];
-                                    H[i*n_+kk] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                for (int i = tid; i < n_; i += num_threads) {
-                                    T tmp = c_v*Q[i*n_+kk]-s_v*Q[i*n_+(kk+1)];
-                                    Q[i*n_+(kk+1)] = s_v*Q[i*n_+kk]+c_v*Q[i*n_+(kk+1)];
-                                    Q[i*n_+kk] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
-                            }
-                        }
-                    }
-
-                    if (tid == 0) {
-                        int nn = static_cast<int>(scratch[3]);
-                        if (nn == 1) { wr[0]=H[0]; wi[0]=T(0); }
-                        else if (nn == 2) {
-                            T a=H[0], b=H[1], c=H[n_], dd=H[n_+1];
-                            T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
-                            if (disc>=T(0)) {
-                                T sq=sycl::sqrt(disc);
-                                wr[0]=T(0.5)*(trace+sq); wi[0]=T(0);
-                                wr[1]=T(0.5)*(trace-sq); wi[1]=T(0);
-                            } else {
-                                T sq=sycl::sqrt(-disc);
-                                wr[0]=T(0.5)*trace; wi[0]=T(0.5)*sq;
-                                wr[1]=T(0.5)*trace; wi[1]=T(-0.5)*sq;
-                            }
-                        }
-                    }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) Vs[idx] = Q[idx];
-                });
-        }).wait();
-    };
-
-    if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>());
-    else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>());
-
-    return {WR, WI, V};
-}
 
 // ============================================================================
 // LU decomposition (native fallback)
@@ -3470,6 +3202,291 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
 }
 
 #endif // TENZOR_HAS_ONEMKL
+
+// ============================================================================
+// Non-symmetric Eigendecomposition (eig) — native SYCL Hessenberg QR algorithm
+// Always compiled (independent of TENZOR_HAS_ONEMKL): oneMKL does not currently
+// expose `geev` through its DPC++ LAPACK interface, so this Francis double-shift
+// QR kernel is the registered backend for `OpId::LinalgEig` on every OneAPI
+// build. Helpers (`validate_linalg_dtype`, `check_square`, `batch_size`,
+// `check_size_limit`) are defined in the unconditional anonymous namespace
+// above the `#ifdef TENZOR_HAS_ONEMKL` block at the top of this file.
+// ============================================================================
+
+auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    validate_linalg_dtype(A, "eig");
+    if (A.dtype() == DType::Float16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
+    if (A.dtype() == DType::BFloat16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
+
+    auto work = A.contiguous().clone();
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    auto shape = A.shape();
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> w_shape = batch_dims; w_shape.push_back(n);
+    auto WR = zeros(w_shape, A.dtype(), A.device());
+    auto WI = zeros(w_shape, A.dtype(), A.device());
+
+    std::vector<int64_t> v_shape = batch_dims; v_shape.push_back(n); v_shape.push_back(n);
+    auto V = zeros(v_shape, A.dtype(), A.device());
+
+    auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr) {
+        using T = std::remove_pointer_t<decltype(work_ptr)>;
+        check_size_limit<T>(n, "eig");
+        size_t smem_bytes = (2 * n * n + 4) * sizeof(T);
+        int threads = std::min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        int max_iter = 30 * static_cast<int>(n);
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
+            int n_ = static_cast<int>(n);
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
+                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    char* smem_raw = smem.get_pointer();
+                    T* H = reinterpret_cast<T*>(smem_raw);
+                    T* Q = H + n_ * n_;
+                    T* scratch = Q + n_ * n_;
+
+                    const T* As = work_ptr + batch_idx * n_ * n_;
+                    T* wr = wr_ptr + batch_idx * n_;
+                    T* wi = wi_ptr + batch_idx * n_;
+                    T* Vs = v_ptr + batch_idx * n_ * n_;
+
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
+                        H[idx] = As[idx];
+                        int row = idx/n_, col = idx%n_;
+                        Q[idx] = (row==col) ? T(1) : T(0);
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // Hessenberg reduction
+                    for (int k = 0; k + 2 < n_; k++) {
+                        if (tid == 0) {
+                            T sigma = T(0);
+                            for (int i = k+1; i < n_; i++) sigma += H[i*n_+k]*H[i*n_+k];
+                            T norm_x = sycl::sqrt(sigma);
+                            if (norm_x < zero_tol) scratch[1]=T(0);
+                            else {
+                                T a = -sycl::copysign(norm_x, H[(k+1)*n_+k]);
+                                T v0_val = H[(k+1)*n_+k]-a;
+                                T v_norm_sq = v0_val*v0_val;
+                                for (int i = k+2; i < n_; i++) v_norm_sq += H[i*n_+k]*H[i*n_+k];
+                                if (v_norm_sq < zero_tol) scratch[1]=T(0);
+                                else { scratch[0]=v0_val; scratch[1]=T(2)/v_norm_sq; scratch[2]=a; }
+                            }
+                        }
+                        sycl::group_barrier(item.get_group());
+                        T tau = scratch[1];
+                        if (tau == T(0)) { sycl::group_barrier(item.get_group()); continue; }
+                        T v0 = scratch[0]; T alpha = scratch[2];
+
+                        for (int j = k+tid; j < n_; j += num_threads) {
+                            T dot = v0 * H[(k+1)*n_+j];
+                            for (int i = k+2; i < n_; i++) dot += H[i*n_+k]*H[i*n_+j];
+                            dot *= tau;
+                            H[(k+1)*n_+j] -= v0*dot;
+                            for (int i = k+2; i < n_; i++) H[i*n_+j] -= H[i*n_+k]*dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        for (int i = tid; i < n_; i += num_threads) {
+                            T dot = v0 * H[i*n_+(k+1)];
+                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*H[i*n_+j];
+                            dot *= tau;
+                            H[i*n_+(k+1)] -= v0*dot;
+                            for (int j = k+2; j < n_; j++) H[i*n_+j] -= H[j*n_+k]*dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        for (int i = tid; i < n_; i += num_threads) {
+                            T dot = v0 * Q[i*n_+(k+1)];
+                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*Q[i*n_+j];
+                            dot *= tau;
+                            Q[i*n_+(k+1)] -= v0*dot;
+                            for (int j = k+2; j < n_; j++) Q[i*n_+j] -= H[j*n_+k]*dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        if (tid == 0) { H[(k+1)*n_+k]=alpha; for (int i=k+2;i<n_;i++) H[i*n_+k]=T(0); }
+                        sycl::group_barrier(item.get_group());
+                    }
+
+                    // QR iteration with implicit double shifts
+                    if (tid == 0) { scratch[3] = static_cast<T>(n_); }
+                    sycl::group_barrier(item.get_group());
+
+                    for (int iter = 0; iter < max_iter; iter++) {
+                        int nn = static_cast<int>(scratch[3]);
+                        if (nn <= 0) break;
+
+                        if (tid == 0) {
+                            bool deflated = false;
+                            if (nn >= 2) {
+                                T tst = sycl::fabs(H[(nn-2)*n_+(nn-2)])+sycl::fabs(H[(nn-1)*n_+(nn-1)]);
+                                if (tst == T(0)) tst = T(1);
+                                if (sycl::fabs(H[(nn-1)*n_+(nn-2)]) < eps*tst) {
+                                    wr[nn-1]=H[(nn-1)*n_+(nn-1)]; wi[nn-1]=T(0);
+                                    H[(nn-1)*n_+(nn-2)]=T(0); scratch[3]=static_cast<T>(nn-1); deflated=true;
+                                }
+                            }
+                            if (!deflated && nn >= 3) {
+                                T tst = sycl::fabs(H[(nn-3)*n_+(nn-3)])+sycl::fabs(H[(nn-2)*n_+(nn-2)]);
+                                if (tst == T(0)) tst = T(1);
+                                if (sycl::fabs(H[(nn-2)*n_+(nn-3)]) < eps*tst) {
+                                    T a=H[(nn-2)*n_+(nn-2)], b=H[(nn-2)*n_+(nn-1)];
+                                    T c=H[(nn-1)*n_+(nn-2)], dd=H[(nn-1)*n_+(nn-1)];
+                                    T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
+                                    if (disc>=T(0)) {
+                                        T sq=sycl::sqrt(disc);
+                                        wr[nn-2]=T(0.5)*(trace+sq); wi[nn-2]=T(0);
+                                        wr[nn-1]=T(0.5)*(trace-sq); wi[nn-1]=T(0);
+                                    } else {
+                                        T sq=sycl::sqrt(-disc);
+                                        wr[nn-2]=T(0.5)*trace; wi[nn-2]=T(0.5)*sq;
+                                        wr[nn-1]=T(0.5)*trace; wi[nn-1]=T(-0.5)*sq;
+                                    }
+                                    H[(nn-2)*n_+(nn-3)]=T(0); scratch[3]=static_cast<T>(nn-2); deflated=true;
+                                }
+                            }
+                            if (!deflated && nn == 1) { wr[0]=H[0]; wi[0]=T(0); scratch[3]=T(0); deflated=true; }
+                            scratch[2] = deflated ? T(1) : T(0);
+                        }
+                        sycl::group_barrier(item.get_group());
+                        if (scratch[2] != T(0)) continue;
+
+                        nn = static_cast<int>(scratch[3]);
+                        T x, y, z;
+                        if (tid == 0) {
+                            T s = H[(nn-2)*n_+(nn-2)]+H[(nn-1)*n_+(nn-1)];
+                            T t = H[(nn-2)*n_+(nn-2)]*H[(nn-1)*n_+(nn-1)]-H[(nn-2)*n_+(nn-1)]*H[(nn-1)*n_+(nn-2)];
+                            scratch[0] = H[0]*H[0]+H[1]*H[n_]-s*H[0]+t;
+                            scratch[1] = H[n_]*(H[0]+H[n_+1]-s);
+                            scratch[2] = (nn>2) ? H[n_]*H[2*n_+1] : T(0);
+                        }
+                        sycl::group_barrier(item.get_group());
+                        x=scratch[0]; y=scratch[1]; z=scratch[2];
+
+                        for (int k = 0; k+2 < nn; k++) {
+                            T norm_v = sycl::sqrt(x*x+y*y+z*z);
+                            if (norm_v < zero_tol) {
+                                if (tid == 0) {
+                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
+                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
+                                }
+                                sycl::group_barrier(item.get_group());
+                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
+                            }
+                            T alpha_h = -sycl::copysign(norm_v, x);
+                            T v0h=x-alpha_h, v1h=y, v2h=z;
+                            T v_sq = v0h*v0h+v1h*v1h+v2h*v2h;
+                            if (v_sq < zero_tol) {
+                                if (tid == 0) {
+                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
+                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
+                                }
+                                sycl::group_barrier(item.get_group());
+                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
+                            }
+                            T tau_h = T(2)/v_sq;
+                            int m_lim = (k+4<nn) ? k+4 : nn;
+
+                            for (int j = k+tid; j < nn; j += num_threads) {
+                                T dot = v0h*H[k*n_+j]+v1h*H[(k+1)*n_+j];
+                                if (k+2<nn) dot += v2h*H[(k+2)*n_+j];
+                                dot *= tau_h;
+                                H[k*n_+j]-=v0h*dot; H[(k+1)*n_+j]-=v1h*dot;
+                                if (k+2<nn) H[(k+2)*n_+j]-=v2h*dot;
+                            }
+                            sycl::group_barrier(item.get_group());
+                            for (int i = tid; i < m_lim; i += num_threads) {
+                                T dot = v0h*H[i*n_+k]+v1h*H[i*n_+(k+1)];
+                                if (k+2<nn) dot += v2h*H[i*n_+(k+2)];
+                                dot *= tau_h;
+                                H[i*n_+k]-=v0h*dot; H[i*n_+(k+1)]-=v1h*dot;
+                                if (k+2<nn) H[i*n_+(k+2)]-=v2h*dot;
+                            }
+                            sycl::group_barrier(item.get_group());
+                            for (int i = tid; i < n_; i += num_threads) {
+                                T dot = v0h*Q[i*n_+k]+v1h*Q[i*n_+(k+1)];
+                                if (k+2<nn) dot += v2h*Q[i*n_+(k+2)];
+                                dot *= tau_h;
+                                Q[i*n_+k]-=v0h*dot; Q[i*n_+(k+1)]-=v1h*dot;
+                                if (k+2<nn) Q[i*n_+(k+2)]-=v2h*dot;
+                            }
+                            sycl::group_barrier(item.get_group());
+                            if (tid == 0) {
+                                if (k>0) H[k*n_+(k-1)]=alpha_h;
+                                if (k+2<nn) H[(k+2)*n_+k]=T(0);
+                                if (k+3<nn) H[(k+3)*n_+k]=T(0);
+                                x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
+                                scratch[0]=x; scratch[1]=y; scratch[2]=z;
+                            }
+                            sycl::group_barrier(item.get_group());
+                            x=scratch[0]; y=scratch[1]; z=scratch[2];
+                        }
+
+                        if (nn >= 2) {
+                            T norm_v = sycl::sqrt(x*x+y*y);
+                            if (norm_v > zero_tol) {
+                                int kk = nn-2;
+                                T c_v=x/norm_v, s_v=-y/norm_v;
+                                for (int j = kk+tid; j < nn; j += num_threads) {
+                                    T tmp = c_v*H[kk*n_+j]-s_v*H[(kk+1)*n_+j];
+                                    H[(kk+1)*n_+j] = s_v*H[kk*n_+j]+c_v*H[(kk+1)*n_+j];
+                                    H[kk*n_+j] = tmp;
+                                }
+                                sycl::group_barrier(item.get_group());
+                                for (int i = tid; i < nn; i += num_threads) {
+                                    T tmp = c_v*H[i*n_+kk]-s_v*H[i*n_+(kk+1)];
+                                    H[i*n_+(kk+1)] = s_v*H[i*n_+kk]+c_v*H[i*n_+(kk+1)];
+                                    H[i*n_+kk] = tmp;
+                                }
+                                sycl::group_barrier(item.get_group());
+                                for (int i = tid; i < n_; i += num_threads) {
+                                    T tmp = c_v*Q[i*n_+kk]-s_v*Q[i*n_+(kk+1)];
+                                    Q[i*n_+(kk+1)] = s_v*Q[i*n_+kk]+c_v*Q[i*n_+(kk+1)];
+                                    Q[i*n_+kk] = tmp;
+                                }
+                                sycl::group_barrier(item.get_group());
+                            }
+                        }
+                    }
+
+                    if (tid == 0) {
+                        int nn = static_cast<int>(scratch[3]);
+                        if (nn == 1) { wr[0]=H[0]; wi[0]=T(0); }
+                        else if (nn == 2) {
+                            T a=H[0], b=H[1], c=H[n_], dd=H[n_+1];
+                            T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
+                            if (disc>=T(0)) {
+                                T sq=sycl::sqrt(disc);
+                                wr[0]=T(0.5)*(trace+sq); wi[0]=T(0);
+                                wr[1]=T(0.5)*(trace-sq); wi[1]=T(0);
+                            } else {
+                                T sq=sycl::sqrt(-disc);
+                                wr[0]=T(0.5)*trace; wi[0]=T(0.5)*sq;
+                                wr[1]=T(0.5)*trace; wi[1]=T(-0.5)*sq;
+                            }
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads) Vs[idx] = Q[idx];
+                });
+        }).wait();
+    };
+
+    if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>());
+    else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>());
+
+    return {WR, WI, V};
+}
 
 // =========================================================================
 // LDL^T factorization — native SYCL Bunch-Kaufman kernel

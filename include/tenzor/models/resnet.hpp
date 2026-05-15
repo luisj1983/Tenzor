@@ -12,7 +12,9 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
+#include <tuple>
 #include <vector>
 #include "../nn/module.hpp"
 #include "../nn/layers/conv.hpp"
@@ -101,13 +103,18 @@ public:
      * @param groups Number of groups for 3x3 convolution (default: 1)
      * @param base_width Base width for grouped convolutions (default: 64)
      * @param downsample Optional downsample module for skip connection
+     * @param dilation Dilation for the 3×3 conv (default: 1; values > 1 give
+     *        atrous convolutions used by DeepLabV3+ for output_stride < 32).
+     *        When dilation > 1, padding is also set to `dilation` to preserve
+     *        the output spatial size — standard atrous convention.
      */
     Bottleneck(int64_t in_channels,
                int64_t out_channels,
                int64_t stride = 1,
                int64_t groups = 1,
                int64_t base_width = 64,
-               std::shared_ptr<nn::Module> downsample = nullptr);
+               std::shared_ptr<nn::Module> downsample = nullptr,
+               int64_t dilation = 1);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
@@ -154,7 +161,8 @@ public:
            int64_t num_classes,
            bool use_basic_block,
            int64_t groups = 1,
-           int64_t width_per_group = 64);
+           int64_t width_per_group = 64,
+           int64_t output_stride = 32);
 
     /**
      * @brief Forward pass through ResNet.
@@ -177,6 +185,48 @@ public:
     auto forward_features(const Variable& input) -> Variable;
 
     /**
+     * @brief Forward pass returning all four stage outputs (C2, C3, C4, C5).
+     *
+     * Used by FPN-style decoders (Mask R-CNN, Faster R-CNN, RetinaNet) that
+     * need multi-scale features. Strides relative to input: C2=1/4, C3=1/8,
+     * C4=1/16, C5=1/32. Channels for ResNet-50/101/152 (Bottleneck):
+     * 256, 512, 1024, 2048. For ResNet-18/34 (BasicBlock): 64, 128, 256, 512.
+     *
+     * @param input Input image tensor of shape (N, 3, H, W)
+     * @return Tuple (C2, C3, C4, C5)
+     */
+    auto forward_features_multi(const Variable& input)
+        -> std::tuple<Variable, Variable, Variable, Variable>;
+
+    /**
+     * @brief Terminal feature-map channel count (layer4 / C5 output).
+     *
+     * Audit G8: exposed so Faster R-CNN / Mask R-CNN / RetinaNet can size
+     * their RPN heads and FPN lateral convs correctly per backbone variant
+     * (was previously hard-coded to 2048, which broke ResNet-18/34).
+     *
+     * Returns 2048 for ResNet-50/101/152 (Bottleneck, expansion=4) and
+     * 512 for ResNet-18/34 (BasicBlock, expansion=1). Note: layer4 width
+     * is fixed at 512×expansion regardless of the `base_channels` stem
+     * width — `base_channels` only affects the conv1 stem.
+     */
+    auto out_channels() const -> int64_t {
+        return use_basic_block_ ? 512 : 2048;
+    }
+
+    /**
+     * @brief Per-stage feature-map channel counts (C2, C3, C4, C5).
+     *
+     * Used by FPN-style decoders that need to size lateral 1×1 convs.
+     * For Bottleneck: {256, 512, 1024, 2048}. For BasicBlock: {64, 128, 256, 512}.
+     */
+    auto stage_channels() const -> std::array<int64_t, 4> {
+        return use_basic_block_
+            ? std::array<int64_t, 4>{64, 128, 256, 512}
+            : std::array<int64_t, 4>{256, 512, 1024, 2048};
+    }
+
+    /**
      * @brief Load pretrained weights.
      *
      * @param path Path to pretrained weights file
@@ -194,7 +244,8 @@ private:
     /**
      * @brief Create a residual layer with Bottleneck blocks.
      */
-    auto make_layer_bottleneck(int64_t out_channels, int64_t num_blocks, int64_t stride)
+    auto make_layer_bottleneck(int64_t out_channels, int64_t num_blocks,
+                                int64_t stride, int64_t dilation = 1)
         -> std::shared_ptr<nn::Sequential>;
 
     bool use_basic_block_;         ///< True for BasicBlock, false for Bottleneck
@@ -288,6 +339,29 @@ auto resnet101(int64_t num_classes = 1000, bool pretrained = false) -> std::shar
  * @return Shared pointer to ResNet-152 model
  */
 auto resnet152(int64_t num_classes = 1000, bool pretrained = false) -> std::shared_ptr<ResNet>;
+
+/**
+ * @brief Create atrous ResNet-50/101/152 for DeepLab-style decoders.
+ *
+ * Audit G11: builds a Bottleneck ResNet where layer3 and/or layer4 use
+ * atrous convolutions (stride=1, dilation>1 on the 3×3 conv) to preserve
+ * spatial resolution at the requested `output_stride`.
+ *
+ * - output_stride=32: unmodified (matches the regular factory).
+ * - output_stride=16: layer4 stride=1, dilation=2. C5 stays at stride 16.
+ * - output_stride=8:  layer3 stride=1, dilation=2; layer4 stride=1, dilation=4.
+ *                     Both C4 and C5 stay at stride 8.
+ *
+ * @param num_classes Number of output classes (1000 for ImageNet pretraining)
+ * @param output_stride Target output stride (8, 16, or 32)
+ * @param pretrained Load pretrained weights (default false)
+ */
+auto resnet50_atrous(int64_t num_classes = 1000, int64_t output_stride = 16,
+                     bool pretrained = false) -> std::shared_ptr<ResNet>;
+auto resnet101_atrous(int64_t num_classes = 1000, int64_t output_stride = 16,
+                      bool pretrained = false) -> std::shared_ptr<ResNet>;
+auto resnet152_atrous(int64_t num_classes = 1000, int64_t output_stride = 16,
+                      bool pretrained = false) -> std::shared_ptr<ResNet>;
 
 /**
  * @brief Create ResNeXt-50 (32x4d) model.

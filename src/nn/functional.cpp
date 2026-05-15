@@ -115,25 +115,14 @@ auto conv2d(const Variable& input, const Variable& weight,
         inputs_vec.push_back(bias->tensor());
     }
 
-    // Asymmetric stride/padding/dilation: most backend Conv2d kernels (CPU,
-    // CUDA, ROCm, OneAPI) only read the singular AttrKey::{Stride,Padding,
-    // Dilation} and ignore per-axis {StrideH/W,PaddingH/W,DilationH/W}.
-    // Silently using the H value for both axes produces wrong output. Guard
-    // here until the kernels accept per-axis values. (#47)
-    bool asymmetric = (stride.first != stride.second) ||
-                      (padding.first != padding.second) ||
-                      (dilation.first != dilation.second);
-    if (asymmetric) {
-        throw std::invalid_argument(
-            "F::conv2d: asymmetric stride/padding/dilation is not yet supported "
-            "by the backend Conv2d kernels. Got stride=(" +
-            std::to_string(stride.first) + "," + std::to_string(stride.second) +
-            "), padding=(" + std::to_string(padding.first) + "," +
-            std::to_string(padding.second) + "), dilation=(" +
-            std::to_string(dilation.first) + "," + std::to_string(dilation.second) +
-            "). Tracked in followup #47.");
-    }
-
+    // Audit E5: asymmetric stride/padding/dilation guard removed. Each
+    // backend now has an honest per-axis contract:
+    //   - CPU + CUDA: produce correct output for asymmetric values (E1).
+    //   - ROCm / OneAPI / Vulkan: throw a clear backend-level error when
+    //     the per-axis values differ from each other (E2/E3/E4), pointing
+    //     at the kernel-side refactor still pending for each. Removing the
+    //     functional-level guard lets the backend error message — which
+    //     names the specific backend — surface to the user.
     NewOpAttributes attrs;
     attrs.set(AttrKey::Stride, stride.first);
     attrs.set(AttrKey::Padding, padding.first);
@@ -1235,7 +1224,7 @@ auto normalize(const Variable& input, double p, int64_t dim,
 }
 
 // ============================================================================
-// Pad (constant mode only for now)
+// Pad (supports constant / reflect / replicate / circular modes)
 // ============================================================================
 
 // Helper: build index tensor that maps padded output positions to input positions

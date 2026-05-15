@@ -309,6 +309,113 @@ TEST_F(ALBERTandT5Test, ALBERTBatchSizeOne) {
               (std::vector<int64_t>{1, 64, 768}));
 }
 
+// G15 regression: T5 generate() must read its starting decoder token from
+// the config (default 0 = HF T5 convention) and honor an explicit override.
+TEST_F(ALBERTandT5Test, T5GenerateUsesConfiguredDecoderStartToken_G15) {
+    auto config = T5Config::small();
+    config.vocab_size = 32128;
+    // Explicit non-zero start token — distinct from the previous hard-coded 0.
+    config.decoder_start_token_id = 7;
+    auto model = std::make_shared<T5ForConditionalGeneration>(config);
+    model->eval();
+
+    auto input_ids = create_input_ids(/*B=*/2, /*T=*/16, config.vocab_size);
+
+    Tensor generated = model->generate(input_ids, /*max_length=*/4,
+                                       /*temperature=*/1.0);
+    // Output shape contract: (batch, generated_length).
+    ASSERT_EQ(generated.shape().size(), 2u);
+    EXPECT_EQ(generated.shape()[0], 2);
+
+    Tensor gen_cpu = generated.to(Device::cpu());
+    auto* g = gen_cpu.data<int64_t>();
+    // First column = decoder start token = config.decoder_start_token_id.
+    EXPECT_EQ(g[0], 7) << "Batch 0 col 0 should be the configured start token (7)";
+    EXPECT_EQ(g[gen_cpu.shape()[1]], 7)
+        << "Batch 1 col 0 should also be the configured start token (7)";
+}
+
+// G15: explicit bos_token_id argument must override config value.
+TEST_F(ALBERTandT5Test, T5GenerateBosTokenOverride_G15) {
+    auto config = T5Config::small();
+    config.vocab_size = 32128;
+    config.decoder_start_token_id = 0;  // HF default
+    auto model = std::make_shared<T5ForConditionalGeneration>(config);
+    model->eval();
+
+    auto input_ids = create_input_ids(1, 8, config.vocab_size);
+    Tensor generated = model->generate(input_ids, /*max_length=*/3,
+                                       /*temperature=*/1.0,
+                                       /*bos_token_id=*/42);
+    Tensor gen_cpu = generated.to(Device::cpu());
+    EXPECT_EQ(gen_cpu.data<int64_t>()[0], 42)
+        << "Explicit bos_token_id=42 should override config's 0.";
+}
+
+// G12 regression: T5 decoder must combine causal mask with the padding mask
+// instead of silently dropping the padding mask. Verify by running two
+// forward passes with the same inputs but different padding masks — outputs
+// at non-padded positions must change when padded positions vary.
+TEST_F(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
+    auto config = T5Config::small();
+    config.vocab_size = 32128;
+    auto model = std::make_shared<T5Model>(config);
+    model->eval();
+
+    const int64_t B = 1;
+    const int64_t T = 32;
+    auto input_ids = create_input_ids(B, T, config.vocab_size);
+    auto decoder_input_ids = create_input_ids(B, T, config.vocab_size);
+
+    // Mask 1: full attention (all 1s). Mask 2: mask the last 16 tokens.
+    Tensor mask_full({B, T}, DType::Float32, device_);
+    Tensor mask_half({B, T}, DType::Float32, device_);
+    auto* fp = mask_full.data<float>();
+    auto* hp = mask_half.data<float>();
+    for (int64_t i = 0; i < T; ++i) {
+        fp[i] = 1.0f;
+        hp[i] = (i < T / 2) ? 1.0f : 0.0f;
+    }
+
+    Tensor enc_mask({B, T}, DType::Float32, device_);
+    for (int64_t i = 0; i < T; ++i) enc_mask.data<float>()[i] = 1.0f;
+
+    auto out_full = model->forward(input_ids, decoder_input_ids, enc_mask, mask_full);
+    auto out_half = model->forward(input_ids, decoder_input_ids, enc_mask, mask_half);
+
+    auto* fo = out_full.decoder_output.tensor().to(Device::cpu()).to(DType::Float32).data<float>();
+    auto* ho = out_half.decoder_output.tensor().to(Device::cpu()).to(DType::Float32).data<float>();
+    const int64_t D = 512;  // T5 small hidden size
+
+    // Position 0 should be (nearly) unchanged: causal mask only attends to
+    // self at position 0, so the padding mask of *later* positions doesn't
+    // matter at position 0. But because of the causal-mask invariant, this
+    // doesn't actually exercise the mask combination. Check position T/2-1
+    // instead: it attends to positions 0..T/2-1 in both cases, so should be
+    // identical. Position T-1, however, attends to positions 0..T-1 under
+    // mask_full but only 0..T/2-1 under mask_half — outputs must differ.
+    double diff_pos_last = 0.0;
+    for (int64_t k = 0; k < D; ++k) {
+        diff_pos_last += std::abs(fo[(T - 1) * D + k] - ho[(T - 1) * D + k]);
+    }
+
+    // Position T/2-1 (last non-masked under mask_half) should match exactly,
+    // since under both masks the attention only sees positions 0..T/2-1.
+    double diff_pos_mid = 0.0;
+    for (int64_t k = 0; k < D; ++k) {
+        diff_pos_mid += std::abs(fo[(T / 2 - 1) * D + k] - ho[(T / 2 - 1) * D + k]);
+    }
+
+    EXPECT_GT(diff_pos_last, 1.0f)
+        << "Position T-1 attends to padded positions under mask_full but not "
+           "under mask_half — outputs must differ. Sum of |diff| was "
+        << diff_pos_last << " — too small, padding mask was probably ignored.";
+    EXPECT_LT(diff_pos_mid, 1.0f)
+        << "Position T/2-1 attends only to non-padded positions in both "
+           "cases — outputs should be ~identical. Sum of |diff| was "
+        << diff_pos_mid;
+}
+
 TEST_F(ALBERTandT5Test, T5VariableSequenceLength) {
     auto config = T5Config::small();
     config.vocab_size = 32128;

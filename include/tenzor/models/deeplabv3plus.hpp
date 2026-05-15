@@ -119,7 +119,8 @@ private:
      *
      * Modifies standard ResNet to use atrous convolutions in later layers.
      */
-    auto create_resnet_backbone(const std::string& name, bool pretrained)
+    auto create_resnet_backbone(const std::string& name, bool pretrained,
+                                 int64_t output_stride)
         -> std::shared_ptr<nn::Module>;
 };
 

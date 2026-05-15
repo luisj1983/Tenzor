@@ -587,8 +587,32 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
     const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
 
-    // For half precision, we use a different approach since atomic_ref<half> may not be supported
-    // Serialize the updates using sequential processing for correctness
+    // Audit F10: atomic accumulation into a Float32 USM scratch buffer, then
+    // narrowed back into the existing Float16 grad-input buffer at the end.
+    // Previously this kernel did a non-atomic read-modify-write of `data_im`
+    // (`data_im[im_idx] = sycl::half(... + val)`) under the assumption that
+    // atomic_ref<sycl::half> isn't supported. Multiple work-items hitting
+    // the same im_idx (the common case: any non-1x1 conv) raced and
+    // silently corrupted F16 grouped-conv backward gradients.
+    //
+    // We can't use atomic_ref<sycl::half> portably, but atomic_ref<float>
+    // is universal — so accumulate per-element in a float scratch and
+    // narrow once at the end. The scratch is sized to the full data_im
+    // image (total_channels * height * width); since the caller adds into
+    // `data_im` across batches/groups, we initialise scratch from the
+    // current `data_im` contents and write back the merged result.
+    const int64_t im_total = total_channels * height * width;
+    Tensor scratch_tensor({im_total}, DType::Float32,
+                          Device{Device::Type::OneAPI, 0});  // queue's device — single-device OneAPI build
+    float* scratch = get_data_ptr<float>(scratch_tensor);
+
+    // Initialise scratch from current data_im (widen). One thread per pixel.
+    sycl::half* data_im_ptr = data_im;  // capture by value into the lambda
+    queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+        scratch[i] = static_cast<float>(data_im_ptr[i]);
+    }).wait();
+
+    // Accumulate atomically into scratch.
     queue.parallel_for<Conv2dGroupedCol2imKernelFloat16>(
         sycl::range<1>(channels_per_group * kernel_h * kernel_w * output_h * output_w),
         [=](sycl::id<1> index) {
@@ -605,13 +629,17 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
             int64_t w_in = w_out * stride - pad + kw * dilation;
             if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
                 int64_t im_idx = (c_global * height + h_in) * width + w_in;
-                // Use float atomic as workaround for half
                 float val = static_cast<float>(data_col[index]);
-                // Note: This is a simplified approach - for production, consider using
-                // compare-exchange loop or accumulating in float buffer first
-                data_im[im_idx] = sycl::half(static_cast<float>(data_im[im_idx]) + val);
+                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                    atomic_val(scratch[im_idx]);
+                atomic_val.fetch_add(val);
             }
-        });
+        }).wait();
+
+    // Narrow scratch back into data_im.
+    queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+        data_im_ptr[i] = sycl::half(scratch[i]);
+    }).wait();
 }
 
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,

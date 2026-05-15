@@ -16,9 +16,12 @@
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/loss/losses.hpp"
+#include "tenzor/nn/functional.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>
+#include <cstring>
+#include <random>
 
 namespace tenzor {
 namespace models {
@@ -331,10 +334,23 @@ MaskRCNN::MaskRCNN(std::shared_ptr<nn::Module> backbone,
     // Register backbone
     register_module("backbone", backbone_);
 
-    // Create feature projection layer to convert ResNet output (2048 channels) to FPN channels (256)
-    // ResNet Bottleneck layer4 outputs 512 * 4 = 2048 channels
-    feature_proj_ = std::make_shared<nn::Conv2d>(2048, 256, 1, 1, 0);  // 1x1 conv, stride=1, padding=0
-    register_module("feature_proj", feature_proj_);
+    // Audit G6: build a proper FPN encoder rather than a single 2048→256 1x1
+    // projection. ResNet (Bottleneck) stage channels are 256, 512, 1024, 2048
+    // for C2-C5 respectively. Each stage gets a 1x1 lateral to FPN's 256-channel
+    // working width, then a 3x3 smoothing conv applied to each Pᵢ output.
+    // extract_features returns P4 (stride 16) so downstream — which is already
+    // configured for stride 16 — gets a feature map with top-down high-level
+    // semantics from P5 mixed in, instead of a raw C5 projection at stride 32.
+    constexpr std::array<int64_t, 4> bottleneck_stage_channels = {256, 512, 1024, 2048};
+    for (size_t i = 0; i < 4; ++i) {
+        fpn_lateral_[i] = std::make_shared<nn::Conv2d>(
+            bottleneck_stage_channels[i], 256, /*kernel=*/1, /*stride=*/1, /*pad=*/0);
+        register_module("fpn_lateral_c" + std::to_string(i + 2), fpn_lateral_[i]);
+
+        fpn_smooth_[i] = std::make_shared<nn::Conv2d>(
+            /*in=*/256, /*out=*/256, /*kernel=*/3, /*stride=*/1, /*pad=*/1);
+        register_module("fpn_smooth_p" + std::to_string(i + 2), fpn_smooth_[i]);
+    }
 
     // Create RPN (assumes backbone output has 256 channels for FPN)
     // Anchor generator uses 3 sizes × 3 aspect ratios = 9 anchors per location
@@ -377,12 +393,44 @@ auto MaskRCNN::forward_impl(const Variable& images) -> Variable {
         );
     }
 
-    // Inference mode
+    // Audit G7: pack detection outputs into a single (N, 6) Variable matching
+    // the YOLOv5 convention: each row is [x1, y1, x2, y2, score, label]. Old
+    // behavior returned only the box coords wrapped as `Variable(boxes, false)`
+    // and silently dropped labels, scores, AND masks — a user calling the
+    // generic `forward(images)` interface had no way to see the predicted
+    // classes/confidences/masks.
+    //
+    // Masks have per-detection spatial shape (h × w) that does not fit a
+    // uniform (N, 6) row, so masks remain accessible via `forward_test` (the
+    // 4-tuple entry point) or the new public `detect()` helper which returns
+    // all four outputs as a struct.
     auto [boxes, labels, scores, masks] = forward_test(images);
+    (void)masks;  // dropped from forward_impl output; see detect() for masks.
 
-    // For now, return a dummy variable
-    // In a real implementation, we'd package this into a proper output format
-    return Variable(boxes, false);
+    const int64_t N = boxes.shape()[0];
+    const DType  dtype  = boxes.dtype();
+    const Device device = boxes.device();
+
+    if (N == 0) {
+        return Variable(Tensor({0, 6}, dtype, device), false);
+    }
+
+    // Cast scores / labels to the box dtype so cat is dtype-uniform; reshape
+    // each to a column for column-wise concat.
+    Tensor scores_col = scores.to(dtype).reshape({N, 1});
+    Tensor labels_col = labels.to(dtype).reshape({N, 1});
+    Tensor boxes_2d   = boxes.reshape({N, 4});
+
+    Tensor packed = tenzor::cat({boxes_2d, scores_col, labels_col}, /*dim=*/1);  // (N, 6)
+    return Variable(packed, false);
+}
+
+auto MaskRCNN::detect(const Variable& images) -> Detections {
+    // Convenience accessor for callers that want the full structured output
+    // (including masks). Internally this is just forward_test bundled into a
+    // struct; gives users a single named-field API instead of a 4-tuple.
+    auto [boxes, labels, scores, masks] = forward_test(images);
+    return Detections{boxes, labels, scores, masks};
 }
 
 auto MaskRCNN::forward_train(const Variable& images,
@@ -938,64 +986,247 @@ auto compute_mask_loss(
 // ============================================================================
 
 auto MaskRCNN::extract_features(const Variable& images) -> Variable {
-    // Extract features from backbone
-    // For ResNet-FPN, this returns multi-scale features
-    // We use the finest scale (P2) for now
-
-    // Cast backbone to ResNet to access forward_features
+    // Audit G6: real FPN encoder.
+    //   C2 (stride 4) ─┐
+    //   C3 (stride 8) ─┼─→ lateral 1x1 ─→ add(upsample(P_{i+1})) ─→ smooth 3x3 ─→ Pᵢ
+    //   C4 (stride 16)─┤
+    //   C5 (stride 32)─┘
+    // Returns P4 (stride 16, 256 ch) so downstream sees a feature map at the
+    // stride the rest of the pipeline is already configured for. Top-down
+    // information from P5 flows into P4 via the additive upsample step.
     auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
     if (!resnet) {
         throw std::runtime_error("Mask R-CNN requires ResNet backbone");
     }
 
-    // Use forward_features to get feature maps before global pooling
-    // This returns features from layer4 (C5) at 1/32 resolution with 2048 channels
-    auto backbone_features = resnet->forward_features(images);  // Shape: (N, 2048, H, W)
+    auto [c2, c3, c4, c5] = resnet->forward_features_multi(images);
 
-    // Project from 2048 channels to 256 channels using 1x1 conv
-    // This simulates FPN's top-down pathway
-    auto projected_features = feature_proj_->forward(backbone_features);  // Shape: (N, 256, H, W)
+    // Top-down. Lateral conv first, then add the upsampled higher-level
+    // pyramid. Upsample target size comes from the lateral's spatial shape,
+    // since strides are factors of two but rounding may produce off-by-one.
+    auto p5 = fpn_lateral_[3]->forward(c5);
 
-    return projected_features;
+    auto lat4 = fpn_lateral_[2]->forward(c4);
+    auto p5_up = nn::functional::interpolate(
+        p5,
+        {lat4.tensor().shape()[2], lat4.tensor().shape()[3]},
+        "nearest", /*align_corners=*/false);
+    auto p4 = lat4 + p5_up;
+
+    auto lat3 = fpn_lateral_[1]->forward(c3);
+    auto p4_up = nn::functional::interpolate(
+        p4,
+        {lat3.tensor().shape()[2], lat3.tensor().shape()[3]},
+        "nearest", /*align_corners=*/false);
+    auto p3 = lat3 + p4_up;
+
+    auto lat2 = fpn_lateral_[0]->forward(c2);
+    auto p3_up = nn::functional::interpolate(
+        p3,
+        {lat2.tensor().shape()[2], lat2.tensor().shape()[3]},
+        "nearest", /*align_corners=*/false);
+    auto p2 = lat2 + p3_up;
+
+    // Smoothing 3x3 — anti-aliases the upsample. Only P4 is returned today;
+    // the P2/P3/P5 smooth convs are registered (so model state is complete
+    // and ready for multi-scale RoIAlign wiring) but not yet exercised on
+    // the forward path. That wiring is G6-followup: per-level RPN +
+    // FPN-style level assignment for ROI features. Once added, p2/p3/p5
+    // become live outputs through their respective smooth convs.
+    (void)p2; (void)p3; (void)p5;  // intentionally unused — see G6-followup
+    p4 = fpn_smooth_[2]->forward(p4);
+
+    return p4;
 }
 
 auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
-    // Generate proposals from RPN output
-    // This is a simplified version - production would implement full proposal generation
+    // Audit G4: real RPN proposals via decode_boxes → clip → small-filter →
+    // top-K by score → NMS → top-K. Replaces the previous `proposals.fill_(0)`
+    // dummy that made inference output meaningless.
+    //
+    // RPN::forward_multi already produces anchor-major flat tensors:
+    //   cls_logits:  (B, H*W*A, 2)   — col 1 is foreground logit
+    //   bbox_deltas: (B, H*W*A, 4)
+    // Flat index in dim 1 is `y * W * A + x * A + a`, matching
+    // anchor_generator_->generate(H, W, stride, device) → (H*W*A, 4).
+    const auto& shape = features.tensor().shape();
+    const int64_t batch_size = shape[0];
+    const int64_t H = shape[2];
+    const int64_t W = shape[3];
+    const Device device = features.tensor().device();
+    const DType dtype = features.tensor().dtype();
+    const int64_t stride = 16;  // Tenzor's Mask R-CNN uses C4 features.
 
-    auto H = features.tensor().shape()[2];
-    auto W = features.tensor().shape()[3];
+    // 1. RPN forward — outputs already anchor-major flat.
+    auto [cls_logits_var, bbox_deltas_var] = rpn_->forward_multi(features);
+    Tensor cls_logits = cls_logits_var.tensor();    // (B, HWA, 2)
+    Tensor bbox_deltas = bbox_deltas_var.tensor();  // (B, HWA, 4)
+    const int64_t HWA = cls_logits.shape()[1];
 
-    // Generate anchor boxes on the same device as features
-    auto anchors = anchor_generator_->generate(H, W, 16, features.tensor().device());
+    // 2. Anchors at this stride. Layout: (y, x, a) flattened — matches the
+    //    permute+reshape RPN::forward_multi performs upstream.
+    Tensor anchors = anchor_generator_->generate(H, W, stride, device);
+    if (anchors.dtype() != dtype) anchors = anchors.to(dtype);
 
-    // For now, return top K anchors as proposals
-    // Format: (batch_idx, x1, y1, x2, y2)
-    auto num_proposals = std::min(
-        static_cast<int64_t>(anchors.shape()[0]),
-        is_training() ? rpn_post_nms_top_n_train_ : rpn_post_nms_top_n_test_
-    );
+    // Image bounds for clipping (saturating, not rejecting).
+    const int64_t image_h = H * stride;
+    const int64_t image_w = W * stride;
 
-    auto proposals = Tensor(
-        std::vector<int64_t>{num_proposals, 5},
-        features.tensor().dtype(),  // Use input dtype for multi-dtype support
-        features.tensor().device()
-    );
+    const int64_t pre_n  = is_training() ? rpn_pre_nms_top_n_train_  : rpn_pre_nms_top_n_test_;
+    const int64_t post_n = is_training() ? rpn_post_nms_top_n_train_ : rpn_post_nms_top_n_test_;
 
-    // Fill with dummy proposals (in production, would decode RPN predictions)
-    proposals.fill_(0.0);
+    std::vector<Tensor> per_image_proposals;
+    per_image_proposals.reserve(static_cast<size_t>(batch_size));
 
-    return proposals;
+    for (int64_t b = 0; b < batch_size; ++b) {
+        // 3. Per-image objectness: take fg-logit (col 1).
+        Tensor cls_b = tenzor::ops::select(cls_logits, 0, b);             // (HWA, 2)
+        Tensor scores = cls_b.slice(1, 1, 2).reshape({HWA}).contiguous(); // (HWA,)
+
+        // 4. Per-image bbox deltas.
+        Tensor reg_b = tenzor::ops::select(bbox_deltas, 0, b).contiguous(); // (HWA, 4)
+
+        // 5. Decode anchor + delta → absolute boxes, clip to image.
+        Tensor proposals = tenzor::ops::decode_boxes(reg_b, anchors);
+        proposals = tenzor::ops::clip_boxes_to_image(proposals, image_h, image_w);
+
+        // 6. Drop too-small boxes.
+        Tensor keep = tenzor::ops::remove_small_boxes(proposals, scores, /*min_size=*/0.001);
+        if (keep.numel() == 0) {
+            per_image_proposals.push_back(Tensor({0, 5}, dtype, device));
+            continue;
+        }
+        proposals = tenzor::ops::index_select(proposals, 0, keep);
+        scores    = tenzor::ops::index_select(scores,    0, keep);
+
+        // 7. Top pre_nms_top_n by score.
+        Tensor sorted_idx = tenzor::ops::argsort(scores, 0, /*descending=*/true);
+        if (sorted_idx.shape()[0] > pre_n) {
+            sorted_idx = sorted_idx.slice(0, 0, pre_n);
+        }
+        proposals = tenzor::ops::index_select(proposals, 0, sorted_idx);
+        scores    = tenzor::ops::index_select(scores,    0, sorted_idx);
+
+        // 8. NMS → top post_nms_top_n.
+        Tensor keep_nms = tenzor::ops::nms(proposals, scores, rpn_nms_thresh_);
+        if (keep_nms.shape()[0] > post_n) {
+            keep_nms = keep_nms.slice(0, 0, post_n);
+        }
+        proposals = tenzor::ops::index_select(proposals, 0, keep_nms);
+
+        // 9. Prepend batch_idx column → shape (num_kept, 5).
+        const int64_t num_kept = proposals.shape()[0];
+        Tensor batch_col = tenzor::ops::full({num_kept, 1}, static_cast<double>(b), dtype, device);
+        Tensor with_batch = tenzor::ops::cat({batch_col, proposals}, 1);
+        per_image_proposals.push_back(with_batch);
+    }
+
+    if (per_image_proposals.empty()) {
+        return Tensor({0, 5}, dtype, device);
+    }
+    return tenzor::ops::cat(per_image_proposals, 0);
 }
 
 auto MaskRCNN::select_training_samples(const Tensor& proposals,
-                                        [[maybe_unused]] const Tensor& gt_boxes,
+                                        const Tensor& gt_boxes,
                                         [[maybe_unused]] const Tensor& gt_labels) -> Tensor {
-    // Select positive and negative training samples
-    // This is a simplified version - production would implement proper sampling
+    // Audit G5: real positive/negative IoU-based sampling.
+    //
+    // Replaces the previous `return proposals;` no-op. Hyperparameters mirror
+    // torchvision's RoIHeads defaults (num_samples=512, positive_fraction=0.25,
+    // fg_iou_thresh=0.5). A proposal is positive iff its max IoU with any GT
+    // box in the same image is >= fg_iou_thresh, negative otherwise. Within
+    // each image we randomly sample up to `num_positive` positives and fill
+    // the remainder up to `num_samples` with negatives. When either pool is
+    // smaller than its budget we take all that exist (matching torchvision).
+    //
+    // Per-image work: proposals carry (batch_idx, x1, y1, x2, y2) in col 0,
+    // so we group rows by col 0 once and run independent sampling per image.
+    constexpr int64_t num_samples       = 512;
+    constexpr double  positive_fraction = 0.25;
+    constexpr double  fg_iou_thresh     = 0.5;
+    constexpr int64_t num_positive      = static_cast<int64_t>(num_samples * positive_fraction);
 
-    // For now, just return the proposals
-    return proposals;
+    if (proposals.shape()[0] == 0) return proposals;
+
+    const Device device     = proposals.device();
+    const DType  dtype      = proposals.dtype();
+    const int64_t batch_size = gt_boxes.shape()[0];
+    const int64_t num_gt     = gt_boxes.shape()[1];
+    const int64_t N          = proposals.shape()[0];
+
+    // Group proposal row indices by batch_idx (col 0). One CPU copy.
+    Tensor batch_col_cpu = proposals.slice(1, 0, 1).to(Device::cpu()).to(DType::Float32);
+    const float* bc = batch_col_cpu.data<float>();
+    std::vector<std::vector<int64_t>> rows_by_batch(static_cast<size_t>(batch_size));
+    for (int64_t r = 0; r < N; ++r) {
+        const int64_t b = static_cast<int64_t>(bc[r]);
+        if (b >= 0 && b < batch_size) rows_by_batch[static_cast<size_t>(b)].push_back(r);
+    }
+
+    std::vector<int64_t> sampled_global;
+    sampled_global.reserve(static_cast<size_t>(num_samples) * static_cast<size_t>(batch_size));
+
+    // Stable per-call rng — deterministic across runs but rotates per image.
+    std::mt19937 rng(0xC0FFEE);
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const auto& rows = rows_by_batch[static_cast<size_t>(b)];
+        if (rows.empty()) continue;
+
+        // Build the index tensor of this image's proposal rows on `device`.
+        Tensor rows_cpu({static_cast<int64_t>(rows.size())}, DType::Int64, Device::cpu());
+        std::memcpy(rows_cpu.data<int64_t>(), rows.data(), rows.size() * sizeof(int64_t));
+        Tensor rows_idx = rows_cpu.to(device);
+
+        if (num_gt == 0) {
+            // No GT for this image — all proposals are negatives. Sample up to
+            // num_samples of them.
+            std::vector<int64_t> shuffled(rows);
+            std::shuffle(shuffled.begin(), shuffled.end(), rng);
+            const int64_t take = std::min<int64_t>(num_samples, static_cast<int64_t>(shuffled.size()));
+            for (int64_t i = 0; i < take; ++i) sampled_global.push_back(shuffled[static_cast<size_t>(i)]);
+            continue;
+        }
+
+        Tensor props_b       = tenzor::ops::index_select(proposals, 0, rows_idx);     // (Nb, 5)
+        Tensor props_boxes_b = props_b.slice(1, 1, 5);                                // (Nb, 4)
+
+        Tensor gt_b = tenzor::ops::select(gt_boxes, 0, b);                            // (M, 4)
+        if (gt_b.dtype() != dtype) gt_b = gt_b.to(dtype);
+
+        Tensor iou      = tenzor::ops::box_iou(props_boxes_b, gt_b);                  // (Nb, M)
+        Tensor max_iou  = tenzor::max(iou, 1);                                        // (Nb,)
+
+        Tensor max_iou_cpu = max_iou.to(Device::cpu()).to(DType::Float32);
+        const float* mp = max_iou_cpu.data<float>();
+
+        std::vector<int64_t> pos_local, neg_local;
+        pos_local.reserve(rows.size());
+        neg_local.reserve(rows.size());
+        for (int64_t i = 0; i < static_cast<int64_t>(rows.size()); ++i) {
+            if (mp[i] >= static_cast<float>(fg_iou_thresh)) pos_local.push_back(i);
+            else                                            neg_local.push_back(i);
+        }
+
+        std::shuffle(pos_local.begin(), pos_local.end(), rng);
+        std::shuffle(neg_local.begin(), neg_local.end(), rng);
+
+        const int64_t n_pos = std::min(num_positive,              static_cast<int64_t>(pos_local.size()));
+        const int64_t n_neg = std::min(num_samples - n_pos,       static_cast<int64_t>(neg_local.size()));
+
+        for (int64_t i = 0; i < n_pos; ++i) sampled_global.push_back(rows[static_cast<size_t>(pos_local[static_cast<size_t>(i)])]);
+        for (int64_t i = 0; i < n_neg; ++i) sampled_global.push_back(rows[static_cast<size_t>(neg_local[static_cast<size_t>(i)])]);
+    }
+
+    if (sampled_global.empty()) {
+        return Tensor({0, proposals.shape()[1]}, dtype, device);
+    }
+
+    Tensor idx_cpu({static_cast<int64_t>(sampled_global.size())}, DType::Int64, Device::cpu());
+    std::memcpy(idx_cpu.data<int64_t>(), sampled_global.data(), sampled_global.size() * sizeof(int64_t));
+    Tensor idx = idx_cpu.to(device);
+    return tenzor::ops::index_select(proposals, 0, idx);
 }
 
 void MaskRCNN::load_pretrained([[maybe_unused]] const std::string& path, [[maybe_unused]] bool strict) {

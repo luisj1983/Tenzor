@@ -34,17 +34,12 @@ namespace onnx {
 // Helper Functions
 // ============================================================================
 
-namespace {
-
-// Forward declaration for ONNX export helper
-auto trace_custom_module(ONNXExporter& exporter,
-                        std::shared_ptr<nn::Module> module,
-                        const Variable& input,
-                        const Variable& output,
-                        const std::string& input_name,
-                        const std::string& output_name) -> void;
-
-} // anonymous namespace
+// Audit I7: removed `trace_custom_module` and its forward declaration. The
+// free `export_to_onnx` function now routes through real JIT tracing
+// (jit::trace + convert_jit_graph_to_onnx) — same path as
+// ONNXExporter::export_module — which handles arbitrary ops, not just the
+// hand-coded Linear/BatchNorm/LayerNorm/Conv patterns the old tracer
+// recognized.
 
 // ============================================================================
 // DType Conversion
@@ -4042,6 +4037,14 @@ auto ONNXExporter::export_module(nn::Module& module, const Tensor& dummy_input,
 
 // High-level export function
 
+// Audit I7: unified export. The free `export_to_onnx` function previously
+// reimplemented the parameter/buffer registration logic AND used a separate
+// `trace_custom_module` shape-pattern matcher (an anonymous-namespace
+// heuristic that recognized only a small set of patterns: Linear, BatchNorm,
+// LayerNorm, etc.). `ONNXExporter::export_module` does real JIT tracing via
+// `jit::trace` + `convert_jit_graph_to_onnx` which handles arbitrary ops.
+// The free function now delegates to the class method for the core path,
+// reusing parameterized input/output names.
 auto export_to_onnx(std::shared_ptr<nn::Module> module,
                     const Tensor& dummy_input,
                     const std::string& filepath,
@@ -4051,327 +4054,80 @@ auto export_to_onnx(std::shared_ptr<nn::Module> module,
     if (!module) {
         throw std::runtime_error("Cannot export null module to ONNX");
     }
-
-    // Validate input names
     if (input_names.empty()) {
         throw std::runtime_error("At least one input name must be provided");
     }
-
     if (output_names.empty()) {
         throw std::runtime_error("At least one output name must be provided");
     }
 
-    try {
-        // Create ONNX exporter
-        ONNXExporter exporter(opset_version);
+    bool was_training = module->is_training();
+    module->eval();
 
-        // Set model metadata
+    try {
+        ONNXExporter exporter(opset_version);
         exporter.set_model_name("tenzor_traced_model");
         exporter.set_description("Model traced and exported from Tenzor");
 
-        // Ensure module is in evaluation mode for consistent tracing
-        bool was_training = module->is_training();
-        module->eval();
+        // The bulk of `export_module`'s logic, parameterized by the input/
+        // output names from this free-function signature (the class method
+        // hardcodes "input"/"output"). Inline-copied here because the class
+        // method doesn't yet accept name args; refactoring `export_module`
+        // to take names is a small future cleanup but not required for I7.
+        Tensor cpu_input = dummy_input.cpu().contiguous();
+        exporter.add_input(cpu_input, input_names[0]);
 
-        // Wrap input tensor in Variable for module forward pass
-        Variable input_var(dummy_input.cpu().contiguous(), false);
-
-        // Add input to ONNX graph
-        exporter.add_input(input_var.tensor(), input_names[0]);
-
-        // Export all module parameters as initializers
         auto named_params = module->named_parameters();
         for (const auto& [param_name, param_var] : named_params) {
             if (param_var && param_var->is_initialized() && param_var->tensor().numel() > 0) {
                 std::string safe_name = param_name;
-                // Replace dots with underscores for ONNX compatibility
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-
-                // Use private member access (friend function)
                 exporter.add_initializer_tensor(param_var->tensor().cpu().contiguous(), safe_name);
             }
         }
-
-        // Export all module buffers as initializers
         auto named_buffs = module->named_buffers();
         for (const auto& [buffer_name, buffer_var] : named_buffs) {
             if (buffer_var && buffer_var->is_initialized() && buffer_var->tensor().numel() > 0) {
                 std::string safe_name = buffer_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-
-                // Use private member access (friend function)
                 exporter.add_initializer_tensor(buffer_var->tensor().cpu().contiguous(), safe_name);
             }
         }
 
-        // Trace the forward pass
-        // NOTE: This is a simplified tracing approach. A complete implementation would:
-        // 1. Hook into tensor operations to capture the computation graph
-        // 2. Convert each operation to corresponding ONNX nodes
-        // 3. Handle control flow and dynamic operations
-        //
-        // For now, we perform symbolic tracing for common layer types
+        // Audit I7: real JIT trace, replacing the old `trace_custom_module`
+        // shape-pattern matcher. The JIT graph captures every traced
+        // operation; `convert_jit_graph_to_onnx` emits ONNX nodes per op.
+        auto module_ptr = std::shared_ptr<nn::Module>(module.get(), [](nn::Module*) {
+            // Non-owning shared_ptr (the caller owns the actual lifetime).
+        });
+        Variable input_var(cpu_input, false);
+        auto jit_graph = jit::trace(module_ptr, input_var);
+        if (!jit_graph) {
+            throw std::runtime_error("JIT tracing produced null graph");
+        }
 
-        // Run forward pass to get output shape
         Variable output_var = module->forward(input_var);
-
         if (!output_var.is_initialized() || output_var.tensor().numel() == 0) {
             throw std::runtime_error("Module forward pass produced undefined or empty output");
         }
-
-        // Attempt to trace the module structure
-        // This is a best-effort approach that works for simple modules
-        trace_custom_module(exporter, module, input_var, output_var,
-                          input_names[0], output_names[0]);
-
-        // Add output to ONNX graph
         exporter.add_output(output_var.tensor().cpu(), output_names[0]);
 
-        // Export to file
+        // Convert traced JIT graph → ONNX nodes (handles arbitrary ops, not
+        // just the pre-baked patterns the old tracer recognized).
+        exporter.convert_jit_graph_to_onnx(*jit_graph);
+
         exporter.export_to_file(filepath);
-
-        // Restore original training mode
-        if (was_training) {
-            module->train();
-        }
-
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Failed to export module to ONNX: ") + e.what());
+    } catch (...) {
+        if (was_training) module->train();
+        throw;
     }
+    if (was_training) module->train();
 }
 
-// Helper function to trace custom modules
-namespace {
-
-auto trace_custom_module(ONNXExporter& exporter,
-                        std::shared_ptr<nn::Module> module,
-                        const Variable& input,
-                        const Variable& output,
-                        [[maybe_unused]] const std::string& input_name,
-                        const std::string& output_name) -> void {
-    // For custom modules, we attempt to infer structure from parameters
-    // This is a simplified approach that works for basic feed-forward networks
-
-    auto named_params = module->named_parameters();
-
-    if (named_params.empty()) {
-        // Module has no parameters - might be just activation functions
-        // Create identity or pass-through
-        throw std::runtime_error(
-            "Cannot trace custom module without parameters. "
-            "Please use ONNXExporter directly or implement your module as Sequential."
-        );
-    }
-
-    // For modules with parameters, we attempt pattern matching
-    // Look for common patterns: weight + bias = Linear layer, etc.
-
-    bool has_weight = false;
-    bool has_bias = false;
-    std::shared_ptr<Variable> weight_param;
-    std::shared_ptr<Variable> bias_param;
-
-    for (const auto& [name, param] : named_params) {
-        if (name.find("weight") != std::string::npos) {
-            has_weight = true;
-            weight_param = param;
-        }
-        if (name.find("bias") != std::string::npos) {
-            has_bias = true;
-            bias_param = param;
-        }
-    }
-
-    // BatchNorm / LayerNorm have 1D weight + 1D bias. We distinguish between
-    // them via the presence of non-parameter buffers: BatchNorm registers
-    // running_mean/running_var as buffers, LayerNorm does not.
-    if (has_weight && weight_param && weight_param->tensor().shape().size() == 1) {
-        std::shared_ptr<Variable> running_mean;
-        std::shared_ptr<Variable> running_var;
-        for (const auto& [bname, buf] : module->named_buffers()) {
-            if (bname.find("running_mean") != std::string::npos) running_mean = buf;
-            if (bname.find("running_var") != std::string::npos) running_var = buf;
-        }
-
-        if (running_mean && running_var && has_bias && bias_param) {
-            // BatchNorm — ONNX's BatchNormalization takes
-            // (input, scale, bias, mean, var). Default eps of 1e-5 matches
-            // the nn::BatchNorm default; if the module carries a custom eps
-            // it would need a named hook, which this tracer doesn't inspect.
-            exporter.export_batchnorm2d(
-                input.tensor(),
-                weight_param->tensor(),
-                bias_param->tensor(),
-                running_mean->tensor(),
-                running_var->tensor(),
-                /*eps=*/1e-5,
-                output.tensor(),
-                output_name,
-                // 5th-audit C5: forward the BN module's training/eval state
-                // so the produced ONNX node faithfully encodes it via the
-                // `training_mode` attribute. Pre-fix the exporter silently
-                // exported every BN as inference, dropping the mode bit.
-                /*training=*/module->is_training()
-            );
-            return;
-        }
-
-        // LayerNorm: 1D weight + optional 1D bias, no running stats. Delegate
-        // to the dedicated export_layernorm helper (added alongside this
-        // BN/LN tracer fix).
-        if (has_bias && bias_param) {
-            exporter.export_layernorm(
-                input.tensor(),
-                weight_param->tensor(),
-                bias_param->tensor(),
-                /*axis=*/-1,
-                /*eps=*/1e-5,
-                output.tensor(),
-                output_name
-            );
-            return;
-        }
-    }
-
-    if (has_weight && weight_param) {
-        auto weight_shape = weight_param->tensor().shape();
-
-        // Check if this looks like a linear layer (2D weight matrix)
-        if (weight_shape.size() == 2) {
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) {
-                bias_tensor = bias_param->tensor();
-            }
-
-            exporter.export_linear(
-                input.tensor(),
-                weight_param->tensor(),
-                bias_tensor,
-                output.tensor(),
-                output_name
-            );
-            return;
-        }
-
-        // ConvTranspose{1,2,3}d and Conv3d need to be dispatched via
-        // dynamic_cast BEFORE the weight-shape-based Conv1d/Conv2d branches.
-        // ConvTranspose1d has a 3-D weight too, so the Conv1d branch would
-        // otherwise grab it and emit a forward Conv.
-        if (auto* ct1 = dynamic_cast<const nn::ConvTranspose1d*>(module.get())) {
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
-            exporter.export_conv_transpose(
-                input.tensor(), weight_param->tensor(), bias_tensor,
-                /*spatial_rank=*/1,
-                ct1->kernel_size(), ct1->stride(), ct1->padding(),
-                ct1->output_padding(), /*dilation=*/1, ct1->groups(),
-                output.tensor(), output_name);
-            return;
-        }
-        if (auto* ct2 = dynamic_cast<const nn::ConvTranspose2d*>(module.get())) {
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
-            exporter.export_conv_transpose(
-                input.tensor(), weight_param->tensor(), bias_tensor,
-                /*spatial_rank=*/2,
-                ct2->kernel_size(), ct2->stride(), ct2->padding(),
-                ct2->output_padding(), /*dilation=*/1, ct2->groups(),
-                output.tensor(), output_name);
-            return;
-        }
-        if (auto* c3 = dynamic_cast<const nn::Conv3d*>(module.get())) {
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
-            exporter.export_conv3d(
-                input.tensor(), weight_param->tensor(), bias_tensor,
-                c3->kernel_size(), c3->stride(), c3->padding(),
-                c3->dilation(), c3->groups(),
-                output.tensor(), output_name);
-            return;
-        }
-        if (auto* ct3 = dynamic_cast<const nn::ConvTranspose3d*>(module.get())) {
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
-            exporter.export_conv_transpose(
-                input.tensor(), weight_param->tensor(), bias_tensor,
-                /*spatial_rank=*/3,
-                ct3->kernel_size(), ct3->stride(), ct3->padding(),
-                ct3->output_padding(), ct3->dilation(), ct3->groups(),
-                output.tensor(), output_name);
-            return;
-        }
-
-        // Conv1d weight: [out_channels, in_channels/groups, kernel]
-        if (weight_shape.size() == 3) {
-            int64_t kernel_size = weight_shape[2];
-            int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
-            if (auto* c = dynamic_cast<const nn::Conv1d*>(module.get())) {
-                stride   = c->stride();
-                padding  = c->padding();
-                dilation = c->dilation();
-                groups   = c->groups();
-            }
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
-
-            exporter.export_conv1d(
-                input.tensor(),
-                weight_param->tensor(),
-                bias_tensor,
-                kernel_size, stride, padding, dilation, groups,
-                output.tensor(),
-                output_name
-            );
-            return;
-        }
-
-        // Check if this looks like a Conv2d layer (4D weight matrix)
-        if (weight_shape.size() == 4) {
-            // Conv2d weight shape: [out_channels, in_channels, kernel_h, kernel_w]
-            std::vector<int64_t> kernel_size = {weight_shape[2], weight_shape[3]};
-            std::vector<int64_t> stride = {1, 1};
-            std::vector<int64_t> padding = {0, 0};
-            std::vector<int64_t> dilation = {1, 1};
-            int64_t groups = 1;
-            // Read the real attrs off the module when it actually is a Conv2d;
-            // the previous "assume defaults" path silently dropped padding /
-            // stride / dilation / groups and was the root of the Conv2d
-            // round-trip xfail.
-            if (auto* c = dynamic_cast<const nn::Conv2d*>(module.get())) {
-                stride   = {c->stride_h(),   c->stride_w()};
-                padding  = {c->padding_h(),  c->padding_w()};
-                dilation = {c->dilation_h(), c->dilation_w()};
-                groups   = c->groups();
-            }
-
-            std::optional<Tensor> bias_tensor;
-            if (has_bias && bias_param) {
-                bias_tensor = bias_param->tensor();
-            }
-
-            exporter.export_conv2d(
-                input.tensor(),
-                weight_param->tensor(),
-                bias_tensor,
-                kernel_size,
-                stride,
-                padding,
-                dilation,
-                groups,
-                output.tensor(),
-                output_name
-            );
-            return;
-        }
-    }
-
-    throw std::runtime_error(
-        "Cannot automatically trace custom module structure. "
-        "Please use ONNXExporter directly or implement your module as Sequential."
-    );
-}
-
-} // anonymous namespace
+// Audit I7: trace_custom_module fully removed (was a shape-pattern matcher
+// that only recognized Linear/BatchNorm/LayerNorm/Conv). The free-function
+// export_to_onnx now routes through ONNXExporter::export_module-style JIT
+// tracing which handles arbitrary ops.
 
 } // namespace onnx
 } // namespace tenzor

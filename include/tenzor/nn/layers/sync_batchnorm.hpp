@@ -14,15 +14,27 @@
 #include "../module.hpp"
 #include "../../core/device.hpp"
 #include <functional>
+#include <memory>
 
 namespace tenzor {
+
+namespace distributed {
+class ProcessGroupBase;
+}  // namespace distributed
+
 namespace nn {
 
 /**
  * @brief Callback type for all-reduce operations.
  *
  * Takes a mutable tensor reference and reduces it (SUM) in-place across all
- * processes. Also returns the world size.
+ * processes.
+ *
+ * @note Prefer the new `ProcessGroupBase`-based constructor for new code;
+ *       it enables autograd-aware all-reduce (audit C1) so that the
+ *       distributed `world_size > 1` backward path supports higher-order
+ *       gradients (`create_graph=true`) by composing the all-reduce into
+ *       the autograd graph via `tenzor::distributed_all_reduce` (A5).
  */
 using AllReduceFn = std::function<void(Tensor& tensor)>;
 
@@ -61,6 +73,33 @@ public:
                   double eps = 1e-5,
                   double momentum = 0.1,
                   bool affine = true,
+                  bool track_running_stats = true,
+                  std::shared_ptr<distributed::ProcessGroupBase> process_group = nullptr);
+
+    /**
+     * @brief Construct synchronized batch normalization with an autograd-aware
+     *        process group (audit C1).
+     *
+     * When this constructor is used, `SyncBatchNorm2dBackward::backward_with_variables`
+     * composes the gradient-side all-reduce as a Variable-level
+     * `distributed_all_reduce` call. That keeps the all-reduce inside the
+     * autograd graph, so `create_graph=true` produces a real second-order
+     * graph even for `world_size > 1`.
+     *
+     * The `AllReduceFn` callback is auto-synthesized from `process_group` so
+     * the existing first-order forward/backward paths remain unchanged.
+     *
+     * @param num_features Number of feature channels (C dimension)
+     * @param process_group Process group spanning the participating ranks
+     * @param world_size Number of processes in the group (defaults to
+     *        `process_group->world_size()`, which is the typical setup)
+     */
+    SyncBatchNorm(int64_t num_features,
+                  std::shared_ptr<distributed::ProcessGroupBase> process_group,
+                  int world_size = 0,
+                  double eps = 1e-5,
+                  double momentum = 0.1,
+                  bool affine = true,
                   bool track_running_stats = true);
 
     auto forward_impl(const Variable& input) -> Variable override;
@@ -83,6 +122,10 @@ private:
     bool track_running_stats_;
     int world_size_;
     AllReduceFn all_reduce_fn_;
+    // Autograd-aware process group (audit C1). When non-null,
+    // SyncBatchNormBackward routes higher-order gradients through
+    // `distributed_all_reduce` so the all-reduce stays in the graph.
+    std::shared_ptr<distributed::ProcessGroupBase> pg_;
 
     Variable weight_;
     Variable bias_;

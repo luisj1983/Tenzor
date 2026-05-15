@@ -52,19 +52,17 @@ FasterRCNN::FasterRCNN(
         rpn_anchor_sizes, rpn_aspect_ratios
     );
 
-    // Determine backbone output channels
-    // For ResNet-50/101, layer4 output is 512 * Bottleneck::expansion = 512 * 4 = 2048
-    // For ResNet-18/34, layer4 output is 512 * BasicBlock::expansion = 512 * 1 = 512
-    int64_t backbone_out_channels = 2048;  // Default for ResNet-50/101
-
-    // Check if backbone is ResNet and adjust channels accordingly
-    auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
-    if (resnet) {
-        // ResNet-50/101/152 use Bottleneck (expansion=4): 512 * 4 = 2048
-        // ResNet-18/34 use BasicBlock (expansion=1): 512 * 1 = 512
-        // We detect this by checking the actual output when possible
-        // For now, assume ResNet-50/101 (Bottleneck) with 2048 channels
-        backbone_out_channels = 2048;
+    // Audit G8: query the backbone for its actual terminal channel count
+    // instead of hard-coding 2048 for every variant. The previous code
+    // silently sized the RPN for Bottleneck (2048 ch) even when the backbone
+    // was ResNet-18/34 (BasicBlock, 512 ch) — which would cause a Conv2d
+    // shape mismatch at the first RPN forward pass. For non-ResNet backbones
+    // we keep the 2048 default; users wiring a custom backbone should swap
+    // in the appropriate value (G8-followup: parameter-shape introspection
+    // for arbitrary Module backbones).
+    int64_t backbone_out_channels = 2048;
+    if (auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_)) {
+        backbone_out_channels = resnet->out_channels();
     }
 
     // Create RPN
@@ -224,15 +222,41 @@ auto FasterRCNN::forward_impl(const Variable& input) -> Variable {
         );
     }
 
-    // Call inference and return dummy tensor
-    // (Actual detections should be retrieved via forward_inference)
-    auto detections = forward_inference(input);
+    // Audit G9: replace the `Variable(zeros({1}), ...)` dummy with a real
+    // packed output. Each row is `(batch_idx, x1, y1, x2, y2, score, label)`
+    // — the YOLOv5 (N, 6) `[x1, y1, x2, y2, score, label]` convention prefixed
+    // by an image index, since Faster R-CNN's `forward_inference` returns one
+    // dict per image and we need to flatten across the batch into a single
+    // Variable. The structured per-image output remains available via
+    // `forward_inference` for callers that prefer keyed access.
+    auto per_image = forward_inference(input);
 
-    // Return dummy output (Module interface requires Variable return)
-    return Variable(
-        ops::zeros({1}, input.dtype(), input.device()),
-        false
-    );
+    const DType  dtype  = input.dtype();
+    const Device device = input.device();
+
+    std::vector<Tensor> rows;
+    rows.reserve(per_image.size());
+    for (int64_t b = 0; b < static_cast<int64_t>(per_image.size()); ++b) {
+        const auto& det = per_image[static_cast<size_t>(b)];
+        auto bit = det.find("boxes");
+        auto lit = det.find("labels");
+        auto sit = det.find("scores");
+        if (bit == det.end() || lit == det.end() || sit == det.end()) continue;
+        const int64_t K = bit->second.shape()[0];
+        if (K == 0) continue;
+
+        Tensor bx     = bit->second.to(dtype).to(device).reshape({K, 4});
+        Tensor sc_col = sit->second.to(dtype).to(device).reshape({K, 1});
+        Tensor lb_col = lit->second.to(dtype).to(device).reshape({K, 1});
+        Tensor b_col  = ops::full({K, 1}, static_cast<double>(b), dtype, device);
+
+        rows.push_back(tenzor::cat({b_col, bx, sc_col, lb_col}, /*dim=*/1));  // (K, 7)
+    }
+
+    if (rows.empty()) {
+        return Variable(Tensor({0, 7}, dtype, device), false);
+    }
+    return Variable(tenzor::cat(rows, /*dim=*/0), false);
 }
 
 auto FasterRCNN::load_pretrained(const std::string& path) -> void {

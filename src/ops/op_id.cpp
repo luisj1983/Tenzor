@@ -207,6 +207,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Unfold)] = "unfold";
     names[static_cast<size_t>(OpId::Fold)] = "fold";
     names[static_cast<size_t>(OpId::Interpolate)] = "interpolate";
+    names[static_cast<size_t>(OpId::InterpolateBackward)] = "interpolate_backward";
     names[static_cast<size_t>(OpId::ROIAlignForward)] = "roi_align_forward";
     names[static_cast<size_t>(OpId::ROIAlignBackward)] = "roi_align_backward";
     names[static_cast<size_t>(OpId::BoxIoU)] = "box_iou";

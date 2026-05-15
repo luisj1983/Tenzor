@@ -7,6 +7,8 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/distributed/process_group.hpp"  // A1/B5: PG-aware grad all_reduce
+#include "tenzor/distributed/distributed.hpp"     // ReduceOp enum
 #include <stdexcept>
 #include <algorithm>
 
@@ -59,6 +61,47 @@ DataParallel::DataParallel(
 
     // Validate devices
     validate_devices();
+}
+
+// A1/B5: factory-based constructor for real per-device replicas.
+DataParallel::DataParallel(
+    UseFactoryTag /*tag*/,
+    ModuleFactory factory,
+    std::vector<int> device_ids,
+    int output_device,
+    int dim,
+    std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg
+) : device_ids_(std::move(device_ids)),
+    output_device_(output_device),
+    dim_(dim),
+    module_factory_(std::move(factory)),
+    pg_(std::move(pg))
+{
+    if (!module_factory_) {
+        throw std::invalid_argument("DataParallel(factory): factory cannot be null");
+    }
+    if (device_ids_.empty()) {
+        throw std::invalid_argument("DataParallel(factory): device_ids cannot be empty");
+    }
+
+    // Set output device
+    if (output_device_ == -1) {
+        output_device_ = device_ids_[0];
+    }
+
+    // Validate that output_device is in device_ids
+    if (std::find(device_ids_.begin(), device_ids_.end(), output_device_) == device_ids_.end()) {
+        throw std::invalid_argument("DataParallel(factory): output_device must be in device_ids");
+    }
+
+    validate_devices();
+
+    // Build the master module from the factory once now so accessors
+    // (parameters(), named_parameters()) work before the first forward.
+    module_ = module_factory_();
+    if (!module_) {
+        throw std::runtime_error("DataParallel(factory): factory returned a null module");
+    }
 }
 
 auto DataParallel::forward_impl(const Variable& input) -> Variable {
@@ -138,33 +181,48 @@ auto DataParallel::replicate() -> void {
     replicas_.clear();
     replicas_.reserve(device_ids_.size());
 
-    // Get master module's state for replication
+    // A1/B5: factory-based path constructs an independent module per non-master
+    // device, syncs initial state from the master, and moves parameters to the
+    // target device. The legacy shared-module path is preserved for callers
+    // that used the original ctor (no factory available).
     auto master_state = module_->state_dict();
 
-    // For each device, create a replica
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         int device_id = device_ids_[i];
 
         if (device_id == output_device_) {
             // Master device uses original module
             replicas_.push_back(module_);
+            continue;
+        }
+
+        if (module_factory_) {
+            // Factory ctor: materialize a fresh replica, load master state,
+            // move parameters to target device. Each replica has its own
+            // parameter tensors — real data parallelism, not shared-module.
+            auto replica = module_factory_();
+            if (!replica) {
+                throw std::runtime_error(
+                    "DataParallel::replicate: module factory returned null for device " +
+                    std::to_string(device_id));
+            }
+            replica->load_state_dict(master_state);
+            // Move all parameters to the target CUDA device. The module's
+            // `to(Device)` method walks its parameters + buffers + submodules.
+            replica->to(Device::cuda(device_id));
+            replicas_.push_back(replica);
         } else {
-            // For other devices, we need to create a deep copy
-            // Since we don't have a generic clone() method, we use the same module
-            // but move parameters to the target device
-            //
-            // Production Note: In a full framework, we would:
-            // 1. Clone the module structure (using a factory or clone method)
-            // 2. Load state dict and move to target device
-            // 3. Keep parameters separate per device
-            //
-            // Current approach: Share module but track device-specific parameter copies
+            // Legacy shared-module path: keep the same module reference on
+            // all devices. Single-process multi-stream "data parallelism"
+            // (parameters are shared; gradients accumulate on the master).
             replicas_.push_back(module_);
         }
     }
 
-    // Store parameters for gradient synchronization
-    // These are the master parameters that will accumulate gradients from all devices
+    // Store parameters for gradient synchronization. With the factory path,
+    // each replica has its own params; we still register the master's params
+    // here so the optimizer updates them and `synchronize_gradients` will
+    // gather from per-device replicas and reduce onto the master.
     parameters_to_sync_ = module_->parameters();
 }
 
@@ -314,6 +372,28 @@ auto DataParallel::synchronize_gradients() -> void {
 
     // Early exit if no parameters to synchronize
     if (parameters_to_sync_.empty()) {
+        return;
+    }
+
+    // B5: real PG all_reduce path. When a ProcessGroupBase is attached,
+    // for each parameter's gradient: all_reduce(SUM) across the group, then
+    // divide by world_size. This replaces the trivial `grad *= 1/N` workaround
+    // for the new factory-based DataParallel (the legacy shared-module ctor
+    // still flows through the CUDA path below since gradients accumulate on
+    // the master device under shared params).
+    if (pg_ != nullptr) {
+        int ws = pg_->world_size();
+        if (ws <= 1) return;  // single-rank PG = no-op
+        const double inv_ws = 1.0 / static_cast<double>(ws);
+        for (auto& param : parameters_to_sync_) {
+            if (!param || !param->has_grad()) continue;
+            auto grad_opt = param->grad();
+            if (!grad_opt.has_value()) continue;
+            Tensor grad = grad_opt.value();
+            // All-reduce with SUM, then scale to mean.
+            pg_->all_reduce(grad, ::tenzor::distributed::ReduceOp::SUM);
+            param->set_grad(grad * inv_ws);
+        }
         return;
     }
 

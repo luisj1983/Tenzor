@@ -254,6 +254,7 @@ enum class OpId : uint16_t {
     Unfold = 200,
     Fold,
     Interpolate,
+    InterpolateBackward,        // audit D3: device-side bilinear scatter
     ROIAlignForward,
     ROIAlignBackward,
     BoxIoU,

@@ -408,6 +408,60 @@ namespace rocm {
                                 const std::vector<int64_t>& weight_shape,
                                 int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                                 hipStream_t stream) -> Tensor;
+    // Audit E2: per-axis overloads. When axes equal, delegate to the
+    // scalar impl above (no behavior change). When asymmetric, throw with
+    // a clear message — the internal HIP im2col/MIOpen-descriptor refactor
+    // is tracked as E2-followup. This eliminates the previous silent
+    // wrong-output behavior where asymmetric stride was passed through as
+    // scalar Stride and silently degraded to symmetric.
+    inline auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                       int64_t stride_h, int64_t stride_w,
+                                       int64_t pad_h, int64_t pad_w,
+                                       int64_t dil_h, int64_t dil_w,
+                                       int64_t groups,
+                                       hipStream_t stream,
+                                       DataLayout layout = DataLayout::NCHW) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_forward_kernel(input, weight, bias, stride_h, pad_h, dil_h,
+                                          groups, stream, layout);
+        }
+        throw std::runtime_error(
+            "ROCm conv2d_forward: asymmetric stride/padding/dilation "
+            "(stride " + std::to_string(stride_h) + "x" + std::to_string(stride_w) +
+            ", pad " + std::to_string(pad_h) + "x" + std::to_string(pad_w) +
+            ", dil " + std::to_string(dil_h) + "x" + std::to_string(dil_w) +
+            ") is not yet supported on ROCm — the im2col / MIOpen-descriptor "
+            "refactor is tracked as E2-followup. Use the CUDA backend for "
+            "asymmetric convolutions, or run on CPU.");
+    }
+    inline auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                                        const std::vector<int64_t>& input_shape,
+                                        int64_t stride_h, int64_t stride_w,
+                                        int64_t pad_h, int64_t pad_w,
+                                        int64_t dil_h, int64_t dil_w,
+                                        int64_t groups, hipStream_t stream) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_backward_input(grad_output, weight, input_shape,
+                                          stride_h, pad_h, dil_h, groups, stream);
+        }
+        throw std::runtime_error(
+            "ROCm conv2d_backward_input: asymmetric stride/padding/dilation "
+            "is not yet supported on ROCm (E2-followup).");
+    }
+    inline auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                                        const std::vector<int64_t>& weight_shape,
+                                        int64_t stride_h, int64_t stride_w,
+                                        int64_t pad_h, int64_t pad_w,
+                                        int64_t dil_h, int64_t dil_w,
+                                        int64_t groups, hipStream_t stream) -> Tensor {
+        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
+            return conv2d_backward_weight(grad_output, input, weight_shape,
+                                           stride_h, pad_h, dil_h, groups, stream);
+        }
+        throw std::runtime_error(
+            "ROCm conv2d_backward_weight: asymmetric stride/padding/dilation "
+            "is not yet supported on ROCm (E2-followup).");
+    }
     auto conv2d_backward_bias(const Tensor& grad_output, hipStream_t stream) -> Tensor;
 
     // Conv3d operations (conv3d.hip.cpp)
@@ -781,6 +835,11 @@ namespace rocm {
                      int64_t dilation, hipStream_t stream) -> Tensor;
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners, hipStream_t stream) -> Tensor;
+    // D3-followup ROCm: native atomicAdd-scatter bilinear backward.
+    auto interpolate_backward_kernel(const Tensor& grad_output,
+                                      const std::vector<int64_t>& input_size,
+                                      const std::string& mode, bool align_corners,
+                                      hipStream_t stream) -> Tensor;
 
     // FFT operations (rocFFT or native HIP fallback)
     auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -1323,27 +1382,39 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Convolution Operations
     // ========================================================================
     // Conv2dBackwardInput: inputs = {grad_output, input, weight}
+    // Audit E2: per-axis read with scalar fallback.
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        // inputs[0]=grad_output, inputs[2]=weight
         return std::vector<Tensor>{rocm::conv2d_backward_input(inputs[0], inputs[2], input_shape,
-            stride, padding, dilation, groups, get_hip_stream(attrs))};
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, get_hip_stream(attrs))};
     });
 
     // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
+    // Audit E2: per-axis read with scalar fallback.
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-        // inputs[0]=grad_output, inputs[1]=input
         return std::vector<Tensor>{rocm::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
-            stride, padding, dilation, groups, get_hip_stream(attrs))};
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3588,28 +3659,48 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Convolution Operations ------------------------------------------------
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        // Audit E2: read per-axis stride/padding/dilation, falling back to
+        // scalars. The per-axis ROCm overload routes symmetric runs to the
+        // existing scalar kernel (no behavior change) and throws cleanly on
+        // asymmetric until the im2col/MIOpen-descriptor refactor lands —
+        // replacing the previous silent wrong-output behavior.
+        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
+            get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // nn::Conv3d sets AttrKey::{Stride,Padding,Dilation} as scalar ints;
-        // the ROCm kernel expects per-axis vectors. The previous lambda
-        // used attrs.get_int_list which silently returned an empty vector
-        // on a scalar attr, causing the kernel to fall back to defaults
-        // (e.g. stride=1) and produce wrong output whenever the layer
-        // specified non-default values. Read scalars and expand to triples.
+        // Audit I5-followup: read per-axis attrs with scalar fallback. The
+        // ROCm kernel signature already accepts std::vector<int64_t> per axis;
+        // previously the lambda only read scalar Stride/Padding/Dilation and
+        // expanded to {s,s,s}, silently dropping any per-axis values the nn
+        // module packed via I5.
         int64_t s = attrs.get_int(AttrKey::Stride, 1);
         int64_t p = attrs.get_int(AttrKey::Padding, 0);
         int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride   = {s, s, s};
-        std::vector<int64_t> padding  = {p, p, p};
-        std::vector<int64_t> dilation = {d, d, d};
+        std::vector<int64_t> stride = {
+            attrs.get_int(AttrKey::StrideD, s),
+            attrs.get_int(AttrKey::StrideH, s),
+            attrs.get_int(AttrKey::StrideW, s)};
+        std::vector<int64_t> padding = {
+            attrs.get_int(AttrKey::PaddingD, p),
+            attrs.get_int(AttrKey::PaddingH, p),
+            attrs.get_int(AttrKey::PaddingW, p)};
+        std::vector<int64_t> dilation = {
+            attrs.get_int(AttrKey::DilationD, d),
+            attrs.get_int(AttrKey::DilationH, d),
+            attrs.get_int(AttrKey::DilationW, d)};
         Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
         return rocm::conv3d_forward_hip(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
@@ -3630,18 +3721,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Same scalar-attr mismatch as Conv3d above — nn::ConvTranspose3d
-        // sets scalar Stride/Padding/OutputPadding/Dilation; expand to
-        // triples for the ROCm kernel.
+        // Audit I5-followup: read per-axis attrs with scalar fallback.
         int64_t s  = attrs.get_int(AttrKey::Stride, 1);
         int64_t p  = attrs.get_int(AttrKey::Padding, 0);
         int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride         = {s, s, s};
-        std::vector<int64_t> padding        = {p, p, p};
-        std::vector<int64_t> output_padding = {op, op, op};
-        std::vector<int64_t> dilation       = {d, d, d};
+        std::vector<int64_t> stride = {
+            attrs.get_int(AttrKey::StrideD, s),
+            attrs.get_int(AttrKey::StrideH, s),
+            attrs.get_int(AttrKey::StrideW, s)};
+        std::vector<int64_t> padding = {
+            attrs.get_int(AttrKey::PaddingD, p),
+            attrs.get_int(AttrKey::PaddingH, p),
+            attrs.get_int(AttrKey::PaddingW, p)};
+        std::vector<int64_t> output_padding = {
+            attrs.get_int(AttrKey::OutputPaddingD, op),
+            attrs.get_int(AttrKey::OutputPaddingH, op),
+            attrs.get_int(AttrKey::OutputPaddingW, op)};
+        std::vector<int64_t> dilation = {
+            attrs.get_int(AttrKey::DilationD, d),
+            attrs.get_int(AttrKey::DilationH, d),
+            attrs.get_int(AttrKey::DilationW, d)};
         Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
         return rocm::conv_transpose3d_forward_hip(inputs[0], inputs[1], bias,
             stride, padding, output_padding, dilation, groups, get_hip_stream(attrs));
@@ -3785,6 +3886,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "nearest"));
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return rocm::interpolate_kernel(inputs[0], size, mode, align_corners, get_hip_stream(attrs));
+    });
+    // D3-followup ROCm: native atomicAdd-scatter bilinear backward (Float32/Float64).
+    // Replaces the earlier honest-throw stub with the HIP port of the CUDA
+    // kernel. Mode 'nearest' is currently rejected — same shape simplification
+    // the CUDA host function makes; a dedicated nearest scatter is a later
+    // refinement.
+    table.register_single_output_kernel(OpId::InterpolateBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_size = attrs.get_int_list(AttrKey::InputShape);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return rocm::interpolate_backward_kernel(inputs[0], input_size, mode, align_corners,
+                                                  get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));

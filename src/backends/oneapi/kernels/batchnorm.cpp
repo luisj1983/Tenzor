@@ -248,12 +248,36 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 }
 
 // Batch normalization backward
+//
+// Audit F12: signature takes `invstd = 1/sqrt(var+eps)` directly, matching
+// what `nn::BatchNorm2dBackward` saves in the autograd. Previously the
+// registry reconstructed `variance` host-side via 4 chained tensor ops; the
+// reconstruction now happens device-side in a single C-element SYCL kernel
+// only on the oneDNN path (oneDNN's DNNL_ARG_VARIANCE requires variance).
+// The SYCL fallback uses `invstd` directly as `std_inv` without any
+// reconstruction.
 auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
-                          const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                          const Tensor& invstd, const Tensor& gamma, float epsilon, sycl::queue& queue)
                           -> std::tuple<Tensor, Tensor, Tensor> {
     // oneDNN BatchNorm backward descriptors are f32-only; delegate non-f32 to SYCL
     if (input.dtype() != DType::Float32) {
-        return batchnorm2d_backward_sycl(grad_output, input, mean, variance, gamma, epsilon, queue);
+        return batchnorm2d_backward_sycl(grad_output, input, mean, invstd, gamma, epsilon, queue);
+    }
+
+    // Reconstruct variance from invstd device-side. oneDNN requires
+    // DNNL_ARG_VARIANCE, but we never want to round-trip through the host:
+    // one SYCL kernel over C elements is far cheaper than 4 host dispatches.
+    Tensor variance(std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
+                    invstd.dtype(), invstd.device());
+    {
+        const float* invstd_ptr = get_data_ptr<const float>(invstd);
+        float*       var_ptr    = get_data_ptr<float>(variance);
+        const float  eps_v      = epsilon;
+        int64_t      C_loc      = invstd.numel();
+        queue.parallel_for(sycl::range<1>(C_loc), [=](sycl::id<1> i) {
+            float iv = invstd_ptr[i];
+            var_ptr[i] = 1.0f / (iv * iv) - eps_v;
+        }).wait();
     }
 
     using namespace dnnl;
@@ -503,9 +527,14 @@ static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& m
     return output;
 }
 
+// Audit F12: now takes `invstd = 1/sqrt(var+eps)` directly (replacing the
+// old `variance` parameter). `std_inv` is loaded as-is from invstd rather
+// than recomputed via `1/sqrt(var + eps)` — same math, cheaper, and one
+// fewer host-side rsqrt-and-rebuild per backward.
 static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
-                                       const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                                       const Tensor& invstd, const Tensor& gamma, float epsilon, sycl::queue& queue)
                                        -> std::tuple<Tensor, Tensor, Tensor> {
+    (void)epsilon;  // epsilon is already folded into invstd
     auto shape = input.shape();
     const int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
     const int64_t spatial = H * W;
@@ -518,7 +547,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* in_ptr = get_data_ptr<const double>(input);
         const double* mean_ptr = get_data_ptr<const double>(mean);
-        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* invstd_ptr = get_data_ptr<const double>(invstd);
         const double* gamma_ptr = get_data_ptr<const double>(gamma);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
         double* grad_gamma_ptr = get_data_ptr<double>(grad_gamma);
@@ -526,7 +555,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
 
         queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
             double sum_go = 0.0, sum_go_norm = 0.0;
-            const double m = mean_ptr[c], std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            const double m = mean_ptr[c], std_inv = invstd_ptr[c];
             for (int64_t n = 0; n < N; ++n)
                 for (int64_t hw = 0; hw < spatial; ++hw) {
                     const int64_t idx = ((n * C + c) * spatial) + hw;
@@ -543,7 +572,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         const double scale = 1.0 / static_cast<double>(N * spatial);
         queue.parallel_for<BatchNorm2dBackwardInputKernelFloat64>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
             const int64_t n = idx[0], c = idx[1], hw = idx[2];
-            const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            const double std_inv = invstd_ptr[c];
             const int64_t i = ((n * C + c) * spatial) + hw;
             const double x_norm = (in_ptr[i] - mean_ptr[c]) * std_inv;
             grad_in_ptr[i] = gamma_ptr[c] * std_inv * (grad_out_ptr[i] -
@@ -554,9 +583,9 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
         const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
-        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const float* invstd_f32 = stats_f32 ? get_data_ptr<const float>(invstd) : nullptr;
         const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
-        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
+        const sycl::half* invstd_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(invstd) : nullptr;
         const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* grad_gamma_ptr = get_data_ptr<sycl::half>(grad_gamma);
@@ -565,8 +594,8 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum_go = 0.0f, sum_go_norm = 0.0f;
             const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
-            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            // F12: invstd is loaded directly (replaces 1/sqrt(var+eps)).
+            const float std_inv = stats_f32 ? invstd_f32[c] : static_cast<float>(invstd_f16[c]);
             for (int64_t n = 0; n < N; ++n)
                 for (int64_t hw = 0; hw < spatial; ++hw) {
                     const int64_t idx = ((n * C + c) * spatial) + hw;
@@ -585,9 +614,8 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         queue.parallel_for<BatchNorm2dBackwardInputKernelFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
             const int64_t n = idx[0], c = idx[1], hw = idx[2];
             const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
-            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float g = static_cast<float>(gamma_ptr[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : static_cast<float>(invstd_f16[c]);
             const int64_t i = ((n * C + c) * spatial) + hw;
             const float x_norm = (static_cast<float>(in_ptr[i]) - m) * std_inv;
             grad_in_ptr[i] = sycl::half(g * std_inv * (static_cast<float>(grad_out_ptr[i]) -
@@ -599,9 +627,9 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
         const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
-        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const float* invstd_f32 = stats_f32 ? get_data_ptr<const float>(invstd) : nullptr;
         const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
-        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* invstd_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(invstd) : nullptr;
         const uint16_t* gamma_ptr = get_data_ptr<const uint16_t>(gamma);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
         uint16_t* grad_gamma_ptr = get_data_ptr<uint16_t>(grad_gamma);
@@ -610,8 +638,8 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         queue.parallel_for<BatchNorm2dBackwardGammaKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum_go = 0.0f, sum_go_norm = 0.0f;
             const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
-            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            // F12: invstd loaded directly (replaces 1/sqrt(var+eps)).
+            const float std_inv = stats_f32 ? invstd_f32[c] : bf16_to_f32(invstd_bf16[c]);
             for (int64_t n = 0; n < N; ++n)
                 for (int64_t hw = 0; hw < spatial; ++hw) {
                     const int64_t idx = ((n * C + c) * spatial) + hw;
@@ -630,9 +658,8 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         queue.parallel_for<BatchNorm2dBackwardInputKernelBFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
             const int64_t n = idx[0], c = idx[1], hw = idx[2];
             const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
-            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
             const float g = bf16_to_f32(gamma_ptr[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : bf16_to_f32(invstd_bf16[c]);
             const int64_t i = ((n * C + c) * spatial) + hw;
             const float x_norm = (bf16_to_f32(in_ptr[i]) - m) * std_inv;
             grad_in_ptr[i] = f32_to_bf16(g * std_inv * (bf16_to_f32(grad_out_ptr[i]) -
@@ -883,9 +910,12 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
     return output;
 }
 
+// Audit F12: takes `invstd = 1/sqrt(var+eps)` directly. `std_inv` is loaded
+// from `invstd_ptr` instead of being recomputed via `1/sqrt(v + epsilon)`.
 auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
-                          const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                          const Tensor& invstd, const Tensor& gamma, float epsilon, sycl::queue& queue)
                           -> std::tuple<Tensor, Tensor, Tensor> {
+    (void)epsilon;  // epsilon is already folded into invstd
     auto shape = input.shape();
     const int64_t N = shape[0];
     const int64_t C = shape[1];
@@ -901,7 +931,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         const float* in_ptr = get_data_ptr<const float>(input);
         const float* mean_ptr = get_data_ptr<const float>(mean);
-        const float* var_ptr = get_data_ptr<const float>(variance);
+        const float* invstd_ptr = get_data_ptr<const float>(invstd);
         const float* gamma_ptr = get_data_ptr<const float>(gamma);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
         float* grad_gamma_ptr = get_data_ptr<float>(grad_gamma);
@@ -912,8 +942,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             float sum_grad_out = 0.0f;
             float sum_grad_out_norm = 0.0f;
             const float m = mean_ptr[c];
-            const float v = var_ptr[c];
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = invstd_ptr[c];
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t hw = 0; hw < spatial; ++hw) {
@@ -935,9 +964,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             const int64_t hw = idx[2];
 
             const float m = mean_ptr[c];
-            const float v = var_ptr[c];
             const float g = gamma_ptr[c];
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = invstd_ptr[c];
 
             const int64_t input_idx = ((n * C + c) * spatial) + hw;
             const float x_norm = (in_ptr[input_idx] - m) * std_inv;
@@ -951,7 +979,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* in_ptr = get_data_ptr<const double>(input);
         const double* mean_ptr = get_data_ptr<const double>(mean);
-        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* invstd_ptr = get_data_ptr<const double>(invstd);
         const double* gamma_ptr = get_data_ptr<const double>(gamma);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
         double* grad_gamma_ptr = get_data_ptr<double>(grad_gamma);
@@ -962,8 +990,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             double sum_grad_out = 0.0;
             double sum_grad_out_norm = 0.0;
             const double m = mean_ptr[c];
-            const double v = var_ptr[c];
-            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+            const double std_inv = invstd_ptr[c];
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t hw = 0; hw < spatial; ++hw) {
@@ -985,9 +1012,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             const int64_t hw = idx[2];
 
             const double m = mean_ptr[c];
-            const double v = var_ptr[c];
             const double g = gamma_ptr[c];
-            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+            const double std_inv = invstd_ptr[c];
 
             const int64_t input_idx = ((n * C + c) * spatial) + hw;
             const double x_norm = (in_ptr[input_idx] - m) * std_inv;
@@ -1000,12 +1026,12 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        // Mean/variance may be Float32 (from mean_var) or Float16 (running stats)
+        // Mean/invstd may be Float32 (from mean_var) or Float16 (running stats)
         const bool stats_f32 = (mean.dtype() == DType::Float32);
         const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
-        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const float* invstd_f32 = stats_f32 ? get_data_ptr<const float>(invstd) : nullptr;
         const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
-        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
+        const sycl::half* invstd_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(invstd) : nullptr;
         const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* grad_gamma_ptr = get_data_ptr<sycl::half>(grad_gamma);
@@ -1016,8 +1042,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             float sum_grad_out = 0.0f;
             float sum_grad_out_norm = 0.0f;
             const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
-            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : static_cast<float>(invstd_f16[c]);
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t hw = 0; hw < spatial; ++hw) {
@@ -1041,9 +1066,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             const int64_t hw = idx[2];
 
             const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
-            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float g = static_cast<float>(gamma_ptr[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : static_cast<float>(invstd_f16[c]);
 
             const int64_t input_idx = ((n * C + c) * spatial) + hw;
             const float in_val = static_cast<float>(in_ptr[input_idx]);
@@ -1060,12 +1084,12 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        // Mean/variance may be Float32 (from mean_var) or BFloat16 (running stats)
+        // Mean/invstd may be Float32 (from mean_var) or BFloat16 (running stats)
         const bool stats_f32 = (mean.dtype() == DType::Float32);
         const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
-        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const float* invstd_f32 = stats_f32 ? get_data_ptr<const float>(invstd) : nullptr;
         const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
-        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* invstd_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(invstd) : nullptr;
         const uint16_t* gamma_ptr = get_data_ptr<const uint16_t>(gamma);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
         uint16_t* grad_gamma_ptr = get_data_ptr<uint16_t>(grad_gamma);
@@ -1076,8 +1100,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             float sum_grad_out = 0.0f;
             float sum_grad_out_norm = 0.0f;
             const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
-            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : bf16_to_f32(invstd_bf16[c]);
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t hw = 0; hw < spatial; ++hw) {
@@ -1101,9 +1124,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             const int64_t hw = idx[2];
 
             const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
-            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
             const float g = bf16_to_f32(gamma_ptr[c]);
-            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const float std_inv = stats_f32 ? invstd_f32[c] : bf16_to_f32(invstd_bf16[c]);
 
             const int64_t input_idx = ((n * C + c) * spatial) + hw;
             const float in_val = bf16_to_f32(in_ptr[input_idx]);

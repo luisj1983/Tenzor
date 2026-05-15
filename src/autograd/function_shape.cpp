@@ -290,97 +290,108 @@ auto UpsampleBilinearBackward::forward(std::vector<Variable> inputs) -> std::vec
 }
 
 auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Distribute gradients from upsampled output back to input size
-    // For nearest neighbor upsampling: each output pixel's gradient goes to its source input pixel
-
-    const auto& grad_output_orig = grad_outputs[0];
-    const auto& shape = grad_output_orig.shape();
-
-    if (shape.size() != 4) {
-        throw std::runtime_error("UpsampleBilinearBackward: Expected 4D gradient tensor (N, C, H, W)");
+    // Audit D3: device-resident bilinear scatter via OpId::InterpolateBackward.
+    // The previous body did a `.to(cpu)` / scalar loop / `.to(device)` round-trip
+    // (a CPU fallback on GPU backends); the new path dispatches through the
+    // registered backend kernel so the math stays on the original device.
+    const auto& grad_output = grad_outputs[0];
+    if (grad_output.shape().size() != 4) {
+        throw std::runtime_error(
+            "UpsampleBilinearBackward: expected 4D gradient tensor (N, C, H, W)");
     }
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputShape,
+              std::to_string(input_h_) + "," + std::to_string(input_w_));
+    attrs.set(AttrKey::Mode, "bilinear");
+    attrs.set(AttrKey::AlignCorners, false);
 
-    // Remember original dtype and device for output conversion
-    DType original_dtype = grad_output_orig.dtype();
-    Device original_device = grad_output_orig.device();
-
-    // Convert to Float32 on CPU for computation
-    Tensor grad_output = grad_output_orig.to(Device::cpu());
-    if (grad_output.dtype() != DType::Float32) {
-        grad_output = grad_output.to(DType::Float32);
-    }
-
-    int64_t N = shape[0];
-    int64_t C = shape[1];
-    int64_t H_out = shape[2];
-    int64_t W_out = shape[3];
-
-    // Create gradient tensor for input (all zeros initially) in Float32
-    auto grad_input = zeros({N, C, input_h_, input_w_}, DType::Float32, Device::cpu());
-
-    // Calculate scaling factors (align_corners=false convention)
-    float scale_h = static_cast<float>(input_h_) / static_cast<float>(output_h_);
-    float scale_w = static_cast<float>(input_w_) / static_cast<float>(output_w_);
-
-    // Distribute gradients using bilinear interpolation weights
-    auto* grad_in_ptr = grad_input.data<float>();
-    const auto* grad_out_ptr = grad_output.data<float>();
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t h = 0; h < H_out; ++h) {
-                for (int64_t w = 0; w < W_out; ++w) {
-                    // Map output pixel to input coordinate (align_corners=false)
-                    float src_h = (h + 0.5f) * scale_h - 0.5f;
-                    float src_w = (w + 0.5f) * scale_w - 0.5f;
-
-                    // Bounding input pixels
-                    int64_t h0 = static_cast<int64_t>(std::floor(src_h));
-                    int64_t w0 = static_cast<int64_t>(std::floor(src_w));
-                    int64_t h1 = h0 + 1;
-                    int64_t w1 = w0 + 1;
-
-                    // Interpolation weights from fractional part
-                    float fh = src_h - h0;
-                    float fw = src_w - w0;
-
-                    float grad_val = grad_out_ptr[((n * C + c) * H_out + h) * W_out + w];
-                    int64_t base = (n * C + c) * input_h_;
-
-                    // Accumulate weighted gradient to each of the 4 neighbors
-                    if (h0 >= 0 && h0 < input_h_ && w0 >= 0 && w0 < input_w_)
-                        grad_in_ptr[(base + h0) * input_w_ + w0] += grad_val * (1.0f - fh) * (1.0f - fw);
-                    if (h0 >= 0 && h0 < input_h_ && w1 >= 0 && w1 < input_w_)
-                        grad_in_ptr[(base + h0) * input_w_ + w1] += grad_val * (1.0f - fh) * fw;
-                    if (h1 >= 0 && h1 < input_h_ && w0 >= 0 && w0 < input_w_)
-                        grad_in_ptr[(base + h1) * input_w_ + w0] += grad_val * fh * (1.0f - fw);
-                    if (h1 >= 0 && h1 < input_h_ && w1 >= 0 && w1 < input_w_)
-                        grad_in_ptr[(base + h1) * input_w_ + w1] += grad_val * fh * fw;
-                }
-            }
-        }
-    }
-
-    // Convert back to original dtype and device
-    if (grad_input.dtype() != original_dtype) {
-        grad_input = grad_input.to(original_dtype);
-    }
-    if (grad_input.device() != original_device) {
-        grad_input = grad_input.to(original_device);
-    }
-
-    return {grad_input};
+    std::vector<Tensor> dispatch_inputs = {grad_output};
+    auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
+    return {results[0]};
 }
 
 auto UpsampleBilinearBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // UpsampleBilinear backward is a linear adjoint (a weighted scatter). A
-    // mathematically correct higher-order implementation needs a dedicated
-    // Function whose own backward is upsample_forward; the hand-written pixel
-    // accumulation here has no Variable-level counterpart. First-order grads
-    // are correct via the Tensor path; `create_graph=true` loses the graph at
-    // this node until a dedicated adjoint Function is added.
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Audit D3: real Variable-level backward + true higher-order.
+    //
+    // The bilinear-backward op is a linear scatter A^T (where A is the
+    // forward bilinear upsample). Its adjoint at the Variable level is
+    // therefore A itself — bilinear upsample of the next-level gradient.
+    //
+    // Strategy: compute grad_input via the tensor-level dispatch (no CPU
+    // fallback, see backward()), then attach a fresh `UpsampleBilinearAdjoint`
+    // grad_fn whose backward dispatches `OpId::Interpolate` on the next-level
+    // gradient. That re-enters the autograd machinery and produces a real
+    // 2nd-order graph.
+    const Variable& grad_out = grad_outputs[0];
+    Tensor grad_input_t = backward({grad_out.tensor()})[0];
+
+    Variable grad_input(grad_input_t, grad_out.requires_grad());
+    if (grad_out.requires_grad() && is_grad_enabled()) {
+        // Build the adjoint Function: its `backward` applies bilinear upsample
+        // to the incoming next-level grad (shape input_h × input_w) to produce
+        // a tensor of shape output_h × output_w — completing the chain.
+        auto adjoint = std::make_shared<UpsampleBilinearForwardAdjoint>(
+            input_h_, input_w_, output_h_, output_w_);
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(grad_out.grad_fn());
+        adjoint->set_next_functions(std::move(next_funcs));
+        std::vector<Variable> input_vars;
+        input_vars.push_back(grad_out);
+        adjoint->set_input_variables(std::move(input_vars));
+        grad_input.set_grad_fn(adjoint);
+    }
+    return {grad_input};
+}
+
+// ============================================================================
+// UpsampleBilinearForwardAdjoint (audit D3)
+// ============================================================================
+//
+// Used by `UpsampleBilinearBackward::backward_with_variables` to express the
+// 2nd-order chain: forward is *no-op* (the engine never invokes this
+// directly), backward applies bilinear upsample (`OpId::Interpolate`) to
+// the next-level gradient — turning a (input_h × input_w)-shaped grad into
+// a (output_h × output_w)-shaped grad, matching the original forward op.
+
+auto UpsampleBilinearForwardAdjoint::forward(std::vector<Variable> /*inputs*/)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "UpsampleBilinearForwardAdjoint::forward should not be called directly");
+}
+
+auto UpsampleBilinearForwardAdjoint::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    const Tensor& g = grad_outputs[0];
+    OpAttributes attrs;
+    attrs.set(AttrKey::OutputSize,
+              std::to_string(output_h_) + "," + std::to_string(output_w_));
+    attrs.set(AttrKey::Mode, "bilinear");
+    attrs.set(AttrKey::AlignCorners, false);
+    std::vector<Tensor> dispatch_inputs = {g};
+    auto results = tenzor::dispatch(OpId::Interpolate, dispatch_inputs, attrs);
+    return {results[0]};
+}
+
+auto UpsampleBilinearForwardAdjoint::backward_with_variables(
+    std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Recursive higher-order: re-enter UpsampleBilinearBackward to provide
+    // the backward-of-the-forward. This pairs symmetrically with
+    // UpsampleBilinearBackward::backward_with_variables above.
+    const Variable& g = grad_outputs[0];
+    auto fwd_result = backward({g.tensor()});  // bilinear upsample, tensor-level
+    Variable out(fwd_result[0], g.requires_grad());
+    if (g.requires_grad() && is_grad_enabled()) {
+        auto bwd = std::make_shared<UpsampleBilinearBackward>(
+            input_h_, input_w_, output_h_, output_w_);
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(g.grad_fn());
+        bwd->set_next_functions(std::move(next_funcs));
+        std::vector<Variable> input_vars;
+        input_vars.push_back(g);
+        bwd->set_input_variables(std::move(input_vars));
+        out.set_grad_fn(bwd);
+    }
+    return {out};
 }
 
 // ============================================================================

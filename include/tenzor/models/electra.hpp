@@ -313,6 +313,9 @@ public:
      */
     auto get_discriminator() -> std::shared_ptr<ElectraDiscriminator> { return discriminator_; }
 
+    /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
+
 private:
     ElectraConfig config_;
     std::shared_ptr<ElectraGenerator> generator_;

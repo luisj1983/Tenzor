@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/t5.hpp"
+#include "tenzor/models/hub.hpp"  // Audit H4
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -554,11 +555,28 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
     int64_t seq_len = decoder_input_ids.shape()[1];
     auto causal_mask = create_causal_mask(seq_len, decoder_input_ids.tensor().device());
 
-    // Combine with provided mask if exists
+    // Audit G12: real combination of causal mask with the decoder's padding
+    // mask. Previously this branch just re-assigned `causal_mask` (the
+    // padding mask was silently dropped), so generation past the first PAD
+    // token would attend to padded positions.
+    //
+    // `decoder_attention_mask` follows the HuggingFace convention: shape
+    // (B, T), 1=keep, 0=mask. T5 attention adds the mask additively to the
+    // scores, so we convert binary → {-1e9, 0} via `(mask - 1) * 1e9`, then
+    // reshape to (B, 1, 1, T) and broadcast-add with the (T, T) causal mask
+    // reshaped to (1, 1, T, T). Result shape (B, 1, T, T) broadcasts to
+    // attention scores (B, num_heads, T, T).
     Tensor combined_mask = causal_mask;
     if (decoder_attention_mask.is_valid() && decoder_attention_mask.numel() > 0) {
-        // Combine causal mask with padding mask
-        combined_mask = causal_mask;  // For now, just use causal mask
+        const int64_t B = decoder_attention_mask.shape()[0];
+        const DType dtype = causal_mask.dtype();
+
+        Tensor pad = decoder_attention_mask.to(dtype).to(causal_mask.device());
+        Tensor pad_additive = (pad - 1.0) * 1e9;  // 1.0→0, 0.0→-1e9
+        pad_additive = pad_additive.reshape({B, 1, 1, seq_len});
+
+        Tensor causal_4d = causal_mask.reshape({1, 1, seq_len, seq_len});
+        combined_mask = causal_4d + pad_additive;  // (B, 1, T, T) via broadcast
     }
 
     // Pass through decoder blocks
@@ -637,6 +655,11 @@ auto T5Model::forward_impl(const Variable& input) -> Variable {
     return encoder_->forward(input, Tensor{});
 }
 
+auto T5Model::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4. See AlbertModel::load_pretrained.
+    ModelHub::load_pretrained_weights(*this, path, strict);
+}
+
 // ============================================================================
 // T5ForConditionalGeneration Implementation
 // ============================================================================
@@ -672,16 +695,33 @@ auto T5ForConditionalGeneration::forward_impl([[maybe_unused]] const Variable& i
     throw std::runtime_error("T5ForConditionalGeneration::forward requires decoder_input_ids");
 }
 
+auto T5ForConditionalGeneration::load_pretrained(const std::string& path, bool strict) -> void {
+    // Audit H4. See AlbertModel::load_pretrained.
+    ModelHub::load_pretrained_weights(*this, path, strict);
+}
+
 auto T5ForConditionalGeneration::generate(const Variable& input_ids,
                                            int64_t max_length,
-                                           double temperature) -> Tensor {
+                                           double temperature,
+                                           int64_t bos_token_id) -> Tensor {
     // Simple greedy generation (can be extended with beam search, sampling, etc.)
     auto batch_size = input_ids.shape()[0];
     auto device = input_ids.tensor().device();
 
-    // Start with BOS token (assume token 0)
-    Tensor generated({batch_size, 1}, DType::Int64, device);
-    generated.zero_();
+    // Audit G15: use the model's configured decoder_start_token_id instead
+    // of hard-coding 0 ("assume token 0"). Caller can override via the
+    // `bos_token_id` argument (e.g. for tokenizers whose start token differs
+    // from the saved config). HuggingFace T5 convention: T5 starts decoding
+    // from `decoder_start_token_id` rather than a separate BOS.
+    const int64_t start_token = (bos_token_id >= 0)
+        ? bos_token_id
+        : config_.decoder_start_token_id;
+
+    // Allocate on CPU for the int64 fill, then move to target device.
+    Tensor generated_cpu({batch_size, 1}, DType::Int64, Device::cpu());
+    auto* gp = generated_cpu.data<int64_t>();
+    for (int64_t b = 0; b < batch_size; ++b) gp[b] = start_token;
+    Tensor generated = (device == Device::cpu()) ? generated_cpu : generated_cpu.to(device);
 
     for (int64_t i = 0; i < max_length; ++i) {
         Variable decoder_ids(generated, false);

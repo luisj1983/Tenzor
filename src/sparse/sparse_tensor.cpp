@@ -808,17 +808,36 @@ auto SparseTensor::coalesce() const -> SparseTensor {
     //      new_values[group_id[i]] += sorted_values[i]   (scatter_add)
     Device dev = indices_.device();
     DType vdtype = values_.dtype();
+    // J16-followup: Complex coalesce via real/imag split. Since both
+    // SparseTensors share the same `indices_`, the segment-key sort
+    // permutation is identical for both halves — so the coalesced
+    // outputs have the same `new_indices` and we can recombine via
+    // `tenzor::complex(real, imag)`.
+    if (vdtype == DType::Complex64 || vdtype == DType::Complex128) {
+        Tensor re = ::tenzor::real(values_);
+        Tensor im = ::tenzor::imag(values_);
+        // Build two SparseTensors with identical indices but real/imag values.
+        SparseTensor st_re = sparse_coo(indices_, re,
+                                         std::vector<int64_t>(shape_.begin(), shape_.end()));
+        SparseTensor st_im = sparse_coo(indices_, im,
+                                         std::vector<int64_t>(shape_.begin(), shape_.end()));
+        SparseTensor co_re = st_re.coalesce();
+        SparseTensor co_im = st_im.coalesce();
+        // Indices match across the two by construction (same input ordering).
+        Tensor merged_values = ::tenzor::complex(co_re.values(), co_im.values());
+        SparseTensor result = sparse_coo(co_re.indices(), merged_values,
+                                          std::vector<int64_t>(shape_.begin(), shape_.end()));
+        result.coalesced_ = true;
+        return result;
+    }
     if (vdtype != DType::Float32 && vdtype != DType::Float64 &&
         vdtype != DType::Int32 && vdtype != DType::Int64) {
-        // After the widening table above, only Complex64 / Complex128 reach
-        // here. The previous host fallback only handled Float32/Float64
-        // anyway — it never actually supported Complex — so reject with a
-        // clear error rather than CPU-roundtripping for a path that can't
-        // succeed.
+        // After the widening table above + the Complex split path above,
+        // anything that reaches here is a genuinely-unsupported value
+        // dtype. Throw with the most informative message we can.
         throw std::runtime_error(
             std::string("SparseTensor::coalesce: unsupported value dtype ") +
-            std::string(dtype_name(vdtype)) +
-            " (split into real/imag SparseTensors and coalesce each)");
+            std::string(dtype_name(vdtype)));
     }
 
     {

@@ -286,6 +286,9 @@ public:
      */
     auto config() const -> const GPT2Config& { return config_; }
 
+    /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
+    auto load_pretrained(const std::string& path, bool strict = true) -> void;
+
 protected:
     GPT2Config config_;                                           ///< Model configuration
     std::shared_ptr<GPTEmbeddings> embeddings_;                  ///< Token + position embeddings

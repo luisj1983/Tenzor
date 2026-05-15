@@ -54,15 +54,25 @@ template<> __device__ __host__ inline int32_t sentinel_max<int32_t>() { return I
 template<> __device__ __host__ inline int64_t sentinel_lowest<int64_t>() { return INT64_MIN; }
 template<> __device__ __host__ inline int64_t sentinel_max<int64_t>() { return INT64_MAX; }
 
-// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
+// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays).
+//
+// Audit F3: rank cap lifted from 8 to 16 — matches the activations.cu copy
+// and the maximum supported in CPU/ROCm. The old 8-dim limit silently
+// truncated higher-rank tensors (e.g. block-sparse attention with rank 9+).
+constexpr int DIM_META_MAX_RANK = 16;
 struct DimMeta {
-    int64_t shape[8];
-    int64_t strides[8];
+    int64_t shape[DIM_META_MAX_RANK];
+    int64_t strides[DIM_META_MAX_RANK];
 };
 
 static DimMeta make_dim_meta(const std::vector<int64_t>& shape, const std::vector<int64_t>& strides) {
+    if (shape.size() > DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA DimMeta (reduction): tensor rank " + std::to_string(shape.size()) +
+            " exceeds maximum " + std::to_string(DIM_META_MAX_RANK));
+    }
     DimMeta meta{};
-    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+    for (size_t i = 0; i < shape.size(); ++i) {
         meta.shape[i] = shape[i];
         meta.strides[i] = strides[i];
     }

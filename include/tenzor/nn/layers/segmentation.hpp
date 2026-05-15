@@ -169,8 +169,9 @@ private:
  * @param target_w Target width
  * @return Upsampled tensor of shape (N, C, target_h, target_w)
  *
- * @note This is implemented using nearest neighbor for now. Full bilinear
- *       interpolation should be implemented in core ops.
+ * @note Dispatches to `OpId::Interpolate` with `mode="bilinear"`. The backward
+ *       (`UpsampleBilinearBackward`) distributes the gradient over the four
+ *       nearest input pixels in proportion to the source fractional coords.
  */
 auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w)
     -> Variable;

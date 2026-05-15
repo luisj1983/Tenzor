@@ -876,8 +876,12 @@ auto ifftn_kernel(const Tensor& input,
 #else // !TENZOR_USE_MKL
 
 // ============================================================================
-// Stub kernels when MKL is not available
-// These throw to fall through to the naive O(n^2) DFT fallback in fft.cpp
+// Stub kernels when MKL is not available.
+// The build hard-links MKL today, so this branch is unreachable in practice.
+// The stubs throw a clear error rather than silently no-op'ing; a future
+// non-MKL CPU FFT path (Cooley-Tukey + Bluestein for non-power-of-two) would
+// replace these throws, matching what the OneAPI/ROCm backends do when their
+// vendor FFT library is absent.
 // ============================================================================
 
 auto fft_kernel(const Tensor&, int64_t, int64_t, std::string_view) -> Tensor {

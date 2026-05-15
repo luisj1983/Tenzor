@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <vector>
 #include <tuple>
@@ -178,6 +179,21 @@ private:
  * auto [boxes, labels, scores, masks] = detections;
  * @endcode
  */
+/**
+ * @brief Structured output bundle for Mask R-CNN inference.
+ *
+ * Audit G7: returned by `MaskRCNN::detect(images)`. The generic `forward()`
+ * entry point on Module returns a single Variable, so it packs boxes + scores
+ * + labels into a flat (N, 6) tensor (YOLOv5 convention) and drops the masks.
+ * Callers who need masks should use `detect()` instead.
+ */
+struct Detections {
+    Tensor boxes;   ///< (N, 4) bounding boxes in (x1, y1, x2, y2) format
+    Tensor labels;  ///< (N,) class indices (Int64)
+    Tensor scores;  ///< (N,) confidence scores
+    Tensor masks;   ///< (N, H, W) binary mask predictions
+};
+
 class MaskRCNN : public nn::Module {
 public:
     /**
@@ -252,6 +268,20 @@ public:
         -> std::tuple<Tensor, Tensor, Tensor, Tensor>;
 
     /**
+     * @brief Inference convenience returning a structured `Detections` bundle.
+     *
+     * Audit G7: callers who use the generic `Module::forward(images)` entry
+     * point get a packed (N, 6) `[x1, y1, x2, y2, score, label]` Variable
+     * (YOLOv5 convention) with masks dropped, because Module returns a single
+     * Variable. This method gives access to all four outputs (boxes, labels,
+     * scores, masks) in a named-field struct.
+     *
+     * @param images Input image batch (N, 3, H, W)
+     * @return Detections{boxes, labels, scores, masks}
+     */
+    auto detect(const Variable& images) -> Detections;
+
+    /**
      * @brief Load pretrained weights.
      *
      * Supports loading weights from:
@@ -269,10 +299,45 @@ public:
      */
     auto num_classes() const -> int64_t { return num_classes_; }
 
+    /**
+     * @brief Run the RPN and produce per-batch proposals.
+     *
+     * Exposed (rather than private) so regression tests can verify that the
+     * decoded boxes are meaningful — see G4 in the audit-remediation plan,
+     * which replaced a dummy `fill_(0.0)` proposal slab with a real
+     * decode → clip → small-filter → top-K → NMS → top-K chain.
+     *
+     * Output shape: (num_proposals, 5) = (batch_idx, x1, y1, x2, y2).
+     */
+    auto generate_proposals(const Variable& features) -> Tensor;
+
+    /**
+     * @brief Sample training-time positive and negative ROIs from proposals.
+     *
+     * Exposed for testing (G5 audit fix). Implements torchvision-style
+     * balanced sampling: positives are proposals whose max IoU with any GT
+     * box in the same image is ≥ 0.5; negatives are the rest. Per image,
+     * picks up to `num_samples * positive_fraction` positives, then fills
+     * the remainder with negatives.
+     *
+     * Output shape: (sampled, 5) matching the proposal layout.
+     */
+    auto select_training_samples(const Tensor& proposals,
+                                  const Tensor& gt_boxes,
+                                  const Tensor& gt_labels) -> Tensor;
+
 private:
     // Model components
     std::shared_ptr<nn::Module> backbone_;              ///< Feature extractor (e.g., ResNet-50)
-    std::shared_ptr<nn::Conv2d> feature_proj_;          ///< Project backbone features to 256 channels
+    // Audit G6: real FPN encoder. Builds P2-P5 from C2-C5 via lateral (1×1)
+    // and smoothing (3×3) convs with top-down (nearest) upsample additions.
+    // extract_features returns P4 (stride 16, 256 channels) so the rest of the
+    // pipeline (RPN, ROI Align, anchor generator) — all already configured for
+    // stride 16 — sees a feature map at the right resolution AND benefits from
+    // top-down high-level semantics injected from P5. Replaces the previous
+    // single 2048→256 1×1 conv that produced a flat C5 projection.
+    std::array<std::shared_ptr<nn::Conv2d>, 4> fpn_lateral_;  ///< 1×1 convs Cᵢ → 256 (i=2..5)
+    std::array<std::shared_ptr<nn::Conv2d>, 4> fpn_smooth_;   ///< 3×3 anti-alias convs on each Pᵢ
     std::shared_ptr<RPN> rpn_;                          ///< Region Proposal Network
     std::shared_ptr<nn::detection::ROIAlign> roi_align_box_;   ///< ROI Align for boxes (7×7)
     std::shared_ptr<nn::detection::ROIAlign> roi_align_mask_;  ///< ROI Align for masks (14×14)
@@ -295,10 +360,6 @@ private:
 
     // Helper functions
     auto extract_features(const Variable& images) -> Variable;
-    auto generate_proposals(const Variable& features) -> Tensor;
-    auto select_training_samples(const Tensor& proposals,
-                                  const Tensor& gt_boxes,
-                                  const Tensor& gt_labels) -> Tensor;
 };
 
 // ============================================================================

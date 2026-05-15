@@ -11,6 +11,7 @@
  */
 
 #include "tenzor/distributed/sequence_parallel.hpp"
+#include "tenzor/distributed/process_group.hpp"  // ProcessGroupBase (B3)
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
@@ -66,23 +67,24 @@ auto SequenceParallel::gather_sequence(const Tensor& input,
         return input;  // Single-process: no-op
     }
 
-    // All-gather along the TP group: each rank contributes its local
-    // sequence partition, and we concatenate along seq_dim.
-    //
-    // Use the mesh to get the TP submesh ranks, then communicate
-    // via the process group associated with the mesh.
-    auto tp_ranks = mesh_->get_submesh(tp_dim_name_);
+    // Audit B3: communicate via the per-axis sub-PG, not the global PG.
+    // The mesh returns the sub-PG spanning the TP axis (created lazily via
+    // ProcessGroupBase::split on first access). Falling back to the global
+    // PG would collect tensors across ranks that don't share this rank's
+    // non-TP coordinates, producing wrong results on multi-axis meshes.
+    auto pg = mesh_->process_group_for_dim(tp_dim_name_);
+    if (!pg) {
+        throw std::runtime_error(
+            "SequenceParallel::gather_sequence: mesh dim '" + tp_dim_name_ +
+            "' has tp_size " + std::to_string(tp_size_) +
+            " but no ProcessGroup is attached to the mesh. Call "
+            "DeviceMesh::set_process_group() before constructing "
+            "SequenceParallel.");
+    }
 
-    // All-gather: collect local tensor from all TP ranks
-    // For now, we use the DistributedContext's process group.
-    // In a full implementation, the DeviceMesh would provide a
-    // sub-process-group for the TP dimension.
-    auto& pg = *DistributedContext::get_process_group();
-
-    std::vector<Tensor> gathered(tp_size_);
-    pg.all_gather(input, gathered);
-
-    // Concatenate all chunks along the sequence dimension
+    std::vector<Tensor> gathered;
+    pg->all_gather(gathered, input);
+    // Concatenate all chunks along the sequence dimension.
     return cat(gathered, seq_dim);
 }
 
@@ -105,19 +107,23 @@ auto SequenceParallel::post_attention_scatter(const Tensor& input,
             std::to_string(tp_size_) + ")");
     }
 
+    // Audit B3: use the per-axis sub-PG (see gather_sequence above).
+    auto pg = mesh_->process_group_for_dim(tp_dim_name_);
+    if (!pg) {
+        throw std::runtime_error(
+            "SequenceParallel::post_attention_scatter: mesh dim '" +
+            tp_dim_name_ + "' has tp_size " + std::to_string(tp_size_) +
+            " but no ProcessGroup is attached to the mesh.");
+    }
+
     // Reduce-scatter: split the input along seq_dim into tp_size chunks,
     // reduce (sum) corresponding chunks across ranks, and each rank
-    // keeps its chunk.
+    // keeps its chunk. ProcessGroupBase::reduce_scatter signature is
+    // (Tensor& output, span<const Tensor> input).
     auto chunks = input.chunk(tp_size_, seq_dim);
-
-    // Convert chunks to a vector<Tensor> for reduce_scatter
     std::vector<Tensor> chunk_vec(chunks.begin(), chunks.end());
-
-    auto& pg = *DistributedContext::get_process_group();
-
     Tensor output = empty_like(chunk_vec[tp_rank_]);
-    pg.reduce_scatter(chunk_vec, output, ReduceOp::SUM);
-
+    pg->reduce_scatter(output, chunk_vec);
     return output;
 }
 

@@ -93,6 +93,62 @@ TEST_F(FasterRCNNTest, FasterRCNNDifferentImageSizes) {
     EXPECT_EQ(detections_1024.size(), 1);
 }
 
+// G9 regression: forward_impl must pack detections into (N_total, 7), not
+// return a dummy single-element zeros tensor.
+TEST_F(FasterRCNNTest, ForwardImplPacks7Columns_G9) {
+    auto model = faster_rcnn_resnet50(91, false);
+    model->eval();
+
+    // Two-image batch: (B=2, 3, 800, 800).
+    Variable images(Tensor({2, 3, 800, 800}, DType::Float32, device_), false);
+
+    Variable output = model->forward(images);
+    const auto& shape = output.tensor().shape();
+    ASSERT_EQ(shape.size(), 2u) << "Expected (N, 7) — got rank " << shape.size();
+    EXPECT_EQ(shape[1], 7)
+        << "Each row must be (batch_idx, x1, y1, x2, y2, score, label)";
+    // Empty output (shape[0] == 0) is acceptable for an untrained model with
+    // post-NMS filtering, but the rank/column count contract must hold.
+}
+
+// G8 regression: ResNet::out_channels() must reflect block type.
+TEST_F(FasterRCNNTest, ResNetOutChannelsPerVariant_G8) {
+    auto r18 = resnet18(1000, false);
+    auto r34 = resnet34(1000, false);
+    auto r50 = resnet50(1000, false);
+    auto r101 = resnet101(1000, false);
+    auto r152 = resnet152(1000, false);
+
+    // BasicBlock (expansion=1) → 512×1 = 512.
+    EXPECT_EQ(r18->out_channels(), 512);
+    EXPECT_EQ(r34->out_channels(), 512);
+
+    // Bottleneck (expansion=4) → 512×4 = 2048.
+    EXPECT_EQ(r50->out_channels(), 2048);
+    EXPECT_EQ(r101->out_channels(), 2048);
+    EXPECT_EQ(r152->out_channels(), 2048);
+}
+
+// G8 regression: Faster R-CNN must size its RPN/ROI head from the backbone's
+// real terminal channel count. Before the fix, the model assumed 2048 even
+// for ResNet-18/34 (which output 512), causing a Conv2d shape mismatch at
+// the first RPN forward.
+TEST_F(FasterRCNNTest, FasterRCNNResNet18Backbone_G8) {
+    // Construct Faster R-CNN with a BasicBlock backbone (ResNet-18).
+    auto backbone = resnet18(1000, false);
+    auto model = std::make_shared<FasterRCNN>(backbone, /*num_classes=*/91);
+    model->eval();
+
+    // The forward pass must not throw on channel mismatch. With 256x256 input
+    // ResNet-18's layer4 produces a (B, 512, 8, 8) feature map; the RPN's
+    // first conv is now 512→256 (instead of broken 2048→256).
+    Variable images(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    EXPECT_NO_THROW({
+        auto detections = model->forward_inference(images);
+        EXPECT_EQ(detections.size(), 1);
+    });
+}
+
 
 // ============================================================================
 // Main  

@@ -30,6 +30,7 @@ set(TENZOR_CORE_SOURCES
     backend/cuda_graph_stub.cpp
     ops/op_id.cpp
     ops/creation.cpp
+    ops/philox_dropout.cpp   # F13/F22-followup: Philox-keyed dropout mask
     ops/math.cpp
     ops/type_promotion.cpp
     ops/fp8_scaling.cpp
@@ -64,6 +65,7 @@ set(TENZOR_CORE_SOURCES
     autograd/function_vision.cpp
     autograd/function_new_ops.cpp
     autograd/function_attention.cpp
+    autograd/function_distributed.cpp
     autograd/engine.cpp
     autograd/ops.cpp
     autograd/checkpoint.cpp
@@ -208,6 +210,7 @@ set(TENZOR_CORE_SOURCES
     onnx/importer.cpp
     onnx/graph_module.cpp
     io/image.cpp
+    io/torch_pickle.cpp     # H2-followup: native PyTorch .pth loader
     jit/tracer.cpp
     jit/graph.cpp
     jit/compiler.cpp

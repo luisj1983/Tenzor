@@ -165,11 +165,21 @@ auto VulkanBackend::dispatchSTFT(const Tensor& input, int64_t n_fft,
     if (onesided) {
         fft_out = dispatchRFFT(framed, /*dim=*/2, n_fft, normalized ? "ortho" : "backward");
     } else {
-        // For non-onesided we need a complex input; cast framed → complex first by
-        // building a complex tensor (real part = framed, imag = 0) and calling FFT.
-        // dispatchFFT expects Complex64. Use dispatch::add zero imag via existing ops.
-        // Pragmatic: rfft is the common case; non-onesided is rare.
-        throw std::runtime_error("Vulkan STFT: onesided=false not yet supported");
+        // F19: onesided=false path. PyTorch's two-sided STFT returns the
+        // full n_fft frequency bins (rfft would only keep n_fft/2+1).
+        // Build Complex64 input from real `framed` (imag = 0), then run the
+        // full-spectrum FFT via dispatchFFT.
+        //
+        // Shape progression:
+        //   framed:        (B, num_frames, n_fft)         — Float32 (or Float64 widened)
+        //   complex input: (B, num_frames, n_fft)         — Complex64, imag=0
+        //   FFT output:    (B, num_frames, n_fft)         — Complex64, full two-sided spectrum
+        //
+        // Caller's downstream reshape uses `freq_bins`, which was set above
+        // to `n_fft` when `onesided == false`, so the output shape lines up.
+        Tensor framed_imag = tenzor::zeros_like(framed);
+        Tensor framed_complex = tenzor::complex(framed, framed_imag);
+        fft_out = dispatchFFT(framed_complex, /*dim=*/2, n_fft, normalized ? "ortho" : "backward");
     }
     // fft_out: (B, num_frames, freq_bins) Complex64
 
@@ -190,7 +200,6 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
     if (n_fft <= 0) throw std::runtime_error("istft: n_fft must be > 0");
     if (hop_length <= 0) hop_length = n_fft / 4;
     if (win_length <= 0) win_length = n_fft;
-    if (!onesided) throw std::runtime_error("Vulkan ISTFT: onesided=false not yet supported");
 
     auto in_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(in_shape.size());
@@ -201,6 +210,18 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
     int64_t batch_size = 1;
     for (int64_t d = 0; d < ndim - 2; ++d) batch_size *= in_shape[d];
 
+    // F19: onesided=false sanity-check. The two-sided spectrum must have
+    // exactly n_fft frequency bins (vs n_fft/2+1 for the onesided case).
+    if (!onesided && freq_bins != n_fft) {
+        throw std::invalid_argument(
+            "Vulkan ISTFT: onesided=false requires input freq_bins == n_fft, got " +
+            std::to_string(freq_bins) + " != " + std::to_string(n_fft));
+    }
+    if (onesided && freq_bins != n_fft / 2 + 1) {
+        // (existing behaviour — keep consistent with the onesided path)
+        // No throw here historically; leave that path alone.
+    }
+
     int64_t expected_length = n_fft + (num_frames - 1) * hop_length;
 
     Tensor input_c64 = (input.dtype() != DType::Complex64) ? input.to(DType::Complex64)
@@ -210,8 +231,23 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
     Tensor transposed_contig = transposed.contiguous();
     // (B, num_frames, freq_bins) Complex64
 
-    // Inverse RFFT → (B, num_frames, n_fft) Float32
-    Tensor time_frames = dispatchIRFFT(transposed_contig, /*dim=*/2, n_fft, "backward");
+    Tensor time_frames;
+    if (onesided) {
+        // Inverse RFFT → (B, num_frames, n_fft) Float32
+        time_frames = dispatchIRFFT(transposed_contig, /*dim=*/2, n_fft, "backward");
+    } else {
+        // F19: onesided=false inverse path. The full two-sided spectrum
+        // already has the Hermitian-symmetry conjugate bins; run the full
+        // IFFT (not IRFFT) and take the real part — the imaginary part
+        // should be ≈0 for a real-input signal, but we drop it explicitly
+        // so callers get the canonical Float32 output regardless of any
+        // numerical noise.
+        Tensor ifft_complex = dispatchIFFT(transposed_contig, /*dim=*/2, n_fft, "backward");
+        // dispatchReal returns the real part as Float32; the result is
+        // (B, num_frames, n_fft) Float32 — same shape the IRFFT path
+        // produces, so the rest of the function is reuse-as-is.
+        time_frames = dispatchReal(ifft_complex);
+    }
 
     int32_t device_id = input.device().index;
 
