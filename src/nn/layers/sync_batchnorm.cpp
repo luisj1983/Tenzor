@@ -164,6 +164,23 @@ public:
             // Legacy regime: no autograd-aware PG. Same disconnection-on-
             // higher-order behavior as before; `is_higher_order_stub()`
             // returns true so the engine flags this path under Warn/Error.
+            //
+            // M13 fix: if any caller asks for a second-order gradient
+            // through this stub path, the result would be silently wrong
+            // (the AllReduceFn callback is a black-box that breaks
+            // autograd's higher-order graph reconstruction). Throw with
+            // a clear error directing to the ProcessGroup constructor
+            // rather than producing a silently-incorrect gradient.
+            const bool any_requires_grad = !grad_outputs.empty()
+                                         && grad_outputs[0].requires_grad();
+            if (any_requires_grad) {
+                throw std::runtime_error(
+                    "SyncBatchNorm: legacy AllReduceFn constructor cannot "
+                    "produce correct higher-order gradients (the raw callback "
+                    "breaks the autograd graph). Use the "
+                    "SyncBatchNorm(features, ProcessGroup, ...) constructor "
+                    "for full higher-order autograd support.");
+            }
             std::vector<Tensor> tensor_grads;
             tensor_grads.reserve(grad_outputs.size());
             for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());

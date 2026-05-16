@@ -104,6 +104,17 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
         throw std::runtime_error("oneapi spmm_kernel requires CSR format");
     }
 
+    // Wave F5 (deferred → landed): F16/BF16 via widen-narrow through F32.
+    if (A.values().dtype() == DType::Float16 || A.values().dtype() == DType::BFloat16) {
+        DType orig = A.values().dtype();
+        auto vals_f32 = A.values().to(DType::Float32);
+        auto A_f32 = SparseTensor::sparse_csr(A.crow_indices(), A.col_indices(),
+                                              vals_f32, A.shape());
+        auto B_f32 = B.to(DType::Float32);
+        auto C_f32 = spmm_kernel(A_f32, B_f32, queue);
+        return C_f32.to(orig);
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
     int64_t n = B.shape()[1];
@@ -112,7 +123,18 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
     auto col = A.col_indices();
     auto vals = A.values();
 
-    Tensor C({m, n}, B.dtype(), vals.device());
+    // M7 fix: assert A.values dtype == B dtype before kernel dispatch.
+    // The kernel reinterprets buffers via `data<float>()` / `data<double>()`
+    // based on a single dtype branch, so a mismatch would silently
+    // misread one of the operands.
+    if (vals.dtype() != B.dtype()) {
+        throw std::runtime_error(
+            "oneapi spmm_kernel: sparse values dtype (" +
+            std::string(dtype_name(vals.dtype())) +
+            ") must match dense B dtype (" +
+            std::string(dtype_name(B.dtype())) + ")");
+    }
+    Tensor C({m, n}, vals.dtype(), vals.device());
 
     if (vals.dtype() == DType::Float32) {
         auto* crow_ptr = crow.data<std::int64_t>();

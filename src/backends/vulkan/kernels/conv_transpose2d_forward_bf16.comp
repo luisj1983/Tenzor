@@ -18,10 +18,14 @@ layout(push_constant) uniform PushConstants {
     uint in_width;
     uint kernel_h;
     uint kernel_w;
-    uint stride;
-    uint padding;
-    uint output_padding;
-    uint dilation;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint output_padding_h;
+    uint output_padding_w;
+    uint dil_h;
+    uint dil_w;
     uint groups;
     uint out_h;
     uint out_w;
@@ -82,13 +86,13 @@ void main() {
     for (uint ic = 0; ic < in_channels_per_group; ic++) {
         for (uint kh = 0; kh < params.kernel_h; kh++) {
             for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int h_shifted = int(oh) + int(params.padding) - int(kh * params.dilation);
-                int w_shifted = int(ow) + int(params.padding) - int(kw * params.dilation);
+                int h_shifted = int(oh) + int(params.pad_h) - int(kh * params.dil_h);
+                int w_shifted = int(ow) + int(params.pad_w) - int(kw * params.dil_w);
 
-                if (h_shifted >= 0 && h_shifted % int(params.stride) == 0 &&
-                    w_shifted >= 0 && w_shifted % int(params.stride) == 0) {
-                    int ih = h_shifted / int(params.stride);
-                    int iw = w_shifted / int(params.stride);
+                if (h_shifted >= 0 && h_shifted % int(params.stride_h) == 0 &&
+                    w_shifted >= 0 && w_shifted % int(params.stride_w) == 0) {
+                    int ih = h_shifted / int(params.stride_h);
+                    int iw = w_shifted / int(params.stride_w);
 
                     if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
                         uint input_idx = n * (params.in_channels * params.in_height * params.in_width) +

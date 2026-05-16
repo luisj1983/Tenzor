@@ -18,10 +18,14 @@ layout(push_constant) uniform PushConstants {
     uint in_width;        // Input width
     uint kernel_h;        // Kernel height
     uint kernel_w;        // Kernel width
-    uint stride;          // Stride
-    uint padding;         // Padding
-    uint output_padding;  // Output padding
-    uint dilation;        // Dilation
+    uint stride_h;        // Stride along H axis
+    uint stride_w;        // Stride along W axis
+    uint pad_h;           // Padding along H axis
+    uint pad_w;           // Padding along W axis
+    uint output_padding_h;// Output padding along H axis
+    uint output_padding_w;// Output padding along W axis
+    uint dil_h;           // Dilation along H axis
+    uint dil_w;           // Dilation along W axis
     uint groups;          // Groups (for grouped convolution)
     uint out_h;           // Output height
     uint out_w;           // Output width
@@ -61,15 +65,15 @@ void main() {
                 // ih * stride = oh + padding - kh * dilation
                 // ih = (oh + padding - kh * dilation) / stride (must be integer and in bounds)
 
-                int h_shifted = int(oh) + int(params.padding) - int(kh * params.dilation);
-                int w_shifted = int(ow) + int(params.padding) - int(kw * params.dilation);
+                int h_shifted = int(oh) + int(params.pad_h) - int(kh * params.dil_h);
+                int w_shifted = int(ow) + int(params.pad_w) - int(kw * params.dil_w);
 
                 // Check if this maps to a valid input position (must be divisible by stride)
-                if (h_shifted >= 0 && h_shifted % int(params.stride) == 0 &&
-                    w_shifted >= 0 && w_shifted % int(params.stride) == 0) {
+                if (h_shifted >= 0 && h_shifted % int(params.stride_h) == 0 &&
+                    w_shifted >= 0 && w_shifted % int(params.stride_w) == 0) {
 
-                    int ih = h_shifted / int(params.stride);
-                    int iw = w_shifted / int(params.stride);
+                    int ih = h_shifted / int(params.stride_h);
+                    int iw = w_shifted / int(params.stride_w);
 
                     if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
                         // Get input value

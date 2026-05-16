@@ -1,5 +1,6 @@
 #ifdef TENZOR_HAS_CUDNN
 
+#include <array>
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/cuda_config.hpp"
@@ -3828,9 +3829,9 @@ auto cudnn_conv3d_forward(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    std::array<int64_t, 3> stride,    // {sD, sH, sW}
+    std::array<int64_t, 3> padding,   // {pD, pH, pW}
+    std::array<int64_t, 3> dilation,  // {dD, dH, dW}
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
@@ -3849,9 +3850,9 @@ auto cudnn_conv3d_forward(
     int64_t kernel_h = weight_shape[3];
     int64_t kernel_w = weight_shape[4];
 
-    int64_t out_d = (depth + 2 * padding - dilation * (kernel_d - 1) - 1) / stride + 1;
-    int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    int64_t out_d = (depth  + 2 * padding[0] - dilation[0] * (kernel_d - 1) - 1) / stride[0] + 1;
+    int64_t out_h = (height + 2 * padding[1] - dilation[1] * (kernel_h - 1) - 1) / stride[1] + 1;
+    int64_t out_w = (width  + 2 * padding[2] - dilation[2] * (kernel_w - 1) - 1) / stride[2] + 1;
 
     std::vector<int64_t> output_shape = {batch, out_channels, out_d, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
@@ -3880,9 +3881,9 @@ auto cudnn_conv3d_forward(
     output_desc.set(cudnn_dtype, output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
-    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
-    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
+    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
+    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
     conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
@@ -3974,9 +3975,9 @@ auto cudnn_conv3d_backward(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    std::array<int64_t, 3> stride,
+    std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> dilation,
     int64_t groups,
     bool compute_grad_input,
     bool compute_grad_weight,
@@ -4027,9 +4028,9 @@ auto cudnn_conv3d_backward(
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
-    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
-    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
+    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
+    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
     conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
@@ -4161,10 +4162,10 @@ auto cudnn_conv_transpose3d_forward(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t output_padding,
-    int64_t dilation,
+    std::array<int64_t, 3> stride,
+    std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> output_padding,
+    std::array<int64_t, 3> dilation,
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
@@ -4185,9 +4186,9 @@ auto cudnn_conv_transpose3d_forward(
     int64_t kernel_w = weight_shape[4];
 
     // Output dimensions for transposed convolution
-    int64_t d_out = (d_in - 1) * stride - 2 * padding + dilation * (kernel_d - 1) + output_padding + 1;
-    int64_t h_out = (h_in - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
-    int64_t w_out = (w_in - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+    int64_t d_out = (d_in - 1) * stride[0] - 2 * padding[0] + dilation[0] * (kernel_d - 1) + output_padding[0] + 1;
+    int64_t h_out = (h_in - 1) * stride[1] - 2 * padding[1] + dilation[1] * (kernel_h - 1) + output_padding[1] + 1;
+    int64_t w_out = (w_in - 1) * stride[2] - 2 * padding[2] + dilation[2] * (kernel_w - 1) + output_padding[2] + 1;
 
     std::vector<int64_t> output_shape = {batch, out_channels, d_out, h_out, w_out};
     Tensor output(output_shape, input.dtype(), input.device());
@@ -4219,9 +4220,9 @@ auto cudnn_conv_transpose3d_forward(
     output_desc.set(cudnn_dtype, output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
-    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
-    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
+    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
+    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
     conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
@@ -4312,10 +4313,10 @@ auto cudnn_conv_transpose3d_backward(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
-    int64_t stride,
-    int64_t padding,
-    int64_t output_padding,
-    int64_t dilation,
+    std::array<int64_t, 3> stride,
+    std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> output_padding,
+    std::array<int64_t, 3> dilation,
     int64_t groups,
     bool compute_grad_input,
     bool compute_grad_weight,
@@ -4367,9 +4368,9 @@ auto cudnn_conv_transpose3d_backward(
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
-    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
-    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
+    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
+    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
     conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
@@ -4500,8 +4501,9 @@ auto cudnn_conv_transpose3d_backward(
 
 Tensor cudnn_conv_transpose3d_backward_input(
     const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-    int64_t stride, int64_t padding, int64_t output_padding,
-    int64_t dilation, int64_t groups, cudaStream_t stream)
+    std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> output_padding, std::array<int64_t, 3> dilation,
+    int64_t groups, cudaStream_t stream)
 {
     auto result = cudnn_conv_transpose3d_backward(
         grad_output, input, weight, stride, padding, output_padding,
@@ -4511,8 +4513,9 @@ Tensor cudnn_conv_transpose3d_backward_input(
 
 Tensor cudnn_conv_transpose3d_backward_weight(
     const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-    int64_t stride, int64_t padding, int64_t output_padding,
-    int64_t dilation, int64_t groups, cudaStream_t stream)
+    std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> output_padding, std::array<int64_t, 3> dilation,
+    int64_t groups, cudaStream_t stream)
 {
     auto result = cudnn_conv_transpose3d_backward(
         grad_output, input, weight, stride, padding, output_padding,
@@ -4522,8 +4525,9 @@ Tensor cudnn_conv_transpose3d_backward_weight(
 
 Tensor cudnn_conv_transpose3d_backward_bias(
     const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-    int64_t stride, int64_t padding, int64_t output_padding,
-    int64_t dilation, int64_t groups, cudaStream_t stream)
+    std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> output_padding, std::array<int64_t, 3> dilation,
+    int64_t groups, cudaStream_t stream)
 {
     auto result = cudnn_conv_transpose3d_backward(
         grad_output, input, weight, stride, padding, output_padding,

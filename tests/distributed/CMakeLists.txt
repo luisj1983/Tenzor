@@ -56,6 +56,12 @@ add_executable(test_nccl_backend_smoke test_nccl_backend_smoke.cpp)
 target_link_libraries(test_nccl_backend_smoke PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_nccl_backend_smoke LABELS "distributed" DISCOVERY_TIMEOUT 60)
 
+# Inf-F: native GlooProcessGroup::all_to_all_single + MPIProcessGroup
+# split/all_to_all_single contract tests (single-process degenerates).
+add_executable(test_process_group_inf_f test_process_group_inf_f.cpp)
+target_link_libraries(test_process_group_inf_f PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_process_group_inf_f LABELS "distributed" DISCOVERY_TIMEOUT 60)
+
 # Distributed launch helpers (audit-2026-05-03 N4)
 add_executable(test_launch test_launch.cpp)
 target_link_libraries(test_launch PRIVATE tenzor_core GTest::gtest_main)

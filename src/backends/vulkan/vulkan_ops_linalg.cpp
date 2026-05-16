@@ -2615,8 +2615,19 @@ auto VulkanBackend::dispatchFlashAttention(
 auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
                                         const Tensor& values, const Tensor& dense,
                                         int64_t M, int64_t K, int64_t N) -> Tensor {
+    // Wave G6 (deferred → landed): F16/BF16 via widen-narrow through F32.
+    // Vulkan has no native half-type sparse shader; widen at the dispatch
+    // boundary keeps correctness for downstream half-precision callers.
+    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
+        DType orig = values.dtype();
+        auto vals_f32 = values.to(DType::Float32);
+        auto dense_f32 = dense.to(DType::Float32);
+        auto result = dispatchSparseSpMM(crow_indices, col_indices, vals_f32,
+                                          dense_f32, M, K, N);
+        return result.to(orig);
+    }
     if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SpMM only supports Float32/Float64, got " +
+        throw std::runtime_error("Vulkan SpMM only supports F32/F64/F16/BF16, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;

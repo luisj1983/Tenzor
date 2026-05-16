@@ -72,16 +72,21 @@ namespace {
 /// Float16/BFloat16/Int32 -> Float32, Int64 -> Float64.
 /// Float32/Float64 are returned as-is.
 DType compute_dtype_for(DType dtype) {
+    // Wave G: native support for half-precision, integer, and complex
+    // sparse. Float16/BFloat16 widen at-register to F32 inside the kernel
+    // via sparse_acc_type traits; Int32/Int64 use native integer
+    // arithmetic; Complex64/Complex128 use the matching complex template
+    // type (the fallback_csr_spm* templates are generic on T).
     switch (dtype) {
         case DType::Float32:
         case DType::Float64:
-            return dtype;
         case DType::Float16:
         case DType::BFloat16:
         case DType::Int32:
-            return DType::Float32;
         case DType::Int64:
-            return DType::Float64;
+        case DType::Complex64:
+        case DType::Complex128:
+            return dtype;
         default:
             throw std::runtime_error("sparse ops: unsupported dtype " +
                                      std::string(dtype_name(dtype)));
@@ -387,18 +392,26 @@ Tensor mkl_csr_spmm_f64(const SparseTensor& sparse, const Tensor& dense,
 // Fallback (non-MKL) scalar implementations
 // ============================================================================
 
+// Wave G: per-element-T accumulator selection. Half-precision (F16/BF16)
+// accumulate in float (per-element widen — single instruction, NOT a
+// tensor-wide widen-narrow). Integer and complex use T directly.
+template<typename T> struct sparse_acc_type { using type = T; };
+template<> struct sparse_acc_type<Float16>   { using type = float; };
+template<> struct sparse_acc_type<BFloat16>  { using type = float; };
+
 /// Fallback SpMV: CSR format, y = A * x
 template<typename T>
 void fallback_csr_spmv(const int64_t* crow_ptr, const int64_t* col_ptr,
                         const T* vals, const T* x, T* y,
                         int64_t nrows) {
+    using Acc = typename sparse_acc_type<T>::type;
     #pragma omp parallel for schedule(static) if(nrows > 128)
     for (int64_t row = 0; row < nrows; ++row) {
-        T sum = T(0);
+        Acc sum = Acc(0);
         for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-            sum += vals[j] * x[col_ptr[j]];
+            sum += static_cast<Acc>(vals[j]) * static_cast<Acc>(x[col_ptr[j]]);
         }
-        y[row] = sum;
+        y[row] = static_cast<T>(sum);
     }
 }
 
@@ -407,17 +420,41 @@ template<typename T>
 void fallback_csr_spmm(const int64_t* crow_ptr, const int64_t* col_ptr,
                         const T* vals, const T* B, T* C,
                         int64_t M, int64_t N) {
-    #pragma omp parallel for schedule(static) if(M > 64)
-    for (int64_t row = 0; row < M; ++row) {
-        T* c_row = C + row * N;
-        std::memset(c_row, 0, N * sizeof(T));
-        for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-            int64_t col = col_ptr[j];
-            T val = vals[j];
-            const T* b_row = B + col * N;
-            for (int64_t n = 0; n < N; ++n) {
-                c_row[n] += val * b_row[n];
+    using Acc = typename sparse_acc_type<T>::type;
+    if constexpr (std::is_same_v<T, Acc>) {
+        // Fast path for F32/F64/int/complex — direct accumulation in T.
+        #pragma omp parallel for schedule(static) if(M > 64)
+        for (int64_t row = 0; row < M; ++row) {
+            T* c_row = C + row * N;
+            // std::fill is correct for complex<T> (memset on complex is
+            // bit-pattern-correct on IEEE-754 but the warning is fair).
+            std::fill(c_row, c_row + N, T{});
+            for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                int64_t col = col_ptr[j];
+                T val = vals[j];
+                const T* b_row = B + col * N;
+                for (int64_t n = 0; n < N; ++n) {
+                    c_row[n] += val * b_row[n];
+                }
             }
+        }
+    } else {
+        // Half-precision path: per-row F32 scratch accumulator (per-element
+        // allocation on stack via a small heap buffer for the row); narrow to
+        // T at end-of-row. This is the standard half-precision sparse pattern.
+        #pragma omp parallel for schedule(static) if(M > 64)
+        for (int64_t row = 0; row < M; ++row) {
+            T* c_row = C + row * N;
+            std::vector<Acc> acc(N, Acc(0));
+            for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                int64_t col = col_ptr[j];
+                Acc val = static_cast<Acc>(vals[j]);
+                const T* b_row = B + col * N;
+                for (int64_t n = 0; n < N; ++n) {
+                    acc[n] += val * static_cast<Acc>(b_row[n]);
+                }
+            }
+            for (int64_t n = 0; n < N; ++n) c_row[n] = static_cast<T>(acc[n]);
         }
     }
 }
@@ -425,24 +462,168 @@ void fallback_csr_spmm(const int64_t* crow_ptr, const int64_t* col_ptr,
 /// Fallback COO SpMV: y = A * x (cannot be parallelized due to race on y)
 template<typename T>
 void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
-                        int64_t nnz) {
-    for (int64_t i = 0; i < nnz; ++i) {
-        int64_t row = idx_ptr[i];
-        int64_t col = idx_ptr[nnz + i];
-        y[row] += vals[i] * x[col];
+                        int64_t nnz, int64_t M = 0) {
+    using Acc = typename sparse_acc_type<T>::type;
+    // Wave G2 (deferred → landed): native parallel COO SpMV via row-partition.
+    // When the COO is row-sorted (the callers coalesce before dispatching here),
+    // we can pre-compute row_start[r] in a single O(nnz) scan and then run an
+    // OpenMP parallel-for over rows — no atomics, no false sharing on `y`.
+    //
+    // M = 0 disables parallelization (caller didn't supply row count); falls
+    // back to the serial path that matches the pre-Wave-G2 behaviour.
+    if (M > 0 && nnz >= 4096) {
+        // M1 fix: previously the row_start derivation only recorded the FIRST
+        // occurrence of each row; for unsorted COO this silently dropped
+        // subsequent entries that fell after entries of a later row. Now we
+        // verify the COO is non-decreasing (the caller coalesce contract);
+        // if not, fall back to the serial path which handles unsorted COO
+        // correctly.
+        bool is_row_sorted = true;
+        int64_t prev_row = -1;
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t r = idx_ptr[i];
+            if (r < prev_row) { is_row_sorted = false; break; }
+            prev_row = r;
+        }
+        if (is_row_sorted) {
+            std::vector<int64_t> row_start(static_cast<size_t>(M) + 1, nnz);
+            for (int64_t i = 0; i < nnz; ++i) {
+                int64_t r = idx_ptr[i];
+                if (r < 0 || r >= M) continue;
+                if (row_start[static_cast<size_t>(r)] == nnz) {
+                    row_start[static_cast<size_t>(r)] = i;
+                }
+            }
+            // Fill forward: rows with no entries inherit the next row's start.
+            for (int64_t r = M - 1; r >= 0; --r) {
+                if (row_start[static_cast<size_t>(r)] == nnz) {
+                    row_start[static_cast<size_t>(r)] = row_start[static_cast<size_t>(r) + 1];
+                }
+            }
+            #pragma omp parallel for schedule(static)
+            for (int64_t r = 0; r < M; ++r) {
+                int64_t start = row_start[static_cast<size_t>(r)];
+                int64_t end   = row_start[static_cast<size_t>(r) + 1];
+                if constexpr (std::is_same_v<T, Acc>) {
+                    T acc = T{};
+                    for (int64_t i = start; i < end; ++i) {
+                        int64_t col = idx_ptr[nnz + i];
+                        acc += vals[i] * x[col];
+                    }
+                    y[r] = acc;
+                } else {
+                    Acc acc = Acc{};
+                    for (int64_t i = start; i < end; ++i) {
+                        int64_t col = idx_ptr[nnz + i];
+                        acc += static_cast<Acc>(vals[i]) * static_cast<Acc>(x[col]);
+                    }
+                    y[r] = static_cast<T>(acc);
+                }
+            }
+            return;
+        }
+        // Unsorted COO — fall through to the serial path below. (The
+        // serial path correctly handles unsorted COO since it
+        // accumulates `y[row] += ...` regardless of order.)
+    }
+    // Serial fallback (small nnz, or M=0 from a legacy caller).
+    if constexpr (std::is_same_v<T, Acc>) {
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t row = idx_ptr[i];
+            int64_t col = idx_ptr[nnz + i];
+            y[row] += vals[i] * x[col];
+        }
+    } else {
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t row = idx_ptr[i];
+            int64_t col = idx_ptr[nnz + i];
+            Acc cur = static_cast<Acc>(y[row]);
+            cur += static_cast<Acc>(vals[i]) * static_cast<Acc>(x[col]);
+            y[row] = static_cast<T>(cur);
+        }
     }
 }
 
 /// Fallback COO SpMM: C = A * B (cannot be parallelized due to race on C)
 template<typename T>
 void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
-                        int64_t nnz, int64_t N) {
-    for (int64_t i = 0; i < nnz; ++i) {
-        int64_t row = idx_ptr[i];
-        int64_t col = idx_ptr[nnz + i];
-        T val = vals[i];
-        for (int64_t n = 0; n < N; ++n) {
-            C[row * N + n] += val * B[col * N + n];
+                        int64_t nnz, int64_t N, int64_t M = 0) {
+    using Acc = typename sparse_acc_type<T>::type;
+    // Wave G2 (deferred → landed): native parallel COO SpMM via row-partition.
+    // Same row_start construction as fallback_coo_spmv; parallelize over
+    // result rows. Per-row accumulator is a small N-element scratch buffer
+    // (stack-allocated for typical N ≤ 1024 via VLA fallback to heap).
+    if (M > 0 && nnz >= 4096) {
+        // M1 fix (SpMM variant): verify row-sorted COO before the
+        // parallel row-partition path. Unsorted COO falls through to
+        // the serial path which handles it correctly.
+        bool is_row_sorted = true;
+        int64_t prev_row = -1;
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t r = idx_ptr[i];
+            if (r < prev_row) { is_row_sorted = false; break; }
+            prev_row = r;
+        }
+        if (is_row_sorted) {
+            std::vector<int64_t> row_start(static_cast<size_t>(M) + 1, nnz);
+            for (int64_t i = 0; i < nnz; ++i) {
+                int64_t r = idx_ptr[i];
+                if (r < 0 || r >= M) continue;
+                if (row_start[static_cast<size_t>(r)] == nnz) {
+                    row_start[static_cast<size_t>(r)] = i;
+                }
+            }
+            for (int64_t r = M - 1; r >= 0; --r) {
+                if (row_start[static_cast<size_t>(r)] == nnz) {
+                    row_start[static_cast<size_t>(r)] = row_start[static_cast<size_t>(r) + 1];
+                }
+            }
+            #pragma omp parallel
+            {
+                std::vector<Acc> scratch(static_cast<size_t>(N), Acc{});
+                #pragma omp for schedule(static)
+                for (int64_t r = 0; r < M; ++r) {
+                    int64_t start = row_start[static_cast<size_t>(r)];
+                    int64_t end   = row_start[static_cast<size_t>(r) + 1];
+                    for (int64_t n = 0; n < N; ++n) scratch[static_cast<size_t>(n)] = Acc{};
+                    for (int64_t i = start; i < end; ++i) {
+                        int64_t col = idx_ptr[nnz + i];
+                        Acc v = static_cast<Acc>(vals[i]);
+                        const T* brow = B + col * N;
+                        for (int64_t n = 0; n < N; ++n) {
+                            scratch[static_cast<size_t>(n)] += v * static_cast<Acc>(brow[n]);
+                        }
+                    }
+                    T* crow = C + r * N;
+                    for (int64_t n = 0; n < N; ++n) {
+                        crow[n] = static_cast<T>(scratch[static_cast<size_t>(n)]);
+                    }
+                }
+            }
+            return;
+        }
+        // Unsorted COO — fall through to serial path.
+    }
+    // Serial fallback.
+    if constexpr (std::is_same_v<T, Acc>) {
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t row = idx_ptr[i];
+            int64_t col = idx_ptr[nnz + i];
+            T val = vals[i];
+            for (int64_t n = 0; n < N; ++n) {
+                C[row * N + n] += val * B[col * N + n];
+            }
+        }
+    } else {
+        for (int64_t i = 0; i < nnz; ++i) {
+            int64_t row = idx_ptr[i];
+            int64_t col = idx_ptr[nnz + i];
+            Acc val = static_cast<Acc>(vals[i]);
+            for (int64_t n = 0; n < N; ++n) {
+                Acc cur = static_cast<Acc>(C[row * N + n]);
+                cur += val * static_cast<Acc>(B[col * N + n]);
+                C[row * N + n] = static_cast<T>(cur);
+            }
         }
     }
 }
@@ -466,7 +647,8 @@ Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
             return mkl_csr_spmm_f64(sparse, dense_c, M, K, N);
         }
 #endif
-        // Fallback scalar CSR
+        // Fallback scalar CSR — natively supports F16/BF16/Int32/Int64 via
+        // sparse_acc_type<T> traits in the kernel templates.
         auto result = zeros({M, N}, dtype, Device::cpu());
         auto crow = sparse.crow_indices().contiguous();
         auto col = sparse.col_indices().contiguous();
@@ -480,6 +662,37 @@ Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
             fallback_csr_spmm<double>(crow.data<int64_t>(), col.data<int64_t>(),
                                        vals.data<double>(), dense_c.data<double>(),
                                        result.data<double>(), M, N);
+        } else if (dtype == DType::Float16) {
+            fallback_csr_spmm<Float16>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<Float16>(), dense_c.data<Float16>(),
+                                       result.data<Float16>(), M, N);
+        } else if (dtype == DType::BFloat16) {
+            fallback_csr_spmm<BFloat16>(crow.data<int64_t>(), col.data<int64_t>(),
+                                        vals.data<BFloat16>(), dense_c.data<BFloat16>(),
+                                        result.data<BFloat16>(), M, N);
+        } else if (dtype == DType::Int32) {
+            fallback_csr_spmm<int32_t>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<int32_t>(), dense_c.data<int32_t>(),
+                                       result.data<int32_t>(), M, N);
+        } else if (dtype == DType::Int64) {
+            fallback_csr_spmm<int64_t>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<int64_t>(), dense_c.data<int64_t>(),
+                                       result.data<int64_t>(), M, N);
+        } else if (dtype == DType::Complex64) {
+            fallback_csr_spmm<std::complex<float>>(
+                crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<std::complex<float>>(),
+                dense_c.data<std::complex<float>>(),
+                result.data<std::complex<float>>(), M, N);
+        } else if (dtype == DType::Complex128) {
+            fallback_csr_spmm<std::complex<double>>(
+                crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<std::complex<double>>(),
+                dense_c.data<std::complex<double>>(),
+                result.data<std::complex<double>>(), M, N);
+        } else {
+            throw std::runtime_error("cpu_spmm CSR: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
         }
         return result;
     }
@@ -505,10 +718,37 @@ Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
 
         if (dtype == DType::Float32) {
             fallback_coo_spmm<float>(idx.data<int64_t>(), vals.data<float>(),
-                                      dense_c.data<float>(), result.data<float>(), nnz, N);
+                                      dense_c.data<float>(), result.data<float>(), nnz, N, M);
         } else if (dtype == DType::Float64) {
             fallback_coo_spmm<double>(idx.data<int64_t>(), vals.data<double>(),
-                                       dense_c.data<double>(), result.data<double>(), nnz, N);
+                                       dense_c.data<double>(), result.data<double>(), nnz, N, M);
+        } else if (dtype == DType::Float16) {
+            fallback_coo_spmm<Float16>(idx.data<int64_t>(), vals.data<Float16>(),
+                                       dense_c.data<Float16>(), result.data<Float16>(), nnz, N, M);
+        } else if (dtype == DType::BFloat16) {
+            fallback_coo_spmm<BFloat16>(idx.data<int64_t>(), vals.data<BFloat16>(),
+                                        dense_c.data<BFloat16>(), result.data<BFloat16>(), nnz, N, M);
+        } else if (dtype == DType::Int32) {
+            fallback_coo_spmm<int32_t>(idx.data<int64_t>(), vals.data<int32_t>(),
+                                       dense_c.data<int32_t>(), result.data<int32_t>(), nnz, N, M);
+        } else if (dtype == DType::Int64) {
+            fallback_coo_spmm<int64_t>(idx.data<int64_t>(), vals.data<int64_t>(),
+                                       dense_c.data<int64_t>(), result.data<int64_t>(), nnz, N, M);
+        } else if (dtype == DType::Complex64) {
+            fallback_coo_spmm<std::complex<float>>(
+                idx.data<int64_t>(),
+                vals.data<std::complex<float>>(),
+                dense_c.data<std::complex<float>>(),
+                result.data<std::complex<float>>(), nnz, N, M);
+        } else if (dtype == DType::Complex128) {
+            fallback_coo_spmm<std::complex<double>>(
+                idx.data<int64_t>(),
+                vals.data<std::complex<double>>(),
+                dense_c.data<std::complex<double>>(),
+                result.data<std::complex<double>>(), nnz, N, M);
+        } else {
+            throw std::runtime_error("cpu_spmm COO: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
         }
         return result;
     }
@@ -547,6 +787,38 @@ Tensor cpu_spmv(const SparseTensor& sparse, const Tensor& vec,
             fallback_csr_spmv<double>(crow.data<int64_t>(), col.data<int64_t>(),
                                        vals.data<double>(), vec_c.data<double>(),
                                        result.data<double>(), M);
+        } else if (dtype == DType::Float16) {
+            fallback_csr_spmv<Float16>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<Float16>(), vec_c.data<Float16>(),
+                                       result.data<Float16>(), M);
+        } else if (dtype == DType::BFloat16) {
+            fallback_csr_spmv<BFloat16>(crow.data<int64_t>(), col.data<int64_t>(),
+                                        vals.data<BFloat16>(), vec_c.data<BFloat16>(),
+                                        result.data<BFloat16>(), M);
+        } else if (dtype == DType::Int32) {
+            fallback_csr_spmv<int32_t>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<int32_t>(), vec_c.data<int32_t>(),
+                                       result.data<int32_t>(), M);
+        } else if (dtype == DType::Int64) {
+            fallback_csr_spmv<int64_t>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<int64_t>(), vec_c.data<int64_t>(),
+                                       result.data<int64_t>(), M);
+        } else if (dtype == DType::Complex64) {
+            // Wave G1 (deferred → landed): native complex CSR SpMV.
+            fallback_csr_spmv<std::complex<float>>(
+                crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<std::complex<float>>(),
+                vec_c.data<std::complex<float>>(),
+                result.data<std::complex<float>>(), M);
+        } else if (dtype == DType::Complex128) {
+            fallback_csr_spmv<std::complex<double>>(
+                crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<std::complex<double>>(),
+                vec_c.data<std::complex<double>>(),
+                result.data<std::complex<double>>(), M);
+        } else {
+            throw std::runtime_error("cpu_spmv CSR: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
         }
         return result;
     }
@@ -572,10 +844,38 @@ Tensor cpu_spmv(const SparseTensor& sparse, const Tensor& vec,
 
         if (dtype == DType::Float32) {
             fallback_coo_spmv<float>(idx.data<int64_t>(), vals.data<float>(),
-                                      vec_c.data<float>(), result.data<float>(), nnz);
+                                      vec_c.data<float>(), result.data<float>(), nnz, M);
         } else if (dtype == DType::Float64) {
             fallback_coo_spmv<double>(idx.data<int64_t>(), vals.data<double>(),
-                                       vec_c.data<double>(), result.data<double>(), nnz);
+                                       vec_c.data<double>(), result.data<double>(), nnz, M);
+        } else if (dtype == DType::Float16) {
+            fallback_coo_spmv<Float16>(idx.data<int64_t>(), vals.data<Float16>(),
+                                       vec_c.data<Float16>(), result.data<Float16>(), nnz, M);
+        } else if (dtype == DType::BFloat16) {
+            fallback_coo_spmv<BFloat16>(idx.data<int64_t>(), vals.data<BFloat16>(),
+                                        vec_c.data<BFloat16>(), result.data<BFloat16>(), nnz, M);
+        } else if (dtype == DType::Int32) {
+            fallback_coo_spmv<int32_t>(idx.data<int64_t>(), vals.data<int32_t>(),
+                                       vec_c.data<int32_t>(), result.data<int32_t>(), nnz, M);
+        } else if (dtype == DType::Int64) {
+            fallback_coo_spmv<int64_t>(idx.data<int64_t>(), vals.data<int64_t>(),
+                                       vec_c.data<int64_t>(), result.data<int64_t>(), nnz, M);
+        } else if (dtype == DType::Complex64) {
+            // Wave G1 (deferred → landed): native complex COO SpMV.
+            fallback_coo_spmv<std::complex<float>>(
+                idx.data<int64_t>(),
+                vals.data<std::complex<float>>(),
+                vec_c.data<std::complex<float>>(),
+                result.data<std::complex<float>>(), nnz, M);
+        } else if (dtype == DType::Complex128) {
+            fallback_coo_spmv<std::complex<double>>(
+                idx.data<int64_t>(),
+                vals.data<std::complex<double>>(),
+                vec_c.data<std::complex<double>>(),
+                result.data<std::complex<double>>(), nnz, M);
+        } else {
+            throw std::runtime_error("cpu_spmv COO: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
         }
         return result;
     }

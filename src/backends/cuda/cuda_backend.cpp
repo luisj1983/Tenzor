@@ -9,6 +9,7 @@
 #endif
 #include <cuda_runtime.h>
 #include "cuda_stream_pool.hpp"
+#include <array>
 #include <stdexcept>
 #include <limits>
 #include <cstdlib>
@@ -206,10 +207,12 @@ namespace cuda {
     auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    // M12 fix: per-axis overload.
+    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t output_padding_h, int64_t output_padding_w, int64_t dilation_h, int64_t dilation_w, int64_t groups, cudaStream_t stream) -> Tensor;
 
     // Conv3d / ConvTranspose3d operations (custom kernels - fallback when cuDNN unavailable)
-    auto conv3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
-    auto conv3d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto conv3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, std::array<int64_t, 3> dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto conv3d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, std::array<int64_t, 3> dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto conv_transpose3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto conv_transpose3d_backward_input_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto conv_transpose3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;

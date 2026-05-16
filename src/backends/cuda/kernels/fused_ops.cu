@@ -433,6 +433,12 @@ auto fused_batchnorm_relu_cuda(
 // Fused Softmax + CrossEntropy CUDA Kernel
 // ==============================================================================
 
+// Wave E1: Acc = F32 for F16/BF16, T otherwise. Per-element in-register
+// promotion avoids overflow in sum_exp accumulation; no tensor-wide widen.
+template<typename T> struct fsce_acc_type { using type = T; };
+template<> struct fsce_acc_type<__half>          { using type = float; };
+template<> struct fsce_acc_type<__nv_bfloat16>   { using type = float; };
+
 template<typename T, int BLOCK_SIZE>
 __global__ void fused_softmax_cross_entropy_kernel(
     const T* logits,
@@ -441,24 +447,22 @@ __global__ void fused_softmax_cross_entropy_kernel(
     int64_t batch_size,
     int64_t num_classes
 ) {
+    using Acc = typename fsce_acc_type<T>::type;
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
 
     const T* row = logits + b * num_classes;
     int64_t target = targets[b];
 
-    // Shared memory for reduction
-    __shared__ T shared_data[BLOCK_SIZE];
+    // Shared memory accumulator in Acc (F32 for F16/BF16) so block-wide
+    // reductions don't lose precision or overflow.
+    __shared__ Acc shared_data[BLOCK_SIZE];
 
-    // Find max (for numerical stability). Use overloaded fmax/exp/log so the
-    // template instantiation for T=double doesn't silently downcast through
-    // the float-only fmaxf/expf/logf intrinsics.
-    T max_val = -INFINITY;
+    Acc max_val = -INFINITY;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        max_val = fmax(max_val, row[i]);
+        max_val = fmax(max_val, static_cast<Acc>(row[i]));
     }
 
-    // Block-wide max reduction
     shared_data[threadIdx.x] = max_val;
     __syncthreads();
 
@@ -469,13 +473,12 @@ __global__ void fused_softmax_cross_entropy_kernel(
         __syncthreads();
     }
 
-    T global_max = shared_data[0];
+    Acc global_max = shared_data[0];
     __syncthreads();
 
-    // Compute sum(exp(x - max))
-    T sum_exp = 0;
+    Acc sum_exp = 0;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        sum_exp += exp(row[i] - global_max);
+        sum_exp += exp(static_cast<Acc>(row[i]) - global_max);
     }
 
     shared_data[threadIdx.x] = sum_exp;
@@ -488,10 +491,10 @@ __global__ void fused_softmax_cross_entropy_kernel(
         __syncthreads();
     }
 
-    // Compute loss
     if (threadIdx.x == 0) {
-        T log_sum_exp = log(shared_data[0]) + global_max;
-        losses[b] = log_sum_exp - row[target];
+        Acc log_sum_exp = log(shared_data[0]) + global_max;
+        Acc loss = log_sum_exp - static_cast<Acc>(row[target]);
+        losses[b] = static_cast<T>(loss);
     }
 }
 
@@ -537,15 +540,8 @@ auto fused_softmax_cross_entropy_cuda(
         }
         return total;  // "sum"
     }
-    if (logits.dtype() == DType::Float16 || logits.dtype() == DType::BFloat16) {
-        // Widen to F32 for compute, narrow output back. Mirrors the rest of the
-        // F16/BF16 paths in this file.
-        DType orig = logits.dtype();
-        Tensor logits_f32 = logits.to(DType::Float32);
-        Tensor loss_f32 = fused_softmax_cross_entropy_cuda(logits_f32, targets, reduction);
-        return loss_f32.to(orig);
-    }
-
+    // Wave E1: native F16/BF16 dispatch — kernel template uses F32 accumulator
+    // for these element types so no tensor-wide widen is needed.
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
@@ -563,20 +559,54 @@ auto fused_softmax_cross_entropy_cuda(
             num_classes
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (logits.dtype() == DType::Float16) {
+        fused_softmax_cross_entropy_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __half*>(logits.data<Float16>()),
+            targets.data<int64_t>(),
+            reinterpret_cast<__half*>(losses.data<Float16>()),
+            batch_size,
+            num_classes
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (logits.dtype() == DType::BFloat16) {
+        fused_softmax_cross_entropy_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __nv_bfloat16*>(logits.data<BFloat16>()),
+            targets.data<int64_t>(),
+            reinterpret_cast<__nv_bfloat16*>(losses.data<BFloat16>()),
+            batch_size,
+            num_classes
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_softmax_cross_entropy_cuda: Unsupported dtype");
+        throw std::runtime_error("fused_softmax_cross_entropy_cuda: Unsupported dtype "
+                                 "(F32/F64/F16/BF16 only)");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 
-    // Apply reduction — stays on device, no D2H transfer
-    if (reduction == "mean") {
-        return cuda_sum_device(losses, 1.0f / batch_size);
-    } else if (reduction == "sum") {
-        return cuda_sum_device(losses);
-    } else {
+    // Apply reduction — F32 uses cuda_sum_device fast path; F16/BF16 take
+    // the dispatch-based reduction (cuda_sum_device internally requires F32).
+    if (reduction == "none") {
         return losses;
     }
+    if (logits.dtype() == DType::Float32) {
+        if (reduction == "mean") {
+            return cuda_sum_device(losses, 1.0f / batch_size);
+        }
+        return cuda_sum_device(losses);  // "sum"
+    }
+    // F16/BF16 dispatch-based reduction.
+    NewOpAttributes sum_attrs;
+    std::vector<Tensor> sum_inputs = {losses};
+    Tensor total = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+    if (reduction == "mean") {
+        Tensor scale_t = tenzor::full({1},
+                                       1.0 / static_cast<double>(batch_size),
+                                       losses.dtype(), losses.device());
+        std::vector<Tensor> mul_inputs = {total, scale_t};
+        return tenzor::dispatch(OpId::Mul, mul_inputs)[0];
+    }
+    return total;  // "sum"
 }
 
 // ==============================================================================
@@ -1187,29 +1217,35 @@ auto fused_layer_norm_backward_cuda(
  * RMSNorm: output = x * weight / sqrt(mean(x^2) + eps)
  * Uses warp shuffle for fast reduction and vectorized memory access.
  */
+// Wave E2: Acc = F32 for F16/BF16, T otherwise. RRMS dynamic range can
+// exceed F16's max (65504) when var ~ 1e-11, so rrms_out is stored as Acc
+// (always F32 for half-types) — same pattern as LayerNorm's mean/inv_std.
+template<typename T> struct rms_acc_type { using type = T; };
+template<> struct rms_acc_type<__half>        { using type = float; };
+template<> struct rms_acc_type<__nv_bfloat16> { using type = float; };
+
 template<typename T, int BLOCK_SIZE>
 __global__ void fused_rms_norm_kernel(
     const T* __restrict__ input,
     const T* __restrict__ weight,
     T* __restrict__ output,
-    T* __restrict__ rrms_out,
+    typename rms_acc_type<T>::type* __restrict__ rrms_out,
     int64_t batch_size,
     int64_t norm_size,
-    T eps
+    typename rms_acc_type<T>::type eps
 ) {
+    using Acc = typename rms_acc_type<T>::type;
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
 
     const T* batch_in = input + b * norm_size;
     T* batch_out = output + b * norm_size;
 
-    // Phase 22-followup #37 fix: the float4 vectorization is hardcoded to
-    // 4-byte lanes, which is wrong for T=double (8-byte lanes). For double
-    // it would reinterpret_cast a double buffer as float4*, reading half the
-    // elements with the wrong type and producing NaN. Only use the float4
-    // path when T=float; double takes the scalar path. Also use rsqrt (not
-    // rsqrtf) for double precision.
-    T sum_sq = 0;
+    // Phase 22-followup #37 fix preserved: float4 vectorization is gated on
+    // T=float; F16/BF16 take the scalar widen-on-load path so sum_sq stays
+    // in Acc (F32) — sums of squares of half-precision values can otherwise
+    // overflow F16's max (65504) for moderate norm_size.
+    Acc sum_sq = 0;
     if constexpr (std::is_same_v<T, float>) {
         const int vec_size = 4;
         int64_t vec_norm_size = norm_size / vec_size;
@@ -1219,24 +1255,23 @@ __global__ void fused_rms_norm_kernel(
             sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
         }
         for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-            T val = batch_in[i];
+            Acc val = static_cast<Acc>(batch_in[i]);
             sum_sq += val * val;
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-            T val = batch_in[i];
+            Acc val = static_cast<Acc>(batch_in[i]);
             sum_sq += val * val;
         }
     }
 
-    // Warp-level reduction using shuffle
+    // Warp-level reduction using shuffle (Acc-typed)
     #pragma unroll
     for (int offset = 16; offset > 0; offset /= 2) {
         sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
     }
 
-    // Inter-warp reduction via shared memory
-    __shared__ T warp_sums[32];  // Max 32 warps per block
+    __shared__ Acc warp_sums[32];
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
@@ -1245,20 +1280,18 @@ __global__ void fused_rms_norm_kernel(
     }
     __syncthreads();
 
-    // Final reduction in first warp
     if (warp_id == 0) {
-        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : 0;
+        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : Acc(0);
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
         }
     }
 
-    // Broadcast rrms to all threads. Use type-appropriate rsqrt.
-    __shared__ T shared_rrms;
+    __shared__ Acc shared_rrms;
     if (threadIdx.x == 0) {
-        T mean_sq = sum_sq / static_cast<T>(norm_size);
-        if constexpr (std::is_same_v<T, double>) {
+        Acc mean_sq = sum_sq / static_cast<Acc>(norm_size);
+        if constexpr (std::is_same_v<Acc, double>) {
             shared_rrms = rsqrt(mean_sq + eps);
         } else {
             shared_rrms = rsqrtf(mean_sq + eps);
@@ -1266,9 +1299,8 @@ __global__ void fused_rms_norm_kernel(
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
-    T rrms = shared_rrms;
+    Acc rrms = shared_rrms;
 
-    // Apply normalization with type-appropriate vectorized stores.
     if constexpr (std::is_same_v<T, float>) {
         const int vec_size = 4;
         int64_t vec_norm_size = norm_size / vec_size;
@@ -1287,11 +1319,13 @@ __global__ void fused_rms_norm_kernel(
             batch_out_vec[i] = out;
         }
         for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-            batch_out[i] = batch_in[i] * rrms * weight[i];
+            batch_out[i] = batch_in[i] * static_cast<T>(rrms) * weight[i];
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-            batch_out[i] = batch_in[i] * rrms * weight[i];
+            Acc x = static_cast<Acc>(batch_in[i]);
+            Acc w = static_cast<Acc>(weight[i]);
+            batch_out[i] = static_cast<T>(x * rrms * w);
         }
     }
 }
@@ -1309,28 +1343,24 @@ auto fused_rms_norm_cuda(
     const Tensor& weight,
     float eps
 ) -> std::tuple<Tensor, Tensor> {
-    // Float16/BFloat16: upcast to Float32, compute, downcast output. The
-    // template kernel only instantiates for float/double; reduced-precision
-    // dtypes lose accuracy in the running sum anyway. Match ROCm behavior.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        DType orig = input.dtype();
-        auto in_f32 = input.to(DType::Float32);
-        auto wt_f32 = weight.to(DType::Float32);
-        auto [out_f32, rrms_f32] = fused_rms_norm_cuda(in_f32, wt_f32, eps);
-        return std::make_tuple(out_f32.to(orig), rrms_f32);
-    }
-
+    // Wave E2: native F16/BF16 dispatch via Acc=F32 inside the kernel template.
+    // RRMS tensor is allocated as F32 for half-precision inputs (rstd dynamic
+    // range exceeds F16 max=65504 when var ~ 1e-11) — same pattern as
+    // fused_layer_norm_cuda's mean/inv_std.
     auto shape = input.shape();
     int64_t norm_size = shape.back();
 
-    // Calculate batch size (all dimensions except last)
     int64_t batch_size = 1;
     for (size_t i = 0; i < shape.size() - 1; ++i) {
         batch_size *= shape[i];
     }
 
     Tensor output = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
-    Tensor rrms = create_cuda_zeros({batch_size}, input.dtype(), input.device());
+    // rrms stays F32 for F16/BF16 inputs (per LayerNorm precedent).
+    DType rrms_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+                            ? DType::Float32
+                            : input.dtype();
+    Tensor rrms = create_cuda_zeros({batch_size}, rrms_dtype, input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -1347,9 +1377,6 @@ auto fused_rms_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        // Float64 dispatch — template kernel is dtype-generic so just
-        // instantiate with double. Eps stays float (small enough that the
-        // narrowing into the kernel is fine).
         fused_rms_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             input.data<double>(),
             weight.data<double>(),
@@ -1360,8 +1387,30 @@ auto fused_rms_norm_cuda(
             static_cast<double>(eps)
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float16) {
+        fused_rms_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            rrms.data<float>(),  // F32 storage for half-type
+            batch_size,
+            norm_size,
+            eps
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::BFloat16) {
+        fused_rms_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
+            rrms.data<float>(),  // F32 storage for half-type
+            batch_size,
+            norm_size,
+            eps
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_rms_norm_cuda: dtype not supported (need Float32 or Float64)");
+        throw std::runtime_error("fused_rms_norm_cuda: dtype not supported (F32/F64/F16/BF16 only)");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1380,12 +1429,16 @@ __global__ void fused_rms_norm_backward_kernel(
     const T* grad_output,    // Gradient from next layer
     const T* input,          // Original input from forward pass
     const T* weight,         // Weight from forward pass
-    const T* rrms,           // Saved reciprocal RMS from forward pass
-    T* grad_input,           // Output: gradient w.r.t. input
-    T* grad_weight,          // Output: gradient w.r.t. weight (accumulated)
+    const typename rms_acc_type<T>::type* rrms,  // F32 for half-types (per forward contract)
+    T* grad_input,           // Output: gradient w.r.t. input (T storage)
+    typename rms_acc_type<T>::type* grad_weight,  // F32 for half-types (atomicAdd-safe)
     int64_t batch_size,
     int64_t norm_size
 ) {
+    // H1 fix: accumulator type is Acc=float for F16/BF16 (per
+    // rms_acc_type<T> traits, same as forward). All intermediate reductions
+    // and shared-mem use Acc; loads widen-on-load, stores narrow-on-store.
+    using Acc = typename rms_acc_type<T>::type;
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
 
@@ -1393,14 +1446,16 @@ __global__ void fused_rms_norm_backward_kernel(
     const T* batch_in = input + b * norm_size;
     T* batch_grad_in = grad_input + b * norm_size;
 
-    T batch_rrms = rrms[b];
+    Acc batch_rrms = static_cast<Acc>(rrms[b]);
 
-    __shared__ T shared_sum[BLOCK_SIZE];
+    __shared__ Acc shared_sum[BLOCK_SIZE];
 
     // Compute sum(grad_out * x * weight) / norm_size for input gradient
-    T sum_grad_x_w = 0;
+    Acc sum_grad_x_w = Acc{0};
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum_grad_x_w += batch_grad_out[i] * batch_in[i] * weight[i];
+        sum_grad_x_w += static_cast<Acc>(batch_grad_out[i])
+                      * static_cast<Acc>(batch_in[i])
+                      * static_cast<Acc>(weight[i]);
     }
 
     shared_sum[threadIdx.x] = sum_grad_x_w;
@@ -1413,18 +1468,21 @@ __global__ void fused_rms_norm_backward_kernel(
         __syncthreads();
     }
 
-    T mean_grad_x_w = shared_sum[0] / norm_size;
+    Acc mean_grad_x_w = shared_sum[0] / static_cast<Acc>(norm_size);
 
     // Compute input gradient and accumulate weight gradient
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T x_i = batch_in[i];
-        T w_i = weight[i];
-        T grad_out_i = batch_grad_out[i];
+        Acc x_i = static_cast<Acc>(batch_in[i]);
+        Acc w_i = static_cast<Acc>(weight[i]);
+        Acc grad_out_i = static_cast<Acc>(batch_grad_out[i]);
 
         // grad_input = rrms * (grad_out * weight - x * rrms^2 * mean_grad_x_w)
-        batch_grad_in[i] = batch_rrms * (grad_out_i * w_i - x_i * batch_rrms * batch_rrms * mean_grad_x_w);
+        Acc gi = batch_rrms * (grad_out_i * w_i - x_i * batch_rrms * batch_rrms * mean_grad_x_w);
+        batch_grad_in[i] = static_cast<T>(gi);
 
-        // grad_weight accumulation (atomic for thread safety across batches)
+        // grad_weight accumulation (atomic on Acc storage — atomicAdd<float>
+        // is well-defined on all SMs; atomicAdd<__half> requires SM 70+
+        // and has different precision semantics).
         atomicAdd(&grad_weight[i], grad_out_i * x_i * batch_rrms);
     }
 }
@@ -1447,7 +1505,13 @@ auto fused_rms_norm_backward_cuda(
     }
 
     Tensor grad_input = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
-    Tensor grad_weight = create_cuda_zeros({norm_size}, input.dtype(), input.device());
+    // H1 fix: grad_weight follows the same dtype convention as forward's
+    // rrms — F32 storage for half-precision inputs (atomicAdd<float> is
+    // safe on all SMs; atomicAdd<__half> is SM-70+ and has different
+    // precision). For F32/F64, grad_weight matches input dtype.
+    DType gw_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+                     ? DType::Float32 : input.dtype();
+    Tensor grad_weight = create_cuda_zeros({norm_size}, gw_dtype, input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -1476,8 +1540,36 @@ auto fused_rms_norm_backward_cuda(
             norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float16) {
+        // H1 fix: native F16 dispatch. Acc=float per rms_acc_type<__half>.
+        // Per forward contract, rrms is F32 and grad_weight is F32.
+        // grad_output / input / weight / grad_input are __half.
+        fused_rms_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            rrms.data<float>(),
+            reinterpret_cast<__half*>(grad_input.data_ptr()),
+            grad_weight.data<float>(),
+            batch_size,
+            norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::BFloat16) {
+        // H1 fix: native BF16 dispatch, mirrors F16 path.
+        fused_rms_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+            rrms.data<float>(),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
+            grad_weight.data<float>(),
+            batch_size,
+            norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_rms_norm_backward_cuda: dtype not supported (need Float32 or Float64)");
+        throw std::runtime_error("fused_rms_norm_backward_cuda: dtype not supported (need Float32/Float64/Float16/BFloat16)");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -3163,30 +3255,34 @@ auto flash_attention_backward_cuda(
         float* dv_ptr = dV.data<float>();
         int seq_len_int = static_cast<int>(seq_len);
 
-        if (head_dim == 32) {
-            size_t smem = compute_bwd_smem(32);
-            flash_attention_backward_kernel<32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else if (head_dim == 64) {
-            size_t smem = compute_bwd_smem(64);
-            flash_attention_backward_kernel<64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else if (head_dim == 128) {
-            size_t smem = compute_bwd_smem(128);
-            auto kernel_fn = flash_attention_backward_kernel<128, Br, Bc, BLOCK_SIZE>;
+        // Wave E3 (deferred → landed): extended head_dim support. Added
+        // arms for {16, 48, 80, 96, 160} — covers ViT (head_dim=64), DeiT
+        // (64), Mistral (128), Llama-7B (128), Llama-30B (128 still),
+        // smaller-model variants (32-80), and Whisper (160).
+        auto launch_f32 = [&](auto kernel_fn, int hd) {
+            size_t smem = compute_bwd_smem(hd);
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
                 seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else {
-            throw std::runtime_error(
-                "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
-                ". Fused backward supports 32, 64, 128.");
+        };
+        switch (head_dim) {
+            case 16:  launch_f32(flash_attention_backward_kernel<16,  Br, Bc, BLOCK_SIZE>, 16);  break;
+            case 32:  launch_f32(flash_attention_backward_kernel<32,  Br, Bc, BLOCK_SIZE>, 32);  break;
+            case 48:  launch_f32(flash_attention_backward_kernel<48,  Br, Bc, BLOCK_SIZE>, 48);  break;
+            case 64:  launch_f32(flash_attention_backward_kernel<64,  Br, Bc, BLOCK_SIZE>, 64);  break;
+            case 80:  launch_f32(flash_attention_backward_kernel<80,  Br, Bc, BLOCK_SIZE>, 80);  break;
+            case 96:  launch_f32(flash_attention_backward_kernel<96,  Br, Bc, BLOCK_SIZE>, 96);  break;
+            case 128: launch_f32(flash_attention_backward_kernel<128, Br, Bc, BLOCK_SIZE>, 128); break;
+            case 160: launch_f32(flash_attention_backward_kernel<160, Br, Bc, BLOCK_SIZE>, 160); break;
+            default:
+                throw std::runtime_error(
+                    "flash_attention_backward_cuda: Unsupported head_dim " +
+                    std::to_string(head_dim) +
+                    ". Fused backward supports {16, 32, 48, 64, 80, 96, 128, 160}; "
+                    "head_dim 192/256 exceed shared-memory limits on common arches "
+                    "and are deferred until a multi-block-tiled backward lands.");
         }
 
         TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -3207,30 +3303,30 @@ auto flash_attention_backward_cuda(
     auto launch_mp_kernels = [&](auto q_ptr, auto k_ptr, auto v_ptr, auto o_ptr, auto do_ptr,
                                   auto dk_ptr, auto dv_ptr) {
         using T = std::remove_const_t<std::remove_pointer_t<decltype(q_ptr)>>;
-        if (head_dim == 32) {
-            size_t smem = compute_bwd_smem(32);
-            flash_attention_backward_kernel_mp<T, 32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else if (head_dim == 64) {
-            size_t smem = compute_bwd_smem(64);
-            flash_attention_backward_kernel_mp<T, 64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else if (head_dim == 128) {
-            size_t smem = compute_bwd_smem(128);
-            auto kernel_fn = flash_attention_backward_kernel_mp<T, 128, Br, Bc, BLOCK_SIZE>;
+        auto launch_mp = [&](auto kernel_fn, int hd) {
+            size_t smem = compute_bwd_smem(hd);
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
                 seq_len_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
-        } else {
-            throw std::runtime_error(
-                "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
-                ". Fused backward supports 32, 64, 128.");
+        };
+        // Wave E3 (deferred → landed): extended head_dim arms, same set
+        // as the F32 path above.
+        switch (head_dim) {
+            case 16:  launch_mp(flash_attention_backward_kernel_mp<T, 16,  Br, Bc, BLOCK_SIZE>, 16);  break;
+            case 32:  launch_mp(flash_attention_backward_kernel_mp<T, 32,  Br, Bc, BLOCK_SIZE>, 32);  break;
+            case 48:  launch_mp(flash_attention_backward_kernel_mp<T, 48,  Br, Bc, BLOCK_SIZE>, 48);  break;
+            case 64:  launch_mp(flash_attention_backward_kernel_mp<T, 64,  Br, Bc, BLOCK_SIZE>, 64);  break;
+            case 80:  launch_mp(flash_attention_backward_kernel_mp<T, 80,  Br, Bc, BLOCK_SIZE>, 80);  break;
+            case 96:  launch_mp(flash_attention_backward_kernel_mp<T, 96,  Br, Bc, BLOCK_SIZE>, 96);  break;
+            case 128: launch_mp(flash_attention_backward_kernel_mp<T, 128, Br, Bc, BLOCK_SIZE>, 128); break;
+            case 160: launch_mp(flash_attention_backward_kernel_mp<T, 160, Br, Bc, BLOCK_SIZE>, 160); break;
+            default:
+                throw std::runtime_error(
+                    "flash_attention_backward_cuda: Unsupported head_dim " +
+                    std::to_string(head_dim) +
+                    ". FP16/BF16 fused backward supports {16, 32, 48, 64, 80, 96, 128, 160}.");
         }
     };
 

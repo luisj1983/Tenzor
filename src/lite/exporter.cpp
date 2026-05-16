@@ -93,6 +93,20 @@ auto emit_unary(OpId op, GraphBuilder& b, int16_t in_id) -> int16_t {
     return out_id;
 }
 
+// H2 fix: emit a unary activation that takes a scalar parameter via attrs.f[0].
+// LeakyReLU(negative_slope), ELU(alpha), CELU(alpha) all use this shape.
+auto emit_unary_with_alpha(OpId op, GraphBuilder& b, int16_t in_id,
+                           double alpha) -> int16_t {
+    LiteNode node;
+    node.op = op;
+    node.input_ids = {in_id};
+    node.attrs.f[0] = static_cast<float>(alpha);
+    auto out_id = b.fresh();
+    node.output_ids = {out_id};
+    b.graph.add_node(std::move(node));
+    return out_id;
+}
+
 // Forward-declared recursive visitor.
 auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t;
 
@@ -115,25 +129,43 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
     if (auto* lin = dynamic_cast<nn::Linear*>(&m)) {
         return emit_linear(*lin, b, in_id);
     }
-    if (dynamic_cast<nn::ReLU*>(&m)) {
-        return emit_unary(OpId::ReLU, b, in_id);
+    // Wave Inf-E6 (deferred → landed): expanded activation coverage.
+    // All zero-attribute unary activations dispatch through emit_unary —
+    // the underlying OpId already encodes the math; no attrs needed.
+    if (dynamic_cast<nn::ReLU*>(&m))      return emit_unary(OpId::ReLU,     b, in_id);
+    if (dynamic_cast<nn::Sigmoid*>(&m))   return emit_unary(OpId::Sigmoid,  b, in_id);
+    if (dynamic_cast<nn::Tanh*>(&m))      return emit_unary(OpId::Tanh,     b, in_id);
+    if (dynamic_cast<nn::GELU*>(&m))      return emit_unary(OpId::Gelu,     b, in_id);
+    if (dynamic_cast<nn::Mish*>(&m))      return emit_unary(OpId::Mish,     b, in_id);
+    if (dynamic_cast<nn::SELU*>(&m))      return emit_unary(OpId::Selu,     b, in_id);
+    // H2 fix: Hardswish has different math from Swish (sigmoid·x). It is
+    // `x · clamp(x+3, 0, 6) / 6`. Until Hardswish has its own dispatch
+    // OpId (Inf-D deferred), refuse to export rather than silently emit
+    // the wrong math.
+    if (dynamic_cast<nn::Hardswish*>(&m)) {
+        throw std::runtime_error(
+            "export_to_tzlite: nn::Hardswish has no dedicated Lite OpId yet. "
+            "Either replace with nn::Swish (different math, sigmoid·x) or "
+            "wait for the Hardswish OpId to land (Inf-D follow-up).");
     }
-    if (dynamic_cast<nn::Sigmoid*>(&m)) {
-        return emit_unary(OpId::Sigmoid, b, in_id);
+    // H2 fix: load the activation parameter from the Module member before
+    // emitting. Previously emitted with attrs.f[0] = 0 which silently
+    // executed ReLU instead of LeakyReLU / ELU.
+    if (auto* lr = dynamic_cast<nn::LeakyReLU*>(&m)) {
+        return emit_unary_with_alpha(OpId::LeakyReLU, b, in_id,
+                                     lr->negative_slope());
     }
-    if (dynamic_cast<nn::Tanh*>(&m)) {
-        return emit_unary(OpId::Tanh, b, in_id);
-    }
-    if (dynamic_cast<nn::GELU*>(&m)) {
-        return emit_unary(OpId::Gelu, b, in_id);
+    if (auto* el = dynamic_cast<nn::ELU*>(&m)) {
+        return emit_unary_with_alpha(OpId::Elu, b, in_id, el->alpha());
     }
 
     throw std::runtime_error(
         std::string{"export_to_tzlite: unsupported module type '"} +
         typeid(m).name() +
-        "'. Phase 3 supports nn::Linear, nn::ReLU, nn::Sigmoid, nn::Tanh, "
-        "nn::GELU, and nn::Sequential. File an issue or extend exporter.cpp "
-        "to add this layer.");
+        "'. Lite exporter supports nn::Linear, nn::Sequential, and the "
+        "parameter-free / single-alpha activations (ReLU, Sigmoid, Tanh, "
+        "GELU, Mish, SELU, Hardswish, LeakyReLU, ELU). File an issue or "
+        "extend exporter.cpp to add this layer.");
 }
 
 }  // anonymous namespace

@@ -12,9 +12,16 @@
 #include "tenzor/distributed/gloo_backend.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include <atomic>
 #include <stdexcept>
 #include <memory>
 #include <cstdlib>
+#include <cstring>
+
+#ifdef TENZOR_HAS_MPI
+#include "tenzor/distributed/mpi_backend.hpp"
+#include <mpi.h>
+#endif
 
 #if defined(TENZOR_HAS_NCCL)
     #ifdef TENZOR_USE_ROCM
@@ -125,7 +132,8 @@ namespace tenzor::distributed {
 GlooProcessGroup::GlooProcessGroup(int rank, int world_size,
                                    const std::string& master_addr,
                                    int master_port)
-    : rank_(rank), world_size_(world_size) {
+    : rank_(rank), world_size_(world_size),
+      master_addr_(master_addr), master_port_(master_port) {
 
     if (rank < 0 || rank >= world_size) {
         throw std::invalid_argument(
@@ -171,16 +179,168 @@ auto GlooProcessGroup::barrier() -> void {
 }
 
 auto GlooProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) -> void {
-    // Gloo lacks a native `all_to_all` in this codebase; fall back to the
-    // base-class all_gather-based default. This is bandwidth-suboptimal
-    // (uses world_size * input_size) but is correct on top of Gloo's
-    // existing all_gather. The native primitive (when added to GlooBackend)
-    // should override this method.
-    ProcessGroupBase::all_to_all_single(output, input);
+    // Inf-F5: native paired send/recv all_to_all on Gloo's TCP transport.
+    //
+    // Sends only chunk-sized payloads per peer (vs. the base-class
+    // all_gather fallback which sends full input to every peer — O(W²)
+    // chunk volume on the wire). With paired ordering (low-rank
+    // sends-first; high-rank recvs-first) the loop is deadlock-free.
+    //
+    // Contract validation mirrors the base class so callers see a single
+    // consistent error shape regardless of override path.
+    const int ws = world_size();
+    const int my_rank = rank();
+    if (input.shape().empty()) {
+        throw std::invalid_argument(
+            "GlooProcessGroup::all_to_all_single: input must have at least 1 dimension");
+    }
+    const int64_t total = input.shape()[0];
+    if (total % ws != 0) {
+        throw std::invalid_argument(
+            "GlooProcessGroup::all_to_all_single: input.shape[0] (" +
+            std::to_string(total) + ") must be divisible by world_size (" +
+            std::to_string(ws) + ")");
+    }
+    auto same_shape = [](std::span<const int64_t> a, std::span<const int64_t> b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    };
+    if (!same_shape(output.shape(), input.shape()) ||
+        output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "GlooProcessGroup::all_to_all_single: output must match input shape and dtype");
+    }
+
+    const int64_t chunk = total / ws;
+
+    // Build per-peer receive buffers (fresh contiguous tensors); the
+    // i-th slot becomes the chunk received from peer i (with i == my_rank
+    // being the local-copy fast path).
+    auto chunk_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    chunk_shape[0] = chunk;
+    std::vector<Tensor> per_peer(ws);
+
+    // Local copy: my chunk of `input` ends up in `per_peer[my_rank]` —
+    // no network round-trip.
+    per_peer[my_rank] =
+        input.slice(0, my_rank * chunk, (my_rank + 1) * chunk).contiguous();
+
+    // For each remote peer, exchange one chunk. Pair (a, b) where a<b:
+    // a sends first then receives; b receives first then sends. This
+    // avoids the deadlock you'd get if both peers blocked on send.
+    for (int peer = 0; peer < ws; ++peer) {
+        if (peer == my_rank) continue;
+        auto send_chunk =
+            input.slice(0, peer * chunk, (peer + 1) * chunk).contiguous();
+        Tensor recv_chunk = zeros(chunk_shape, input.dtype(), input.device());
+        if (my_rank < peer) {
+            pg_->send(send_chunk, peer);
+            pg_->recv(recv_chunk, peer);
+        } else {
+            pg_->recv(recv_chunk, peer);
+            pg_->send(send_chunk, peer);
+        }
+        per_peer[peer] = std::move(recv_chunk);
+    }
+
+    // Assemble: peer-ordered concatenation along dim 0.
+    // H5 fix: write into the caller's pre-allocated `output` storage
+    // in-place instead of rebinding (which would orphan any autograd
+    // Variable / view aliased to it). Matches NCCL/MPI semantics.
+    auto assembled = cat(per_peer, 0);
+    auto src_bytes = static_cast<size_t>(assembled.numel())
+                   * static_cast<size_t>(dtype_size(assembled.dtype()));
+    std::memcpy(output.data_ptr(), assembled.data_ptr(), src_bytes);
+}
+
+// Inf-F4: collective sub-PG creation. Builds a fresh GlooProcessGroup on
+// a derived TCP port for ranks sharing the same color, ordered by key.
+auto GlooProcessGroup::split(int color, int key)
+    -> std::shared_ptr<ProcessGroupBase>
+{
+    // Build per-rank (color, key, rank) and all_gather over the parent.
+    // Pack as Int32 triples to keep the all_gather simple.
+    auto local = zeros({3}, DType::Int32, Device::cpu());
+    auto* lp = local.data<int32_t>();
+    lp[0] = static_cast<int32_t>(color);
+    lp[1] = static_cast<int32_t>(key);
+    lp[2] = static_cast<int32_t>(rank_);
+
+    std::vector<Tensor> gathered(world_size_);
+    all_gather(gathered, local);
+
+    // For each peer, extract (color, key, peer_rank).
+    struct Member { int color; int key; int rank; };
+    std::vector<Member> members;
+    members.reserve(world_size_);
+    for (int r = 0; r < world_size_; ++r) {
+        auto* g = gathered[r].data<int32_t>();
+        members.push_back({g[0], g[1], g[2]});
+    }
+
+    // Opt-out path: this rank doesn't participate.
+    if (color < 0) {
+        return nullptr;
+    }
+
+    // Collect members sharing my color, sort by (key, rank) for deterministic
+    // new-rank ordering (matches MPI_Comm_split convention).
+    std::vector<Member> my_group;
+    for (const auto& m : members) {
+        if (m.color == color) my_group.push_back(m);
+    }
+    std::sort(my_group.begin(), my_group.end(),
+              [](const Member& a, const Member& b) {
+                  if (a.key != b.key) return a.key < b.key;
+                  return a.rank < b.rank;
+              });
+
+    // Find my position in the sorted group → new rank.
+    int new_rank = -1;
+    for (size_t i = 0; i < my_group.size(); ++i) {
+        if (my_group[i].rank == rank_) {
+            new_rank = static_cast<int>(i);
+            break;
+        }
+    }
+    if (new_rank < 0) {
+        throw std::runtime_error(
+            "GlooProcessGroup::split: internal — local rank not found in own color group");
+    }
+    int new_world_size = static_cast<int>(my_group.size());
+
+    // M3 fix: previously used `master_port_ + 1000 + color` which collides
+    // on nested splits or same-color splits from sibling parent PGs. Now
+    // derive an offset that depends on both the parent's port AND a
+    // process-local counter of splits performed so far, so every split-
+    // derived child PG gets a unique port within the process.
+    //
+    // For multi-process distribution the counter is process-local but the
+    // sequence is identical across ranks (since they all execute split()
+    // collectively in the same order) — so the derived port matches.
+    static std::atomic<int> split_counter{0};
+    const int my_split_id = split_counter.fetch_add(1, std::memory_order_relaxed);
+    // Use a large enough stride (10000) so colors within one split don't
+    // collide with the next split's color-0.
+    const int new_port = master_port_ + 1000 + my_split_id * 10000 + color;
+
+    return std::make_shared<GlooProcessGroup>(
+        new_rank, new_world_size, master_addr_, new_port);
 }
 
 // ============================================================================
-// ProcessGroupBase::split default: throw. Backends override.
+// ProcessGroupBase::split default: throw with a documented contract.
+//
+// M8 note: this is intentionally a non-pure-virtual default so:
+//   (a) future backends that don't support sub-group creation can still
+//       inherit from ProcessGroupBase without forcing them to provide a
+//       split implementation,
+//   (b) tests that use a mock ProcessGroup don't need to override split,
+//   (c) the existing override set (NCCL via ncclCommSplit, MPI via
+//       MPI_Comm_split, Gloo via gather + new rendezvous) demonstrates
+//       the contract for backends that DO support split.
+//
+// If you're adding a new ProcessGroup subclass that supports sub-group
+// creation, override this method.
 // ============================================================================
 auto ProcessGroupBase::split(int color, int key)
     -> std::shared_ptr<ProcessGroupBase>
@@ -188,8 +348,9 @@ auto ProcessGroupBase::split(int color, int key)
     (void)color; (void)key;
     throw std::runtime_error(
         "ProcessGroupBase::split: not implemented for this backend. "
-        "NCCLProcessGroup supports ncclCommSplit; other backends require a "
-        "concrete override.");
+        "Currently supported: NCCLProcessGroup (ncclCommSplit), "
+        "MPIProcessGroup (MPI_Comm_split), GlooProcessGroup (gather + "
+        "rendezvous). Add a `split()` override on your custom backend.");
 }
 
 // ============================================================================
@@ -241,7 +402,11 @@ auto ProcessGroupBase::all_to_all_single(Tensor& output, const Tensor& input) ->
     for (int r = 0; r < ws; ++r) {
         per_peer[r] = gathered[r].slice(0, my_rank * chunk, (my_rank + 1) * chunk);
     }
-    output = cat(per_peer, 0);
+    // H5 fix: in-place writeback so autograd aliases survive.
+    auto assembled_b = cat(per_peer, 0);
+    auto src_bytes_b = static_cast<size_t>(assembled_b.numel())
+                     * static_cast<size_t>(dtype_size(assembled_b.dtype()));
+    std::memcpy(output.data_ptr(), assembled_b.data_ptr(), src_bytes_b);
 }
 
 // ============================================================================
@@ -703,12 +868,16 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
 
 auto NCCLProcessGroup::barrier() -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    // NCCL has no native barrier; perform an all-reduce on a dummy tensor
+    // NCCL has no native barrier; perform an all-reduce on a dummy tensor.
+    // L7 fix: cache the dummy tensor per-instance to avoid the per-call
+    // allocation on the hot path. Lazy-init keyed on (device_id, dtype).
     int device_id = 0;
     NCCL_PG_GPU_CHECK(cudaGetDevice(&device_id));
-
-    Tensor dummy = zeros({1}, DType::Float32, Device::cuda(device_id));
-    all_reduce(dummy, ReduceOp::SUM);
+    if (!barrier_dummy_.has_value() ||
+        barrier_dummy_->device().index != device_id) {
+        barrier_dummy_.emplace(zeros({1}, DType::Float32, Device::cuda(device_id)));
+    }
+    all_reduce(*barrier_dummy_, ReduceOp::SUM);
 #else
     throw std::runtime_error("NCCLProcessGroup: NCCL not available");
 #endif
@@ -821,4 +990,264 @@ auto NCCLProcessGroup::split(int color, int key)
 
 #endif // TENZOR_HAS_NCCL
 
-} // namespace tenzor::distributed
+// ============================================================================
+// Inf-F1: MPIProcessGroup Implementation
+// ============================================================================
+
+#ifdef TENZOR_HAS_MPI
+
+namespace {
+
+inline auto reduce_op_to_mpi(ReduceOp op) -> MPI_Op {
+    switch (op) {
+        case ReduceOp::SUM:     return MPI_SUM;
+        case ReduceOp::AVG:     return MPI_SUM;  // divide by world_size on caller
+        case ReduceOp::PRODUCT: return MPI_PROD;
+        case ReduceOp::MIN:     return MPI_MIN;
+        case ReduceOp::MAX:     return MPI_MAX;
+        default:
+            throw std::invalid_argument(
+                "MPIProcessGroup: unsupported ReduceOp");
+    }
+}
+
+inline auto dtype_to_mpi(DType dtype) -> MPI_Datatype {
+    switch (dtype) {
+        case DType::Float32: return MPI_FLOAT;
+        case DType::Float64: return MPI_DOUBLE;
+        case DType::Int32:   return MPI_INT;
+        case DType::Int64:   return MPI_LONG_LONG_INT;
+        case DType::Int8:    return MPI_INT8_T;
+        case DType::UInt8:   return MPI_UINT8_T;
+        case DType::Int16:   return MPI_INT16_T;
+        case DType::UInt16:  return MPI_UINT16_T;
+        case DType::UInt32:  return MPI_UINT32_T;
+        case DType::UInt64:  return MPI_UINT64_T;
+        case DType::Bool:    return MPI_C_BOOL;
+        default:
+            // Sentinel — callers must validate dtype before reaching this
+            // path. Returning MPI_BYTE was unsafe because MPI_SUM on raw
+            // bytes is undefined. Use `validate_mpi_reducible_dtype` below.
+            return MPI_BYTE;
+    }
+}
+
+// H3 fix: explicit gate that throws on any dtype MPI cannot natively
+// reduce (F16/BF16/Complex/quantized). Callers must widen to F32 first.
+inline auto validate_mpi_reducible_dtype(DType dtype, const char* op) -> void {
+    switch (dtype) {
+        case DType::Float32: case DType::Float64:
+        case DType::Int8:  case DType::Int16: case DType::Int32: case DType::Int64:
+        case DType::UInt8: case DType::UInt16: case DType::UInt32: case DType::UInt64:
+        case DType::Bool:
+            return;
+        default:
+            throw std::runtime_error(
+                std::string("MPIProcessGroup::") + op +
+                ": dtype " + std::string(dtype_name(dtype)) +
+                " has no native MPI representation. Widen to Float32 before reducing.");
+    }
+}
+
+#define MPI_PG_CHECK(call) \
+    do { \
+        int err__ = (call); \
+        if (err__ != MPI_SUCCESS) { \
+            char err_buf__[MPI_MAX_ERROR_STRING]; int err_len__ = 0; \
+            MPI_Error_string(err__, err_buf__, &err_len__); \
+            throw std::runtime_error( \
+                std::string("MPIProcessGroup: MPI call failed: ") + err_buf__); \
+        } \
+    } while (0)
+
+}  // anonymous namespace
+
+MPIProcessGroup::MPIProcessGroup(int rank, int world_size,
+                                 const std::string& /*master_addr*/,
+                                 int /*master_port*/)
+    : rank_(rank), world_size_(world_size) {
+    // Ensure MPI is initialized — match MPIBackend::initialize semantics.
+    int inited = 0;
+    MPI_PG_CHECK(MPI_Initialized(&inited));
+    if (!inited) {
+        int provided = 0;
+        MPI_PG_CHECK(MPI_Init_thread(nullptr, nullptr,
+                                     MPI_THREAD_MULTIPLE, &provided));
+    }
+    MPI_Comm world = MPI_COMM_WORLD;
+    comm_ = static_cast<void*>(world);
+    owns_comm_ = false;  // MPI_COMM_WORLD is owned by MPI itself
+
+    // Sanity-check rank/world_size against the communicator.
+    int comm_rank = -1, comm_size = -1;
+    MPI_PG_CHECK(MPI_Comm_rank(world, &comm_rank));
+    MPI_PG_CHECK(MPI_Comm_size(world, &comm_size));
+    if (comm_rank != rank || comm_size != world_size) {
+        throw std::invalid_argument(
+            "MPIProcessGroup: requested (rank=" + std::to_string(rank) +
+            ", world_size=" + std::to_string(world_size) +
+            ") does not match MPI_COMM_WORLD (rank=" +
+            std::to_string(comm_rank) + ", size=" + std::to_string(comm_size) + ")");
+    }
+}
+
+MPIProcessGroup::MPIProcessGroup(int rank, int world_size,
+                                 void* comm, bool owns)
+    : rank_(rank), world_size_(world_size),
+      comm_(comm), owns_comm_(owns) {}
+
+MPIProcessGroup::~MPIProcessGroup() {
+    if (owns_comm_ && comm_ != nullptr) {
+        MPI_Comm c = reinterpret_cast<MPI_Comm>(comm_);
+        if (c != MPI_COMM_NULL) {
+            MPI_Comm_free(&c);  // ignore error at destruction time
+        }
+    }
+}
+
+auto MPIProcessGroup::validate_initialized() const -> void {
+    if (comm_ == nullptr) {
+        throw std::runtime_error(
+            "MPIProcessGroup: communicator is null (uninitialized)");
+    }
+}
+
+auto MPIProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
+    validate_initialized();
+    validate_mpi_reducible_dtype(tensor.dtype(), "all_reduce");
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    MPI_PG_CHECK(MPI_Allreduce(MPI_IN_PLACE, tensor.data_ptr(),
+                               static_cast<int>(tensor.numel()),
+                               dtype_to_mpi(tensor.dtype()),
+                               reduce_op_to_mpi(op), comm));
+    if (op == ReduceOp::AVG && world_size_ > 1) {
+        // H6 fix: in-place divide preserves the caller's storage pointer
+        // so any aliased Variable / view sees the result. Construct a
+        // scalar Tensor for the divisor; `/=` writes through.
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                    tensor.dtype(), tensor.device());
+        tensor /= scalar;
+    }
+}
+
+auto MPIProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
+    validate_initialized();
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    MPI_PG_CHECK(MPI_Bcast(tensor.data_ptr(),
+                           static_cast<int>(tensor.numel()),
+                           dtype_to_mpi(tensor.dtype()),
+                           src_rank, comm));
+}
+
+auto MPIProcessGroup::all_gather(std::vector<Tensor>& output,
+                                 const Tensor& input) -> void {
+    validate_initialized();
+    if (static_cast<int>(output.size()) != world_size_) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::all_gather: output.size() must equal world_size");
+    }
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    // Use a flat contiguous buffer for the gather, then slice into output[].
+    int64_t per_rank_numel = input.numel();
+    Tensor flat = zeros({static_cast<int64_t>(world_size_) * per_rank_numel},
+                        input.dtype(), input.device());
+    MPI_PG_CHECK(MPI_Allgather(input.data_ptr(),
+                               static_cast<int>(per_rank_numel),
+                               dtype_to_mpi(input.dtype()),
+                               flat.data_ptr(),
+                               static_cast<int>(per_rank_numel),
+                               dtype_to_mpi(input.dtype()),
+                               comm));
+    auto in_shape = input.shape();
+    for (int r = 0; r < world_size_; ++r) {
+        output[r] = flat.slice(0, r * per_rank_numel, (r + 1) * per_rank_numel)
+                        .reshape(std::vector<int64_t>(in_shape.begin(), in_shape.end()));
+    }
+}
+
+auto MPIProcessGroup::reduce_scatter(Tensor& output,
+                                     std::span<const Tensor> input) -> void {
+    validate_initialized();
+    validate_mpi_reducible_dtype(output.dtype(), "reduce_scatter");
+    if (static_cast<int>(input.size()) != world_size_) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::reduce_scatter: input.size() must equal world_size");
+    }
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    // MPI_Reduce_scatter_block expects a contiguous send buffer with one
+    // chunk per peer. Concatenate input[] along dim 0 first.
+    std::vector<Tensor> in_vec(input.begin(), input.end());
+    Tensor send_buf = cat(in_vec, 0);
+    MPI_PG_CHECK(MPI_Reduce_scatter_block(
+        send_buf.data_ptr(), output.data_ptr(),
+        static_cast<int>(output.numel()),
+        dtype_to_mpi(output.dtype()),
+        MPI_SUM, comm));
+}
+
+auto MPIProcessGroup::all_to_all_single(Tensor& output,
+                                        const Tensor& input) -> void {
+    // Inf-F3: native MPI_Alltoallv on the owning communicator. Validates
+    // the same contract as the base class.
+    validate_initialized();
+    if (input.shape().empty()) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::all_to_all_single: input must have at least 1 dim");
+    }
+    const int64_t total = input.shape()[0];
+    if (total % world_size_ != 0) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::all_to_all_single: input.shape[0] (" +
+            std::to_string(total) + ") must be divisible by world_size (" +
+            std::to_string(world_size_) + ")");
+    }
+    auto same_shape = [](std::span<const int64_t> a, std::span<const int64_t> b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    };
+    if (!same_shape(output.shape(), input.shape()) ||
+        output.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::all_to_all_single: output must match input shape and dtype");
+    }
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    const int chunk_elems = static_cast<int>(input.numel() / world_size_);
+    // Equal-size chunks → MPI_Alltoall suffices and avoids per-peer displs.
+    MPI_PG_CHECK(MPI_Alltoall(input.data_ptr(),  chunk_elems,
+                              dtype_to_mpi(input.dtype()),
+                              output.data_ptr(), chunk_elems,
+                              dtype_to_mpi(output.dtype()),
+                              comm));
+}
+
+auto MPIProcessGroup::split(int color, int key)
+    -> std::shared_ptr<ProcessGroupBase> {
+    // Inf-F2: native MPI_Comm_split. Maps `color < 0` to MPI_UNDEFINED so
+    // the opting-out rank receives MPI_COMM_NULL → returns nullptr (same
+    // contract as NCCLProcessGroup::split).
+    validate_initialized();
+    auto parent = reinterpret_cast<MPI_Comm>(comm_);
+    int mpi_color = (color < 0) ? MPI_UNDEFINED : color;
+    MPI_Comm new_comm = MPI_COMM_NULL;
+    MPI_PG_CHECK(MPI_Comm_split(parent, mpi_color, key, &new_comm));
+    if (new_comm == MPI_COMM_NULL) {
+        return nullptr;  // we opted out
+    }
+    int new_rank = -1, new_size = -1;
+    MPI_PG_CHECK(MPI_Comm_rank(new_comm, &new_rank));
+    MPI_PG_CHECK(MPI_Comm_size(new_comm, &new_size));
+    // shared_ptr can't reach the private ctor; use new directly.
+    return std::shared_ptr<MPIProcessGroup>(
+        new MPIProcessGroup(new_rank, new_size,
+                            static_cast<void*>(new_comm),
+                            /*owns=*/true));
+}
+
+auto MPIProcessGroup::barrier() -> void {
+    validate_initialized();
+    auto comm = reinterpret_cast<MPI_Comm>(comm_);
+    MPI_PG_CHECK(MPI_Barrier(comm));
+}
+
+#endif  // TENZOR_HAS_MPI
+
+}  // namespace tenzor::distributed

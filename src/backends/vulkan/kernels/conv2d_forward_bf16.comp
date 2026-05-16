@@ -19,9 +19,12 @@ layout(push_constant) uniform PushConstants {
     uint in_width;        // Input width
     uint kernel_h;        // Kernel height
     uint kernel_w;        // Kernel width
-    uint stride;          // Stride
-    uint padding;         // Padding
-    uint dilation;        // Dilation
+    uint stride_h;        // Stride along H axis
+    uint stride_w;        // Stride along W axis
+    uint pad_h;           // Padding along H axis
+    uint pad_w;           // Padding along W axis
+    uint dil_h;           // Dilation along H axis
+    uint dil_w;           // Dilation along W axis
     uint groups;          // Groups (for grouped convolution)
     uint out_h;           // Output height
     uint out_w;           // Output width
@@ -95,8 +98,8 @@ void main() {
     for (uint ic = ic_start; ic < ic_end; ic++) {
         for (uint kh = 0; kh < params.kernel_h; kh++) {
             for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
-                int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+                int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+                int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
                 if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
                     uint input_idx = n * (params.in_channels * params.in_height * params.in_width) +

@@ -34,12 +34,17 @@ struct ONNXAttribute {
     std::optional<ONNXTensorData> tensor;
     std::optional<std::vector<int64_t>> ints;
     std::optional<std::vector<float>> floats;
+    // Wave Inf-C4: ONNX RNN/LSTM/GRU `activations` is a STRINGS list (one
+    // entry per direction × cell). Other attributes that take string lists
+    // also use this field.
+    std::optional<std::vector<std::string>> strings;
 
     auto get_int(int64_t default_val = 0) const -> int64_t;
     auto get_float(float default_val = 0.0f) const -> float;
     auto get_string(const std::string& default_val = "") const -> std::string;
     auto get_ints(const std::vector<int64_t>& default_val = {}) const -> std::vector<int64_t>;
     auto get_floats(const std::vector<float>& default_val = {}) const -> std::vector<float>;
+    auto get_strings(const std::vector<std::string>& default_val = {}) const -> std::vector<std::string>;
 };
 
 struct ONNXImportNode {

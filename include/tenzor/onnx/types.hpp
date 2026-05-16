@@ -31,7 +31,15 @@ enum class ONNXDataType : int32_t {
     UINT64 = 13,    // uint64
     COMPLEX64 = 14, // complex64
     COMPLEX128 = 15,// complex128
-    BFLOAT16 = 16   // bfloat16
+    BFLOAT16 = 16,  // bfloat16
+    // Inf-D: extended ONNX type codes (opset 19+/21+)
+    FLOAT8E4M3FN = 17,    // 8-bit float 4-exponent-3-mantissa, finite-only (Hopper)
+    FLOAT8E4M3FNUZ = 18,  // 8-bit float, no negative zero
+    FLOAT8E5M2 = 19,      // 8-bit float 5-exponent-2-mantissa (Hopper)
+    FLOAT8E5M2FNUZ = 20,  // 8-bit float, no negative zero
+    UINT4 = 21,           // 4-bit unsigned int (opset 21+)
+    INT4 = 22,            // 4-bit signed int (opset 21+)
+    FLOAT4E2M1 = 23       // 4-bit float (opset 23+)
 };
 
 /**

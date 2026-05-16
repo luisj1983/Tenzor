@@ -12,6 +12,7 @@
 #include "../core/tensor.hpp"
 #include <vector>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -197,6 +198,11 @@ private:
     int rank_;
     int world_size_;
     void* comm_{nullptr};  // ncclComm_t stored as void* to avoid header dep
+    // L7 fix: cached single-element dummy tensor reused across barrier()
+    // calls. Lazy-initialized on first barrier() to avoid the per-call
+    // allocation on the distributed hot path. Sized for whichever device
+    // the runtime is bound to.
+    mutable std::optional<Tensor> barrier_dummy_;
 
     /// Private constructor used by `split()` to wrap an already-split comm.
     NCCLProcessGroup(int rank, int world_size, void* comm);
@@ -211,6 +217,68 @@ private:
     auto get_device_id(const Tensor& tensor) const -> int;
 };
 #endif
+
+#ifdef TENZOR_HAS_MPI
+/**
+ * @brief MPI-based process group for CPU and (CUDA-aware) GPU communication.
+ *
+ * Inf-F1: adapter that exposes the `ProcessGroupBase` interface backed by
+ * the existing `MPIBackend`. Adds two native operations beyond the
+ * backend's collective set:
+ *   - `split(color, key)` → native `MPI_Comm_split`. Returns `nullptr`
+ *     when `color < 0` (per `MPI_UNDEFINED` semantics).
+ *   - `all_to_all_single(output, input)` → native `MPI_Alltoallv` on the
+ *     owning communicator.
+ *
+ * The remaining PG methods (all_reduce, broadcast, all_gather,
+ * reduce_scatter, barrier) delegate to the same MPI backend.
+ *
+ * Requires the build to define `TENZOR_HAS_MPI`.
+ */
+class MPIProcessGroup : public ProcessGroupBase {
+public:
+    /** @brief Construct an MPIProcessGroup over MPI_COMM_WORLD.
+     *
+     * Initialises an owned `MPIBackend` (calls `MPI_Init` if not already
+     * initialised). The communicator used for subsequent ops is the
+     * world communicator unless `split()` is called.
+     */
+    MPIProcessGroup(int rank, int world_size,
+                    const std::string& master_addr = "",
+                    int master_port = 0);
+    ~MPIProcessGroup() override;
+
+    // Non-copyable.
+    MPIProcessGroup(const MPIProcessGroup&) = delete;
+    MPIProcessGroup& operator=(const MPIProcessGroup&) = delete;
+
+    auto rank() const -> int override { return rank_; }
+    auto world_size() const -> int override { return world_size_; }
+
+    auto all_reduce(Tensor& tensor, ReduceOp op) -> void override;
+    auto broadcast(Tensor& tensor, int src_rank) -> void override;
+    auto all_gather(std::vector<Tensor>& output, const Tensor& input) -> void override;
+    auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void override;
+    auto all_to_all_single(Tensor& output, const Tensor& input) -> void override;
+    auto split(int color, int key)
+        -> std::shared_ptr<ProcessGroupBase> override;
+    auto barrier() -> void override;
+
+private:
+    int rank_;
+    int world_size_;
+    // Communicator stored as void* so this header does not need <mpi.h>.
+    // Set to MPI_COMM_WORLD by the public ctor; overwritten by `split()`
+    // via the private split-wrapping constructor.
+    void* comm_{nullptr};
+    bool owns_comm_{false};  ///< true → MPI_Comm_free at destruction
+
+    /// Private constructor used by `split()` to wrap an already-split comm.
+    MPIProcessGroup(int rank, int world_size, void* comm, bool owns);
+
+    auto validate_initialized() const -> void;
+};
+#endif  // TENZOR_HAS_MPI
 
 /**
  * @brief CPU-based process group using TCP/IP sockets.
@@ -236,10 +304,22 @@ public:
     auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void override;
     auto all_to_all_single(Tensor& output, const Tensor& input) -> void override;
     auto barrier() -> void override;
+    // Inf-F4 (deferred → landed): collective sub-PG creation.
+    // Gloo has no native MPI_Comm_split equivalent; this implementation
+    // all_gathers (rank, color, key) triples over the parent, computes
+    // new rank/size locally per color, and spins a fresh GlooBackend
+    // RendezvousStore on a per-color derived TCP port. Ranks with
+    // color < 0 opt out and receive nullptr.
+    auto split(int color, int key)
+        -> std::shared_ptr<ProcessGroupBase> override;
 
 private:
     int rank_;
     int world_size_;
+    // Inf-F4: rendezvous metadata kept for `split()` to derive the
+    // child PG's TCP port.
+    std::string master_addr_;
+    int master_port_;
     // Delegate to existing ProcessGroup from distributed.hpp
     std::shared_ptr<class ProcessGroup> pg_;
 };

@@ -287,6 +287,12 @@ add_executable(test_onnx_audit_fixes test_onnx_audit_fixes.cpp)
 target_link_libraries(test_onnx_audit_fixes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_onnx_audit_fixes LABELS "unit;onnx" DISCOVERY_TIMEOUT 60)
 
+# Inf-D: ONNX exporter coverage (every forward OpId has a mapping; extended
+# DTypes — BF16/FP8/INT4 — emit the right ONNX type codes).
+add_executable(test_onnx_exporter_coverage test_onnx_exporter_coverage.cpp)
+target_link_libraries(test_onnx_exporter_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_onnx_exporter_coverage LABELS "unit;onnx" DISCOVERY_TIMEOUT 60)
+
 # ONNX round-trip tests
 add_executable(test_onnx_roundtrip test_onnx_roundtrip.cpp)
 target_link_libraries(test_onnx_roundtrip PRIVATE tenzor_core GTest::gtest_main)

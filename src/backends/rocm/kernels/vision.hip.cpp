@@ -321,6 +321,41 @@ __global__ void interpolate_bilinear_backward_kernel_hip(
     }
 }
 
+// Wave H4: nearest-neighbour interpolate backward — scatter each output
+// gradient back to the single nearest input pixel via atomicAdd. Multiple
+// output positions can map to the same input pixel; atomicAdd accumulates
+// safely. Mirrors the bilinear backward shape with one destination per output
+// element instead of four bilinear corners.
+template<typename T>
+__global__ void interpolate_nearest_backward_kernel_hip(
+    const T* __restrict__ grad_out,
+    T* __restrict__ grad_in,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w)
+{
+    int64_t total = batch * channels * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        // PyTorch nearest-mode forward maps `oh -> floor(oh * in_h / out_h)`
+        // (no half-pixel offset, no align_corners — the nearest mode in
+        // PyTorch ignores align_corners). The backward scatters the gradient
+        // to that same input pixel.
+        int64_t y = (oh * in_h) / out_h;
+        int64_t x = (ow * in_w) / out_w;
+        if (y > in_h - 1) y = in_h - 1;
+        if (x > in_w - 1) x = in_w - 1;
+
+        int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        atomicAdd(&grad_in[base_idx + y * in_w + x], grad_out[idx]);
+    }
+}
+
 // Bicubic interpolation helper function
 __device__ inline float cubic_interp1d(float x) {
     float abs_x = fabsf(x);
@@ -678,21 +713,42 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
     const int threads = 256;
     const int blocks  = static_cast<int>((total + threads - 1) / threads);
 
-    if (grad_output.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<float>,
-            dim3(blocks), dim3(threads), 0, stream,
-            grad_output.data<float>(), grad_input.data<float>(),
-            N, C, in_h, in_w, out_h, out_w, align_corners);
-    } else if (grad_output.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<double>,
-            dim3(blocks), dim3(threads), 0, stream,
-            grad_output.data<double>(), grad_input.data<double>(),
-            N, C, in_h, in_w, out_h, out_w, align_corners);
-    } else {
-        throw std::runtime_error(
-            "interpolate_backward (ROCm): unsupported dtype " +
-            std::string(dtype_name(grad_output.dtype())) +
-            ". Only Float32 and Float64 are supported (HIP atomicAdd availability).");
+    // Wave H4: mode-aware dispatch — bilinear vs nearest both supported
+    // natively now via dedicated scatter kernels.
+    if (mode == "bilinear") {
+        if (grad_output.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<float>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<float>(), grad_input.data<float>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        } else if (grad_output.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(interpolate_bilinear_backward_kernel_hip<double>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<double>(), grad_input.data<double>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        } else {
+            throw std::runtime_error(
+                "interpolate_backward bilinear (ROCm): unsupported dtype " +
+                std::string(dtype_name(grad_output.dtype())) +
+                ". Only Float32 and Float64 are supported (HIP atomicAdd availability).");
+        }
+    } else {  // "nearest"
+        if (grad_output.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(interpolate_nearest_backward_kernel_hip<float>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<float>(), grad_input.data<float>(),
+                N, C, in_h, in_w, out_h, out_w);
+        } else if (grad_output.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(interpolate_nearest_backward_kernel_hip<double>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<double>(), grad_input.data<double>(),
+                N, C, in_h, in_w, out_h, out_w);
+        } else {
+            throw std::runtime_error(
+                "interpolate_backward nearest (ROCm): unsupported dtype " +
+                std::string(dtype_name(grad_output.dtype())) +
+                ". Only Float32 and Float64 are supported (HIP atomicAdd availability).");
+        }
     }
 
     HIP_CHECK(hipGetLastError());

@@ -356,13 +356,17 @@ public:
                                 int64_t padding, int64_t groups) -> Tensor;
     auto dispatchConvTranspose2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
 
-    // Conv2d backward operations
+    // Conv2d backward operations (per-axis stride/padding/dilation — Wave B1/B2).
     auto dispatchConv2dBackwardInput(const Tensor& grad_output, const Tensor& weight,
-                                     int64_t stride, int64_t padding, int64_t dilation,
+                                     int64_t stride_h, int64_t stride_w,
+                                     int64_t pad_h, int64_t pad_w,
+                                     int64_t dil_h, int64_t dil_w,
                                      const std::vector<int64_t>& input_shape,
                                      int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardWeight(const Tensor& grad_output, const Tensor& input,
-                                      int64_t stride, int64_t padding, int64_t dilation,
+                                      int64_t stride_h, int64_t stride_w,
+                                      int64_t pad_h, int64_t pad_w,
+                                      int64_t dil_h, int64_t dil_w,
                                       const std::vector<int64_t>& weight_shape,
                                       int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardBias(const Tensor& grad_output) -> Tensor;
@@ -393,14 +397,18 @@ public:
                                                  bool use_mask,
                                                  const std::vector<int64_t>& weight_shape) -> Tensor;
 
-    // Conv3d operations
+    // Conv3d operations (per-axis stride/padding/dilation — Wave B1/B2).
     auto dispatchConv3dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
     auto dispatchConv3dBackwardInput(const Tensor& grad_output, const Tensor& weight,
-                                     int64_t stride, int64_t padding, int64_t dilation,
+                                     int64_t stride_d, int64_t stride_h, int64_t stride_w,
+                                     int64_t padding_d, int64_t padding_h, int64_t padding_w,
+                                     int64_t dilation_d, int64_t dilation_h, int64_t dilation_w,
                                      const std::vector<int64_t>& input_shape,
                                      int64_t groups = 1) -> Tensor;
     auto dispatchConv3dBackwardWeight(const Tensor& grad_output, const Tensor& input,
-                                      int64_t stride, int64_t padding, int64_t dilation,
+                                      int64_t stride_d, int64_t stride_h, int64_t stride_w,
+                                      int64_t padding_d, int64_t padding_h, int64_t padding_w,
+                                      int64_t dilation_d, int64_t dilation_h, int64_t dilation_w,
                                       const std::vector<int64_t>& weight_shape,
                                       int64_t groups = 1) -> Tensor;
     auto dispatchConv3dBackwardBias(const Tensor& grad_output) -> Tensor;

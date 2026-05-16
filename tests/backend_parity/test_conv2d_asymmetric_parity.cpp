@@ -233,8 +233,13 @@ TEST_F(E1Test, ROCm_Conv2dForward_SymmetricStill_Works) {
     ASSERT_EQ(outputs.size(), 1u);
 }
 
-TEST_F(E1Test, ROCm_Conv2dForward_Asymmetric_ThrowsHonestly) {
-    // Audit E2: previously silently degraded to symmetric. Now throws.
+// Wave B3: ROCm Conv2d now natively supports per-axis stride/padding/dilation
+// via MIOpen's miopenInitConvolutionDescriptor (which has always accepted
+// per-axis (pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)).
+// The earlier "_Asymmetric_ThrowsHonestly" stub has been replaced with two
+// positive tests: shape correctness + value parity against CPU.
+
+TEST_F(E1Test, ROCm_Conv2dForward_AsymmetricStride_ProducesCorrectShape) {
     if (!has_rocm()) GTEST_SKIP() << "ROCm not available";
     auto input  = random_tensor({1, 2, 8, 8}, Device::rocm(0));
     auto weight = random_tensor({4, 2, 3, 3}, Device::rocm(0));
@@ -249,7 +254,47 @@ TEST_F(E1Test, ROCm_Conv2dForward_Asymmetric_ThrowsHonestly) {
     attrs.set(AttrKey::Groups,    1);
 
     std::vector<Tensor> inputs = {input, weight};
-    EXPECT_THROW(dispatch(OpId::Conv2dForward, inputs, attrs), std::runtime_error);
+    auto outputs = dispatch(OpId::Conv2dForward, inputs, attrs);
+    ASSERT_EQ(outputs.size(), 1u);
+    auto [exp_h, exp_w] = expected_out_hw(8, 8, 3, 3, 2, 1, 0, 0, 1, 1);
+    auto shape = outputs[0].shape();
+    EXPECT_EQ(shape[2], exp_h);
+    EXPECT_EQ(shape[3], exp_w);
+}
+
+TEST_F(E1Test, ROCm_Conv2dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_rocm()) GTEST_SKIP() << "ROCm not available";
+
+    auto input_cpu  = random_tensor({1, 2, 8, 8}, Device::cpu());
+    auto weight_cpu = random_tensor({4, 2, 3, 3}, Device::cpu());
+    auto input_gpu  = input_cpu.to(Device::rocm(0));
+    auto weight_gpu = weight_cpu.to(Device::rocm(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH,   2);
+    attrs.set(AttrKey::StrideW,   1);
+    attrs.set(AttrKey::PaddingH,  1);
+    attrs.set(AttrKey::PaddingW,  0);
+    attrs.set(AttrKey::DilationH, 1);
+    attrs.set(AttrKey::DilationW, 1);
+    attrs.set(AttrKey::Groups,    1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out = dispatch(OpId::Conv2dForward, cpu_inputs, attrs)[0];
+    Tensor gpu_out = dispatch(OpId::Conv2dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -332,7 +377,11 @@ TEST_F(E1Test, Vulkan_Conv2dForward_SymmetricStill_Works) {
     ASSERT_EQ(outputs.size(), 1u);
 }
 
-TEST_F(E1Test, Vulkan_Conv2dForward_Asymmetric_ThrowsHonestly) {
+// Wave B1/B2: Vulkan Conv2dForward now natively supports asymmetric stride/
+// padding/dilation via per-axis push-constants in the compute shader. Replaces
+// the prior _Asymmetric_ThrowsHonestly test with two positive tests
+// (shape + value parity against CPU).
+TEST_F(E1Test, Vulkan_Conv2dForward_AsymmetricStride_ProducesCorrectShape) {
     if (!has_vulkan()) GTEST_SKIP() << "Vulkan not available";
     auto input  = random_tensor({1, 2, 8, 8}, Device::vulkan(0));
     auto weight = random_tensor({4, 2, 3, 3}, Device::vulkan(0));
@@ -347,7 +396,47 @@ TEST_F(E1Test, Vulkan_Conv2dForward_Asymmetric_ThrowsHonestly) {
     attrs.set(AttrKey::Groups,    1);
 
     std::vector<Tensor> inputs = {input, weight};
-    EXPECT_THROW(dispatch(OpId::Conv2dForward, inputs, attrs), std::runtime_error);
+    auto outputs = dispatch(OpId::Conv2dForward, inputs, attrs);
+    ASSERT_EQ(outputs.size(), 1u);
+    auto [exp_h, exp_w] = expected_out_hw(8, 8, 3, 3, 2, 1, 0, 0, 1, 1);
+    auto shape = outputs[0].shape();
+    EXPECT_EQ(shape[2], exp_h);
+    EXPECT_EQ(shape[3], exp_w);
+}
+
+TEST_F(E1Test, Vulkan_Conv2dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_vulkan()) GTEST_SKIP() << "Vulkan not available";
+
+    auto input_cpu  = random_tensor({1, 2, 8, 8}, Device::cpu());
+    auto weight_cpu = random_tensor({4, 2, 3, 3}, Device::cpu());
+    auto input_gpu  = input_cpu.to(Device::vulkan(0));
+    auto weight_gpu = weight_cpu.to(Device::vulkan(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH,   2);
+    attrs.set(AttrKey::StrideW,   1);
+    attrs.set(AttrKey::PaddingH,  1);
+    attrs.set(AttrKey::PaddingW,  0);
+    attrs.set(AttrKey::DilationH, 1);
+    attrs.set(AttrKey::DilationW, 1);
+    attrs.set(AttrKey::Groups,    1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out = dispatch(OpId::Conv2dForward, cpu_inputs, attrs)[0];
+    Tensor gpu_out = dispatch(OpId::Conv2dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -393,20 +482,23 @@ TEST_F(E1Test, NN_FConv2d_AsymmetricStride_CUDA_ProducesShape) {
     EXPECT_EQ(shape[3], 6);
 }
 
-TEST_F(E1Test, NN_FConv2d_AsymmetricStride_ROCm_ThrowsAtBackend) {
-    // After E5 the F::conv2d guard is gone; ROCm asymmetric throws at the
-    // backend with a clear "kernel refactor pending" message.
+TEST_F(E1Test, NN_FConv2d_AsymmetricStride_ROCm_ProducesShape) {
+    // Wave B3: ROCm now natively supports asymmetric stride/padding/dilation
+    // via the per-axis im2col path. Previously threw; now produces the correct
+    // output shape (matches CPU semantics).
     if (!has_rocm()) GTEST_SKIP() << "ROCm not available";
     auto input  = random_tensor({1, 2, 8, 8}, Device::rocm(0));
     auto weight = random_tensor({4, 2, 3, 3}, Device::rocm(0));
     Variable input_v(input, false);
     Variable weight_v(weight, false);
 
-    EXPECT_THROW(
-        nn::functional::conv2d(input_v, weight_v, std::nullopt,
-                                /*stride=*/{2, 1}, /*padding=*/{0, 0},
-                                /*dilation=*/{1, 1}, /*groups=*/1),
-        std::runtime_error);
+    auto out = nn::functional::conv2d(input_v, weight_v, std::nullopt,
+                                       /*stride=*/{2, 1}, /*padding=*/{0, 0},
+                                       /*dilation=*/{1, 1}, /*groups=*/1);
+    auto shape = out.shape();
+    // out_h = (8 - 3) / 2 + 1 = 3; out_w = (8 - 3) / 1 + 1 = 6.
+    EXPECT_EQ(shape[2], 3);
+    EXPECT_EQ(shape[3], 6);
 }
 
 TEST_F(E1Test, NN_Conv2d_Module_AsymmetricStride_CPU_Works) {
@@ -439,4 +531,233 @@ TEST_F(E1Test, NN_Conv2d_Module_AsymmetricDilation_CPU_Works) {
     // out_h = (10 - 2*(3-1) - 1)/1 + 1 = 6; out_w = (10 - 3)/1 + 1 = 8.
     EXPECT_EQ(shape[2], 6);
     EXPECT_EQ(shape[3], 8);
+}
+
+// ============================================================================
+// Wave B4: CUDA Conv3d must honor per-axis StrideD/H/W, PaddingD/H/W,
+// DilationD/H/W (replacing the prior TENZOR_CUDA_READ_3D_ISO_OR_THROW macro
+// that rejected asymmetric values). cuDNN's cudnnSetConvolutionNdDescriptor
+// already accepts per-axis arrays; the wrappers now plumb them through.
+// ============================================================================
+
+static auto expected_out_dhw(int64_t D, int64_t H, int64_t W,
+                              int64_t kD, int64_t kH, int64_t kW,
+                              int64_t sD, int64_t sH, int64_t sW,
+                              int64_t pD, int64_t pH, int64_t pW,
+                              int64_t dD, int64_t dH, int64_t dW)
+    -> std::tuple<int64_t, int64_t, int64_t>
+{
+    int64_t out_d = (D + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
+    int64_t out_h = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t out_w = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+    return {out_d, out_h, out_w};
+}
+
+TEST_F(E1Test, CUDA_Conv3dForward_AsymmetricStride_ProducesCorrectShape) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    auto input  = random_tensor({1, 2, 8, 8, 8}, Device::cuda(0));
+    auto weight = random_tensor({4, 2, 3, 3, 3}, Device::cuda(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideD, 1);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 1);
+    attrs.set(AttrKey::Padding, 0);
+    attrs.set(AttrKey::Dilation, 1);
+    attrs.set(AttrKey::Groups, 1);
+
+    std::vector<Tensor> inputs = {input, weight};
+    auto outputs = dispatch(OpId::Conv3dForward, inputs, attrs);
+    ASSERT_EQ(outputs.size(), 1u);
+    auto exp = expected_out_dhw(8, 8, 8, 3, 3, 3, 1, 2, 1, 0, 0, 0, 1, 1, 1);
+    auto shape = outputs[0].shape();
+    EXPECT_EQ(shape[2], std::get<0>(exp));
+    EXPECT_EQ(shape[3], std::get<1>(exp));
+    EXPECT_EQ(shape[4], std::get<2>(exp));
+}
+
+TEST_F(E1Test, CUDA_Conv3dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    auto input_cpu  = random_tensor({1, 2, 6, 6, 6}, Device::cpu());
+    auto weight_cpu = random_tensor({3, 2, 3, 3, 3}, Device::cpu());
+    auto input_gpu  = input_cpu.to(Device::cuda(0));
+    auto weight_gpu = weight_cpu.to(Device::cuda(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideD, 1);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 1);
+    attrs.set(AttrKey::PaddingD, 1);
+    attrs.set(AttrKey::PaddingH, 0);
+    attrs.set(AttrKey::PaddingW, 1);
+    attrs.set(AttrKey::Dilation, 1);
+    attrs.set(AttrKey::Groups, 1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out, gpu_out;
+    try {
+        cpu_out = dispatch(OpId::Conv3dForward, cpu_inputs, attrs)[0];
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "CPU Conv3dForward does not honor per-axis yet: " << e.what();
+    }
+    gpu_out = dispatch(OpId::Conv3dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
+}
+
+TEST_F(E1Test, Vulkan_Conv3dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_vulkan()) GTEST_SKIP() << "Vulkan not available";
+
+    auto input_cpu  = random_tensor({1, 2, 6, 6, 6}, Device::cpu());
+    auto weight_cpu = random_tensor({3, 2, 3, 3, 3}, Device::cpu());
+    auto input_gpu  = input_cpu.to(Device::vulkan(0));
+    auto weight_gpu = weight_cpu.to(Device::vulkan(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideD, 1);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 1);
+    attrs.set(AttrKey::PaddingD, 1);
+    attrs.set(AttrKey::PaddingH, 0);
+    attrs.set(AttrKey::PaddingW, 1);
+    attrs.set(AttrKey::Dilation, 1);
+    attrs.set(AttrKey::Groups, 1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out = dispatch(OpId::Conv3dForward, cpu_inputs, attrs)[0];
+    Tensor gpu_out = dispatch(OpId::Conv3dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
+}
+
+TEST_F(E1Test, Vulkan_ConvTranspose2dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_vulkan()) GTEST_SKIP() << "Vulkan not available";
+
+    auto input_cpu  = random_tensor({1, 2, 4, 4}, Device::cpu());
+    auto weight_cpu = random_tensor({2, 3, 3, 3}, Device::cpu());  // ConvT layout
+    auto input_gpu  = input_cpu.to(Device::vulkan(0));
+    auto weight_gpu = weight_cpu.to(Device::vulkan(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 1);
+    attrs.set(AttrKey::PaddingH, 0);
+    attrs.set(AttrKey::PaddingW, 1);
+    attrs.set(AttrKey::DilationH, 1);
+    attrs.set(AttrKey::DilationW, 1);
+    attrs.set(AttrKey::OutputPaddingH, 0);
+    attrs.set(AttrKey::OutputPaddingW, 0);
+    attrs.set(AttrKey::Groups, 1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out, gpu_out;
+    try {
+        cpu_out = dispatch(OpId::ConvTranspose2dForward, cpu_inputs, attrs)[0];
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "CPU ConvTranspose2dForward does not honor per-axis: " << e.what();
+    }
+    gpu_out = dispatch(OpId::ConvTranspose2dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
+}
+
+TEST_F(E1Test, Vulkan_ConvTranspose3dForward_AsymmetricMatchesCPU_Values) {
+    if (!has_vulkan()) GTEST_SKIP() << "Vulkan not available";
+
+    auto input_cpu  = random_tensor({1, 2, 3, 3, 3}, Device::cpu());
+    auto weight_cpu = random_tensor({2, 3, 3, 3, 3}, Device::cpu());  // ConvT layout
+    auto input_gpu  = input_cpu.to(Device::vulkan(0));
+    auto weight_gpu = weight_cpu.to(Device::vulkan(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideD, 1);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 1);
+    attrs.set(AttrKey::PaddingD, 1);
+    attrs.set(AttrKey::PaddingH, 0);
+    attrs.set(AttrKey::PaddingW, 1);
+    attrs.set(AttrKey::Dilation, 1);
+    attrs.set(AttrKey::OutputPaddingD, 0);
+    attrs.set(AttrKey::OutputPaddingH, 0);
+    attrs.set(AttrKey::OutputPaddingW, 0);
+    attrs.set(AttrKey::Groups, 1);
+
+    std::vector<Tensor> cpu_inputs = {input_cpu, weight_cpu};
+    std::vector<Tensor> gpu_inputs = {input_gpu, weight_gpu};
+
+    Tensor cpu_out, gpu_out;
+    try {
+        cpu_out = dispatch(OpId::ConvTranspose3dForward, cpu_inputs, attrs)[0];
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "CPU ConvTranspose3dForward does not honor per-axis: " << e.what();
+    }
+    gpu_out = dispatch(OpId::ConvTranspose3dForward, gpu_inputs, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), gpu_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], gpu_out.shape()[i]) << " dim " << i;
+    }
+    auto* cp = cpu_out.data<float>();
+    auto* gp = gpu_out.data<float>();
+    int64_t n = cpu_out.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(cp[i], gp[i], 1e-4f) << " elem " << i;
+    }
+}
+
+TEST_F(E1Test, CUDA_Conv3dForward_ScalarAttrsStillWork) {
+    // Regression: scalar-only attrs must still produce the isotropic result.
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    auto input  = random_tensor({1, 2, 6, 6, 6}, Device::cuda(0));
+    auto weight = random_tensor({3, 2, 3, 3, 3}, Device::cuda(0));
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Stride,   2);
+    attrs.set(AttrKey::Padding,  1);
+    attrs.set(AttrKey::Dilation, 1);
+    attrs.set(AttrKey::Groups,   1);
+
+    std::vector<Tensor> inputs = {input, weight};
+    auto outputs = dispatch(OpId::Conv3dForward, inputs, attrs);
+    ASSERT_EQ(outputs.size(), 1u);
+    auto exp = expected_out_dhw(6, 6, 6, 3, 3, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1);
+    auto shape = outputs[0].shape();
+    EXPECT_EQ(shape[2], std::get<0>(exp));
+    EXPECT_EQ(shape[3], std::get<1>(exp));
+    EXPECT_EQ(shape[4], std::get<2>(exp));
 }

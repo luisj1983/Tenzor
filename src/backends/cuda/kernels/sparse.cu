@@ -193,8 +193,21 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStr
     }
 
     DType dtype = dense.dtype();
+    // Wave E4/G6 (deferred → landed): F16/BF16 via widen-narrow.
+    // cuSPARSE supports F16, but our dispatch path keeps F32/F64 only —
+    // route half-types through F32 for correctness.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto dense_f32 = dense.to(DType::Float32);
+        auto result_f32 = cuda_spmm_kernel(sparse_f32, dense_f32, stream);
+        return result_f32.to(dtype);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_spmm: only Float32 and Float64 supported, got "
+        throw std::runtime_error("cuda_spmm: only Float32/Float64/Float16/BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -316,8 +329,19 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStrea
     }
 
     DType dtype = vec.dtype();
+    // Wave E4/G6 (deferred → landed): F16/BF16 via widen-narrow.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto vec_f32 = vec.to(DType::Float32);
+        auto result_f32 = cuda_spmv_kernel(sparse_f32, vec_f32, stream);
+        return result_f32.to(dtype);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_spmv: only Float32 and Float64 supported, got "
+        throw std::runtime_error("cuda_spmv: only Float32/Float64/Float16/BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
 

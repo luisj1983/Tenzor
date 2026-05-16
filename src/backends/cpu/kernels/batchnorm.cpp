@@ -477,9 +477,11 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
 // --------------------------------------------------------------------------
 struct BatchNormCacheKey {
     int64_t N, C, H, W;
+    DType dtype;  // src/dst element type (gamma/beta/mean/var are always F32)
 
     bool operator==(const BatchNormCacheKey& other) const {
-        return N == other.N && C == other.C && H == other.H && W == other.W;
+        return N == other.N && C == other.C && H == other.H && W == other.W
+            && dtype == other.dtype;
     }
 };
 
@@ -489,6 +491,7 @@ struct BatchNormCacheKeyHash {
         h ^= std::hash<int64_t>{}(k.C) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<int64_t>{}(k.H) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<int64_t>{}(k.W) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(static_cast<int64_t>(k.dtype)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -516,9 +519,15 @@ static bool batchnorm2d_forward_affine_onednn(
     const Tensor& beta,
     float epsilon
 ) {
-    // oneDNN only supports Float32 for now
-    if (input.dtype() != DType::Float32) {
-        return false;
+    // Map src/dst dtype to oneDNN. F32/F16/BF16 are natively supported; other
+    // dtypes fall through to the templated generic path. Gamma/beta/mean/var
+    // stay F32 (oneDNN's convention for scale/shift/stats).
+    dnnl::memory::data_type src_dt;
+    switch (input.dtype()) {
+        case DType::Float32:  src_dt = dnnl::memory::data_type::f32; break;
+        case DType::Float16:  src_dt = dnnl::memory::data_type::f16; break;
+        case DType::BFloat16: src_dt = dnnl::memory::data_type::bf16; break;
+        default: return false;
     }
 
     auto shape = input.shape();
@@ -531,8 +540,8 @@ static bool batchnorm2d_forward_affine_onednn(
         auto& engine = get_onednn_engine();
         auto& stream = get_onednn_stream();
 
-        // Create cache key
-        BatchNormCacheKey cache_key{N, C, H, W};
+        // Cache key includes dtype so F32/F16/BF16 primitives don't collide.
+        BatchNormCacheKey cache_key{N, C, H, W, input.dtype()};
 
         // Try to get cached primitive
         auto cached = g_batchnorm_cache.get(cache_key);
@@ -543,15 +552,17 @@ static bool batchnorm2d_forward_affine_onednn(
 
             // Memory descriptors
             dnnl::memory::dims src_dims = {N, C, H, W};
-            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+            cached->src_md = dnnl::memory::desc(src_dims, src_dt,
                                                   dnnl::memory::format_tag::nchw);
 
-            // Scale/shift memory descriptor
+            // Scale/shift memory descriptor — always F32
             dnnl::memory::dims sc_dims = {C};
             cached->sc_md = dnnl::memory::desc(sc_dims, dnnl::memory::data_type::f32,
                                                  dnnl::memory::format_tag::a);
 
-            // Create batch normalization primitive descriptor for inference
+            // Create batch normalization primitive descriptor for inference.
+            // If oneDNN can't synthesize this on the current CPU (e.g. no AVX2
+            // for BF16), construction throws dnnl::error and we fall through.
             auto bn_pd = dnnl::batch_normalization_forward::primitive_desc(
                 engine,
                 dnnl::prop_kind::forward_inference,
@@ -567,9 +578,11 @@ static bool batchnorm2d_forward_affine_onednn(
             g_batchnorm_cache.put(cache_key, cached);
         }
 
-        // Create memory objects with user data (fast - just wraps pointers)
-        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input.data<float>()));
-        auto dst_mem = dnnl::memory(cached->src_md, engine, output.data<float>());
+        // Create memory objects with user data (fast - just wraps pointers).
+        // src/dst use raw void* via data_ptr() because element type may be F16/BF16.
+        auto src_mem = dnnl::memory(cached->src_md, engine,
+                                    const_cast<void*>(input.storage()->data()));
+        auto dst_mem = dnnl::memory(cached->src_md, engine, output.storage()->data());
         auto scale_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(gamma.data<float>()));
         auto shift_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(beta.data<float>()));
         auto mean_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(mean.data<float>()));

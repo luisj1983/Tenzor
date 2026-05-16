@@ -32,7 +32,12 @@ TEST(ModelFormatTest, MagicConstant) {
 }
 
 TEST(ModelFormatTest, VersionConstant) {
-    EXPECT_EQ(TZLITE_VERSION, 1u);
+    // Inf-E7: v2 added MMPL section.
+    // Inf-E5 (Wave Inf-E5): v3 adds LiteAttributes::extra_i/extra_f suffix
+    // per node — used by RNN/MHA which need >4+4 positional attrs.
+    // v1 + v2 files still load via TZLITE_VERSION_MIN_SUPPORTED.
+    EXPECT_EQ(TZLITE_VERSION, 3u);
+    EXPECT_EQ(TZLITE_VERSION_MIN_SUPPORTED, 1u);
 }
 
 TEST(ModelFormatTest, HeaderDefaultInit) {

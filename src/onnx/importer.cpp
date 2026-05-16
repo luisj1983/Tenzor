@@ -59,8 +59,9 @@ constexpr int32_t kAttrTypeFloat  = 1;
 constexpr int32_t kAttrTypeInt    = 2;
 constexpr int32_t kAttrTypeString = 3;
 constexpr int32_t kAttrTypeTensor = 4;
-constexpr int32_t kAttrTypeFloats = 6;
-constexpr int32_t kAttrTypeInts   = 7;
+constexpr int32_t kAttrTypeFloats  = 6;
+constexpr int32_t kAttrTypeInts    = 7;
+constexpr int32_t kAttrTypeStrings = 8;  // STRINGS list (Wave Inf-C4)
 
 // 6th-audit Fix #1: load the bytes for an EXTERNAL TensorProto from the
 // sidecar file referenced by its `external_data` entries. Throws on missing
@@ -232,6 +233,13 @@ auto proto_to_ir_attribute(const tenzor_onnx::AttributeProto& a) -> ONNXAttribut
         std::vector<float> floats(a.floats().begin(), a.floats().end());
         attr.floats = std::move(floats);
     }
+    // Wave Inf-C4: STRINGS list (used by RNN/LSTM/GRU `activations`).
+    if (type == kAttrTypeStrings || (!a.strings().empty() && type == 0)) {
+        std::vector<std::string> strs;
+        strs.reserve(a.strings().size());
+        for (const auto& s : a.strings()) strs.emplace_back(s);
+        attr.strings = std::move(strs);
+    }
     return attr;
 }
 
@@ -393,6 +401,11 @@ auto ONNXAttribute::get_ints(const std::vector<int64_t>& default_val) const -> s
 
 auto ONNXAttribute::get_floats(const std::vector<float>& default_val) const -> std::vector<float> {
     return floats.value_or(default_val);
+}
+
+auto ONNXAttribute::get_strings(const std::vector<std::string>& default_val) const
+    -> std::vector<std::string> {
+    return strings.value_or(default_val);
 }
 
 // ============================================================================
@@ -1081,17 +1094,54 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
     auto dilations = node.get_attr("dilations").value_or(ONNXAttribute{}).get_ints(default_ones);
     int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
 
-    // auto_pad: NOTSET uses `pads` as-is. SAME_UPPER/SAME_LOWER and VALID
-    // would need the input shape at import time; we leave these unsupported
-    // until the exporter emits SAME_*, which it doesn't as of today.
+    // auto_pad: Wave Inf-C1.
+    //   NOTSET                  → use `pads` as-is.
+    //   VALID                   → zero padding.
+    //   SAME_UPPER / SAME_LOWER → per ONNX spec: ceil(in_dim/stride) outputs;
+    //     extra padding goes after (UPPER) or before (LOWER) when total pad
+    //     is odd. Resolved at import time using the input tensor's spatial
+    //     shape (registered upstream by topological order).
     auto auto_pad = node.get_attr("auto_pad").value_or(ONNXAttribute{}).get_string("NOTSET");
-    if (auto_pad != "NOTSET" && auto_pad != "VALID") {
-        throw std::runtime_error("ONNX Conv: auto_pad=" + auto_pad +
-                                 " not supported (only NOTSET/VALID). "
-                                 "Re-export with explicit pads.");
-    }
     if (auto_pad == "VALID") {
         pads.assign(spatial_dims * 2, 0);
+    } else if (auto_pad == "SAME_UPPER" || auto_pad == "SAME_LOWER") {
+        // Need input X's spatial dims.
+        Tensor x_in = get_input(node.inputs[0]);
+        auto x_shape = x_in.shape();
+        if (x_shape.size() != spatial_dims + 2) {
+            throw std::runtime_error("ONNX Conv: input has rank " +
+                std::to_string(x_shape.size()) + ", expected " +
+                std::to_string(spatial_dims + 2) + " (N, C, *spatial).");
+        }
+        bool same_upper = (auto_pad == "SAME_UPPER");
+        pads.resize(spatial_dims * 2);
+        for (size_t i = 0; i < spatial_dims; ++i) {
+            int64_t in_dim  = x_shape[i + 2];
+            int64_t k       = kernel_shape[i];
+            int64_t s       = strides[i];
+            int64_t d       = dilations[i];
+            if (in_dim < 0) {
+                throw std::runtime_error("ONNX Conv: auto_pad=" + auto_pad +
+                    " requires concrete input spatial dim, got dynamic for dim " +
+                    std::to_string(i + 2));
+            }
+            int64_t out_dim = (in_dim + s - 1) / s;  // ceil(in_dim / stride)
+            int64_t total_pad = (out_dim - 1) * s + d * (k - 1) + 1 - in_dim;
+            if (total_pad < 0) total_pad = 0;
+            int64_t pad_lo, pad_hi;
+            if (same_upper) {
+                pad_lo = total_pad / 2;
+                pad_hi = total_pad - pad_lo;
+            } else {  // SAME_LOWER
+                pad_hi = total_pad / 2;
+                pad_lo = total_pad - pad_hi;
+            }
+            pads[i]                  = pad_lo;
+            pads[i + spatial_dims]   = pad_hi;
+        }
+    } else if (auto_pad != "NOTSET") {
+        throw std::runtime_error("ONNX Conv: auto_pad=" + auto_pad +
+                                 " not recognized (expected NOTSET/VALID/SAME_UPPER/SAME_LOWER).");
     }
     if (pads.size() != spatial_dims * 2) {
         throw std::runtime_error("ONNX Conv: pads attribute has " +
@@ -1196,13 +1246,54 @@ auto ONNXImporter::convert_conv_transpose(const ONNXImportNode& node)
                               .value_or(ONNXAttribute{}).get_ints(default_zeros);
     int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
 
+    // Wave Inf-C1: auto_pad — NOTSET/VALID/SAME_UPPER/SAME_LOWER all supported.
+    // For ConvTranspose with SAME_*, the ONNX spec computes total_pad such that
+    // out = in * stride; total_pad is then distributed UPPER (extra after) or
+    // LOWER (extra before). Requires concrete input spatial dims.
     auto auto_pad = node.get_attr("auto_pad").value_or(ONNXAttribute{}).get_string("NOTSET");
-    if (auto_pad != "NOTSET" && auto_pad != "VALID") {
-        throw std::runtime_error("ONNX ConvTranspose: auto_pad=" + auto_pad +
-                                 " not supported (only NOTSET/VALID).");
-    }
     if (auto_pad == "VALID") {
         pads.assign(spatial_dims * 2, 0);
+    } else if (auto_pad == "SAME_UPPER" || auto_pad == "SAME_LOWER") {
+        Tensor x_in = get_input(node.inputs[0]);
+        auto x_shape = x_in.shape();
+        if (x_shape.size() != spatial_dims + 2) {
+            throw std::runtime_error("ONNX ConvTranspose: input has rank " +
+                std::to_string(x_shape.size()) + ", expected " +
+                std::to_string(spatial_dims + 2) + " (N, C, *spatial).");
+        }
+        bool same_upper = (auto_pad == "SAME_UPPER");
+        pads.resize(spatial_dims * 2);
+        for (size_t i = 0; i < spatial_dims; ++i) {
+            int64_t in_dim  = x_shape[i + 2];
+            int64_t k       = kernel_shape[i];
+            int64_t s       = strides[i];
+            int64_t d       = dilations[i];
+            int64_t op      = (i < output_padding.size()) ? output_padding[i] : 0;
+            if (in_dim < 0) {
+                throw std::runtime_error("ONNX ConvTranspose: auto_pad=" + auto_pad +
+                    " requires concrete input spatial dim, got dynamic for dim " +
+                    std::to_string(i + 2));
+            }
+            // For ConvTranspose (per ONNX spec):
+            //   total_pad = stride*(in_dim-1) + output_padding + ((kernel-1)*dilation+1) - (in_dim*stride)
+            //             = output_padding + (kernel-1)*dilation + 1 - stride
+            // We pick UPPER vs LOWER for the asymmetric remainder.
+            int64_t total_pad = op + (k - 1) * d + 1 - s;
+            if (total_pad < 0) total_pad = 0;
+            int64_t pad_lo, pad_hi;
+            if (same_upper) {
+                pad_lo = total_pad / 2;
+                pad_hi = total_pad - pad_lo;
+            } else {
+                pad_hi = total_pad / 2;
+                pad_lo = total_pad - pad_hi;
+            }
+            pads[i]                = pad_lo;
+            pads[i + spatial_dims] = pad_hi;
+        }
+    } else if (auto_pad != "NOTSET") {
+        throw std::runtime_error("ONNX ConvTranspose: auto_pad=" + auto_pad +
+                                 " not recognized (expected NOTSET/VALID/SAME_UPPER/SAME_LOWER).");
     }
 
     if (!pads_are_symmetric(pads, spatial_dims)) {
@@ -1623,21 +1714,46 @@ auto ONNXImporter::convert_rnn(const ONNXImportNode& node) -> std::shared_ptr<nn
                                  std::to_string(dims.num_directions));
     }
 
-    // ONNX RNN supports `activations` attribute (default: Tanh per direction).
-    // tenzor::RNN supports nonlinearity ∈ {"tanh", "relu"}. The ONNX attribute
-    // is a STRINGS list but our ONNXAttribute struct currently captures only
-    // a single string; we read the first one and reject unknowns. (Most
-    // exports use the default Tanh, which is the no-op path here.)
+    // Wave Inf-C4: ONNX RNN `activations` is a STRINGS list (one entry per
+    // direction). tenzor::RNN supports nonlinearity ∈ {"tanh", "relu"} for
+    // both directions uniformly. We read all listed activations and verify
+    // they're all equal (post-lowercase); if so we use that nonlinearity,
+    // otherwise we throw with the heterogeneous-list situation. Aliases:
+    //   "Tanh", "Relu" → supported directly.
+    //   Other ONNX activation names (Sigmoid, LeakyRelu, Elu, ScaledTanh,
+    //   HardSigmoid, Affine, etc.) are rejected with the activation name in
+    //   the error so users can see exactly what export uses.
     std::string nonlin = "tanh";
     auto acts = node.get_attr("activations");
     if (acts) {
-        std::string a = acts->get_string("Tanh");
-        for (auto& c : a) c = static_cast<char>(std::tolower(c));
-        if (a == "tanh" || a.empty()) nonlin = "tanh";
-        else if (a == "relu") nonlin = "relu";
+        // Prefer the new STRINGS list; fall back to the legacy single-string
+        // path for older ONNXAttribute representations.
+        std::vector<std::string> act_list;
+        if (acts->strings.has_value()) {
+            act_list = acts->strings.value();
+        } else {
+            act_list.push_back(acts->get_string("Tanh"));
+        }
+        std::string first;
+        for (const auto& raw : act_list) {
+            std::string a = raw;
+            for (auto& c : a) c = static_cast<char>(std::tolower(c));
+            if (first.empty()) first = a;
+            else if (a != first) {
+                throw std::runtime_error("ONNX RNN: heterogeneous `activations` "
+                    "list (forward=`" + first + "`, other=`" + a +
+                    "`) is not supported by tenzor::RNN (it applies a single "
+                    "nonlinearity per layer for both directions).");
+            }
+        }
+        if (first.empty() || first == "tanh") nonlin = "tanh";
+        else if (first == "relu") nonlin = "relu";
         else {
-            throw std::runtime_error("ONNX RNN: unsupported activation `" + a +
-                                     "` (only Tanh and Relu currently supported).");
+            throw std::runtime_error("ONNX RNN: unsupported activation `" + first +
+                "` (only `tanh` and `relu` are supported by tenzor::RNN). "
+                "Other ONNX activations (sigmoid, leaky_relu, elu, hardsigmoid, "
+                "scaledtanh, affine, ...) require lowering to Sequential(Linear, "
+                "<activation>, Linear) which is not yet implemented for ONNX RNN.");
         }
     }
 
@@ -1934,12 +2050,19 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
         }
     }
 
+    // Wave Inf-C3: pad value is taken from input #2 in Pad-11+ (tensor), or
+    // from the legacy `value` attribute in Pad-2..10. Read both for compat.
     double value = 0.0;
     if (node.inputs.size() > 2) {
         auto value_t = get_input(node.inputs[2]);
         if (value_t.numel() > 0) {
             value = static_cast<double>(
                 *static_cast<const float*>(value_t.to(DType::Float32).data_ptr()));
+        }
+    } else if (auto value_attr = node.get_attr("value")) {
+        // Legacy Pad-2..10 attribute form.
+        if (value_attr->f.has_value()) {
+            value = static_cast<double>(value_attr->f.value());
         }
     }
 
@@ -1955,16 +2078,14 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
     //   "constant" → "constant"  (with `value`)
     //   "reflect"  → "reflect"
     //   "edge"     → "replicate"  (same op, different name across frameworks)
-    //   "wrap"     → not yet supported in nn::functional::pad — clear error.
+    //   "wrap"     → "circular"   (Wave Inf-C2: ONNX wrap-around padding
+    //                              maps to circular/wrap-around).
     std::string tenzor_mode;
     if (onnx_mode == "constant")      tenzor_mode = "constant";
     else if (onnx_mode == "reflect")  tenzor_mode = "reflect";
     else if (onnx_mode == "edge")     tenzor_mode = "replicate";
-    else if (onnx_mode == "wrap") {
-        throw std::runtime_error(
-            "ONNX Pad mode 'wrap' is not yet supported by nn::functional::pad "
-            "(I1-followup: add wrap/circular pad mode).");
-    } else {
+    else if (onnx_mode == "wrap")     tenzor_mode = "circular";
+    else {
         throw std::runtime_error("ONNX Pad: unknown mode '" + onnx_mode + "'");
     }
 

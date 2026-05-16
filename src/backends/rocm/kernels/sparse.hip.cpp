@@ -263,8 +263,26 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     }
 
     DType dtype = dense.dtype();
+    // Wave G6 (deferred → landed): F16/BF16 supported via widen-narrow
+    // through F32. rocSPARSE doesn't expose half-precision SpMM directly;
+    // widening at the dispatch boundary keeps correctness at the cost of
+    // one extra cast pass. Same pattern documented in the codebase memory.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        // Widen sparse + dense to F32, recurse, narrow result back.
+        // Use the layout-appropriate constructor directly (H8 fix —
+        // previously built CSR with COO indices in a "build-then-overwrite"
+        // pattern that was fragile against stricter validation).
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto dense_f32 = dense.to(DType::Float32);
+        auto result_f32 = rocm_spmm_kernel(sparse_f32, dense_f32);
+        return result_f32.to(dtype);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("rocm_spmm: only Float32 and Float64 supported, got "
+        throw std::runtime_error("rocm_spmm: only Float32/Float64/Float16/BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -394,8 +412,19 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     }
 
     DType dtype = vec.dtype();
+    // Wave G6 (deferred → landed): F16/BF16 via widen-narrow.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto vec_f32 = vec.to(DType::Float32);
+        auto result_f32 = rocm_spmv_kernel(sparse_f32, vec_f32);
+        return result_f32.to(dtype);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("rocm_spmv: only Float32 and Float64 supported, got "
+        throw std::runtime_error("rocm_spmv: only Float32/Float64/Float16/BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
 

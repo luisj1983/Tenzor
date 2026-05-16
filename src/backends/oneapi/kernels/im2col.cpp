@@ -10,8 +10,26 @@ namespace oneapi {
 // Kernel class declarations for im2col/col2im operations (separate classes per dtype)
 struct Im2colKernelFloat32 {};
 struct Im2colKernelFloat64 {};
+struct Im2colKernelFloat16 {};
+struct Im2colKernelBFloat16 {};
 struct Col2imKernelFloat32 {};
 struct Col2imKernelFloat64 {};
+struct Col2imKernelFloat16 {};
+struct Col2imKernelBFloat16 {};
+
+// Compile-time kernel-tag selector for im2col/col2im over scalar T.
+template<typename T> struct Im2colTag;
+template<> struct Im2colTag<float>      { using type = Im2colKernelFloat32; };
+template<> struct Im2colTag<double>     { using type = Im2colKernelFloat64; };
+template<> struct Im2colTag<sycl::half> { using type = Im2colKernelFloat16; };
+// BFloat16 is represented as uint16_t at storage; im2col is a pure data
+// shuffle (no arithmetic) so we template directly on uint16_t.
+template<> struct Im2colTag<uint16_t>   { using type = Im2colKernelBFloat16; };
+
+template<typename T> struct Col2imTag;
+template<> struct Col2imTag<float>      { using type = Col2imKernelFloat32; };
+template<> struct Col2imTag<double>     { using type = Col2imKernelFloat64; };
+template<> struct Col2imTag<sycl::half> { using type = Col2imKernelFloat16; };
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -46,7 +64,7 @@ void im2col_kernel_impl(const T* data_im, int64_t channels, int64_t height, int6
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
     const int64_t col_size = channels * kernel_h * kernel_w * output_h * output_w;
 
-    using KernelClass = std::conditional_t<std::is_same_v<T, float>, Im2colKernelFloat32, Im2colKernelFloat64>;
+    using KernelClass = typename Im2colTag<T>::type;
     queue.parallel_for<KernelClass>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
         int64_t idx = index / output_w;
@@ -96,7 +114,7 @@ void col2im_kernel_impl(const T* data_col, int64_t channels, int64_t height, int
     queue.fill(data_im, T(0), im_size);
 
     // Accumulate gradients from col buffer
-    using KernelClass = std::conditional_t<std::is_same_v<T, float>, Col2imKernelFloat32, Col2imKernelFloat64>;
+    using KernelClass = typename Col2imTag<T>::type;
     queue.parallel_for<KernelClass>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
                       [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
@@ -191,7 +209,6 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         const double* input_ptr = get_data_ptr<const double>(input);
         double* output_ptr = get_data_ptr<double>(output);
 
-        // Process each batch
         for (int64_t n = 0; n < N; ++n) {
             im2col_kernel_impl<double>(
                 input_ptr + n * C * H * W,
@@ -201,8 +218,41 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
             );
         }
     }
+    else if (input.dtype() == DType::Float16) {
+        // Wave F2: native F16 — im2col is a pure data shuffle so no F32 widen
+        // is needed; the SYCL half type is opaque to the algorithm.
+        const sycl::half* input_ptr =
+            reinterpret_cast<const sycl::half*>(input.data_ptr());
+        sycl::half* output_ptr =
+            reinterpret_cast<sycl::half*>(const_cast<void*>(output.data_ptr()));
+        for (int64_t n = 0; n < N; ++n) {
+            im2col_kernel_impl<sycl::half>(
+                input_ptr + n * C * H * W,
+                C, H, W, K_h, K_w, padding, stride, dilation,
+                output_ptr + n * C * K_h * K_w * H_out * W_out,
+                queue
+            );
+        }
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        // Wave F2: BF16 storage is uint16_t; im2col is a bit-pattern copy
+        // (T(0) = 0 in BF16, same as uint16_t(0)) so we template directly on
+        // uint16_t storage. No F32 widen, no tensor-wide cast.
+        const uint16_t* input_ptr =
+            reinterpret_cast<const uint16_t*>(input.data_ptr());
+        uint16_t* output_ptr =
+            reinterpret_cast<uint16_t*>(const_cast<void*>(output.data_ptr()));
+        for (int64_t n = 0; n < N; ++n) {
+            im2col_kernel_impl<uint16_t>(
+                input_ptr + n * C * H * W,
+                C, H, W, K_h, K_w, padding, stride, dilation,
+                output_ptr + n * C * K_h * K_w * H_out * W_out,
+                queue
+            );
+        }
+    }
     else {
-        throw std::runtime_error("im2col: Unsupported data type (only Float32 and Float64 supported)");
+        throw std::runtime_error("im2col: Unsupported data type (only Float32/Float64/Float16/BFloat16 supported)");
     }
 
     return output;

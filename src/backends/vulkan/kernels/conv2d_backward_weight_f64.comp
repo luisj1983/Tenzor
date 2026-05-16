@@ -24,9 +24,12 @@ layout(push_constant) uniform PushConstants {
     uint width_out;
     uint kernel_h;
     uint kernel_w;
-    uint stride;
-    uint padding;
-    uint dilation;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
     uint groups;
 } params;
 
@@ -66,8 +69,8 @@ void main() {
         for (uint oh = 0; oh < params.height_out; oh++) {
             for (uint ow = 0; ow < params.width_out; ow++) {
                 // Calculate corresponding input position
-                int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
-                int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+                int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+                int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
                 // Check bounds (apply padding)
                 if (ih >= 0 && ih < int(params.height_in) &&

@@ -2949,15 +2949,101 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
-        if (score_mod_id != 0 && score_mod_id != 1) {
-            throw std::runtime_error(
-                "FlexAttentionBackward CPU: ScoreModId=" + std::to_string(score_mod_id) +
-                " is not yet implemented on this backend (M8).");
+
+        // ScoreModId 0/1: route to fused FlashAttention backward (mathematically identical).
+        if (score_mod_id == 0 || score_mod_id == 1) {
+            bool causal = (score_mod_id == 1);
+            return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                                                 scale, causal, /*dropout_p=*/0.0f,
+                                                 /*philox_seed=*/0, /*philox_offset=*/0);
         }
-        bool causal = (score_mod_id == 1);
-        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-                                             scale, causal, /*dropout_p=*/0.0f,
-                                             /*philox_seed=*/0, /*philox_offset=*/0);
+
+        // Wave C: ScoreModId == 2 (sliding window) or >= 3 (user functor) — composed backward.
+        // Replays forward to recover masked scores, applies softmax-attention chain rule.
+        // inputs: [dO, Q, K, V, O, (LSE optional)].
+        if (score_mod_id == 2 || score_mod_id >= 3) {
+            const Tensor& dO = inputs[0];
+            const Tensor& Q  = inputs[1];
+            const Tensor& K  = inputs[2];
+            const Tensor& V  = inputs[3];
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = scores * scale_t;
+
+            if (score_mod_id == 2) {
+                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+                if (window_size <= 0) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward CPU: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                }
+                int64_t S_q = Q.shape()[Q.shape().size() - 2];
+                int64_t S_k = K.shape()[K.shape().size() - 2];
+                int64_t half = window_size / 2;
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
+                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                                              abs_diff.dtype(), abs_diff.device());
+                Tensor outside = tenzor::gt(abs_diff, half_t);
+                // Use a large finite negative instead of -inf so 0 * mask = 0
+                // (avoids NaN at in-window positions). softmax(-1e30) underflows
+                // to 0 to machine precision — bit-identical effect.
+                Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
+                                                 scores.dtype(), scores.device());
+                scores = scores + (outside.to(scores.dtype()) * large_neg);
+            } else {
+                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+                if (!fn) {
+                    throw std::runtime_error(
+                        "FlexAttentionBackward CPU: no user score_mod registered for ScoreModId=" +
+                        std::to_string(score_mod_id));
+                }
+                scores = fn(scores, 0, 0, 0, 0);
+            }
+
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {scores};
+            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+            // dV = attn^T @ dO
+            Tensor attn_t = tenzor::transpose(attn, -1, -2);
+            Tensor dV = tenzor::bmm(attn_t, dO);
+
+            // dAttn = dO @ V^T
+            Tensor Vt = tenzor::transpose(V, -1, -2);
+            Tensor dAttn = tenzor::bmm(dO, Vt);
+
+            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
+            Tensor ad = tenzor::mul(attn, dAttn);
+            NewOpAttributes sum_attrs;
+            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            sum_attrs.set(AttrKey::Keepdim, true);
+            std::vector<Tensor> sum_inputs = {ad};
+            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
+
+            // Apply scale to grad.
+            Tensor scale_t2 = tenzor::full(
+                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                static_cast<double>(scale), dScores.dtype(), dScores.device());
+            dScores = tenzor::mul(dScores, scale_t2);
+
+            Tensor dQ = tenzor::bmm(dScores, K);
+            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
+            Tensor dK = tenzor::bmm(dScores_t, Q);
+
+            return {dQ, dK, dV};
+        }
+
+        throw std::runtime_error(
+            "FlexAttentionBackward CPU: ScoreModId=" + std::to_string(score_mod_id) +
+            " not recognised.");
     });
 
     // =========================================================================

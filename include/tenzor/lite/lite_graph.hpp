@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
+#include <vector>
 
 namespace tenzor::lite {
 
@@ -44,6 +45,22 @@ using LiteOpType = OpId;
 struct LiteAttributes {
     float f[4]{};
     int64_t i[4]{};
+    // Wave Inf-E5 (deferred → landed): variable-length extras for ops that
+    // need more than 4 floats / 4 ints of positional state. RNN/LSTM/GRU
+    // use it for (hidden_size, num_layers, bidirectional, batch_first,
+    // dropout_at_layer_k...). MultiheadAttention uses it for
+    // (num_heads, head_dim, embed_dim, causal, kv_seq_len, ...).
+    //
+    // Encoding is purely positional; each consumer in dispatch_bridge.cpp
+    // documents the slot meaning inline next to the OpId switch arm.
+    //
+    // The serialiser at src/lite/model_format.cpp writes this as
+    //   u32 extra_i_count; i64[extra_i_count]
+    //   u32 extra_f_count; f32[extra_f_count]
+    // appended to each node's record. v1 files (no extras) round-trip
+    // unchanged because both counts default to 0.
+    std::vector<int64_t> extra_i;
+    std::vector<float>   extra_f;
 };
 
 // ============================================================================

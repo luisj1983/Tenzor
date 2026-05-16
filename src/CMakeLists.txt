@@ -243,6 +243,7 @@ set(TENZOR_CORE_SOURCES
     lite/runtime.cpp
     lite/lite_graph.cpp
     lite/model_format.cpp
+    lite/memory_planner.cpp
     lite/tensor_bridge.cpp
     lite/dispatch_bridge.cpp
     lite/exporter.cpp

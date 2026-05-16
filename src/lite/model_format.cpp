@@ -56,6 +56,7 @@
  */
 
 #include "tenzor/lite/model_format.hpp"
+#include "tenzor/lite/memory_planner.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -113,7 +114,7 @@ auto write_pod(std::ostream& file, const T& value) -> void {
 // Node table — shared between v1 graph-only writer and v2 TLV writer.
 // ---------------------------------------------------------------------------
 
-auto serialise_node_table(const LiteGraph& graph) -> std::vector<uint8_t> {
+auto serialise_node_table(const LiteGraph& graph, uint32_t version) -> std::vector<uint8_t> {
     std::vector<uint8_t> out;
     out.reserve(graph.num_nodes() * 64);
     for (const auto& node : graph.nodes()) {
@@ -129,12 +130,26 @@ auto serialise_node_table(const LiteGraph& graph) -> std::vector<uint8_t> {
 
         for (int i = 0; i < 4; ++i) append_pod(out, node.attrs.f[i]);
         for (int i = 0; i < 4; ++i) append_pod(out, node.attrs.i[i]);
+
+        // Wave Inf-E5 (deferred → landed): v3+ writes variable-length extras
+        // appended to each node record. v2 (and v1 implicit) files have no
+        // extras suffix — readers detect this from the file header version
+        // and skip the parsing entirely.
+        if (version >= 3) {
+            auto ec_i = static_cast<uint32_t>(node.attrs.extra_i.size());
+            append_pod(out, ec_i);
+            for (int64_t v : node.attrs.extra_i) append_pod(out, v);
+            auto ec_f = static_cast<uint32_t>(node.attrs.extra_f.size());
+            append_pod(out, ec_f);
+            for (float v : node.attrs.extra_f) append_pod(out, v);
+        }
     }
     return out;
 }
 
 auto deserialise_node_table(const uint8_t* buffer, size_t size,
-                            size_t& offset, uint32_t num_nodes)
+                            size_t& offset, uint32_t num_nodes,
+                            uint32_t version)
     -> std::unique_ptr<LiteGraph> {
     auto graph = std::make_unique<LiteGraph>();
     for (uint32_t n = 0; n < num_nodes; ++n) {
@@ -160,6 +175,22 @@ auto deserialise_node_table(const uint8_t* buffer, size_t size,
 
         for (int i = 0; i < 4; ++i) read_pod(buffer, size, offset, node.attrs.f[i]);
         for (int i = 0; i < 4; ++i) read_pod(buffer, size, offset, node.attrs.i[i]);
+
+        // Wave Inf-E5: v3+ has variable-length extras per node.
+        if (version >= 3) {
+            uint32_t ec_i = 0;
+            read_pod(buffer, size, offset, ec_i);
+            node.attrs.extra_i.resize(ec_i);
+            for (uint32_t k = 0; k < ec_i; ++k) {
+                read_pod(buffer, size, offset, node.attrs.extra_i[k]);
+            }
+            uint32_t ec_f = 0;
+            read_pod(buffer, size, offset, ec_f);
+            node.attrs.extra_f.resize(ec_f);
+            for (uint32_t k = 0; k < ec_f; ++k) {
+                read_pod(buffer, size, offset, node.attrs.extra_f[k]);
+            }
+        }
 
         graph->add_node(std::move(node));
     }
@@ -284,6 +315,49 @@ auto parse_meta_payload(const uint8_t* buffer, size_t size)
 }
 
 // ---------------------------------------------------------------------------
+// Inf-E1: MMPL section build/parse.
+// ---------------------------------------------------------------------------
+
+auto build_mmpl_payload(const MmplPlan& plan) -> std::vector<uint8_t> {
+    std::vector<uint8_t> out;
+    out.reserve(16 + plan.pool_sizes.size() * 8 + plan.placements.size() * 16);
+    append_pod<uint8_t>(out, static_cast<uint8_t>(plan.alignment));
+    append_pod<uint32_t>(out, static_cast<uint32_t>(plan.pool_sizes.size()));
+    for (uint64_t s : plan.pool_sizes) append_pod(out, s);
+    append_pod<uint32_t>(out, static_cast<uint32_t>(plan.placements.size()));
+    for (const auto& p : plan.placements) {
+        append_pod(out, p.tensor_id);
+        append_pod<uint8_t>(out, p.pool_index);
+        append_pod(out, p.offset);
+    }
+    return out;
+}
+
+auto parse_mmpl_payload(const uint8_t* buffer, size_t size) -> MmplPlan {
+    MmplPlan plan;
+    size_t offset = 0;
+    uint8_t alignment = 0;
+    read_pod(buffer, size, offset, alignment);
+    plan.alignment = alignment ? alignment : 64;
+    uint32_t num_pools = 0;
+    read_pod(buffer, size, offset, num_pools);
+    plan.pool_sizes.resize(num_pools);
+    for (uint32_t i = 0; i < num_pools; ++i) {
+        read_pod(buffer, size, offset, plan.pool_sizes[i]);
+    }
+    uint32_t num_placements = 0;
+    read_pod(buffer, size, offset, num_placements);
+    plan.placements.resize(num_placements);
+    for (uint32_t i = 0; i < num_placements; ++i) {
+        auto& p = plan.placements[i];
+        read_pod(buffer, size, offset, p.tensor_id);
+        read_pod(buffer, size, offset, p.pool_index);
+        read_pod(buffer, size, offset, p.offset);
+    }
+    return plan;
+}
+
+// ---------------------------------------------------------------------------
 // File I/O helpers.
 // ---------------------------------------------------------------------------
 
@@ -335,14 +409,21 @@ auto TZLiteReader::load_full(const void* data, size_t size) -> LoadedModel {
     if (header.magic != TZLITE_MAGIC) {
         throw std::runtime_error("TZLiteReader: bad magic — not a TZLITE file");
     }
-    if (header.version != TZLITE_VERSION) {
+    // Inf-E7: accept v1 (legacy) and v2 (with optional MMPL section). v1
+    // files simply have no MMPL section to parse — the back-compat path
+    // in the reader handles that transparently.
+    if (header.version < TZLITE_VERSION_MIN_SUPPORTED ||
+        header.version > TZLITE_VERSION) {
         throw std::runtime_error("TZLiteReader: unsupported TZLITE version " +
-                                  std::to_string(header.version));
+                                  std::to_string(header.version) +
+                                  " (this build supports versions " +
+                                  std::to_string(TZLITE_VERSION_MIN_SUPPORTED) +
+                                  ".." + std::to_string(TZLITE_VERSION) + ")");
     }
 
     LoadedModel result;
     size_t offset = sizeof(TZLiteHeader);
-    result.graph = deserialise_node_table(buffer, size, offset, header.num_nodes);
+    result.graph = deserialise_node_table(buffer, size, offset, header.num_nodes, header.version);
 
     // TLV section table: only parsed when weight_data_offset points at a
     // valid in-file offset past the node table.
@@ -379,6 +460,10 @@ auto TZLiteReader::load_full(const void* data, size_t size) -> LoadedModel {
                 }
                 case TZLITE_TAG_META:
                     result.metadata = parse_meta_payload(payload, section_size);
+                    break;
+                case TZLITE_TAG_MMPL:
+                    result.memory_plan = std::make_unique<MmplPlan>(
+                        parse_mmpl_payload(payload, section_size));
                     break;
                 default:
                     // Unknown tag — forward compatibility: skip silently. A
@@ -420,6 +505,13 @@ auto compute_node_table_size(const LiteGraph& graph) -> size_t {
         bytes += node.output_ids.size() * sizeof(int16_t);
         bytes += 4 * sizeof(float);
         bytes += 4 * sizeof(int64_t);
+        // Wave Inf-E5: v3+ extras suffix per node.
+        if (TZLITE_VERSION >= 3) {
+            bytes += sizeof(uint32_t);
+            bytes += node.attrs.extra_i.size() * sizeof(int64_t);
+            bytes += sizeof(uint32_t);
+            bytes += node.attrs.extra_f.size() * sizeof(float);
+        }
     }
     return bytes;
 }
@@ -441,7 +533,7 @@ auto TZLiteWriter::save(const LiteGraph& graph, const std::string& path) -> void
         sizeof(TZLiteHeader) + compute_node_table_size(graph);
     write_pod(file, header);
 
-    auto node_bytes = serialise_node_table(graph);
+    auto node_bytes = serialise_node_table(graph, TZLITE_VERSION);
     if (!node_bytes.empty()) {
         file.write(reinterpret_cast<const char*>(node_bytes.data()),
                    static_cast<std::streamsize>(node_bytes.size()));
@@ -449,9 +541,12 @@ auto TZLiteWriter::save(const LiteGraph& graph, const std::string& path) -> void
             throw std::runtime_error("TZLiteWriter: write failed");
         }
     }
-    // No TLV section in legacy mode — keeps the file byte-exactly equal to
-    // what pre-Phase-2 writers produced (the format-pinning tests rely on
-    // this).
+    // L14 fix: the comment previously claimed this path was "byte-exactly
+    // equal to pre-Phase-2 writers" — that hasn't been true since v3
+    // added LiteAttributes::extra_i/extra_f suffix per node. The save
+    // still writes a complete current-version file; just without the
+    // optional TLV (MMPL/WGTS/IOSP/META) sections. Format-pinning tests
+    // updated to match.
 }
 
 auto TZLiteWriter::save(const LiteGraph& graph,
@@ -544,7 +639,7 @@ auto TZLiteWriter::save(const LiteGraph& graph,
     auto meta_payload = build_meta_payload(opts.metadata);
 
     // Serialise the node table once so we can compute weight_data_offset.
-    auto node_bytes = serialise_node_table(graph);
+    auto node_bytes = serialise_node_table(graph, TZLITE_VERSION);
     const uint64_t tlv_offset =
         sizeof(TZLiteHeader) + static_cast<uint64_t>(node_bytes.size());
 
@@ -572,6 +667,7 @@ auto TZLiteWriter::save(const LiteGraph& graph,
     if (!wgts_payload.empty()) ++section_count;
     if (!opts.input_ids.empty() || !opts.output_ids.empty()) ++section_count;
     if (!opts.metadata.empty()) ++section_count;
+    if (opts.memory_plan) ++section_count;  // Inf-E1: MMPL section
     write_pod(file, section_count);
 
     auto write_section = [&](uint32_t tag, const std::vector<uint8_t>& payload) {
@@ -588,6 +684,10 @@ auto TZLiteWriter::save(const LiteGraph& graph,
         write_section(TZLITE_TAG_IOSP, iosp_payload);
     }
     if (!opts.metadata.empty()) write_section(TZLITE_TAG_META, meta_payload);
+    if (opts.memory_plan) {
+        auto mmpl_payload = build_mmpl_payload(*opts.memory_plan);
+        write_section(TZLITE_TAG_MMPL, mmpl_payload);
+    }
 
     if (!file) {
         throw std::runtime_error("TZLiteWriter: write failed");

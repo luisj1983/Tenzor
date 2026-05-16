@@ -92,7 +92,17 @@ auto WeightNorm::apply(std::shared_ptr<Module> module,
 }
 
 auto WeightNorm::compute_weight() -> Tensor {
-    if (!weight_g_ || !weight_v_) return Tensor{};
+    // L8 fix: previously returned default-constructed `Tensor{}` when
+    // weight_g_ or weight_v_ wasn't registered, which silently produced
+    // an unshape tensor that downstream code couldn't distinguish from
+    // "no weight_norm registered yet". Throw with a clear contract
+    // violation so callers see the API error immediately.
+    if (!weight_g_ || !weight_v_) {
+        throw std::runtime_error(
+            "WeightNorm::compute_weight: weight_g_ or weight_v_ is null. "
+            "Call apply() on the parent Module to register the "
+            "weight_norm reparameterization before invoking compute_weight.");
+    }
 
     Tensor g = weight_g_->tensor();
     Tensor v = weight_v_->tensor();

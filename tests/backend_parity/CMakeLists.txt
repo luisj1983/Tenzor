@@ -131,6 +131,12 @@ add_parity_test(test_sparse_real_patterns test_sparse_real_patterns.cpp)
 # Quantization parity tests
 add_parity_test(test_quantization_parity test_quantization_parity.cpp)
 
+# Inf-G (deferred → landed): multi-backend INT8 e2e quantization parity.
+# Each backend test gracefully GTEST_SKIPs when the device is unavailable.
+add_executable(test_quantization_e2e_parity test_quantization_e2e_parity.cpp)
+target_link_libraries(test_quantization_e2e_parity PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_quantization_e2e_parity LABELS "backend_parity;quantization" DISCOVERY_TIMEOUT 60)
+
 # Real-int8 quantized-kernel parity (QuantizedLinear across backends)
 add_parity_test(test_quantized_kernel_parity test_quantized_kernel_parity.cpp)
 
@@ -303,6 +309,30 @@ add_parity_test(test_nanstats_parity test_nanstats_parity.cpp)
 
 # Audit E1: asymmetric (per-axis) Conv2d stride/padding/dilation.
 add_parity_test(test_conv2d_asymmetric_parity test_conv2d_asymmetric_parity.cpp)
+
+# Wave C: FlexAttention with user-registered score_mod (ID >= 3) on Vulkan + ROCm.
+add_parity_test(test_flex_attention_user_mod_parity test_flex_attention_user_mod_parity.cpp)
+
+# Wave D: Vulkan FlashAttention tiled shader native causal masking (lifts stale gate).
+add_parity_test(test_vulkan_flash_attn_causal_parity test_vulkan_flash_attn_causal_parity.cpp)
+
+# Wave E: CUDA fused kernels with native F16/BF16 (F32 accumulator inside kernel).
+add_parity_test(test_cuda_fused_dtype_parity test_cuda_fused_dtype_parity.cpp)
+
+# Wave F2: OneAPI im2col native F16/BF16.
+add_parity_test(test_oneapi_im2col_dtype_parity test_oneapi_im2col_dtype_parity.cpp)
+
+# Wave G: CPU sparse SpMV/SpMM native F16/BF16/Int32/Int64 (Acc=F32 for half).
+add_parity_test(test_cpu_sparse_dtype_native test_cpu_sparse_dtype_native.cpp)
+
+# Wave H4: ROCm InterpolateBackward native nearest-mode scatter.
+add_parity_test(test_rocm_interpolate_nearest_backward test_rocm_interpolate_nearest_backward.cpp)
+
+# Wave Inf-A: CPU FFT non-MKL DFT fallback (covers any signal length).
+add_parity_test(test_cpu_fft_fallback test_cpu_fft_fallback.cpp)
+
+# Wave Inf-B: distribution entropy/mean/variance closed-form additions.
+add_parity_test(test_distributions_closed_forms test_distributions_closed_forms.cpp)
 
 # ==============================================================================
 # Test Groups

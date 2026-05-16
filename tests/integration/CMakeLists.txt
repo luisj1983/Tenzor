@@ -222,3 +222,8 @@ tenzor_discover_tests(test_model_backend_parity DISCOVERY_TIMEOUT 60 DISCOVERY_M
 add_executable(test_program_export test_program_export.cpp)
 target_link_libraries(test_program_export PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_program_export DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
+# Inf-G: audit-style quantization end-to-end tests (8 behaviour probes).
+add_executable(test_quantization_e2e test_quantization_e2e.cpp)
+target_link_libraries(test_quantization_e2e PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;quantization" BACKENDS cpu)

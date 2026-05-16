@@ -10,6 +10,7 @@
 #include "int_simd.hpp"
 #include "fp8_emulation.hpp"
 #include "pointwise_kernel.hpp"
+#include "simd_elementwise.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -3967,25 +3968,18 @@ auto cos_kernel(const Tensor& input) -> Tensor {
 }
 
 auto tan_kernel(const Tensor& input) -> Tensor {
-    // Widen-narrow Float16/BFloat16 — TENZOR_DISPATCH_FLOATING_TYPES below
-    // only supports Float32/Float64, but distributions like Cauchy /
-    // HalfCauchy sample via tan(uniform * π) and need a float-rendering
-    // path for Float16 inputs.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto orig = input.dtype();
-        return tan_kernel(input.to(DType::Float32)).to(orig);
-    }
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    size_t n = static_cast<size_t>(input.numel());
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "tan", [&]() {
+    // Native F32/F64/F16/BF16 dispatch. For F16/BF16, elementwise_unary
+    // promotes each element to F32 in a register, applies std::tan, and
+    // narrows the result back. No tensor-wide widen-narrow is performed.
+    TENZOR_DISPATCH_FLOAT_AND_HALF(input.dtype(), "tan", [&]() {
         const scalar_t* in_data = input.data<scalar_t>();
         scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::tan(in_data[i]);
-        }
+        cpu::elementwise_unary<scalar_t>(in_data, out_data, n,
+            [](auto x) { return std::tan(x); });
     });
     return output;
 }
@@ -4951,24 +4945,23 @@ static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
                           std::vector<int64_t>& shape_a_vec,
                           std::vector<int64_t>& shape_b_vec,
                           std::vector<int64_t>& output_shape) {
+    // Compare via float promotion so the template works for Float16/BFloat16
+    // (which expose explicit `operator float()` but not `operator<`). For
+    // float/double/integer types this cast is a compile-time no-op.
+    auto less = [](T x, T y) -> bool {
+        return static_cast<float>(x) < static_cast<float>(y);
+    };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
         for (size_t i = 0; i < n; ++i)
-            c_data[i] = (a_data[i] < b_data[i]) ? a_data[i] : b_data[i];
+            c_data[i] = less(a_data[i], b_data[i]) ? a_data[i] : b_data[i];
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-            [](T x, T y) -> T { return (x < y) ? x : y; });
+            [less](T x, T y) -> T { return less(x, y) ? x : y; });
     }
 }
 
 auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    // Float16/BFloat16: widen both operands to Float32, compute, cast back.
-    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
-        auto orig_dtype = a.dtype();
-        return minimum_kernel(a.to(DType::Float32), b.to(DType::Float32))
-            .to(orig_dtype);
-    }
-
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -4983,6 +4976,12 @@ auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                       a, b, shape_a_vec, shape_b_vec, output_shape);
     } else if (a.dtype() == DType::Float64) {
         minimum_typed(a.data<double>(), b.data<double>(), result.data<double>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Float16) {
+        minimum_typed(a.data<Float16>(), b.data<Float16>(), result.data<Float16>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::BFloat16) {
+        minimum_typed(a.data<BFloat16>(), b.data<BFloat16>(), result.data<BFloat16>(),
                       a, b, shape_a_vec, shape_b_vec, output_shape);
     } else {
         TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "minimum", [&]() {
@@ -4999,25 +4998,20 @@ static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
                           std::vector<int64_t>& shape_a_vec,
                           std::vector<int64_t>& shape_b_vec,
                           std::vector<int64_t>& output_shape) {
+    auto greater = [](T x, T y) -> bool {
+        return static_cast<float>(x) > static_cast<float>(y);
+    };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
         for (size_t i = 0; i < n; ++i)
-            c_data[i] = (a_data[i] > b_data[i]) ? a_data[i] : b_data[i];
+            c_data[i] = greater(a_data[i], b_data[i]) ? a_data[i] : b_data[i];
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-            [](T x, T y) -> T { return (x > y) ? x : y; });
+            [greater](T x, T y) -> T { return greater(x, y) ? x : y; });
     }
 }
 
 auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    // Float16/BFloat16: widen both operands to Float32, compute, cast back.
-    // The dispatch below only wires Float32/Float64 and integer types.
-    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
-        auto orig_dtype = a.dtype();
-        return maximum_kernel(a.to(DType::Float32), b.to(DType::Float32))
-            .to(orig_dtype);
-    }
-
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -5032,6 +5026,12 @@ auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                       a, b, shape_a_vec, shape_b_vec, output_shape);
     } else if (a.dtype() == DType::Float64) {
         maximum_typed(a.data<double>(), b.data<double>(), result.data<double>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Float16) {
+        maximum_typed(a.data<Float16>(), b.data<Float16>(), result.data<Float16>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::BFloat16) {
+        maximum_typed(a.data<BFloat16>(), b.data<BFloat16>(), result.data<BFloat16>(),
                       a, b, shape_a_vec, shape_b_vec, output_shape);
     } else {
         TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "maximum", [&]() {

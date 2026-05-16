@@ -107,6 +107,8 @@ namespace rocm {
 
     // Conv2d operations
     auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, hipStream_t stream, DataLayout layout = DataLayout::NCHW) -> Tensor;
+    // Wave B3: per-axis overload for asymmetric stride/padding/dilation (HIP im2col).
+    auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups, hipStream_t stream, DataLayout layout = DataLayout::NCHW) -> Tensor;
     auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, hipStream_t stream, DataLayout layout = DataLayout::NCHW) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Pooling operations

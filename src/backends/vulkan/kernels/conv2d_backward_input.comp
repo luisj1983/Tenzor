@@ -23,9 +23,12 @@ layout(push_constant) uniform PushConstants {
     uint width_out;
     uint kernel_h;
     uint kernel_w;
-    uint stride;
-    uint padding;
-    uint dilation;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
     uint groups;
 } params;
 
@@ -64,13 +67,13 @@ void main() {
         for (uint kw = 0; kw < params.kernel_w; kw++) {
             // Reverse the forward mapping: given input (ih, iw) and kernel (kh, kw),
             // find which output position (oh, ow) used this input
-            int ih_shifted = int(ih) + int(params.padding) - int(kh * params.dilation);
-            int iw_shifted = int(iw) + int(params.padding) - int(kw * params.dilation);
+            int ih_shifted = int(ih) + int(params.pad_h) - int(kh * params.dil_h);
+            int iw_shifted = int(iw) + int(params.pad_w) - int(kw * params.dil_w);
 
             // Check if this maps to a valid output position (must be divisible by stride)
-            if (ih_shifted % int(params.stride) == 0 && iw_shifted % int(params.stride) == 0) {
-                int oh = ih_shifted / int(params.stride);
-                int ow = iw_shifted / int(params.stride);
+            if (ih_shifted % int(params.stride_h) == 0 && iw_shifted % int(params.stride_w) == 0) {
+                int oh = ih_shifted / int(params.stride_h);
+                int ow = iw_shifted / int(params.stride_w);
 
                 // Check bounds
                 if (oh >= 0 && oh < int(params.height_out) &&

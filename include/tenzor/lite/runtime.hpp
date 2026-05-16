@@ -202,6 +202,23 @@ public:
     static auto load(const void* data, size_t size) -> std::unique_ptr<LiteRuntime>;
 
     /**
+     * @brief Inf-E4: Load a model by mmap'ing the file.
+     *
+     * Equivalent to `load(path)` but uses POSIX mmap(2) to map the WGTS
+     * payload into the address space as a non-owning view. Weights are
+     * served via `Tensor::from_blob` with a no-op deleter — no per-call
+     * copy, no heap allocation for the weight blob. The mapping lives
+     * for the lifetime of the runtime; the destructor calls `munmap`.
+     *
+     * On Windows or when mmap fails, falls back transparently to the
+     * heap-buffered `load(path)` path.
+     *
+     * @param path Path to the .tzlite model file
+     * @return Runtime with mmap-backed weights when supported
+     */
+    static auto load_mmap(const std::string& path) -> std::unique_ptr<LiteRuntime>;
+
+    /**
      * @brief Build a runtime around an in-memory graph (no file I/O).
      *
      * Useful for tests and for callers that produce a graph programmatically.

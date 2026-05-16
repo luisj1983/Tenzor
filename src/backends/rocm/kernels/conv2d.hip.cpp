@@ -159,9 +159,12 @@ __global__ void im2col_kernel_nchw(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -177,9 +180,9 @@ __global__ void im2col_kernel_nchw(
         int64_t oh = temp % out_h; temp /= out_h;
         int64_t b = temp;
 
-        // Calculate input position with padding and dilation
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
+        // Calculate input position with per-axis padding and dilation
+        int64_t ih = oh * stride_h - pad_h + kh * dil_h;
+        int64_t iw = ow * stride_w - pad_w + kw * dil_w;
 
         // Output index in col matrix
         // Shape: (batch * out_h * out_w, channels * kernel_h * kernel_w)
@@ -206,9 +209,12 @@ __global__ void im2col_kernel_nhwc(
     int64_t channels,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -224,9 +230,9 @@ __global__ void im2col_kernel_nhwc(
         int64_t oh = temp % out_h; temp /= out_h;
         int64_t b = temp;
 
-        // Calculate input position with padding and dilation
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
+        // Calculate input position with per-axis padding and dilation
+        int64_t ih = oh * stride_h - pad_h + kh * dil_h;
+        int64_t iw = ow * stride_w - pad_w + kw * dil_w;
 
         // Output index in col matrix (same as NCHW)
         int64_t out_row = b * out_h * out_w + oh * out_w + ow;
@@ -268,9 +274,12 @@ __global__ void col2im_kernel_nchw(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -288,17 +297,17 @@ __global__ void col2im_kernel_nchw(
         // Accumulate from all kernel positions that contribute to this output
         T sum = T(0);
 
-        // Accumulate from all kernel positions
+        // Accumulate from all kernel positions (per-axis stride/padding/dilation)
         for (int64_t kh = 0; kh < kernel_h; ++kh) {
             for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
                 // Reverse the im2col mapping: given output (ih, iw) and kernel (kh, kw), find col (oh, ow)
-                int64_t ih_shifted = ih + padding - kh * dilation;
-                int64_t iw_shifted = iw + padding - kw_iter * dilation;
+                int64_t ih_shifted = ih + pad_h - kh * dil_h;
+                int64_t iw_shifted = iw + pad_w - kw_iter * dil_w;
 
                 // Check if this maps to a valid col position
-                if (ih_shifted % stride == 0 && iw_shifted % stride == 0) {
-                    int64_t oh = ih_shifted / stride;
-                    int64_t ow = iw_shifted / stride;
+                if (ih_shifted % stride_h == 0 && iw_shifted % stride_w == 0) {
+                    int64_t oh = ih_shifted / stride_h;
+                    int64_t ow = iw_shifted / stride_w;
 
                     // Check bounds
                     if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
@@ -330,9 +339,12 @@ __global__ void col2im_kernel_nhwc(
     int64_t channels,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -350,12 +362,12 @@ __global__ void col2im_kernel_nhwc(
 
         for (int64_t kh = 0; kh < kernel_h; ++kh) {
             for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
-                int64_t ih_shifted = ih + padding - kh * dilation;
-                int64_t iw_shifted = iw + padding - kw_iter * dilation;
+                int64_t ih_shifted = ih + pad_h - kh * dil_h;
+                int64_t iw_shifted = iw + pad_w - kw_iter * dil_w;
 
-                if (ih_shifted % stride == 0 && iw_shifted % stride == 0) {
-                    int64_t oh = ih_shifted / stride;
-                    int64_t ow = iw_shifted / stride;
+                if (ih_shifted % stride_h == 0 && iw_shifted % stride_w == 0) {
+                    int64_t oh = ih_shifted / stride_h;
+                    int64_t ow = iw_shifted / stride_w;
 
                     if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                         int64_t col_row = b * out_h * out_w + oh * out_w + ow;
@@ -388,9 +400,12 @@ __global__ void col2im_kernel_lds_optimized(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -410,12 +425,12 @@ __global__ void col2im_kernel_lds_optimized(
 
         for (int64_t kh = 0; kh < kernel_h; ++kh) {
             for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
-                int64_t ih_shifted = ih + padding - kh * dilation;
-                int64_t iw_shifted = iw + padding - kw_iter * dilation;
+                int64_t ih_shifted = ih + pad_h - kh * dil_h;
+                int64_t iw_shifted = iw + pad_w - kw_iter * dil_w;
 
-                if (ih_shifted % stride == 0 && iw_shifted % stride == 0) {
-                    int64_t oh = ih_shifted / stride;
-                    int64_t ow = iw_shifted / stride;
+                if (ih_shifted % stride_h == 0 && iw_shifted % stride_w == 0) {
+                    int64_t oh = ih_shifted / stride_h;
+                    int64_t ow = iw_shifted / stride_w;
 
                     if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                         int64_t col_row = b * out_h * out_w + oh * out_w + ow;
@@ -751,18 +766,29 @@ __global__ void add_bias_kernel_nhwc_half(
     }
 }
 
-// rocBLAS-based implementation using im2col + GEMM
+// rocBLAS-based implementation using im2col + GEMM (per-axis stride/pad/dilation).
 auto conv2d_forward_kernel(
     const Tensor& input,         // (batch, in_channels, height, width)
     const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
     const Tensor* bias,          // (out_channels) or nullptr
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups,
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> Tensor {
+    // Scalar aliases for legacy code paths that still reference stride/padding/dilation
+    // (validation, calculate_output_size in symmetric case, etc.). Asymmetric ops use
+    // stride_h/stride_w/pad_h/pad_w/dil_h/dil_w directly below.
+    int64_t stride = stride_h;     // for legacy validation
+    int64_t padding = pad_h;        // unused in asymmetric paths
+    int64_t dilation = dil_h;       // unused in asymmetric paths
+    (void)padding; (void)dilation;  // silence unused warnings when asymmetric paths take over
+
     // Float16: upcast to Float32, compute, convert back
     if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
@@ -774,7 +800,7 @@ auto conv2d_forward_kernel(
             bias_f32_ptr = &bias_f32;
         }
         auto result = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
-                                            stride, padding, dilation, groups, stream, layout);
+                                            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, stream, layout);
         auto result_f16 = result.to(DType::Float16);
         fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
         return result_f16;
@@ -791,7 +817,7 @@ auto conv2d_forward_kernel(
             bias_f32_ptr = &bias_f32;
         }
         auto result = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
-                                            stride, padding, dilation, groups, stream, layout);
+                                            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, stream, layout);
         return result.to(DType::BFloat16);
     }
 
@@ -820,16 +846,16 @@ auto conv2d_forward_kernel(
     int64_t kernel_w = weight_shape[3];
 
     // Validate parameters
-    if (stride == 0) {
+    if (stride_h == 0 || stride_w == 0) {
         throw std::invalid_argument("Conv2d: stride cannot be zero");
     }
     if (groups == 0) {
         throw std::invalid_argument("Conv2d: groups cannot be zero");
     }
 
-    // Calculate output dimensions
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+    // Calculate output dimensions (per-axis)
+    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, pad_h, dil_h);
+    int64_t out_w = calculate_output_size(width,  kernel_w, stride_w, pad_w, dil_w);
 
     // Create output tensor
     std::vector<int64_t> output_shape;
@@ -887,13 +913,13 @@ auto conv2d_forward_kernel(
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
-                    stride, padding, dilation, out_h, out_w
+                    stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             } else {  // NHWC
                 const float* input_ptr = input.data<float>() + in_start;
                 im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, height, width, in_channels_per_group,
-                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             }
             HIP_CHECK(hipGetLastError());
@@ -950,13 +976,13 @@ auto conv2d_forward_kernel(
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
-                    stride, padding, dilation, out_h, out_w
+                    stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             } else {  // NHWC
                 const double* input_ptr = input.data<double>() + in_start;
                 im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, height, width, in_channels_per_group,
-                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             }
             HIP_CHECK(hipGetLastError());
@@ -1010,13 +1036,13 @@ auto conv2d_forward_kernel(
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
-                    stride, padding, dilation, out_h, out_w
+                    stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             } else {  // NHWC
                 const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start;
                 im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                     input_ptr, col_buffer, batch, height, width, in_channels_per_group,
-                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
             }
             HIP_CHECK(hipGetLastError());
@@ -1126,6 +1152,25 @@ auto conv2d_forward_kernel(
     return output;
 }
 
+// Wave B3: scalar overload forwards to per-axis with duplicated values.
+// Preserves all existing scalar callers (e.g. rocm_kernel_registry.cpp's
+// symmetric dispatch lambda).
+auto conv2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    hipStream_t stream,
+    DataLayout layout
+) -> Tensor {
+    return conv2d_forward_kernel(input, weight, bias,
+                                  stride, stride, padding, padding, dilation, dilation,
+                                  groups, stream, layout);
+}
+
 // ============================================================================
 // Conv2d Backward HIP Implementation
 // ============================================================================
@@ -1134,9 +1179,12 @@ auto conv2d_backward_kernel(
     const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
     const Tensor& input,         // (batch, in_channels, height, width)
     const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups,
     bool compute_grad_input,
     bool compute_grad_weight,
@@ -1150,7 +1198,7 @@ auto conv2d_backward_kernel(
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto [gi, gw, gb] = conv2d_backward_kernel(grad_output_f32, input_f32, weight_f32,
-                                                     stride, padding, dilation, groups,
+                                                     stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
                                                      compute_grad_input, compute_grad_weight,
                                                      compute_grad_bias, stream, layout);
         if (compute_grad_input) { gi = gi.to(DType::Float16); fp16_saturate(gi.data_ptr(), gi.numel(), stream); }
@@ -1165,7 +1213,7 @@ auto conv2d_backward_kernel(
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto [gi, gw, gb] = conv2d_backward_kernel(grad_output_f32, input_f32, weight_f32,
-                                                     stride, padding, dilation, groups,
+                                                     stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
                                                      compute_grad_input, compute_grad_weight,
                                                      compute_grad_bias, stream, layout);
         if (compute_grad_input) gi = gi.to(DType::BFloat16);
@@ -1208,7 +1256,7 @@ auto conv2d_backward_kernel(
     }
 
     // Validate parameters
-    if (stride == 0) {
+    if (stride_h == 0 || stride_w == 0) {
         throw std::invalid_argument("Conv2d backward: stride cannot be zero");
     }
     if (groups == 0) {
@@ -1294,13 +1342,13 @@ auto conv2d_backward_kernel(
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
                         reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {
                     grad_input_ptr = reinterpret_cast<__half*>(grad_input.data<Float16>()) + in_start;
                     col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
                         reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1343,13 +1391,13 @@ auto conv2d_backward_kernel(
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
                         grad_col, grad_input_ptr, batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {
                     grad_input_ptr = grad_input.data<double>() + in_start;
                     col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
                         grad_col, grad_input_ptr, batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1397,13 +1445,13 @@ auto conv2d_backward_kernel(
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
                         grad_col, grad_input_ptr, batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {  // NHWC
                     grad_input_ptr = grad_input.data<float>() + in_start;
                     col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
                         grad_col, grad_input_ptr, batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1426,13 +1474,13 @@ auto conv2d_backward_kernel(
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                         input_ptr, reinterpret_cast<__half*>(input_col), batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {
                     const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start;
                     im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                         input_ptr, reinterpret_cast<__half*>(input_col), batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1478,13 +1526,13 @@ auto conv2d_backward_kernel(
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                         input_ptr, input_col, batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {
                     const double* input_ptr = input.data<double>() + in_start;
                     im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                         input_ptr, input_col, batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1530,13 +1578,13 @@ auto conv2d_backward_kernel(
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
                         input_ptr, input_col, batch, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
-                        stride, padding, dilation, out_h, out_w
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 } else {
                     const float* input_ptr = input.data<float>() + in_start;
                     im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
                         input_ptr, input_col, batch, height, width, in_channels_per_group,
-                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                        kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
                 }
                 HIP_CHECK(hipGetLastError());
@@ -1611,6 +1659,46 @@ auto conv2d_backward_kernel(
 // Standalone Gradient Functions for Separate Calls
 // ============================================================================
 
+// Wave B3: scalar overload of conv2d_backward_kernel forwards to per-axis.
+auto conv2d_backward_kernel(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    hipStream_t stream,
+    DataLayout layout
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    return conv2d_backward_kernel(grad_output, input, weight,
+                                   stride, stride, padding, padding, dilation, dilation,
+                                   groups, compute_grad_input, compute_grad_weight,
+                                   compute_grad_bias, stream, layout);
+}
+
+auto conv2d_backward_input(
+    const Tensor& grad_output,
+    const Tensor& weight,
+    const std::vector<int64_t>& input_shape,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    hipStream_t stream
+) -> Tensor {
+    Tensor dummy_input(input_shape, grad_output.dtype(), grad_output.device());
+    auto [grad_input, _, __] = conv2d_backward_kernel(
+        grad_output, dummy_input, weight,
+        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
+        true, false, false, stream);
+    return grad_input;
+}
+
+// Scalar overload of conv2d_backward_input forwards to per-axis.
 auto conv2d_backward_input(
     const Tensor& grad_output,
     const Tensor& weight,
@@ -1621,19 +1709,30 @@ auto conv2d_backward_input(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // Create dummy input tensor for shape
-    Tensor dummy_input(input_shape, grad_output.dtype(), grad_output.device());
-
-    auto [grad_input, _, __] = conv2d_backward_kernel(
-        grad_output, dummy_input, weight,
-        stride, padding, dilation, groups,
-        true, false, false,  // Only compute grad_input
-        stream
-    );
-
-    return grad_input;
+    return conv2d_backward_input(grad_output, weight, input_shape,
+                                  stride, stride, padding, padding, dilation, dilation,
+                                  groups, stream);
 }
 
+auto conv2d_backward_weight(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const std::vector<int64_t>& weight_shape,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    hipStream_t stream
+) -> Tensor {
+    Tensor dummy_weight(weight_shape, input.dtype(), input.device());
+    auto [_, grad_weight, __] = conv2d_backward_kernel(
+        grad_output, input, dummy_weight,
+        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
+        false, true, false, stream);
+    return grad_weight;
+}
+
+// Scalar overload of conv2d_backward_weight forwards to per-axis.
 auto conv2d_backward_weight(
     const Tensor& grad_output,
     const Tensor& input,
@@ -1644,17 +1743,9 @@ auto conv2d_backward_weight(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // Create dummy weight tensor for shape
-    Tensor dummy_weight(weight_shape, input.dtype(), input.device());
-
-    auto [_, grad_weight, __] = conv2d_backward_kernel(
-        grad_output, input, dummy_weight,
-        stride, padding, dilation, groups,
-        false, true, false,  // Only compute grad_weight
-        stream
-    );
-
-    return grad_weight;
+    return conv2d_backward_weight(grad_output, input, weight_shape,
+                                   stride, stride, padding, padding, dilation, dilation,
+                                   groups, stream);
 }
 
 auto conv2d_backward_bias(

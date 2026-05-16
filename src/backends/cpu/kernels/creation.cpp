@@ -432,30 +432,36 @@ auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const D
 
     Tensor result({steps}, dtype, device);
 
+    // Compute step in F64 to preserve precision across all output dtypes,
+    // exactly mirroring the public src/ops/creation.cpp::linspace path.
+    double step_size = (steps > 1)
+        ? (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1)
+        : 0.0;
+
+    auto fill = [&](auto* ptr, auto cast) {
+        if (steps == 1) {
+            ptr[0] = cast(static_cast<double>(start));
+            return;
+        }
+        for (int64_t i = 0; i < steps; ++i) {
+            ptr[i] = cast(static_cast<double>(start) + static_cast<double>(i) * step_size);
+        }
+        // Exact endpoint to avoid floating-point drift.
+        ptr[steps - 1] = cast(static_cast<double>(end));
+    };
+
     if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-        if (steps == 1) {
-            data[0] = start;
-        } else {
-            float step = (end - start) / static_cast<float>(steps - 1);
-            for (int64_t i = 0; i < steps; ++i) {
-                data[i] = start + static_cast<float>(i) * step;
-            }
-            data[steps - 1] = end;  // Exact endpoint
-        }
+        fill(result.data<float>(), [](double v) { return static_cast<float>(v); });
     } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-        if (steps == 1) {
-            data[0] = static_cast<double>(start);
-        } else {
-            double step = (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1);
-            for (int64_t i = 0; i < steps; ++i) {
-                data[i] = static_cast<double>(start) + static_cast<double>(i) * step;
-            }
-            data[steps - 1] = static_cast<double>(end);  // Exact endpoint
-        }
+        fill(result.data<double>(), [](double v) { return v; });
+    } else if (dtype == DType::Float16) {
+        fill(result.data<Float16>(),
+             [](double v) { return Float16(static_cast<float>(v)); });
+    } else if (dtype == DType::BFloat16) {
+        fill(result.data<BFloat16>(),
+             [](double v) { return BFloat16(static_cast<float>(v)); });
     } else {
-        throw std::runtime_error("linspace operation: only Float32 and Float64 supported");
+        throw std::runtime_error("linspace operation: dtype not supported (expected Float32/64/16/BFloat16)");
     }
 
     return result;

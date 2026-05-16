@@ -67,6 +67,12 @@ public:
      * @param affine If true, learn scale and shift parameters (default: true)
      * @param track_running_stats If true, track running mean/var (default: true)
      */
+    [[deprecated(
+        "Legacy SyncBatchNorm constructor with raw AllReduceFn callback. "
+        "When world_size > 1 and process_group is null, the backward path is "
+        "a higher-order-stub (no second-derivative graph). Use the "
+        "ProcessGroup-based constructor for full higher-order autograd "
+        "support — see audit C1 in the SyncBatchNorm header.")]]
     SyncBatchNorm(int64_t num_features,
                   AllReduceFn all_reduce_fn,
                   int world_size = 1,

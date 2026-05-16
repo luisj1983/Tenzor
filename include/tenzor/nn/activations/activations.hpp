@@ -126,6 +126,8 @@ class LeakyReLU : public Module {
 public:
     explicit LeakyReLU(double negative_slope = 0.01);
     auto forward_impl(const Variable& input) -> Variable override;
+    // H2 fix: accessor for serializers (e.g. Lite exporter).
+    auto negative_slope() const -> double { return negative_slope_; }
 
 private:
     double negative_slope_;
@@ -359,6 +361,8 @@ class ELU : public Module {
 public:
     explicit ELU(double alpha = 1.0);
     auto forward_impl(const Variable& input) -> Variable override;
+    // H2 fix: accessor for serializers (e.g. Lite exporter).
+    auto alpha() const -> double { return alpha_; }
 
 private:
     double alpha_;

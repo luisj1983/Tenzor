@@ -153,6 +153,11 @@ BertEncoder::BertEncoder(const BertConfig& config)
 }
 
 auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len, DType compute_dtype) -> Tensor {
+    // L9 note: returning `Tensor{}` here is the deliberate "no mask"
+    // sentinel pattern. Downstream `encoder_->forward(hidden_states, mask, ...)`
+    // tests `.is_valid()` / `.numel() != 0` and skips mask application
+    // when this sentinel is returned. Equivalent to `std::optional<Tensor>`
+    // but matches the established API across the model zoo.
     if (!mask.is_valid() || mask.numel() == 0) {
         return Tensor{};
     }

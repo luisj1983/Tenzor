@@ -1408,19 +1408,60 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             throw std::runtime_error("Unsupported dtype for 1D×2D matmul with oneMKL");
         }
 #else
-        // Fallback naive implementation
+        // Fallback naive implementation. Wave F7 (deferred → landed):
+        // extended from F32-only to F64/F16/BF16. All paths accumulate
+        // in F32 inside the lambda (correct precision for all half-types).
         if (a_cont.dtype() == DType::Float32) {
             const float* a_ptr = get_data_ptr<const float>(a_cont);
             const float* b_ptr = get_data_ptr<const float>(b_cont);
             float* out_ptr = get_data_ptr<float>(output);
-
-            queue.parallel_for<class MatMulKernelVector>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+            queue.parallel_for<class MatMulKernelVectorF32>(sycl::range<1>(m), [=](sycl::id<1> idx) {
                 const int64_t j = idx[0];
                 float sum = 0.0f;
                 for (int64_t p = 0; p < n; ++p) {
                     sum += a_ptr[p] * b_ptr[p * m + j];
                 }
                 out_ptr[j] = sum;
+            });
+        }
+        else if (a_cont.dtype() == DType::Float64) {
+            const double* a_ptr = get_data_ptr<const double>(a_cont);
+            const double* b_ptr = get_data_ptr<const double>(b_cont);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<class MatMulKernelVectorF64>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+                const int64_t j = idx[0];
+                double sum = 0.0;
+                for (int64_t p = 0; p < n; ++p) {
+                    sum += a_ptr[p] * b_ptr[p * m + j];
+                }
+                out_ptr[j] = sum;
+            });
+        }
+        else if (a_cont.dtype() == DType::Float16) {
+            const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+            const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<class MatMulKernelVectorF16>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+                const int64_t j = idx[0];
+                float sum = 0.0f;
+                for (int64_t p = 0; p < n; ++p) {
+                    sum += static_cast<float>(a_ptr[p])
+                         * static_cast<float>(b_ptr[p * m + j]);
+                }
+                out_ptr[j] = sycl::half(sum);
+            });
+        }
+        else if (a_cont.dtype() == DType::BFloat16) {
+            const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
+            const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<class MatMulKernelVectorBF16>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+                const int64_t j = idx[0];
+                float sum = 0.0f;
+                for (int64_t p = 0; p < n; ++p) {
+                    sum += bf16_to_f32(a_ptr[p]) * bf16_to_f32(b_ptr[p * m + j]);
+                }
+                out_ptr[j] = f32_to_bf16(sum);
             });
         }
         else {

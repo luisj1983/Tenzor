@@ -597,7 +597,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 462;  // 449 + 13 new ops (DeformableConv2d x4, Einsum, DCT, IDCT, MelScale, MFCC, CholeskySolve, Cov, Corrcoef, LOBPCG)
+inline constexpr size_t EXPECTED_NAMED_OPS = 463;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

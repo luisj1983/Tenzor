@@ -25,10 +25,16 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
         throw std::invalid_argument("conv2d_forward requires 4D weight (out_channels, in_channels, kH, kW)");
     }
 
-    // Extract attributes
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
+    int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+    int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
+    int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
+    int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
+    int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
     int64_t groups = attrs.get_int(AttrKey::Groups, 1);
     bool has_bias = (bias != nullptr);
 
@@ -42,16 +48,16 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t kernel_w = weight_shape[3];
 
     // Route to Winograd F(2,3) for 3x3 convolutions with stride=1, dilation=1, Float32.
-    // Route to Winograd F(2,3) for 3x3 convolutions with stride=1, dilation=1, Float32
-    // Uses a fused batched matmul shader for deterministic accumulation.
-    if (kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1
+    // Winograd is inherently isotropic; only takes the path when all axes match.
+    if (kernel_h == 3 && kernel_w == 3 && stride_h == 1 && stride_w == 1
+        && dil_h == 1 && dil_w == 1 && pad_h == pad_w
         && input.dtype() == DType::Float32) {
-        return dispatchConv2dWinograd(input, weight, bias, padding, groups);
+        return dispatchConv2dWinograd(input, weight, bias, pad_h, groups);
     }
 
-    // Calculate output dimensions
-    int64_t out_height = (in_height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_width = (in_width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    // Calculate output dimensions (per-axis)
+    int64_t out_height = (in_height + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_width  = (in_width  + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     int32_t device_id = input.device().index;
 
@@ -116,7 +122,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Set push constants
+    // Set push constants (per-axis stride/padding/dilation — Wave B1/B2).
     struct PushConstants {
         uint32_t n_elements;
         uint32_t batch;
@@ -126,9 +132,12 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
         uint32_t in_width;
         uint32_t kernel_h;
         uint32_t kernel_w;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t groups;
         uint32_t out_h;
         uint32_t out_w;
@@ -143,9 +152,12 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     push_constants.in_width = static_cast<uint32_t>(in_width);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.groups = static_cast<uint32_t>(groups);
     push_constants.out_h = static_cast<uint32_t>(out_height);
     push_constants.out_w = static_cast<uint32_t>(out_width);
@@ -464,11 +476,19 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
         throw std::invalid_argument("conv_transpose2d_forward requires 4D weight (in_channels, out_channels/groups, kH, kW)");
     }
 
-    // Extract attributes
+    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
     int64_t stride = attrs.get_int(AttrKey::Stride, 1);
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+    int64_t pad_h = attrs.get_int(AttrKey::PaddingH, padding);
+    int64_t pad_w = attrs.get_int(AttrKey::PaddingW, padding);
+    int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
+    int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
+    int64_t dil_h = attrs.get_int(AttrKey::DilationH, dilation);
+    int64_t dil_w = attrs.get_int(AttrKey::DilationW, dilation);
     int64_t groups = attrs.get_int(AttrKey::Groups, 1);
     bool has_bias = (bias != nullptr);
 
@@ -483,10 +503,10 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions for transposed convolution
+    // Calculate output dimensions for transposed convolution (per-axis).
     // out = (in - 1) * stride - 2 * padding + dilation * (kernel - 1) + output_padding + 1
-    int64_t out_height = (in_height - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
-    int64_t out_width = (in_width - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+    int64_t out_height = (in_height - 1) * stride_h - 2 * pad_h + dil_h * (kernel_h - 1) + output_padding_h + 1;
+    int64_t out_width  = (in_width  - 1) * stride_w - 2 * pad_w + dil_w * (kernel_w - 1) + output_padding_w + 1;
 
     if (out_height <= 0 || out_width <= 0) {
         throw std::invalid_argument("Invalid conv_transpose2d configuration: output dimensions are non-positive");
@@ -551,10 +571,14 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
         uint32_t in_width;
         uint32_t kernel_h;
         uint32_t kernel_w;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t output_padding;
-        uint32_t dilation;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t output_padding_h;
+        uint32_t output_padding_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t groups;
         uint32_t out_h;
         uint32_t out_w;
@@ -569,10 +593,14 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     push_constants.in_width = static_cast<uint32_t>(in_width);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.output_padding = static_cast<uint32_t>(output_padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.output_padding_h = static_cast<uint32_t>(output_padding_h);
+    push_constants.output_padding_w = static_cast<uint32_t>(output_padding_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.groups = static_cast<uint32_t>(groups);
     push_constants.out_h = static_cast<uint32_t>(out_height);
     push_constants.out_w = static_cast<uint32_t>(out_width);
@@ -624,10 +652,19 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
         throw std::invalid_argument("conv3d_forward requires 5D weight (out_channels, in_channels/groups, kD, kH, kW)");
     }
 
-    // Extract attributes
+    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
     int64_t stride = attrs.get_int(AttrKey::Stride, 1);
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t stride_d = attrs.get_int(AttrKey::StrideD, stride);
+    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, padding);
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
+    int64_t dilation_d = attrs.get_int(AttrKey::DilationD, dilation);
+    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, dilation);
+    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, dilation);
     int64_t groups = attrs.get_int(AttrKey::Groups, 1);
     bool has_bias = (bias != nullptr);
 
@@ -643,9 +680,9 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
     int64_t kernel_w = weight_shape[4];
 
     // Calculate output dimensions
-    int64_t out_depth = (in_depth + 2 * padding - dilation * (kernel_d - 1) - 1) / stride + 1;
-    int64_t out_height = (in_height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_width = (in_width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    int64_t out_depth  = (in_depth  + 2 * padding_d - dilation_d * (kernel_d - 1) - 1) / stride_d + 1;
+    int64_t out_height = (in_height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_width  = (in_width  + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     int32_t device_id = input.device().index;
 
@@ -737,15 +774,15 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
     push_constants.kernel_d = static_cast<uint32_t>(kernel_d);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride_d = static_cast<uint32_t>(stride);
-    push_constants.stride_h = static_cast<uint32_t>(stride);
-    push_constants.stride_w = static_cast<uint32_t>(stride);
-    push_constants.padding_d = static_cast<uint32_t>(padding);
-    push_constants.padding_h = static_cast<uint32_t>(padding);
-    push_constants.padding_w = static_cast<uint32_t>(padding);
-    push_constants.dilation_d = static_cast<uint32_t>(dilation);
-    push_constants.dilation_h = static_cast<uint32_t>(dilation);
-    push_constants.dilation_w = static_cast<uint32_t>(dilation);
+    push_constants.stride_d = static_cast<uint32_t>(stride_d);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.padding_d = static_cast<uint32_t>(padding_d);
+    push_constants.padding_h = static_cast<uint32_t>(padding_h);
+    push_constants.padding_w = static_cast<uint32_t>(padding_w);
+    push_constants.dilation_d = static_cast<uint32_t>(dilation_d);
+    push_constants.dilation_h = static_cast<uint32_t>(dilation_h);
+    push_constants.dilation_w = static_cast<uint32_t>(dilation_w);
     push_constants.groups = static_cast<uint32_t>(groups);
     push_constants.out_d = static_cast<uint32_t>(out_depth);
     push_constants.out_h = static_cast<uint32_t>(out_height);
@@ -775,9 +812,9 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
 auto VulkanBackend::dispatchConv3dBackwardInput(
     const Tensor& grad_output,
     const Tensor& weight,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_d, int64_t stride_h, int64_t stride_w,
+    int64_t padding_d, int64_t padding_h, int64_t padding_w,
+    int64_t dilation_d, int64_t dilation_h, int64_t dilation_w,
     const std::vector<int64_t>& input_shape,
     int64_t groups) -> Tensor {
 
@@ -888,15 +925,15 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
     push_constants.kernel_d = static_cast<uint32_t>(kernel_d);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride_d = static_cast<uint32_t>(stride);
-    push_constants.stride_h = static_cast<uint32_t>(stride);
-    push_constants.stride_w = static_cast<uint32_t>(stride);
-    push_constants.padding_d = static_cast<uint32_t>(padding);
-    push_constants.padding_h = static_cast<uint32_t>(padding);
-    push_constants.padding_w = static_cast<uint32_t>(padding);
-    push_constants.dilation_d = static_cast<uint32_t>(dilation);
-    push_constants.dilation_h = static_cast<uint32_t>(dilation);
-    push_constants.dilation_w = static_cast<uint32_t>(dilation);
+    push_constants.stride_d = static_cast<uint32_t>(stride_d);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.padding_d = static_cast<uint32_t>(padding_d);
+    push_constants.padding_h = static_cast<uint32_t>(padding_h);
+    push_constants.padding_w = static_cast<uint32_t>(padding_w);
+    push_constants.dilation_d = static_cast<uint32_t>(dilation_d);
+    push_constants.dilation_h = static_cast<uint32_t>(dilation_h);
+    push_constants.dilation_w = static_cast<uint32_t>(dilation_w);
     push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
@@ -923,9 +960,9 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
 auto VulkanBackend::dispatchConv3dBackwardWeight(
     const Tensor& grad_output,
     const Tensor& input,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_d, int64_t stride_h, int64_t stride_w,
+    int64_t padding_d, int64_t padding_h, int64_t padding_w,
+    int64_t dilation_d, int64_t dilation_h, int64_t dilation_w,
     const std::vector<int64_t>& weight_shape,
     int64_t groups) -> Tensor {
 
@@ -1036,15 +1073,15 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
     push_constants.kernel_d = static_cast<uint32_t>(kernel_d);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride_d = static_cast<uint32_t>(stride);
-    push_constants.stride_h = static_cast<uint32_t>(stride);
-    push_constants.stride_w = static_cast<uint32_t>(stride);
-    push_constants.padding_d = static_cast<uint32_t>(padding);
-    push_constants.padding_h = static_cast<uint32_t>(padding);
-    push_constants.padding_w = static_cast<uint32_t>(padding);
-    push_constants.dilation_d = static_cast<uint32_t>(dilation);
-    push_constants.dilation_h = static_cast<uint32_t>(dilation);
-    push_constants.dilation_w = static_cast<uint32_t>(dilation);
+    push_constants.stride_d = static_cast<uint32_t>(stride_d);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.padding_d = static_cast<uint32_t>(padding_d);
+    push_constants.padding_h = static_cast<uint32_t>(padding_h);
+    push_constants.padding_w = static_cast<uint32_t>(padding_w);
+    push_constants.dilation_d = static_cast<uint32_t>(dilation_d);
+    push_constants.dilation_h = static_cast<uint32_t>(dilation_h);
+    push_constants.dilation_w = static_cast<uint32_t>(dilation_w);
     push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
@@ -1171,10 +1208,23 @@ auto VulkanBackend::dispatchConvTranspose3dForward(
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
+    // Per-axis attrs with scalar fallback (Wave B1/B2).
     int64_t stride = attrs.get_int(AttrKey::Stride, 1);
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t stride_d = attrs.get_int(AttrKey::StrideD, stride);
+    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, padding);
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
+    int64_t output_padding_d = attrs.get_int(AttrKey::OutputPaddingD, output_padding);
+    int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
+    int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
+    int64_t dilation_d = attrs.get_int(AttrKey::DilationD, dilation);
+    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, dilation);
+    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, dilation);
     int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
     int64_t batch = input_shape[0];
@@ -1188,17 +1238,21 @@ auto VulkanBackend::dispatchConvTranspose3dForward(
     int64_t kernel_h = weight_shape[3];
     int64_t kernel_w = weight_shape[4];
 
-    // Output dimensions for transposed conv
-    int64_t out_depth = (in_depth - 1) * stride - 2 * padding + dilation * (kernel_d - 1) + output_padding + 1;
-    int64_t out_height = (in_height - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
-    int64_t out_width = (in_width - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+    // Output dimensions for transposed conv (per-axis).
+    int64_t out_depth  = (in_depth  - 1) * stride_d - 2 * padding_d + dilation_d * (kernel_d - 1) + output_padding_d + 1;
+    int64_t out_height = (in_height - 1) * stride_h - 2 * padding_h + dilation_h * (kernel_h - 1) + output_padding_h + 1;
+    int64_t out_width  = (in_width  - 1) * stride_w - 2 * padding_w + dilation_w * (kernel_w - 1) + output_padding_w + 1;
 
     std::vector<int64_t> output_shape = {batch, out_channels, out_depth, out_height, out_width};
 
     // Use conv3d_backward_input shader: grad_output=input, weight=weight^T, output=result
     // The backward_input shader computes: for each output element, sum over input * weight
     // which is exactly the transposed convolution operation
-    auto result = dispatchConv3dBackwardInput(input, weight, stride, padding, dilation, output_shape, groups);
+    auto result = dispatchConv3dBackwardInput(input, weight,
+        stride_d, stride_h, stride_w,
+        padding_d, padding_h, padding_w,
+        dilation_d, dilation_h, dilation_w,
+        output_shape, groups);
 
     // Add bias if present — reshape bias to (1, C, 1, 1, 1) and broadcast-add
     if (bias) {
@@ -1225,11 +1279,15 @@ auto VulkanBackend::dispatchConvTranspose3dBackwardWeight(
     int64_t stride = attrs.get_int(AttrKey::Stride, 1);
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t sD = attrs.get_int(AttrKey::StrideD, stride), sH = attrs.get_int(AttrKey::StrideH, stride), sW = attrs.get_int(AttrKey::StrideW, stride);
+    int64_t pD = attrs.get_int(AttrKey::PaddingD, padding), pH = attrs.get_int(AttrKey::PaddingH, padding), pW = attrs.get_int(AttrKey::PaddingW, padding);
+    int64_t dD = attrs.get_int(AttrKey::DilationD, dilation), dH = attrs.get_int(AttrKey::DilationH, dilation), dW = attrs.get_int(AttrKey::DilationW, dilation);
     int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
     // For ConvTranspose3d backward weight, roles are swapped:
     // input plays the role of grad_output, grad_output plays the role of input
-    return dispatchConv3dBackwardWeight(input, grad_output, stride, padding, dilation, weight_shape, groups);
+    return dispatchConv3dBackwardWeight(input, grad_output,
+        sD, sH, sW, pD, pH, pW, dD, dH, dW, weight_shape, groups);
 }
 
 // ConvTranspose3d Backward Bias (same as conv3d backward bias)

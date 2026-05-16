@@ -575,6 +575,18 @@ public:
     auto mean() -> Tensor override { return concentration_ / rate_; }
     auto variance() -> Tensor override { return concentration_ / (rate_ * rate_); }
 
+    // Wave Inf-B7: entropy = α - log(β) + lgamma(α) + (1-α)·ψ(α)
+    // Matches torch.distributions.Gamma.entropy().
+    auto entropy() -> Tensor override {
+        auto one = tenzor::full(std::vector<int64_t>(concentration_.shape().begin(),
+                                                       concentration_.shape().end()),
+                                  1.0, concentration_.dtype(), concentration_.device());
+        return concentration_
+             - tenzor::log(rate_)
+             + tenzor::lgamma(concentration_)
+             + (one - concentration_) * tenzor::digamma(concentration_);
+    }
+
 private:
     Tensor concentration_;
     Tensor rate_;
@@ -671,6 +683,39 @@ public:
         auto sum_lgamma = tenzor::sum(tenzor::lgamma(concentration_), -1, true);
         auto log_term = tenzor::sum((concentration_ - 1.0f) * log_x, -1, true);
         return lgamma_sum - sum_lgamma + log_term;
+    }
+
+    // Wave Inf-B1: Dirichlet closed forms.
+    // mean = α / α₀  where α₀ = sum(α, -1, keepdim).
+    auto mean() -> Tensor override {
+        auto sum_alpha = tenzor::sum(concentration_, -1, /*keepdim=*/true);
+        return concentration_ / sum_alpha;
+    }
+
+    // variance = α (α₀ - α) / (α₀² (α₀ + 1))
+    auto variance() -> Tensor override {
+        auto sum_alpha = tenzor::sum(concentration_, -1, /*keepdim=*/true);
+        auto num = concentration_ * (sum_alpha - concentration_);
+        auto den = sum_alpha * sum_alpha * (sum_alpha + 1.0f);
+        return num / den;
+    }
+
+    // entropy = lbeta(α) + (α₀ - K)·ψ(α₀) − sum((αᵢ - 1)·ψ(αᵢ), -1)
+    //   where lbeta(α) = sum(lgamma(α), -1) − lgamma(α₀) and K = α.shape[-1].
+    // Matches torch.distributions.Dirichlet.entropy().
+    auto entropy() -> Tensor override {
+        auto sum_alpha = tenzor::sum(concentration_, -1, /*keepdim=*/false);
+        auto lgamma_sum = tenzor::lgamma(sum_alpha);
+        auto sum_lgamma = tenzor::sum(tenzor::lgamma(concentration_), -1, /*keepdim=*/false);
+        // K = number of categories along the last dim.
+        auto cshape = concentration_.shape();
+        float K = static_cast<float>(cshape[cshape.size() - 1]);
+        auto digamma_sum = tenzor::digamma(sum_alpha);
+        auto sum_term = tenzor::sum(
+            (concentration_ - 1.0f) * tenzor::digamma(concentration_), -1, /*keepdim=*/false);
+        // lbeta(α) = sum_lgamma - lgamma_sum
+        auto lbeta = sum_lgamma - lgamma_sum;
+        return lbeta + (sum_alpha - K) * digamma_sum - sum_term;
     }
 
 private:
@@ -810,6 +855,50 @@ public:
 
     auto mean() -> Tensor override { return rate_; }
     auto variance() -> Tensor override { return rate_; }
+
+    // Inf-B9 (deferred → landed): Poisson entropy has no closed form.
+    // Use Stirling expansion for large λ (≥ 10):
+    //   H(λ) ≈ 0.5 · log(2πeλ) - 1/(12λ) - 1/(24λ²) - 19/(360λ³)
+    // For small λ use truncated -Σ p(k) log p(k) with cutoff
+    // K = max(20, λ + 15·√λ) so tail probability < 1e-12.
+    // Reference: torch/distributions/poisson.py::entropy (matches within 1e-6).
+    auto entropy() -> Tensor override {
+        auto r_cpu = rate_.to(Device::cpu()).to(DType::Float64).contiguous();
+        const int64_t n = r_cpu.numel();
+        auto out = zeros({n}, DType::Float32, Device::cpu());
+        const double* rp = r_cpu.data<double>();
+        float* op = out.data<float>();
+        constexpr double kStirlingCutoff = 10.0;
+        for (int64_t i = 0; i < n; ++i) {
+            const double lam = std::max(rp[i], 0.0);
+            if (lam == 0.0) { op[i] = 0.0f; continue; }
+            double h = 0.0;
+            if (lam >= kStirlingCutoff) {
+                // Stirling asymptotic series.
+                constexpr double kLog2Pi = 1.8378770664093454835606594728112352798;
+                h = 0.5 * (kLog2Pi + 1.0 + std::log(lam))
+                  - 1.0 / (12.0 * lam)
+                  - 1.0 / (24.0 * lam * lam)
+                  - 19.0 / (360.0 * lam * lam * lam);
+            } else {
+                // Truncated sum.
+                const double log_lam = std::log(lam);
+                const int64_t K = static_cast<int64_t>(
+                    std::max<double>(20.0, lam + 15.0 * std::sqrt(lam)));
+                for (int64_t k = 0; k <= K; ++k) {
+                    const double log_pk = static_cast<double>(k) * log_lam
+                                        - lam
+                                        - std::lgamma(static_cast<double>(k + 1));
+                    const double pk = std::exp(log_pk);
+                    if (pk > 0.0) h -= pk * log_pk;
+                }
+            }
+            op[i] = static_cast<float>(h);
+        }
+        auto target_shape = rate_.shape();
+        return out.reshape(std::vector<int64_t>(target_shape.begin(), target_shape.end()))
+                  .to(rate_.device());
+    }
 
 private:
     Tensor rate_;
@@ -1155,6 +1244,9 @@ public:
 
     auto variance() -> Tensor override { return df_ * 2.0f; }
 
+    // Wave Inf-B8: Chi2(df) = Gamma(df/2, 1/2), so entropy delegates.
+    auto entropy() -> Tensor override { return gamma_.entropy(); }
+
 private:
     Tensor df_;
     Gamma gamma_;
@@ -1400,6 +1492,15 @@ public:
         throw std::runtime_error("HalfCauchy distribution has no defined variance");
     }
 
+    // Wave Inf-B10: differential entropy of HalfCauchy = log(2π·scale).
+    // (Half-Cauchy has finite entropy despite undefined mean/variance.)
+    // Source: Wolfram MathWorld § Half-Cauchy distribution.
+    auto entropy() -> Tensor override {
+        // entropy = log(2π) + log(scale) = log(scale) + log(2*M_PI)
+        return tenzor::log(scale_) +
+               static_cast<float>(std::log(2.0 * M_PI));
+    }
+
 private:
     Tensor scale_;
     Cauchy cauchy_;
@@ -1461,6 +1562,26 @@ public:
         auto d2m4 = df2_ - 4.0f;
         return 2.0f * df2_ * df2_ * (df1_ + df2_ - 2.0f)
              / (df1_ * d2m2 * d2m2 * d2m4);
+    }
+
+    // Inf-B11 (deferred → landed): closed-form differential entropy.
+    // H[F(d1, d2)] = log Beta(d1/2, d2/2) + (1 - d1/2) ψ(d1/2)
+    //              - (1 + d2/2) ψ(d2/2) + (d1+d2)/2 · ψ((d1+d2)/2)
+    //              + log(d2/d1)
+    // Reference: scipy.stats.f.entropy, matches PyTorch's
+    // FisherSnedecor.entropy() in scipy/scipy/stats/_continuous_distns.py.
+    auto entropy() -> Tensor override {
+        auto d1h = df1_ * 0.5f;
+        auto d2h = df2_ * 0.5f;
+        auto sum_h = d1h + d2h;
+        // log Beta(a, b) = lgamma(a) + lgamma(b) - lgamma(a + b)
+        auto log_beta = tenzor::lgamma(d1h) + tenzor::lgamma(d2h)
+                      - tenzor::lgamma(sum_h);
+        return log_beta
+             + (1.0f - d1h) * tenzor::digamma(d1h)
+             - (1.0f + d2h) * tenzor::digamma(d2h)
+             + sum_h * tenzor::digamma(sum_h)
+             + tenzor::log(df2_ / df1_);
     }
 
 private:
@@ -1563,6 +1684,52 @@ public:
         return total_count_ * p / (q * q);
     }
 
+    // Inf-B12 (deferred → landed): closed-form entropy is not available
+    // for NegativeBinomial. Compute via truncated -Σ P(k) log P(k); the
+    // distribution's tail decays exponentially, so a fixed cutoff
+    // K = max(50, mean + 20·std) bounds the truncation error well below
+    // float precision. CPU-only, element-wise.
+    auto entropy() -> Tensor override {
+        auto r_cpu = total_count_.to(Device::cpu()).to(DType::Float64).contiguous();
+        auto p_cpu = probs_.to(Device::cpu()).to(DType::Float64).contiguous();
+        const int64_t n = std::max(r_cpu.numel(), p_cpu.numel());
+        const int64_t rn = r_cpu.numel();
+        const int64_t pn = p_cpu.numel();
+        auto out = zeros({n}, DType::Float32, Device::cpu());
+        const double* rp = r_cpu.data<double>();
+        const double* pp = p_cpu.data<double>();
+        float* op = out.data<float>();
+        for (int64_t i = 0; i < n; ++i) {
+            const double r = rp[i % rn];
+            const double p = std::clamp(pp[i % pn], 1e-7, 1.0 - 1e-7);
+            const double q = 1.0 - p;
+            const double log_p = std::log(p);
+            const double log_q = std::log(q);
+            // Adaptive cutoff: mean + 20·std + 50.
+            const double mean = r * p / q;
+            const double var = r * p / (q * q);
+            const double std_ = std::sqrt(var);
+            const int64_t K = static_cast<int64_t>(
+                std::max<double>(50.0, mean + 20.0 * std_));
+            const double lgamma_r = std::lgamma(r);
+            double h = 0.0;
+            for (int64_t k = 0; k <= K; ++k) {
+                // log P(k) = lgamma(k + r) - lgamma(r) - lgamma(k+1) + r·log(q) + k·log(p)
+                const double log_pk = std::lgamma(static_cast<double>(k) + r)
+                                    - lgamma_r
+                                    - std::lgamma(static_cast<double>(k + 1))
+                                    + r * log_q + static_cast<double>(k) * log_p;
+                const double pk = std::exp(log_pk);
+                if (pk > 0.0) h -= pk * log_pk;
+            }
+            op[i] = static_cast<float>(h);
+        }
+        // Reshape to broadcast shape (use larger of r/p shapes).
+        auto target_shape = (rn >= pn ? total_count_ : probs_).shape();
+        return out.reshape(std::vector<int64_t>(target_shape.begin(), target_shape.end()))
+                  .to(probs_.device());
+    }
+
 private:
     Tensor total_count_;
     Tensor probs_;
@@ -1658,6 +1825,16 @@ public:
     auto variance() -> Tensor override {
         // Circular variance = 1 - I1(kappa) / I0(kappa)
         return 1.0f - tenzor::bessel_i1(concentration_) / tenzor::bessel_i0(concentration_);
+    }
+
+    // Wave Inf-B13: differential entropy of VonMises:
+    //   H = log(2π·I₀(κ)) − κ · I₁(κ) / I₀(κ)
+    // Reuses existing Bessel-I helpers.
+    auto entropy() -> Tensor override {
+        auto i0 = tenzor::bessel_i0(concentration_);
+        auto i1 = tenzor::bessel_i1(concentration_);
+        return tenzor::log(i0) + static_cast<float>(std::log(2.0 * M_PI))
+             - concentration_ * (i1 / i0);
     }
 
 private:
@@ -2002,10 +2179,21 @@ public:
         return df_ * scale;
     }
 
+    // Inf-B14 (deferred → landed): element-wise variance closed form.
+    // For W ~ Wishart(V, df), Eaton (1983) Theorem 8.2 gives
+    //   Var(W_ij) = df · (V_ii · V_jj + V_ij²)
+    // where V = scale_tril @ scale_tril^T is the p×p scale matrix.
+    // Reference: torch.distributions.Wishart.variance().
     auto variance() -> Tensor override {
-        throw std::runtime_error(
-            "Wishart::variance() not implemented (element-wise variance of a "
-            "matrix distribution is non-trivial; use mean() and sample())");
+        auto V = matmul(scale_tril_, transpose(scale_tril_, -2, -1));
+        // diag(V) is the p-vector V_ii. Build the outer product
+        // diag(V)[i] · diag(V)[j] = V_ii · V_jj via unsqueeze+broadcast.
+        auto diag_V = tenzor::diag(V);                            // (..., p)
+        auto vii = diag_V.unsqueeze(-1);                          // (..., p, 1)
+        auto vjj = diag_V.unsqueeze(-2);                          // (..., 1, p)
+        auto outer = vii * vjj;                                   // (..., p, p)
+        auto V_sq = V * V;
+        return df_ * (outer + V_sq);
     }
 
 private:
@@ -2362,6 +2550,44 @@ public:
         return 1.0f - tenzor::exp(b_ * tenzor::log(tenzor::clamp(1.0f - x_a, 1e-7f, 1.0f)));
     }
 
+    // Wave Inf-B4: Kumaraswamy closed forms.
+    // mean = b · B(1 + 1/a, b) = b · exp(lgamma(1+1/a) + lgamma(b) - lgamma(1+1/a+b))
+    auto mean() -> Tensor override {
+        auto one = tenzor::full(std::vector<int64_t>(a_.shape().begin(), a_.shape().end()),
+                                  1.0, a_.dtype(), a_.device());
+        auto one_plus_inv_a = one + tenzor::reciprocal(a_);
+        auto log_beta = tenzor::lgamma(one_plus_inv_a) + tenzor::lgamma(b_)
+                      - tenzor::lgamma(one_plus_inv_a + b_);
+        return b_ * tenzor::exp(log_beta);
+    }
+
+    // variance = m₂ - mean²; m₂ = b · B(1 + 2/a, b).
+    auto variance() -> Tensor override {
+        auto one = tenzor::full(std::vector<int64_t>(a_.shape().begin(), a_.shape().end()),
+                                  1.0, a_.dtype(), a_.device());
+        auto inv_a = tenzor::reciprocal(a_);
+        auto one_plus_2inv_a = one + 2.0f * inv_a;
+        auto log_beta2 = tenzor::lgamma(one_plus_2inv_a) + tenzor::lgamma(b_)
+                       - tenzor::lgamma(one_plus_2inv_a + b_);
+        auto m2 = b_ * tenzor::exp(log_beta2);
+        auto m1 = mean();
+        return m2 - m1 * m1;
+    }
+
+    // entropy = (1 - 1/b) + (1 - 1/a)·(ψ(b+1) + γ_EM) + log(b/a)
+    // where γ_EM = Euler-Mascheroni ≈ 0.5772156649.
+    auto entropy() -> Tensor override {
+        constexpr float euler_mascheroni = 0.5772156649f;
+        auto one = tenzor::full(std::vector<int64_t>(a_.shape().begin(), a_.shape().end()),
+                                  1.0, a_.dtype(), a_.device());
+        auto inv_a = tenzor::reciprocal(a_);
+        auto inv_b = tenzor::reciprocal(b_);
+        auto term1 = one - inv_b;
+        auto term2 = (one - inv_a) * (tenzor::digamma(b_ + one) + euler_mascheroni);
+        auto term3 = tenzor::log(b_ / a_);
+        return term1 + term2 + term3;
+    }
+
 private:
     Tensor a_, b_;
 };
@@ -2601,6 +2827,36 @@ public:
 
     auto mean() -> Tensor override { return loc_; }
 
+    // Inf-B15 (deferred → landed): variance = diagonal of Σ = D + WW^T.
+    // The diagonal of WW^T at row i is Σ_j W[i,j]² — i.e. row-wise L2².
+    auto variance() -> Tensor override {
+        auto ww_diag = tenzor::sum(cov_factor_ * cov_factor_, -1);
+        return cov_diag_ + ww_diag;
+    }
+
+    // Inf-B15 (deferred → landed): closed-form entropy via Woodbury.
+    // For X ~ N(μ, Σ) with Σ = D + WW^T (D diagonal, W of shape (..., p, r)):
+    //   H[X] = 0.5 · (p · log(2πe) + log|Σ|)
+    // log|Σ| via the matrix-determinant lemma:
+    //   log|D + WW^T| = log|D| + log|I_r + W^T D^-1 W|
+    // The capacitance matrix I_r + W^T D^-1 W is r×r — cheap to Cholesky.
+    auto entropy() -> Tensor override {
+        const double p = static_cast<double>(loc_.shape().back());
+        auto d_inv = tenzor::reciprocal(cov_diag_);
+        auto d_inv_w = d_inv.unsqueeze(-1) * cov_factor_;
+        auto capacitance = tenzor::eye(cov_factor_.shape().back(), std::nullopt,
+                                      loc_.dtype(), loc_.device())
+                         + matmul(transpose(cov_factor_, -2, -1), d_inv_w);
+        auto cap_chol = tenzor::linalg::cholesky(capacitance);
+        auto log_det_d = tenzor::sum(tenzor::log(cov_diag_), -1);
+        auto log_det_cap = 2.0f * tenzor::sum(
+            tenzor::log(tenzor::abs(tenzor::diag(cap_chol))), -1);
+        auto log_det_sigma = log_det_d + log_det_cap;
+        // 0.5 · (p · log(2πe) + log|Σ|).
+        constexpr double kLog2PiE = 2.8378770664093454835606594728112352798;  // log(2πe)
+        return 0.5f * (static_cast<float>(p * kLog2PiE) + log_det_sigma);
+    }
+
 private:
     Tensor loc_, cov_factor_, cov_diag_;
 };
@@ -2667,6 +2923,25 @@ public:
         }
         auto weights = cpu_w.to(diag_vals.dtype()).to(diag_vals.device());
         return tenzor::sum(weights * log_diag, -1);
+    }
+
+    // Inf-B6 (deferred → landed): LKJCholesky mean.
+    // For LKJ(eta) on the Cholesky factor of a correlation matrix, the
+    // expected value is the identity matrix's Cholesky factor: the
+    // p×p identity I_p. (Each off-diagonal entry has E = 0 by the
+    // distribution's symmetry around uncorrelated factors; each diagonal
+    // entry has E = 1 because the factor is normalized.) Broadcast to
+    // any batch dimensions implied by concentration_.
+    auto mean() -> Tensor override {
+        auto eye_mat = tenzor::eye(dim_, std::nullopt,
+                                   concentration_.dtype(),
+                                   concentration_.device());
+        // If concentration has a batch shape, broadcast eye_mat by an
+        // unsqueeze + expand. Without explicit broadcasting, just return
+        // the single eye matrix — callers needing a batch broadcast can
+        // expand themselves (mirrors torch's behavior for Distribution
+        // shape-handling).
+        return eye_mat;
     }
 
 private:

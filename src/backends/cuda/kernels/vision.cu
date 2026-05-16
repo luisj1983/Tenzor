@@ -736,9 +736,39 @@ auto fold_cuda(const Tensor& input,
     return output;
 }
 
-// Audit D3: bilinear backward via atomicAdd scatter (device-resident — no
-// CPU fallback). Mirrors `interpolate_bilinear_kernel`'s clamping so the
-// adjoint exactly inverts the forward.
+// M11 fix: nearest-mode interpolate backward. Each output pixel scatters
+// its gradient to the single nearest input pixel via atomicAdd. Multiple
+// output positions can map to the same input pixel; atomicAdd accumulates
+// safely. Mirrors `interpolate_nearest_backward_kernel_hip` from ROCm
+// (Wave H4) — same PyTorch nearest-mode convention (floor mapping, no
+// half-pixel, no align_corners).
+template<typename T>
+__global__ void interpolate_nearest_backward_kernel(
+    const T* __restrict__ grad_out,
+    T* __restrict__ grad_in,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w)
+{
+    int64_t total = batch * channels * out_h * out_w;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        // PyTorch nearest forward: oh -> floor(oh * in_h / out_h).
+        int64_t y = (oh * in_h) / out_h;
+        int64_t x = (ow * in_w) / out_w;
+        if (y > in_h - 1) y = in_h - 1;
+        if (x > in_w - 1) x = in_w - 1;
+
+        int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        atomicAdd(&grad_in[base_idx + y * in_w + x], grad_out[idx]);
+    }
+}
+
 template<typename T>
 __global__ void interpolate_bilinear_backward_kernel(
     const T* grad_out, T* grad_in,
@@ -1007,15 +1037,16 @@ auto interpolate_backward_cuda(const Tensor& grad_output,
                 N, C, in_h, in_w, out_h, out_w, align_corners);
         });
     } else {
-        // Nearest backward: scatter each output grad to its source input pixel.
-        // For exactness, we synthesize via the bilinear backward kernel with
-        // zero fractional parts (achieved by setting align_corners=false +
-        // integer scale). To keep nearest-correct, implement a tiny dedicated
-        // loop on host: dispatch tensor copies and use indexing. Simpler:
-        // require user to add a dedicated nearest backward kernel later.
-        throw std::runtime_error(
-            "interpolate_backward_cuda: nearest mode not yet implemented "
-            "on CUDA. Use 'bilinear' or do the backward on CPU.");
+        // M11 fix: native nearest-mode backward via atomicAdd scatter.
+        // Mirrors the ROCm pattern from Wave H4. Each output pixel writes
+        // its gradient to the single nearest input pixel; atomicAdd
+        // handles the (out_h × out_w) → (in_h × in_w) overlap.
+        TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_nearest_backward", [&]() {
+            interpolate_nearest_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_output.data<scalar_t>(),
+                grad_input.data<scalar_t>(),
+                N, C, in_h, in_w, out_h, out_w);
+        });
     }
     TENZOR_CUDA_POST_LAUNCH_CHECK();
     return grad_input;

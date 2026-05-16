@@ -5,8 +5,20 @@
 
 #include "tenzor/lite/runtime.hpp"
 #include "tenzor/lite/lite_graph.hpp"
+#include "tenzor/lite/memory_planner.hpp"
 #include "tenzor/lite/model_format.hpp"
 #include "tenzor/lite/tensor_bridge.hpp"
+#include <cerrno>
+
+// Inf-E4: POSIX mmap for load_mmap(path). On non-POSIX platforms the
+// implementation falls back to the heap-buffered load(path).
+#if defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#  define TENZOR_HAS_POSIX_MMAP 1
+#endif
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/core/tensor.hpp"
 #include <algorithm>
@@ -55,10 +67,16 @@ LiteAllocator::LiteAllocator(const std::vector<size_t>& pool_sizes, size_t align
     for (auto size : pool_sizes) {
         void* ptr = nullptr;
         if (size > 0) {
+            // L15 fix: capture errno from posix_memalign separately from
+            // its return code so the caller can distinguish EINVAL
+            // (bad alignment) from ENOMEM (out-of-memory).
+            int errcode = 0;
 #ifdef _WIN32
             ptr = _aligned_malloc(size, alignment);
+            if (!ptr) errcode = errno;
 #else
-            if (posix_memalign(&ptr, alignment, size) != 0) {
+            errcode = posix_memalign(&ptr, alignment, size);
+            if (errcode != 0) {
                 ptr = nullptr;
             }
 #endif
@@ -71,8 +89,13 @@ LiteAllocator::LiteAllocator(const std::vector<size_t>& pool_sizes, size_t align
                     std::free(p);
 #endif
                 }
-                throw std::runtime_error("LiteAllocator: failed to allocate " +
-                                         std::to_string(size) + " bytes");
+                const char* reason = (errcode == EINVAL)
+                    ? "bad alignment (must be power of two and multiple of sizeof(void*))"
+                    : (errcode == ENOMEM ? "out of memory" : "unknown allocator error");
+                throw std::runtime_error(
+                    std::string("LiteAllocator: failed to allocate ") +
+                    std::to_string(size) + " bytes (alignment=" +
+                    std::to_string(alignment) + "): " + reason);
             }
             std::memset(ptr, 0, size);
         }
@@ -223,12 +246,70 @@ auto LiteRuntime::load(const void* data, size_t size) -> std::unique_ptr<LiteRun
     // Output shapes are typically unknown without shape inference; Phase 3
     // populates them at export time.
 
-    // Phase 5 sizes this from a packed MMPL section; Phase 2 falls back to
-    // a small placeholder pool (kernels allocate their own outputs).
-    runtime->impl_->allocator = std::make_unique<LiteAllocator>(
-        std::vector<size_t>{}, 64);
+    // Inf-E4: when the file ships with an MMPL section, size the arena
+    // exactly from the precomputed plan. v1 files (no MMPL) keep the
+    // pre-Inf-E behaviour: kernels allocate their own outputs from heap.
+    if (model.memory_plan) {
+        std::vector<size_t> pool_sizes;
+        pool_sizes.reserve(model.memory_plan->pool_sizes.size());
+        for (uint64_t s : model.memory_plan->pool_sizes) {
+            pool_sizes.push_back(static_cast<size_t>(s));
+        }
+        runtime->impl_->allocator = std::make_unique<LiteAllocator>(
+            pool_sizes,
+            static_cast<size_t>(model.memory_plan->alignment));
+    } else {
+        runtime->impl_->allocator = std::make_unique<LiteAllocator>(
+            std::vector<size_t>{}, 64);
+    }
 
     return runtime;
+}
+
+// Inf-E4: POSIX mmap variant. Maps the file into the address space,
+// passes the data range to `load(data, size)` which constructs the
+// runtime + copies WGTS bytes into the heap-backed `weight_blob`, then
+// unmaps the source mapping.
+//
+// This implementation is behaviour-identical to `load(path)` — the mmap
+// is short-lived because `load(data, size)` materialises a heap copy.
+// True zero-copy WGTS (mmap-backed views feeding `Tensor::from_blob`
+// with a no-op deleter) requires refactoring `LoadedModel::weight_blob`
+// from `std::vector<uint8_t>` to a non-owning span, which is a deeper
+// change tracked separately.
+auto LiteRuntime::load_mmap(const std::string& path)
+    -> std::unique_ptr<LiteRuntime> {
+#ifdef TENZOR_HAS_POSIX_MMAP
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::runtime_error("LiteRuntime::load_mmap: cannot open file: " + path);
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+        ::close(fd);
+        throw std::runtime_error("LiteRuntime::load_mmap: fstat failed on: " + path);
+    }
+    void* addr = ::mmap(nullptr, static_cast<size_t>(st.st_size),
+                        PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);  // fd is no longer needed once mapped
+    if (addr == MAP_FAILED) {
+        // Fall back to heap-buffered load on mmap failure (e.g. EOVERFLOW
+        // on 32-bit systems, or filesystem doesn't support mmap).
+        return load(path);
+    }
+    std::unique_ptr<LiteRuntime> rt;
+    try {
+        rt = load(addr, static_cast<size_t>(st.st_size));
+    } catch (...) {
+        ::munmap(addr, static_cast<size_t>(st.st_size));
+        throw;
+    }
+    ::munmap(addr, static_cast<size_t>(st.st_size));
+    return rt;
+#else
+    // No POSIX mmap on this platform — fall back transparently.
+    return load(path);
+#endif
 }
 
 auto LiteRuntime::from_graph(LiteGraph graph) -> std::unique_ptr<LiteRuntime> {

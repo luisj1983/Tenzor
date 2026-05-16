@@ -1898,9 +1898,9 @@ auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
 auto VulkanBackend::dispatchConv2dBackwardInput(
     const Tensor& grad_output,
     const Tensor& weight,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     const std::vector<int64_t>& input_shape,
     int64_t groups) -> Tensor {
 
@@ -1981,9 +1981,12 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
         uint32_t width_out;
         uint32_t kernel_h;
         uint32_t kernel_w;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t groups;
     } push_constants;
 
@@ -1996,9 +1999,12 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     push_constants.width_out = static_cast<uint32_t>(width_out);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
@@ -2027,9 +2033,9 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
 auto VulkanBackend::dispatchConv2dBackwardWeight(
     const Tensor& grad_output,
     const Tensor& input,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     const std::vector<int64_t>& weight_shape,
     int64_t groups) -> Tensor {
 
@@ -2110,9 +2116,12 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
         uint32_t width_out;
         uint32_t kernel_h;
         uint32_t kernel_w;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t groups;
     } push_constants;
 
@@ -2125,9 +2134,12 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     push_constants.width_out = static_cast<uint32_t>(width_out);
     push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),

@@ -32,6 +32,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+// Note: MmplPlan is forward-declared as an incomplete type below; the full
+// definition is in memory_planner.hpp. Code that constructs or inspects an
+// MmplPlan should include that header explicitly.
 
 #include "../core/dtype.hpp"
 #include "../core/tensor.hpp"
@@ -39,13 +42,32 @@
 namespace tenzor::lite {
 
 constexpr uint32_t TZLITE_MAGIC   = 0x544C5A54;  // "TZLT"
-constexpr uint32_t TZLITE_VERSION = 1;
+// Inf-E7: v2 added optional MMPL section.
+// Inf-E5 (Wave Inf-E5): v3 adds variable-length extras to LiteAttributes
+// (per-node `extra_i` + `extra_f` lists, sized by uint32 counts). Used by
+// RNN/LSTM/GRU/MultiheadAttention which need richer state than the fixed
+// 4+4 positional slots.
+constexpr uint32_t TZLITE_VERSION = 3;
+constexpr uint32_t TZLITE_VERSION_MIN_SUPPORTED = 1;
 
 // FourCC tags for TLV sections (little-endian byte order in the file).
 constexpr uint32_t TZLITE_TAG_TVAL = 0x4C415654;  // 'T''V''A''L' read little-endian
 constexpr uint32_t TZLITE_TAG_WGTS = 0x53544757;  // 'W''G''T''S'
 constexpr uint32_t TZLITE_TAG_IOSP = 0x50534F49;  // 'I''O''S''P'
 constexpr uint32_t TZLITE_TAG_META = 0x4154454D;  // 'M''E''T''A'
+// Inf-E1: 'MMPL' — Materialized Memory Plan section. Greedy-by-size
+// pool layout computed by `tenzor::lite::compute_memory_plan`.
+//
+// Layout:
+//   u8  alignment (typically 64)
+//   u32 num_pools
+//   repeated num_pools: u64 pool_size_bytes
+//   u32 num_placements
+//   repeated num_placements:
+//     i16 tensor_id
+//     u8  pool_index
+//     u64 offset_within_pool
+constexpr uint32_t TZLITE_TAG_MMPL = 0x4C504D4D;  // 'M''M''P''L'
 
 struct TZLiteHeader {
     uint32_t magic;
@@ -83,6 +105,12 @@ struct TensorValue {
     uint32_t input_index{0};
 };
 
+// Inf-E1: parsed MMPL fields (forward-declared here, full layout in
+// memory_planner.hpp). The reader fills these when the file has an
+// MMPL section; the runtime allocator uses them to size its arena.
+struct MmplPlacement;
+struct MmplPlan;
+
 /** Loaded model artefacts — what TZLiteReader::load returns. */
 struct LoadedModel {
     std::unique_ptr<LiteGraph> graph;
@@ -91,6 +119,10 @@ struct LoadedModel {
     std::vector<int16_t> input_ids;
     std::vector<int16_t> output_ids;
     std::unordered_map<std::string, std::string> metadata;
+    /** Inf-E1: present when the file has an MMPL section. Uses a unique_ptr
+     *  so the struct can stay incomplete-typed in this header (definition
+     *  lives in memory_planner.hpp). Empty/null when absent. */
+    std::unique_ptr<MmplPlan> memory_plan;
 };
 
 // ============================================================================
@@ -137,6 +169,11 @@ struct WriteOptions {
 
     /** Free-form metadata. */
     std::unordered_map<std::string, std::string> metadata;
+
+    /** Inf-E3: optional precomputed memory plan. When set, the writer
+     *  emits an MMPL section and the runtime allocates its arena from
+     *  this plan instead of growing on demand. */
+    std::shared_ptr<MmplPlan> memory_plan;
 };
 
 class TZLiteWriter {

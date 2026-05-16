@@ -23,3 +23,8 @@ tenzor_discover_tests(test_lite_runtime LABELS "lite" DISCOVERY_TIMEOUT 60)
 add_executable(test_exporter test_exporter.cpp)
 target_link_libraries(test_exporter PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_exporter LABELS "lite" DISCOVERY_TIMEOUT 60)
+
+# Inf-E: MMPL memory planner + section round-trip + v1 back-compat.
+add_executable(test_memory_planner test_memory_planner.cpp)
+target_link_libraries(test_memory_planner PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_memory_planner LABELS "lite" DISCOVERY_TIMEOUT 60)

@@ -8,6 +8,7 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/nn/layers/flex_attention.hpp"  // Wave C: process-wide score_mod registry
 #include <sstream>
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -777,27 +778,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Convolution Operations
     // ========================================================================
-    // Audit E4: per-axis honest contract on Vulkan. Symmetric runs fall
-    // through to the existing compute-shader path; asymmetric throws cleanly
-    // — replacing the previous silent miscompute (Vulkan's conv2d compute
-    // shaders read scalar AttrKey::Stride/Padding/Dilation only). Native
-    // per-axis push-constants in the shaders are tracked as E4-followup.
+    // Wave B1/B2: Vulkan Conv2dForward natively supports per-axis stride/
+    // padding/dilation via per-axis push-constants in conv2d_forward.comp
+    // (and its f16/bf16/f64 variants). dispatchConv2dForward reads per-axis
+    // attrs internally with scalar fallback.
     table.register_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
-            throw std::runtime_error(
-                "Vulkan conv2d_forward: asymmetric stride/padding/dilation "
-                "is not yet supported (E4-followup: extend the compute-shader "
-                "push-constant struct + scalar reads in conv2d_*.comp).");
-        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
@@ -813,19 +798,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
         int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
         int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
-            throw std::runtime_error(
-                "Vulkan conv2d_backward_input: asymmetric stride/padding/dilation "
-                "is not yet supported (E4-followup).");
-        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardInput(
             inputs[0], inputs[2],
-            stride_h, pad_h, dil_h,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
             attrs.get_int_list(AttrKey::InputShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
-    // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
+    // Conv2dBackwardWeight: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
@@ -836,14 +816,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
         int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
         int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        if (stride_h != stride_w || pad_h != pad_w || dil_h != dil_w) {
-            throw std::runtime_error(
-                "Vulkan conv2d_backward_weight: asymmetric stride/padding/dilation "
-                "is not yet supported (E4-followup).");
-        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardWeight(
             inputs[0], inputs[1],
-            stride_h, pad_h, dil_h,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
             attrs.get_int_list(AttrKey::WeightShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
@@ -893,41 +868,41 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Conv3d Operations
     // ========================================================================
+    // Wave B1/B2: Vulkan Conv3d natively supports per-axis stride/padding/dilation.
+    // The conv3d_forward.comp shader already has per-axis push-constants;
+    // dispatchConv3dForward now reads per-axis attrs (with scalar fallback).
     table.register_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Audit I5-followup: honest contract for Vulkan Conv3d. The Vulkan
-        // dispatchConv3dForward reads scalar Stride/Padding/Dilation only;
-        // throw clearly when per-axis attrs disagree.
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sD = attrs.get_int(AttrKey::StrideD, s),   sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pD = attrs.get_int(AttrKey::PaddingD, p),  pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
-        if (sD != sH || sH != sW || pD != pH || pH != pW || dD != dH || dH != dW) {
-            throw std::runtime_error(
-                "Vulkan Conv3d: asymmetric stride/padding/dilation is not yet "
-                "supported (I5-followup: extend the conv3d compute-shader push-"
-                "constants + dispatch to read per-axis).");
-        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
 
-    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
+    // Conv3dBackwardInput: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s), sH = attrs.get_int(AttrKey::StrideH, s), sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardInput(
-            inputs[0], inputs[2],  // grad_output, weight
-            attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
-            attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::InputShape),
+            inputs[0], inputs[2],
+            sD, sH, sW, pD, pH, pW, dD, dH, dW,
+            attrs.get_int_list(AttrKey::InputShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
-    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
+    // Conv3dBackwardWeight: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sD = attrs.get_int(AttrKey::StrideD, s), sH = attrs.get_int(AttrKey::StrideH, s), sW = attrs.get_int(AttrKey::StrideW, s);
+        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
+        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardWeight(
-            inputs[0], inputs[1],  // grad_output, input
-            attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
-            attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::WeightShape),
+            inputs[0], inputs[1],
+            sD, sH, sW, pD, pH, pW, dD, dH, dW,
+            attrs.get_int_list(AttrKey::WeightShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
@@ -935,23 +910,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardBias(inputs[0])};
     });
 
-    // ConvTranspose3d Operations (use Conv3d shader duality)
+    // Wave B1/B2: Vulkan ConvTranspose3d natively supports per-axis stride/
+    // padding/output_padding/dilation. dispatchConvTranspose3dForward reads
+    // per-axis attrs internally (with scalar fallback).
     table.register_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Audit I5-followup: honest contract.
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sD = attrs.get_int(AttrKey::StrideD, s),   sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pD = attrs.get_int(AttrKey::PaddingD, p),  pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t opD= attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
-        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
-        if (sD != sH || sH != sW || pD != pH || pH != pW ||
-            opD != opH || opH != opW || dD != dH || dH != dW) {
-            throw std::runtime_error(
-                "Vulkan ConvTranspose3d: asymmetric stride/padding/output_padding/"
-                "dilation is not yet supported (I5-followup).");
-        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose3dForward(
             inputs[0], inputs[1], bias_ptr, attrs)};
@@ -971,21 +933,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose3dBackwardBias(inputs[0])};
     });
 
+    // Wave B1/B2: Vulkan ConvTranspose2d natively supports per-axis stride/
+    // padding/output_padding/dilation via per-axis push-constants in
+    // conv_transpose2d_forward.comp (and f16/bf16/f64 variants).
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Audit I5-followup: honest contract for Vulkan ConvT2d.
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sH = attrs.get_int(AttrKey::StrideH, s),   sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pH = attrs.get_int(AttrKey::PaddingH, p),  pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
-        int64_t dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
-        if (sH != sW || pH != pW || opH != opW || dH != dW) {
-            throw std::runtime_error(
-                "Vulkan ConvTranspose2d: asymmetric stride/padding/output_padding/"
-                "dilation is not yet supported (I5-followup).");
-        }
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose2dForward(
             inputs[0], inputs[1], bias_ptr, attrs)};
@@ -2764,26 +2715,136 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 return {output, Tensor{}};
             }
 
+            // Wave C: ScoreModId >= 3 routes through the process-wide score_mod
+            // registry populated by `tenzor::nn::register_score_mod` (same
+            // pattern as CPU/CUDA/OneAPI). Forward composes Q@K^T → user
+            // functor → softmax → @V via tenzor:: ops (which dispatch to
+            // Vulkan automatically since Q/K/V live on Vulkan).
+            if (score_mod_id >= 3) {
+                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+                if (!fn) {
+                    throw std::runtime_error(
+                        "FlexAttention Vulkan: no user score_mod registered for ScoreModId=" +
+                        std::to_string(score_mod_id) +
+                        ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
+                }
+                const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::bmm(Q, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                               scores.dtype(), scores.device());
+                scores = scores * scale_t;
+                Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {modified};
+                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                Tensor output = tenzor::bmm(probs, V);
+                return {output, Tensor{}};
+            }
+
             throw std::runtime_error(
                 "FlexAttention Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
-                " not yet implemented (only 0=identity, 1=causal, 2=sliding_window).");
+                " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
+                "register user IDs >= 3 via tenzor::nn::register_score_mod).");
         });
 
     table.register_kernel(OpId::FlexAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
-            if (score_mod_id != 0 && score_mod_id != 1) {
-                throw std::runtime_error(
-                    "FlexAttentionBackward Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
-                    " not yet implemented (M8 work).");
+
+            // ScoreModId 0/1: route to fused FlashAttention backward.
+            if (score_mod_id == 0 || score_mod_id == 1) {
+                bool causal = (score_mod_id == 1);
+                OpAttributes bwd_attrs;
+                bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
+                bwd_attrs.set(AttrKey::Causal, causal);
+                std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
+                return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
             }
-            bool causal = (score_mod_id == 1);
-            OpAttributes bwd_attrs;
-            bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
-            bwd_attrs.set(AttrKey::Causal, causal);
-            std::vector<Tensor> bwd_inputs(inputs.begin(), inputs.end());
-            return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
+
+            // Wave C: ScoreModId == 2 (sliding window) or >= 3 (user functor) — composed backward.
+            if (score_mod_id == 2 || score_mod_id >= 3) {
+                const Tensor& dO = inputs[0];
+                const Tensor& Q  = inputs[1];
+                const Tensor& K  = inputs[2];
+                const Tensor& V  = inputs[3];
+                Tensor Kt = tenzor::transpose(K, -1, -2);
+                Tensor scores = tenzor::bmm(Q, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                               scores.dtype(), scores.device());
+                scores = scores * scale_t;
+
+                if (score_mod_id == 2) {
+                    int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+                    if (window_size <= 0) {
+                        throw std::invalid_argument(
+                            "FlexAttentionBackward Vulkan: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                    }
+                    int64_t S_q = Q.shape()[Q.shape().size() - 2];
+                    int64_t S_k = K.shape()[K.shape().size() - 2];
+                    int64_t half = window_size / 2;
+                    Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
+                    Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
+                    Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                    Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+                    Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                                                  abs_diff.dtype(), abs_diff.device());
+                    Tensor outside = tenzor::gt(abs_diff, half_t);
+                    // Use large finite negative; softmax(-1e30) underflows to 0
+                    // (same effect as -inf) without producing NaN at in-window
+                    // positions via 0 * -inf.
+                    Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
+                                                     scores.dtype(), scores.device());
+                    scores = scores + (outside.to(scores.dtype()) * large_neg);
+                } else {
+                    auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+                    if (!fn) {
+                        throw std::runtime_error(
+                            "FlexAttentionBackward Vulkan: no user score_mod registered for ScoreModId=" +
+                            std::to_string(score_mod_id));
+                    }
+                    scores = fn(scores, 0, 0, 0, 0);
+                }
+
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+
+                Tensor attn_t = tenzor::transpose(attn, -1, -2);
+                Tensor dV = tenzor::bmm(attn_t, dO);
+
+                Tensor Vt = tenzor::transpose(V, -1, -2);
+                Tensor dAttn = tenzor::bmm(dO, Vt);
+
+                Tensor ad = tenzor::mul(attn, dAttn);
+                NewOpAttributes sum_attrs;
+                sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                sum_attrs.set(AttrKey::Keepdim, true);
+                std::vector<Tensor> sum_inputs = {ad};
+                Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+                Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
+
+                Tensor scale_t2 = tenzor::full(
+                    std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                    static_cast<double>(scale), dScores.dtype(), dScores.device());
+                dScores = tenzor::mul(dScores, scale_t2);
+
+                Tensor dQ = tenzor::bmm(dScores, K);
+                Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
+                Tensor dK = tenzor::bmm(dScores_t, Q);
+
+                return {dQ, dK, dV};
+            }
+
+            throw std::runtime_error(
+                "FlexAttentionBackward Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
+                " not recognised.");
         });
 
     // =========================================================================

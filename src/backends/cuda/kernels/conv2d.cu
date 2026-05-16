@@ -1601,9 +1601,12 @@ __global__ void conv_transpose2d_forward_kernel_impl(
     int64_t out_w,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,      // M12 fix: per-axis stride/padding/dilation
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t groups,
     int64_t in_channels_per_group,
     int64_t out_channels_per_group,
@@ -1636,15 +1639,15 @@ __global__ void conv_transpose2d_forward_kernel_impl(
                     // ih * stride = oh + padding - kh * dilation
                     // ih = (oh + padding - kh * dilation) / stride (must be integer and in bounds)
 
-                    int64_t h_shifted = h + padding - kh * dilation;
-                    int64_t w_shifted = w + padding - kw * dilation;
+                    int64_t h_shifted = h + padding_h - kh * dilation_h;
+                    int64_t w_shifted = w + padding_w - kw * dilation_w;
 
                     // Check if this maps to a valid input position
-                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                        w_shifted >= 0 && w_shifted % stride == 0) {
+                    if (h_shifted >= 0 && h_shifted % stride_h == 0 &&
+                        w_shifted >= 0 && w_shifted % stride_w == 0) {
 
-                        int64_t ih = h_shifted / stride;
-                        int64_t iw = w_shifted / stride;
+                        int64_t ih = h_shifted / stride_h;
+                        int64_t iw = w_shifted / stride_w;
 
                         if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                             // Get input value
@@ -1691,9 +1694,12 @@ __global__ void conv_transpose2d_forward_kernel_f16(
     int64_t out_w,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,      // M12 fix: per-axis
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t groups,
     int64_t in_channels_per_group,
     int64_t out_channels_per_group,
@@ -1720,14 +1726,14 @@ __global__ void conv_transpose2d_forward_kernel_f16(
         for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                    int64_t h_shifted = h + padding - kh * dilation;
-                    int64_t w_shifted = w + padding - kw * dilation;
+                    int64_t h_shifted = h + padding_h - kh * dilation_h;
+                    int64_t w_shifted = w + padding_w - kw * dilation_w;
 
-                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                        w_shifted >= 0 && w_shifted % stride == 0) {
+                    if (h_shifted >= 0 && h_shifted % stride_h == 0 &&
+                        w_shifted >= 0 && w_shifted % stride_w == 0) {
 
-                        int64_t ih = h_shifted / stride;
-                        int64_t iw = w_shifted / stride;
+                        int64_t ih = h_shifted / stride_h;
+                        int64_t iw = w_shifted / stride_w;
 
                         if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                             int64_t input_idx = b * (in_channels * in_h * in_w) +
@@ -1757,14 +1763,20 @@ __global__ void conv_transpose2d_forward_kernel_f16(
 }
 
 // ConvTranspose2d forward wrapper function
+// M12 fix: per-axis stride/padding/output_padding/dilation wrapper. The
+// scalar version is preserved as a thin shim below for back-compat.
 auto conv_transpose2d_forward_kernel(
     const Tensor& input,          // (batch, in_channels, in_h, in_w)
     const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
     const Tensor* bias,           // (out_channels) or nullptr
-    int64_t stride,
-    int64_t padding,
-    int64_t output_padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t output_padding_h,
+    int64_t output_padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
@@ -1783,9 +1795,9 @@ auto conv_transpose2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions for transposed convolution
-    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, stride, padding, output_padding, dilation);
-    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, stride, padding, output_padding, dilation);
+    // Calculate output dimensions for transposed convolution (per-axis).
+    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, stride_h, padding_h, output_padding_h, dilation_h);
+    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, stride_w, padding_w, output_padding_w, dilation_w);
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
@@ -1817,7 +1829,7 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
             kernel_h, kernel_w,
-            stride, padding, dilation, groups,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, groups,
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
@@ -1834,7 +1846,7 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
             kernel_h, kernel_w,
-            stride, padding, dilation, groups,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, groups,
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
@@ -1851,7 +1863,7 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
             kernel_h, kernel_w,
-            stride, padding, dilation, groups,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, groups,
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
@@ -1860,6 +1872,28 @@ auto conv_transpose2d_forward_kernel(
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
     return output;
+}
+
+// M12 fix: scalar-args back-compat shim — duplicates the scalar values
+// to per-axis pairs and delegates to the per-axis kernel above.
+auto conv_transpose2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return conv_transpose2d_forward_kernel(
+        input, weight, bias,
+        stride, stride,
+        padding, padding,
+        output_padding, output_padding,
+        dilation, dilation,
+        groups, stream);
 }
 
 

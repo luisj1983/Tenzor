@@ -6016,11 +6016,13 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
                                                  const std::vector<int64_t>& input_size,
                                                  const std::string& mode,
                                                  bool align_corners) -> Tensor {
-    if (mode != "bilinear") {
+    // M14 fix: nearest mode wired via interpolate_nearest_backward.comp.
+    // Same atomic-float scatter shape as bilinear but one source pixel
+    // per output element (no weights, no align_corners).
+    if (mode != "bilinear" && mode != "nearest") {
         throw std::runtime_error(
             "dispatchInterpolateBackward (Vulkan): mode '" + mode +
-            "' not supported. Only 'bilinear' is wired (the only mode the "
-            "audit-shipped shader implements).");
+            "' not supported. Supported: 'bilinear', 'nearest'.");
     }
     if (grad_output.dtype() != DType::Float32) {
         throw std::runtime_error(
@@ -6048,7 +6050,12 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
 
     int32_t device_id = cont_grad.device().index;
 
-    auto* pipeline = getPipeline("interpolate_bilinear_backward", device_id);
+    // M14: select shader by mode. Nearest has no align_corners parameter
+    // (PyTorch nearest ignores it); the push constant struct differs by 1 uint.
+    const std::string shader_name = (mode == "nearest")
+        ? "interpolate_nearest_backward"
+        : "interpolate_bilinear_backward";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     Tensor grad_input(std::vector<int64_t>{N, C, in_h, in_w}, cont_grad.dtype(), cont_grad.device());
 

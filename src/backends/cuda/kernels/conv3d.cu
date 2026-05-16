@@ -12,6 +12,7 @@
  * matching cuDNN's mixed-precision convention.
  */
 
+#include <array>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "cuda_common.cuh"
@@ -765,11 +766,25 @@ void launch_conv_transpose3d_backward_weight(
 
 auto conv3d_forward_kernel(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    std::array<int64_t, 3> stride,
+    std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> dilation,
+    int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
-    if (stride == 0)  throw std::invalid_argument("Conv3d: stride cannot be zero");
+    if (stride[0] == 0 || stride[1] == 0 || stride[2] == 0)
+        throw std::invalid_argument("Conv3d: stride cannot be zero");
     if (groups == 0)  throw std::invalid_argument("Conv3d: groups cannot be zero");
+    // Non-cuDNN fallback device kernel uses scalar index math; honest-throw on
+    // asymmetric until per-axis device kernel lands as a separate refactor.
+    if (stride[0] != stride[1] || stride[1] != stride[2] ||
+        padding[0] != padding[1] || padding[1] != padding[2] ||
+        dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
+        throw std::runtime_error(
+            "CUDA Conv3d (non-cuDNN fallback): asymmetric stride/padding/dilation "
+            "requires cuDNN; rebuild with TENZOR_WITH_CUDNN=ON or use isotropic params.");
+    }
+    int64_t s = stride[0], p = padding[0], d = dilation[0];
 
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
@@ -784,9 +799,9 @@ auto conv3d_forward_kernel(
     int64_t kH = w_shape[3];
     int64_t kW = w_shape[4];
 
-    int64_t oD = conv3d_out_dim(D, kD, stride, padding, dilation);
-    int64_t oH = conv3d_out_dim(H, kH, stride, padding, dilation);
-    int64_t oW = conv3d_out_dim(W, kW, stride, padding, dilation);
+    int64_t oD = conv3d_out_dim(D, kD, s, p, d);
+    int64_t oH = conv3d_out_dim(H, kH, s, p, d);
+    int64_t oW = conv3d_out_dim(W, kW, s, p, d);
 
     Tensor output({N, Cout, oD, oH, oW}, input.dtype(), input.device());
 
@@ -794,22 +809,22 @@ auto conv3d_forward_kernel(
         case DType::Float32:
             launch_conv3d_forward<float, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv3d_forward<double, double>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv3d_forward<__half, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv3d_forward<__nv_bfloat16, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
             throw std::invalid_argument(
@@ -824,12 +839,24 @@ auto conv3d_forward_kernel(
 
 auto conv3d_backward_kernel(
     const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    std::array<int64_t, 3> stride,
+    std::array<int64_t, 3> padding,
+    std::array<int64_t, 3> dilation,
+    int64_t groups,
     bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
-    if (stride == 0)  throw std::invalid_argument("Conv3d: stride cannot be zero");
+    if (stride[0] == 0 || stride[1] == 0 || stride[2] == 0)
+        throw std::invalid_argument("Conv3d: stride cannot be zero");
     if (groups == 0)  throw std::invalid_argument("Conv3d: groups cannot be zero");
+    if (stride[0] != stride[1] || stride[1] != stride[2] ||
+        padding[0] != padding[1] || padding[1] != padding[2] ||
+        dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
+        throw std::runtime_error(
+            "CUDA Conv3d backward (non-cuDNN fallback): asymmetric stride/padding/dilation "
+            "requires cuDNN; rebuild with TENZOR_WITH_CUDNN=ON or use isotropic params.");
+    }
+    int64_t s_ = stride[0], p_ = padding[0], d_ = dilation[0];
 
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
@@ -860,13 +887,13 @@ auto conv3d_backward_kernel(
             launch_conv3d_backward_input<T_, ACC_>(                                      \
                 grad_output, weight, grad_input,                                         \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
-                oD, oH, oW, stride, padding, dilation, groups, stream);                  \
+                oD, oH, oW, s_, p_, d_, groups, stream);                  \
         }                                                                                \
         if (compute_grad_weight) {                                                       \
             launch_conv3d_backward_weight<T_, ACC_>(                                     \
                 grad_output, input, grad_weight,                                         \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
-                oD, oH, oW, stride, padding, dilation, groups, stream);                  \
+                oD, oH, oW, s_, p_, d_, groups, stream);                  \
         }                                                                                \
         if (compute_grad_bias) {                                                         \
             launch_conv3d_backward_bias<T_, ACC_>(                                       \
@@ -906,6 +933,7 @@ auto conv_transpose3d_forward_kernel(
 ) -> Tensor {
     if (stride == 0)  throw std::invalid_argument("ConvTranspose3d: stride cannot be zero");
     if (groups == 0)  throw std::invalid_argument("ConvTranspose3d: groups cannot be zero");
+    int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
 
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
@@ -931,22 +959,22 @@ auto conv_transpose3d_forward_kernel(
         case DType::Float32:
             launch_conv_transpose3d_forward<float, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_forward<double, double>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_forward<__half, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_forward<__nv_bfloat16, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
             throw std::invalid_argument(
@@ -965,6 +993,7 @@ auto conv_transpose3d_backward_input_kernel(
     int64_t dilation, int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
+    int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
     auto go_shape = grad_output.shape();
@@ -988,22 +1017,22 @@ auto conv_transpose3d_backward_input_kernel(
         case DType::Float32:
             launch_conv_transpose3d_backward_input<float, float>(
                 grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_backward_input<double, double>(
                 grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_backward_input<__half, float>(
                 grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_backward_input<__nv_bfloat16, float>(
                 grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
             throw std::invalid_argument(
@@ -1018,6 +1047,7 @@ auto conv_transpose3d_backward_weight_kernel(
     int64_t dilation, int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
+    int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
     auto go_shape = grad_output.shape();
@@ -1041,22 +1071,22 @@ auto conv_transpose3d_backward_weight_kernel(
         case DType::Float32:
             launch_conv_transpose3d_backward_weight<float, float>(
                 grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_backward_weight<double, double>(
                 grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_backward_weight<__half, float>(
                 grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_backward_weight<__nv_bfloat16, float>(
                 grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
-                kD, kH, kW, oD, oH, oW, stride, padding, dilation, groups, stream);
+                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
             throw std::invalid_argument(

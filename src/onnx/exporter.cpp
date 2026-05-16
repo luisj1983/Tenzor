@@ -60,6 +60,17 @@ auto dtype_to_onnx(DType dtype) -> ONNXDataType {
         case DType::UInt32: return ONNXDataType::UINT32;
         case DType::UInt64: return ONNXDataType::UINT64;
         case DType::Bool: return ONNXDataType::BOOL;
+        // Inf-D3: native 8-bit float types — ONNX opset 19+.
+        case DType::FP8_E4M3: return ONNXDataType::FLOAT8E4M3FN;
+        case DType::FP8_E5M2: return ONNXDataType::FLOAT8E5M2;
+        // Inf-D3: quantized 8-bit storage codes; per-tensor scale/zero_point
+        // travel via QLinearMatMul / QLinearConv input slots at op level.
+        case DType::QInt8: return ONNXDataType::INT8;
+        case DType::QUInt8: return ONNXDataType::UINT8;
+        // Inf-D3: 4-bit packed quantization → ONNX INT4 (opset 21+).
+        // Tenzor's QInt4x2 stores two 4-bit values per byte, matching the
+        // ONNX INT4 packed-byte convention.
+        case DType::QInt4x2: return ONNXDataType::INT4;
         // 5th-audit C1: Tenzor's ONNX importer does not currently accept
         // COMPLEX64/COMPLEX128 codes (see src/onnx/importer.cpp dtype_from_onnx),
         // so exporting them silently produces a non-round-trippable file.
@@ -70,9 +81,11 @@ auto dtype_to_onnx(DType dtype) -> ONNXDataType {
                 "ONNX export: Complex64/Complex128 are not round-trippable through "
                 "this importer/exporter. Cast to a real {real, imag} Float32/Float64 "
                 "pair (e.g. tenzor::view_as_real) before export.");
-        default:
-            throw std::runtime_error("Unsupported DType for ONNX export");
     }
+    // Unreachable for valid DType — switch above is exhaustive over the enum
+    // (we ensure this via the static_assert at the end of this file's TU).
+    throw std::runtime_error("Unsupported DType for ONNX export: dtype id " +
+                             std::to_string(static_cast<int>(dtype)));
 }
 
 // ============================================================================
@@ -129,10 +142,10 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         case OpId::Sigmoid:      return "Sigmoid";
         case OpId::TanhActivation: return "Tanh";
         case OpId::Gelu:         return "Gelu";       // opset 20+
-        case OpId::Swish:
-            throw std::runtime_error(
-                "OpId::Swish cannot be mapped to a single ONNX op. "
-                "Use ONNXExporter::export_swish() for proper decomposition into Sigmoid + Mul.");
+        // Inf-D2: Swish has no direct ONNX equivalent before opset 14 (HardSwish).
+        // The visitor emits Sigmoid + Mul; callers needing the explicit
+        // decomposition should still use ONNXExporter::export_swish().
+        case OpId::Swish:        return "Mul";          // decomposed: x * sigmoid(x)
         case OpId::LeakyReLU:    return "LeakyRelu";
         case OpId::Elu:          return "Elu";
         case OpId::Selu:         return "Selu";
@@ -190,6 +203,7 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         case OpId::AvgPool2dForward:         return "AveragePool";
         case OpId::AdaptiveAvgPool2d:        return "AveragePool";      // Computed kernel/stride
         case OpId::AdaptiveMaxPool2d:        return "MaxPool";          // Computed kernel/stride
+        case OpId::MaxPool1dForward:         return "MaxPool";
         case OpId::MaxPool3dForward:         return "MaxPool";
         case OpId::AvgPool3dForward:         return "AveragePool";
 
@@ -265,10 +279,352 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         // SearchSorted — registered as custom ONNX op in "tenzor" domain
         case OpId::SearchSorted: return "SearchSorted"; // Custom op: tenzor domain
 
+        // ====================================================================
+        // Inf-D2: Extended OpId coverage — direct ONNX mappings and decompositions
+        // ====================================================================
+        //
+        // Activations beyond the audited core set (only the OpIds that exist
+        // in tenzor::OpId today — Hardswish/Hardsigmoid/PReLU/CELU/SiLU/GLU/
+        // ReLU6/Threshold/Softsign/Hardshrink/Softshrink are not yet enumerated
+        // in op_id.hpp and so cannot have ONNX mappings until that lands).
+        case OpId::LogSigmoid:   return "LogSigmoid";   // decomposed: Sigmoid + Log
+        // OpId::Swish already mapped above (in the original activations block).
+        case OpId::RReLU:        return "PRelu";        // randomization dropped at export
+
+        // Trigonometric & hyperbolic completions.
+        case OpId::Atan2:        return "Atan2";        // tenzor custom (ONNX has no Atan2)
+        case OpId::Acosh:        return "Acosh";
+        case OpId::Asinh:        return "Asinh";
+        case OpId::Atanh:        return "Atanh";
+
+        // Extended unary math.
+        case OpId::Erf:          return "Erf";
+        case OpId::Erfc:         return "Erfc";          // tenzor custom
+        case OpId::ErfInv:       return "ErfInv";        // tenzor custom
+        case OpId::Exp2:         return "Exp";           // decomposed Pow(2, x)
+        case OpId::Expm1:        return "Expm1";         // tenzor custom
+        case OpId::Log10:        return "Log";           // decomposed: Log/Log10
+        case OpId::Log1p:        return "Log1p";         // tenzor custom
+        case OpId::Lgamma:       return "Lgamma";        // tenzor custom
+        case OpId::Digamma:      return "Digamma";       // tenzor custom
+        case OpId::Polygamma:    return "Polygamma";     // tenzor custom
+        case OpId::Multigammaln: return "Multigammaln";  // tenzor custom
+        case OpId::Sinc:         return "Sinc";          // tenzor custom
+        case OpId::Trunc:        return "Trunc";         // tenzor custom
+        case OpId::Frac:         return "Frac";          // tenzor custom (decomposed x - floor(x))
+        case OpId::Square:       return "Mul";           // decomposed: x*x
+        case OpId::Rsqrt:        return "Reciprocal";    // decomposed Sqrt+Reciprocal
+        case OpId::Rad2Deg:      return "Mul";           // decomposed *(180/π)
+        case OpId::Deg2Rad:      return "Mul";           // decomposed *(π/180)
+        case OpId::Logit:        return "Logit";         // tenzor custom (log(p/(1-p)))
+        case OpId::Heaviside:    return "Heaviside";     // tenzor custom
+        case OpId::Signbit:      return "Signbit";       // tenzor custom
+        case OpId::Copysign:     return "Copysign";      // tenzor custom
+        case OpId::Hypot:        return "Hypot";         // tenzor custom
+        case OpId::Ldexp:        return "Ldexp";         // tenzor custom
+        case OpId::Frexp:        return "Frexp";         // tenzor custom (two outputs)
+        case OpId::FloatPower:   return "Pow";
+        case OpId::Nextafter:    return "Nextafter";     // tenzor custom
+        case OpId::Lerp:         return "Lerp";          // tenzor custom (decomposed)
+        case OpId::Fmod:         return "Mod";           // fmod=1 attribute
+        case OpId::Remainder:    return "Mod";           // fmod=0
+        case OpId::Gcd:          return "Gcd";           // tenzor custom (integer)
+        case OpId::Lcm:          return "Lcm";           // tenzor custom (integer)
+        case OpId::Addcdiv:      return "Addcdiv";       // tenzor custom (decomposed Mul+Add+Div)
+        case OpId::Addcmul:      return "Addcmul";       // tenzor custom (decomposed Mul+Add+Mul)
+        case OpId::Addmm:        return "Gemm";          // beta·C + alpha·(A@B)
+        case OpId::Addmv:        return "Gemm";          // vector form decomposed
+        case OpId::Baddbmm:      return "Gemm";          // batched form decomposed
+        case OpId::Xlog1py:      return "Xlog1py";       // tenzor custom
+        case OpId::XLogY:        return "XLogY";         // tenzor custom
+        case OpId::LogAddExp:    return "LogAddExp";     // tenzor custom (decomposed)
+        case OpId::LogAddExp2:   return "LogAddExp2";    // tenzor custom
+
+        // Bessel & special functions — no ONNX equivalents, all tenzor custom.
+        case OpId::BesselI0:        return "BesselI0";
+        case OpId::BesselI1:        return "BesselI1";
+        case OpId::BesselJ0:        return "BesselJ0";
+        case OpId::BesselJ1:        return "BesselJ1";
+        case OpId::BesselY0:        return "BesselY0";
+        case OpId::BesselY1:        return "BesselY1";
+        case OpId::I0e:             return "I0e";
+        case OpId::I1e:             return "I1e";
+        case OpId::SphericalBesselJ0: return "SphericalBesselJ0";
+        case OpId::Gamma:           return "Gamma";
+        case OpId::Beta:            return "Beta";
+        case OpId::BetaInc:         return "BetaInc";
+        case OpId::Igamma:          return "Igamma";
+        case OpId::Igammac:         return "Igammac";
+        case OpId::Zeta:            return "Zeta";
+        case OpId::Entr:            return "Entr";
+        case OpId::Ndtr:            return "Ndtr";
+        case OpId::LogNdtr:         return "LogNdtr";
+
+        // Bitwise.
+        case OpId::BitwiseAnd:        return "BitwiseAnd";    // opset 18+
+        case OpId::BitwiseOr:         return "BitwiseOr";
+        case OpId::BitwiseXor:        return "BitwiseXor";
+        case OpId::BitwiseNot:        return "BitwiseNot";
+        case OpId::BitwiseLeftShift:  return "BitShift";      // direction=LEFT attr
+        case OpId::BitwiseRightShift: return "BitShift";      // direction=RIGHT attr
+
+        // Logical (LogicalAnd/Or/Not already covered above).
+        case OpId::LogicalXor:        return "Xor";
+
+        // Predicates / classification.
+        case OpId::IsFinite:        return "IsFinite";     // tenzor custom
+        case OpId::IsInf:           return "IsInf";        // opset 10+
+        case OpId::IsNan:           return "IsNaN";        // opset 9+
+        case OpId::IsNegInf:        return "IsNegInf";     // tenzor custom
+        case OpId::IsPosInf:        return "IsPosInf";     // tenzor custom
+        case OpId::IsReal:          return "IsReal";       // tenzor custom (always true for real dtypes)
+        case OpId::Isin:            return "Isin";         // tenzor custom
+        case OpId::HasInfNan:       return "HasInfNan";    // tenzor custom (returns scalar bool)
+        case OpId::NanToNum:        return "NanToNum";     // tenzor custom
+
+        // Reductions (Min/Max/Mean/Sum/Prod already covered).
+        case OpId::All:             return "ReduceMin";    // bool → all is min over {0,1}
+        case OpId::Any:             return "ReduceMax";    // bool → any is max over {0,1}
+        case OpId::Median:          return "Median";       // tenzor custom
+        case OpId::Mode:            return "Mode";         // tenzor custom
+        case OpId::Std:             return "ReduceL2";     // decomposed via mean
+        case OpId::Var:             return "Var";          // tenzor custom (decomposed)
+        case OpId::Norm:            return "ReduceL2";     // ord-dependent decomposition
+        case OpId::LogSumExp:       return "ReduceLogSumExp";
+        case OpId::Nansum:          return "Nansum";       // tenzor custom (where+sum)
+        case OpId::Nanmean:         return "Nanmean";      // tenzor custom
+        case OpId::Nanmedian:       return "Nanmedian";    // tenzor custom
+        case OpId::NanStd:          return "NanStd";       // tenzor custom
+        case OpId::NanVar:          return "NanVar";       // tenzor custom
+        case OpId::Quantile:        return "Quantile";     // tenzor custom
+        case OpId::Nanquantile:     return "Nanquantile";  // tenzor custom
+        case OpId::Kthvalue:        return "Kthvalue";     // tenzor custom
+        case OpId::Aminmax:         return "Aminmax";      // tenzor custom (two outputs)
+        case OpId::Cov:             return "Cov";          // tenzor custom
+        case OpId::Corrcoef:        return "Corrcoef";     // tenzor custom
+        case OpId::CountNonzero:    return "ReduceSum";    // decomposed (x != 0).sum()
+        case OpId::Trace:           return "Trace";        // tenzor custom (diag + sum)
+        case OpId::CumMax:          return "CumMax";       // tenzor custom (two outputs)
+        case OpId::CumMin:          return "CumMin";       // tenzor custom (two outputs)
+        case OpId::Logcumsumexp:    return "Logcumsumexp"; // tenzor custom
+        case OpId::Bincount:        return "Bincount";     // tenzor custom
+        case OpId::Histc:           return "Histc";        // tenzor custom
+        case OpId::Histogram:       return "Histogram";    // tenzor custom
+        case OpId::Histogramdd:     return "Histogramdd";  // tenzor custom
+        case OpId::SegmentReduce:   return "SegmentReduce"; // tenzor custom
+        case OpId::Trapezoid:       return "Trapezoid";    // tenzor custom
+        case OpId::CumulativeTrapezoid: return "CumulativeTrapezoid"; // tenzor custom
+
+        // Min/Max element-wise.
+        case OpId::Maximum:         return "Max";
+        case OpId::Minimum:         return "Min";
+        case OpId::Fmax:            return "Max";          // decomposed via where(isnan)
+        case OpId::Fmin:            return "Min";          // decomposed via where(isnan)
+        case OpId::ClampMax:        return "Clip";         // max-only
+        case OpId::ClampMin:        return "Clip";         // min-only
+
+        // Shape ops & creation.
+        case OpId::Flip:            return "Slice";        // negative step decomposition
+        case OpId::AsStrided:       return "AsStrided";    // tenzor custom
+        case OpId::Clone:           return "Identity";
+        case OpId::Contiguous:      return "Identity";
+        case OpId::ToMemoryFormat:  return "Identity";
+        case OpId::Fill:            return "ConstantOfShape";
+        case OpId::Full:            return "ConstantOfShape";
+        case OpId::Zeros:           return "ConstantOfShape"; // value=0
+        case OpId::Ones:            return "ConstantOfShape"; // value=1
+        case OpId::Eye:             return "EyeLike";
+        case OpId::Arange:          return "Range";
+        case OpId::Linspace:        return "Range";        // computed step (end-start)/(n-1)
+        case OpId::Diag:            return "Diag";         // tenzor custom (no native ONNX)
+        case OpId::DiagEmbed:       return "DiagEmbed";    // tenzor custom
+        case OpId::Diagflat:        return "Diagflat";     // tenzor custom
+        case OpId::TrilIndices:     return "TrilIndices";  // tenzor custom
+        case OpId::TriuIndices:     return "TriuIndices";  // tenzor custom
+        case OpId::RepeatInterleave: return "RepeatInterleave"; // tenzor custom (or decomposed)
+        case OpId::Unique:          return "Unique";       // opset 11+
+        case OpId::UniqueConsecutive: return "UniqueConsecutive"; // tenzor custom
+        case OpId::Renorm:          return "Renorm";       // tenzor custom
+
+        // Indexing / scatter (Gather/Scatter/ScatterElements/Where already covered).
+        case OpId::AdvancedIndex:    return "AdvancedIndex";   // tenzor custom
+        case OpId::AdvancedIndexPut: return "AdvancedIndexPut";// tenzor custom
+        case OpId::MaskedFill:       return "Where";           // decomposed
+        case OpId::MaskedScatter:    return "MaskedScatter";   // tenzor custom
+        case OpId::MaskedSelect:     return "MaskedSelect";    // tenzor custom (Compress in ONNX)
+        case OpId::IndexAdd:         return "ScatterElements"; // reduction='add'
+        case OpId::IndexCopy:        return "ScatterElements"; // reduction='none'
+        case OpId::IndexFill:        return "ScatterElements"; // reduction='none', constant src
+        case OpId::Take:             return "Gather";
+        case OpId::TakeAlongDim:     return "GatherElements";
+        case OpId::Put:              return "ScatterElements";
+        case OpId::ScatterReduce:    return "ScatterElements"; // reduction attribute set
+        case OpId::SelectScatter:    return "ScatterElements";
+        case OpId::SliceScatter:     return "ScatterElements";
+        case OpId::DiagonalScatter:  return "DiagonalScatter"; // tenzor custom
+        case OpId::ArgSort:          return "TopK";            // returns indices only
+        case OpId::Bucketize:        return "Bucketize";       // tenzor custom (binary search)
+        case OpId::EmbeddingWithBoundsCheck: return "Gather";  // bounds-check decomposes to Where+Gather
+
+        // Sort second output already covered via OpId::Sort.
+
+        // Conv / Deformable / Fractional Pool.
+        case OpId::Conv1dForward:                return "Conv";
+        case OpId::ConvTranspose3dForward:       return "ConvTranspose";
+        case OpId::DeformableConv2dForward:      return "DeformableConv2d"; // tenzor custom
+        case OpId::FractionalMaxPool2dForward:   return "FractionalMaxPool2d"; // tenzor custom
+        case OpId::FractionalMaxPool3dForward:   return "FractionalMaxPool3d"; // tenzor custom
+
+        // Pooling extra.
+        case OpId::AvgPool1dForward:        return "AveragePool";
+        case OpId::AdaptiveAvgPool1d:       return "AveragePool";   // computed kernel
+        case OpId::AdaptiveAvgPool3d:       return "AveragePool";   // computed kernel
+        case OpId::AdaptiveMaxPool1d:       return "MaxPool";       // computed kernel
+        case OpId::AdaptiveMaxPool3d:       return "MaxPool";       // computed kernel
+        case OpId::MaxUnpool1dForward:      return "MaxUnpool";     // opset 11+
+        case OpId::MaxUnpool2dForward:      return "MaxUnpool";
+        case OpId::MaxUnpool3dForward:      return "MaxUnpool";
+
+        // Norms (LayerNorm/GroupNorm/InstanceNorm/BatchNorm already covered).
+        case OpId::RMSNorm:                 return "RMSNormalization"; // opset 23+
+        case OpId::FusedLayerNorm:          return "LayerNormalization";
+        case OpId::FusedRMSNorm:            return "RMSNormalization";
+
+        // Fused ops (decompositions live in the visitor; mapped here for naming).
+        case OpId::FusedAddReLU:            return "Relu";    // decomposed: Add + Relu
+        case OpId::FusedGelu:               return "Gelu";    // opset 20+ (or decomposed)
+        case OpId::FusedLinearReLU:         return "Relu";    // Gemm + Relu
+        case OpId::FusedConv2dReLU:         return "Relu";    // Conv + Relu
+        case OpId::FusedConv2dSigmoid:      return "Sigmoid"; // Conv + Sigmoid
+        case OpId::FusedConv2dTanh:         return "Tanh";    // Conv + Tanh
+        case OpId::FusedConv2dSwish:        return "Mul";     // Conv + Swish
+        case OpId::FusedConv2dBnReLU:       return "Relu";    // Conv + BN + Relu folded
+        case OpId::FusedBatchNormReLU:      return "Relu";    // BN + Relu
+        case OpId::FusedSoftmaxCrossEntropy: return "SoftmaxCrossEntropyLoss"; // opset 12+
+        case OpId::FusedAttention:          return "Attention"; // opset 23+ (else MHA decomposition)
+
+        // Random / sampling.
+        case OpId::Bernoulli:        return "Bernoulli";     // opset 15+
+        case OpId::Multinomial:      return "Multinomial";   // opset 7+
+        case OpId::Rand:             return "RandomUniform";
+        case OpId::Randn:            return "RandomNormal";
+        case OpId::Randint:          return "RandomUniform"; // cast to int
+        case OpId::NormalSample:     return "RandomNormal";
+        case OpId::PoissonSample:    return "PoissonSample"; // tenzor custom
+        case OpId::ExponentialSample: return "ExponentialSample"; // tenzor custom
+        case OpId::GumbelSoftmax:    return "GumbelSoftmax"; // tenzor custom
+
+        // Complex / FFT block.
+        case OpId::Real:             return "Real";          // tenzor custom
+        case OpId::Imag:             return "Imag";          // tenzor custom
+        case OpId::Conj:             return "Conj";          // tenzor custom
+        case OpId::Angle:            return "Angle";         // tenzor custom
+        case OpId::ComplexTensor:    return "ComplexTensor"; // tenzor custom (combines re+im)
+        case OpId::Polar:            return "Polar";         // tenzor custom
+        case OpId::FFT2:             return "DFT";
+        case OpId::FFTN:             return "DFT";
+        case OpId::IFFT2:            return "DFT";           // inverse=1
+        case OpId::IFFTN:            return "DFT";           // inverse=1
+        case OpId::IRFFT:            return "DFT";           // inverse=1, onesided=1
+        case OpId::DCT:              return "DCT";           // tenzor custom
+        case OpId::IDCT:             return "IDCT";          // tenzor custom
+        case OpId::STFT:             return "STFT";          // opset 17+
+        case OpId::ISTFT:            return "ISTFT";         // tenzor custom
+        case OpId::MelScale:         return "MelScale";      // tenzor custom (audio)
+        case OpId::MFCC:             return "MFCC";          // tenzor custom (audio)
+
+        // Linear-algebra block — all but Det/Inv go under tenzor custom domain.
+        case OpId::LinalgDet:           return "Det";
+        case OpId::LinalgInv:           return "LinalgInv";        // tenzor custom (Inverse opset 9+, but we route via custom)
+        case OpId::LinalgCholesky:      return "LinalgCholesky";   // tenzor custom
+        case OpId::LinalgCholeskySolve: return "LinalgCholeskySolve";
+        case OpId::CholeskyInverse:     return "CholeskyInverse";
+        case OpId::LinalgQR:            return "LinalgQR";         // tenzor custom
+        case OpId::LinalgSVD:           return "LinalgSVD";        // tenzor custom
+        case OpId::LinalgEig:           return "LinalgEig";        // tenzor custom
+        case OpId::LinalgEigh:          return "LinalgEigh";       // tenzor custom
+        case OpId::LinalgSolve:         return "LinalgSolve";      // tenzor custom
+        case OpId::LinalgLU:            return "LinalgLU";         // tenzor custom
+        case OpId::LinalgLUSolve:       return "LinalgLUSolve";    // tenzor custom
+        case OpId::LinalgLDLFactor:     return "LinalgLDLFactor";  // tenzor custom
+        case OpId::LinalgLDLSolve:      return "LinalgLDLSolve";   // tenzor custom
+        case OpId::LinalgHouseholder:   return "LinalgHouseholder";// tenzor custom
+        case OpId::LinalgMatrixNorm:    return "LinalgMatrixNorm"; // tenzor custom
+        case OpId::LinalgVectorNorm:    return "LinalgVectorNorm"; // tenzor custom
+        case OpId::LinalgVecdot:        return "LinalgVecdot";     // tenzor custom (dot)
+        case OpId::Geqrf:               return "Geqrf";            // tenzor custom
+        case OpId::Ormqr:               return "Ormqr";            // tenzor custom
+        case OpId::TensorSolve:         return "TensorSolve";      // tenzor custom
+        case OpId::TensorInv:           return "TensorInv";        // tenzor custom
+        case OpId::SolveTriangular:     return "SolveTriangular";  // tenzor custom
+        case OpId::Einsum:              return "Einsum";           // opset 12+
+        case OpId::Cross:               return "Cross";            // tenzor custom
+        case OpId::CDist:               return "CDist";            // tenzor custom
+        case OpId::Pdist:               return "Pdist";            // tenzor custom
+        case OpId::PairwiseDistance:    return "PairwiseDistance"; // tenzor custom
+        case OpId::CosineSimilarity:    return "CosineSimilarity"; // tenzor custom
+        case OpId::LOBPCG:              return "LOBPCG";           // tenzor custom
+
+        // Sparse.
+        case OpId::SparseSpMM:    return "SparseSpMM";    // tenzor custom domain
+        case OpId::SparseSpMV:    return "SparseSpMV";    // tenzor custom
+        case OpId::SparseSpGEMM:  return "SparseSpGEMM";  // tenzor custom
+        case OpId::SparseAdd:     return "SparseAdd";     // tenzor custom
+        case OpId::SparseToDense: return "SparseToDense"; // tenzor custom
+        case OpId::DenseToSparse: return "DenseToSparse"; // tenzor custom
+        case OpId::SparseSoftmax: return "SparseSoftmax"; // tenzor custom
+        case OpId::SparseLogSoftmax: return "SparseLogSoftmax"; // tenzor custom
+        case OpId::SparseTrsm:    return "SparseTrsm";    // tenzor custom
+        case OpId::SparseTrsv:    return "SparseTrsv";    // tenzor custom
+
+        // Attention / nested.
+        case OpId::FlashAttention:   return "Attention";      // opset 23+ (else custom MHA)
+        case OpId::FlexAttention:    return "FlexAttention";  // tenzor custom
+        case OpId::NestedAttention:  return "NestedAttention";// tenzor custom
+        case OpId::NestedFromPadded: return "NestedFromPadded"; // tenzor custom
+        case OpId::NestedToPadded:   return "NestedToPadded";   // tenzor custom
+        case OpId::NestedSoftmax:    return "NestedSoftmax";    // tenzor custom
+        case OpId::NestedLogSoftmax: return "NestedLogSoftmax"; // tenzor custom
+        case OpId::NestedLinear:     return "NestedLinear";     // tenzor custom
+        case OpId::NestedLayerNorm:  return "NestedLayerNorm";  // tenzor custom
+        case OpId::NestedSum:        return "NestedSum";        // tenzor custom
+        case OpId::NestedMean:       return "NestedMean";       // tenzor custom
+
+        // Vision / detection.
+        // Disambiguated: OpId::AffineGrid is now pinned to enum value 692
+        // (op_id.hpp), distinct from FusedLinearReLU = 210. Routes through
+        // the tenzor custom-domain "AffineGrid" op consumed by the importer
+        // (which already supports it via Tenzor's existing affine_grid op).
+        case OpId::AffineGrid:       return "AffineGrid";    // tenzor custom
+        case OpId::GridSample:       return "GridSample";    // opset 16+
+        case OpId::ROIAlignForward:  return "RoiAlign";      // opset 10+
+        case OpId::NMS:              return "NonMaxSuppression"; // opset 10+
+        case OpId::BoxIoU:           return "BoxIoU";        // tenzor custom
+        case OpId::GatherRelativePositionBias: return "GatherRelativePositionBias"; // tenzor custom
+
+        // Misc.
+        case OpId::QuantizedLinear:  return "QLinearMatMul";  // opset 10+
+        case OpId::BatchNorm2dFusedTraining:    return "BatchNormalization";
+        case OpId::BatchNorm2dUpdateRunningStats: return "Identity"; // stats update is implicit
+        case OpId::StridedFill:      return "ScatterElements"; // strided-fill decomposes
+        case OpId::NumericalGradient: return "NumericalGradient"; // tenzor custom (debug)
+
+        // ====================================================================
+        // Inf-D1: catch-all — any OpId not above is either:
+        //   (a) a *Backward, *Inplace, or autograd-internal sentinel (e.g.
+        //       OP_COUNT, BatchNorm2dMeanVar) — those reach this branch only
+        //       through misuse since exporter walks the forward graph only;
+        //   (b) a genuinely new op added after Inf-D — falls through with a
+        //       clear error citing this site so the dev knows what to update.
+        // The exhaustiveness static_assert at end-of-TU prevents (b) at
+        // compile time once a developer touches op_id.hpp.
+        // ====================================================================
         default:
             throw std::runtime_error(
                 "No ONNX mapping for OpId: " +
-                std::string(op_id_to_name(op))
+                std::string(op_id_to_name(op)) +
+                " — add a case in src/onnx/exporter.cpp::op_to_onnx, or add "
+                "the OpId to op_id_export_skip_list if it is autograd-internal."
             );
     }
 }
