@@ -87,6 +87,9 @@ TEST(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
     auto view_t = transpose(src, 0, 1);      // {6, 4} non-contiguous view
     auto ref_t  = view_t.contiguous();
 
+    EXPECT_FALSE(view_t.is_contiguous()) << "Precondition: transpose must yield a non-contiguous tensor";
+    EXPECT_TRUE(ref_t.is_contiguous())   << "Precondition: .contiguous() must yield a contiguous tensor";
+
     Variable view_var(view_t, false);
     Variable ref_var(ref_t,   false);
 
@@ -100,4 +103,83 @@ TEST(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
     EXPECT_LT(max_diff, 1e-6)
         << "softmax(dim=0) on transposed view differs from contiguous copy. "
            "max_diff=" << max_diff;
+}
+
+// ---------------------------------------------------------------------------
+// Backward-path regression: softmax_backward_kernel must produce identical
+// gradients on a transposed view as on the equivalent contiguous tensor.
+// A stride-ignoring backward kernel would compute wrong grad values silently.
+// ---------------------------------------------------------------------------
+TEST(SoftmaxStrideAudit, BackwardTransposedInputMatchesContiguous) {
+    // Deterministic source data avoids flaky failures from large random values.
+    auto src_t = arange(1.0, 13.0, 1.0).reshape({4, 3});  // {4,3} contiguous
+
+    // Two independent Variables share the same underlying data pattern but
+    // one uses a non-contiguous transposed view and one is explicitly packed.
+    auto view_t = transpose(src_t, 0, 1);          // {3, 4} non-contiguous
+    auto ref_t  = view_t.contiguous();             // {3, 4} packed copy
+
+    EXPECT_FALSE(view_t.is_contiguous()) << "Precondition: view must be non-contiguous";
+    EXPECT_TRUE(ref_t.is_contiguous())   << "Precondition: contiguous copy must be contiguous";
+
+    Variable x_view(view_t, /*requires_grad=*/true);
+    Variable x_ref (ref_t,  /*requires_grad=*/true);
+
+    auto y_view = softmax(x_view, -1);
+    auto y_ref  = softmax(x_ref,  -1);
+
+    auto loss_view = sum(y_view);
+    auto loss_ref  = sum(y_ref);
+
+    loss_view.backward();
+    loss_ref.backward();
+
+    ASSERT_TRUE(x_view.grad().has_value()) << "No gradient on transposed-view input";
+    ASSERT_TRUE(x_ref.grad().has_value())  << "No gradient on contiguous input";
+
+    // View's grad is in the transposed (non-contiguous) layout; pack before diff.
+    auto gv = x_view.grad().value().contiguous().to(DType::Float64);
+    auto gr = x_ref.grad().value().contiguous().to(DType::Float64);
+
+    auto diff_t   = abs(gv - gr);
+    auto max_diff = max(diff_t).item<double>();
+
+    EXPECT_LT(max_diff, 1e-6)
+        << "softmax backward on transposed view differs from contiguous copy "
+           "(stride-from-shape bug in softmax_backward_kernel). max_diff=" << max_diff;
+}
+
+TEST(SoftmaxStrideAudit, BackwardLogSoftmaxTransposedInputMatchesContiguous) {
+    auto src_t = arange(1.0, 13.0, 1.0).reshape({4, 3});  // {4,3} contiguous
+
+    auto view_t = transpose(src_t, 0, 1);          // {3, 4} non-contiguous
+    auto ref_t  = view_t.contiguous();             // {3, 4} packed copy
+
+    EXPECT_FALSE(view_t.is_contiguous()) << "Precondition: view must be non-contiguous";
+    EXPECT_TRUE(ref_t.is_contiguous())   << "Precondition: contiguous copy must be contiguous";
+
+    Variable x_view(view_t, /*requires_grad=*/true);
+    Variable x_ref (ref_t,  /*requires_grad=*/true);
+
+    auto y_view = log_softmax(x_view, -1);
+    auto y_ref  = log_softmax(x_ref,  -1);
+
+    auto loss_view = sum(y_view);
+    auto loss_ref  = sum(y_ref);
+
+    loss_view.backward();
+    loss_ref.backward();
+
+    ASSERT_TRUE(x_view.grad().has_value()) << "No gradient on transposed-view input";
+    ASSERT_TRUE(x_ref.grad().has_value())  << "No gradient on contiguous input";
+
+    auto gv = x_view.grad().value().contiguous().to(DType::Float64);
+    auto gr = x_ref.grad().value().contiguous().to(DType::Float64);
+
+    auto diff_t   = abs(gv - gr);
+    auto max_diff = max(diff_t).item<double>();
+
+    EXPECT_LT(max_diff, 1e-6)
+        << "log_softmax backward on transposed view differs from contiguous copy "
+           "(stride-from-shape bug in log_softmax_backward_kernel). max_diff=" << max_diff;
 }
