@@ -16,6 +16,8 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>  // D.2: dtor error logging
+#include "tenzor/utils/log.hpp"  // D.1: TENZOR_LOG_ERROR
 
 namespace tenzor {
 namespace distributed {
@@ -45,10 +47,16 @@ namespace distributed {
 MPIBackend::MPIBackend() = default;
 
 MPIBackend::~MPIBackend() {
+    // D.2: log destructor finalize failures via tenzor logger (D.1).
     try {
         finalize();
+    } catch (const std::exception& e) {
+        TENZOR_LOG_ERROR("MPIBackend::~MPIBackend: finalize() threw: {}",
+                         e.what());
     } catch (...) {
-        // Ignore errors during destruction
+        TENZOR_LOG_ERROR(
+            "MPIBackend::~MPIBackend: finalize() threw an unknown "
+            "exception type");
     }
 }
 

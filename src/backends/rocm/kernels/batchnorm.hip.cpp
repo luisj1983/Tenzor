@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #ifdef USE_MIOPEN
@@ -835,7 +836,7 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     // Compute mean in float
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        sum += __half2float(input[offset + i]);
+        sum += tenzor::rocm::safe_h2f(input[offset + i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -844,7 +845,7 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     // Compute variance in float
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float diff = __half2float(input[offset + i]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input[offset + i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -856,8 +857,8 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     float grad_output_sum = 0.0f;
     float grad_output_norm_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
-        float grad_out = __half2float(grad_output[offset + i]);
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
         grad_output_sum += grad_out;
         grad_output_norm_sum += grad_out * normalized;
     }
@@ -871,11 +872,11 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
 
     // Compute input gradient
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
-        float grad_out = __half2float(grad_output[offset + i]);
-        float g = __half2float(gamma[i]);
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
+        float g = tenzor::rocm::safe_h2f(gamma[i]);
         float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
-        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+        grad_input[offset + i] = tenzor::rocm::safe_f2h(g * invstd * grad_normalized);
 
         // Accumulate gradients in float
         atomicAdd(&grad_gamma_f32[i], grad_out * normalized);
@@ -910,7 +911,7 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     // Compute mean and variance in float
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
-        sum += __half2float(input[offset + i]);
+        sum += tenzor::rocm::safe_h2f(input[offset + i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -918,7 +919,7 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
 
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
-        float diff = __half2float(input[offset + i]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input[offset + i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -930,8 +931,8 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     float grad_output_sum = 0.0f;
     float grad_output_norm_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
-        float grad_out = __half2float(grad_output[offset + i]);
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
         grad_output_sum += grad_out;
         grad_output_norm_sum += grad_out * normalized;
     }
@@ -943,14 +944,14 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     float mean_grad = grad_output_sum / static_cast<float>(spatial_size);
     float mean_grad_norm = grad_output_norm_sum / static_cast<float>(spatial_size);
 
-    float g = __half2float(gamma[c]);
+    float g = tenzor::rocm::safe_h2f(gamma[c]);
 
     // Compute gradients
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
-        float grad_out = __half2float(grad_output[offset + i]);
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
         float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
-        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+        grad_input[offset + i] = tenzor::rocm::safe_f2h(g * invstd * grad_normalized);
 
         // Accumulate gradients in float
         atomicAdd(&grad_gamma_f32[c], grad_out * normalized);
@@ -988,7 +989,7 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
     // Compute mean and variance in float
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        sum += __half2float(input[offset + i]);
+        sum += tenzor::rocm::safe_h2f(input[offset + i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -996,7 +997,7 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
 
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        float diff = __half2float(input[offset + i]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input[offset + i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -1008,8 +1009,8 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
     float grad_output_sum = 0.0f;
     float grad_output_norm_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
-        float grad_out = __half2float(grad_output[offset + i]);
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
         grad_output_sum += grad_out;
         grad_output_norm_sum += grad_out * normalized;
     }
@@ -1023,13 +1024,13 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
 
     // Compute gradients
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float normalized = (tenzor::rocm::safe_h2f(input[offset + i]) - mean) * invstd;
         int64_t c_local = i / spatial_size;
         int64_t c_global = g_idx * channels_per_group + c_local;
-        float grad_out = __half2float(grad_output[offset + i]);
-        float g = __half2float(gamma[c_global]);
+        float grad_out = tenzor::rocm::safe_h2f(grad_output[offset + i]);
+        float g = tenzor::rocm::safe_h2f(gamma[c_global]);
         float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
-        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+        grad_input[offset + i] = tenzor::rocm::safe_f2h(g * invstd * grad_normalized);
 
         // Accumulate gradients in float
         atomicAdd(&grad_gamma_f32[c_global], grad_out * normalized);
@@ -1041,7 +1042,7 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
 __global__ void batchnorm_convert_f32_to_f16_kernel(const float* src, __half* dst, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        dst[idx] = __float2half(src[idx]);
+        dst[idx] = tenzor::rocm::safe_f2h(src[idx]);
     }
 }
 

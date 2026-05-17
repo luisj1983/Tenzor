@@ -198,6 +198,7 @@ set(TENZOR_CORE_SOURCES
     models/faster_rcnn.cpp
     models/mask_rcnn.cpp
     utils/logging.cpp
+    utils/log.cpp        # D.1: spdlog facade — tenzor::utils::logger()
     utils/error.cpp
     utils/config.cpp
     utils/benchmark.cpp
@@ -331,6 +332,7 @@ target_include_directories(tenzor_core PUBLIC
 target_link_libraries(tenzor_core PUBLIC
     Threads::Threads
     ${CMAKE_DL_LIBS}
+    spdlog::spdlog  # D.1: structured logging across distributed / io / serving
 )
 
 # ============================================================================

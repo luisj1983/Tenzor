@@ -412,6 +412,23 @@ public:
     }
 
     /**
+     * @brief Set learning rate.
+     *
+     * ZeRO delegates to the wrapped base optimizer (whose ParamGroups are the
+     * authoritative LR source — ZeRO itself does not own param_groups_).
+     */
+    auto set_lr(double lr) -> void override {
+        base_optimizer_->set_lr(lr);
+    }
+
+    /**
+     * @brief Get learning rate from the wrapped base optimizer.
+     */
+    auto get_lr() const -> double override {
+        return base_optimizer_->get_lr();
+    }
+
+    /**
      * @brief Borrow the OffloadEngine this optimizer is currently using, if any.
      *
      * Returns nullptr when CPU offload is disabled (config_.offload_to_cpu == false)

@@ -105,6 +105,57 @@ public:
         return logsumexp_last_dim(combined);
     }
 
+
+    /**
+     * @brief Mean of the mixture: E[Y] = Σ_k w_k · E[component_k].
+     *
+     * Closed-form via the law of total expectation. Requires the component
+     * distribution to expose a K-batched mean (which every shipped
+     * distribution does after the Phase-A audit fix).
+     */
+    auto mean() -> Tensor override {
+        auto comp_mean = component_->mean();         // (..., K[, event...])
+        auto weights   = tenzor::exp(log_weights_);  // (..., K)
+        // Scalar event only for the closed-form path; for non-scalar event
+        // shapes the user should fall back to a generic MC estimator.
+        if (comp_mean.ndim() != weights.ndim()) {
+            // Non-scalar event: Monte-Carlo.
+            return distributions::detail::mc_mean(
+                [this]() { return this->sample({}); });
+        }
+        return tenzor::sum(weights * comp_mean, /*dim=*/-1, /*keepdim=*/false);
+    }
+
+    /**
+     * @brief Variance of the mixture via the law of total variance:
+     *   Var[Y] = Σ_k w_k · Var_k + Σ_k w_k · (mean_k - overall_mean)²
+     */
+    auto variance() -> Tensor override {
+        auto comp_mean = component_->mean();
+        auto comp_var  = component_->variance();
+        auto weights   = tenzor::exp(log_weights_);
+        if (comp_mean.ndim() != weights.ndim() ||
+            comp_var.ndim()  != weights.ndim()) {
+            return distributions::detail::mc_variance(
+                [this]() { return this->sample({}); });
+        }
+        auto overall_m = tenzor::sum(weights * comp_mean, -1, /*keepdim=*/true);
+        auto deviation = comp_mean - overall_m;
+        auto within  = tenzor::sum(weights * comp_var,             -1, false);
+        auto between = tenzor::sum(weights * deviation * deviation, -1, false);
+        return within + between;
+    }
+
+    /**
+     * @brief Differential entropy via Monte-Carlo (mixture entropy has no
+     * closed form in general): H = -E[log p(Y)] ≈ -mean log_prob(samples).
+     */
+    auto entropy() -> Tensor override {
+        return distributions::detail::mc_entropy(
+            [this]() { return this->sample({}); },
+            [this](const Tensor& s) { return this->log_prob(s); });
+    }
+
     /** @brief Access the mixture distribution */
     auto mixture_dist() const -> const Distribution& { return *mixture_; }
 

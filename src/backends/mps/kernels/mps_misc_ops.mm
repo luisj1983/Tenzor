@@ -163,6 +163,39 @@ static Tensor reshape_reduction_output(const Tensor& result, const std::vector<i
 
 } // anonymous namespace
 
+// H: native non-last-dim reduction on MPS via on-device permute + reduce.
+// Replaces the prior `to(cpu) → dispatch(cpu) → to(mps)` round-trip used by
+// count_nonzero / nansum / nanmean / argmin / argmax / median when the
+// caller passes a non-trailing dim. Permute is a zero-copy metadata op on
+// MPS (registered in mps_kernel_registry.mm), so the only real GPU work
+// is the per-row reduction shader applied to the permuted layout.
+static Tensor mps_reduce_non_last_dim(const std::string& shader_name,
+                                       const Tensor& input,
+                                       int64_t dim, bool keepdim,
+                                       DType out_dtype) {
+    auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i != dim) perm.push_back(i);
+    }
+    perm.push_back(dim);
+
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+
+    int64_t reduce_size = shape[dim];
+    int64_t num_rows = input.numel() / reduce_size;
+    auto reduced = dispatch_reduction_per_row(shader_name, transposed,
+                                              num_rows, reduce_size, out_dtype);
+    return reshape_reduction_output(
+        reduced, std::vector<int64_t>(shape.begin(), shape.end()),
+        dim, keepdim);
+}
+
 // ============================================================================
 // Element-wise operations
 // ============================================================================
@@ -321,10 +354,9 @@ Tensor mps_count_nonzero_kernel(const Tensor& input, int64_t dim) {
         auto result = dispatch_reduction_per_row("count_nonzero_reduce_kernel", input, num_rows, reduce_size, DType::Int32);
         return reshape_reduction_output(result, std::vector<int64_t>(shape.begin(), shape.end()), dim, false);
     }
-    // Non-last-dim: transpose + reduce (CPU fallback for now)
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    return dispatch(OpId::CountNonzero, {cpu_in}, OpAttributes{})[0].to(dev);
+    // H: non-last-dim — permute on MPS and reuse the per-row shader.
+    return mps_reduce_non_last_dim("count_nonzero_reduce_kernel", input, dim,
+                                    /*keepdim=*/false, DType::Int32);
 }
 
 Tensor mps_nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
@@ -340,12 +372,9 @@ Tensor mps_nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
         auto result = dispatch_reduction_per_row("nansum_reduce_kernel", input, num_rows, reduce_size, input.dtype());
         return reshape_reduction_output(result, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    return dispatch(OpId::Nansum, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — on-device permute.
+    return mps_reduce_non_last_dim("nansum_reduce_kernel", input, dim,
+                                    keepdim, input.dtype());
 }
 
 Tensor mps_nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
@@ -361,12 +390,9 @@ Tensor mps_nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
         auto result = dispatch_reduction_per_row("nanmean_reduce_kernel", input, num_rows, reduce_size, input.dtype());
         return reshape_reduction_output(result, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    return dispatch(OpId::Nanmean, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — on-device permute.
+    return mps_reduce_non_last_dim("nanmean_reduce_kernel", input, dim,
+                                    keepdim, input.dtype());
 }
 
 std::pair<Tensor, Tensor> mps_aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) {
@@ -430,14 +456,15 @@ std::pair<Tensor, Tensor> mps_aminmax_kernel(const Tensor& input, int64_t dim, b
         return {reshape_reduction_output(out_min, sv, dim, keepdim),
                 reshape_reduction_output(out_max, sv, dim, keepdim)};
     }
-    // Non-last-dim fallback
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    auto result = dispatch(OpId::Aminmax, {cpu_in}, attrs);
-    return {result[0].to(dev), result[1].to(dev)};
+    // H: non-last-dim — permute on MPS so dim is last, then recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_aminmax_kernel(transposed, ndim - 1, keepdim);
 }
 
 Tensor mps_var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) {
@@ -491,13 +518,15 @@ Tensor mps_var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [cmd waitUntilCompleted];
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    attrs.set_int(AttrKey::Correction, correction);
-    return dispatch(OpId::Var, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on MPS so dim is last, then recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_var_kernel(transposed, ndim - 1, keepdim, correction);
 }
 
 Tensor mps_std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) {
@@ -550,13 +579,15 @@ Tensor mps_std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [cmd waitUntilCompleted];
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    attrs.set_int(AttrKey::Correction, correction);
-    return dispatch(OpId::Std, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on MPS so dim is last, then recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_std_kernel(transposed, ndim - 1, keepdim, correction);
 }
 
 Tensor mps_norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) {
@@ -608,12 +639,15 @@ Tensor mps_norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) 
         [cmd waitUntilCompleted];
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Keepdim, keepdim);
-    return dispatch(OpId::Norm, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on MPS so dim is last, then recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_norm_kernel(transposed, p, ndim - 1, keepdim);
 }
 
 // ============================================================================
@@ -871,12 +905,21 @@ Tensor mps_cumsum_kernel(const Tensor& input, int64_t dim) {
         [cmd waitUntilCompleted];
         return output;
     }
-    // Non-last-dim fallback
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    return dispatch(OpId::CumSum, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on MPS so dim is last, recurse, then
+    // inverse-permute (cumsum preserves shape so we must restore layout).
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    auto out_perm = mps_cumsum_kernel(transposed, ndim - 1);
+    std::vector<int64_t> inv(ndim);
+    for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+    OpAttributes ipattrs;
+    ipattrs.set(AttrKey::Dims, inv);
+    return dispatch(OpId::Permute, {out_perm}, ipattrs)[0].contiguous();
 }
 
 Tensor mps_cumprod_kernel(const Tensor& input, int64_t dim) {
@@ -911,11 +954,21 @@ Tensor mps_cumprod_kernel(const Tensor& input, int64_t dim) {
         [cmd waitUntilCompleted];
         return output;
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    return dispatch(OpId::CumProd, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on MPS so dim is last, recurse, then
+    // inverse-permute.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    auto out_perm = mps_cumprod_kernel(transposed, ndim - 1);
+    std::vector<int64_t> inv(ndim);
+    for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+    OpAttributes ipattrs;
+    ipattrs.set(AttrKey::Dims, inv);
+    return dispatch(OpId::Permute, {out_perm}, ipattrs)[0].contiguous();
 }
 
 Tensor mps_cross_kernel(const Tensor& a, const Tensor& b) {

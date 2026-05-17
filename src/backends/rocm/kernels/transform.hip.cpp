@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -1280,16 +1281,16 @@ __global__ void cast_fp8_e5m2_to_f64_kernel(const uint8_t* input, double* output
 
 // Float16 <-> FP8
 __global__ void cast_f16_to_fp8_e4m3_kernel(const __half* input, uint8_t* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(__half2float(input[idx])); }
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(tenzor::rocm::safe_h2f(input[idx])); }
 }
 __global__ void cast_f16_to_fp8_e5m2_kernel(const __half* input, uint8_t* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(__half2float(input[idx])); }
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(tenzor::rocm::safe_h2f(input[idx])); }
 }
 __global__ void cast_fp8_e4m3_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = __float2half(fp8_e4m3_to_float(input[idx])); }
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = tenzor::rocm::safe_f2h(fp8_e4m3_to_float(input[idx])); }
 }
 __global__ void cast_fp8_e5m2_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = __float2half(fp8_e5m2_to_float(input[idx])); }
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = tenzor::rocm::safe_f2h(fp8_e5m2_to_float(input[idx])); }
 }
 
 // BFloat16 <-> FP8
@@ -1366,7 +1367,7 @@ __global__ void cast_from_f16_kernel(const __half* input, DstT* output, int64_t 
                 continue;
             }
         }
-        output[idx] = static_cast<DstT>(__half2float(input[idx]));
+        output[idx] = static_cast<DstT>(tenzor::rocm::safe_h2f(input[idx]));
     }
 }
 
@@ -1404,7 +1405,7 @@ __global__ void cast_to_f16_kernel(const SrcT* input, __half* output, int64_t n)
             output[idx] = h;
         } else {
             val = fminf(fmaxf(val, -kHalfMax), kHalfMax);
-            output[idx] = __float2half(val);
+            output[idx] = tenzor::rocm::safe_f2h(val);
         }
     }
 }
@@ -1882,7 +1883,7 @@ auto strided_fill_kernel(Tensor& self, double value, hipStream_t stream) -> void
     } else if (self.dtype() == DType::Int64) {
         launch(self.data<int64_t>(), static_cast<int64_t>(value));
     } else if (self.dtype() == DType::Float16) {
-        __half h_value = __float2half(static_cast<float>(value));
+        __half h_value = tenzor::rocm::safe_f2h(static_cast<float>(value));
         launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
     } else if (self.dtype() == DType::Int8) {
         launch(self.data<int8_t>(), static_cast<int8_t>(value));

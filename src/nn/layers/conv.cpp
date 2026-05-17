@@ -275,29 +275,15 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
         throw std::invalid_argument("Input channels mismatch");
     }
 
-    // Audit E5: rectangular-stride / rectangular-dilation guard removed.
-    // Each backend now has an honest per-axis contract (E1: CUDA native;
-    // E2/E3/E4: ROCm/OneAPI/Vulkan throw cleanly when their kernels haven't
-    // been refactored yet). The CPU kernel handles rectangular configs
-    // natively. We retain the rectangular-padding pre-pad below so that the
-    // legacy non-CPU pad behavior continues to compose with backends whose
-    // native pad is not yet rectangular-aware.
-    const bool is_cpu = input_orig.tensor().device() == Device::cpu();
-
+    // F.4: all backends now read per-axis padding (AttrKey::PaddingH /
+    // AttrKey::PaddingW) and thread it through to their conv kernel
+    // descriptors. CUDA: cuDNN per-axis. ROCm: MIOpen per-axis. OneAPI:
+    // oneDNN per-axis. Vulkan: shader push-constants per-axis. CPU: native.
+    // The pre-pad + padding=0 workaround that used to live here is gone —
+    // we pass (padding_h_, padding_w_) directly into the forward attrs.
     Variable input = input_orig;
     int64_t effective_pad_h = padding_h_;
     int64_t effective_pad_w = padding_w_;
-    if (padding_h_ != padding_w_ && !is_cpu) {
-        // Non-CPU backends: pre-pad with (pad_h, pad_w) and dispatch
-        // Conv2d with padding=0. CPU kernel handles per-axis padding
-        // natively so we skip the pre-pad there.
-        input = ::tenzor::nn::functional::pad(
-            input_orig,
-            std::vector<int64_t>{padding_w_, padding_w_, padding_h_, padding_h_},
-            "constant", 0.0);
-        effective_pad_h = 0;
-        effective_pad_w = 0;
-    }
 
     auto post_pad_shape = input.shape();
     int64_t height = post_pad_shape[2];

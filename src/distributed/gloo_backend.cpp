@@ -603,6 +603,47 @@ auto GlooBackend::supports_device([[maybe_unused]] Device::Type device_type) con
 }
 
 // ============================================================================
+// B.3: async collectives via WorkExecutor worker thread
+// ============================================================================
+
+auto GlooBackend::async_executor() -> WorkExecutor& {
+    if (!async_executor_) {
+        async_executor_ = std::make_unique<WorkExecutor>();
+    }
+    return *async_executor_;
+}
+
+auto GlooBackend::all_reduce_async(Tensor& tensor, ReduceOp op,
+                                    void* /*stream*/) -> void {
+    Tensor& t = tensor;
+    async_executor().enqueue([this, &t, op]() { this->all_reduce(t, op); });
+}
+
+auto GlooBackend::all_gather_async(const Tensor& tensor,
+                                    std::vector<Tensor>& output,
+                                    void* /*stream*/) -> void {
+    const Tensor& in = tensor;
+    auto& out = output;
+    async_executor().enqueue([this, &in, &out]() { this->all_gather(in, out); });
+}
+
+auto GlooBackend::reduce_scatter_async(const std::vector<Tensor>& tensors,
+                                        Tensor& output, ReduceOp op,
+                                        void* /*stream*/) -> void {
+    const auto& in = tensors;
+    auto& out = output;
+    async_executor().enqueue([this, &in, &out, op]() {
+        this->reduce_scatter(in, out, op);
+    });
+}
+
+auto GlooBackend::wait_pending_async() -> void {
+    if (async_executor_) {
+        async_executor_->wait_pending();
+    }
+}
+
+// ============================================================================
 // Private Helper Methods
 // ============================================================================
 

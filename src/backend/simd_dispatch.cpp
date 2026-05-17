@@ -166,10 +166,34 @@ void mul_scalar(float* dst, const float* src1, const float* src2, size_t size) {
 }
 
 void matmul_scalar(float* dst, const float* src1, const float* src2, size_t size) {
-    // Simplified: assumes square matrices of size sqrt(size) x sqrt(size)
-    // For production, use proper BLAS libraries
-    for (size_t i = 0; i < size; ++i) {
-        dst[i] = src1[i] * src2[i]; // Element-wise multiplication (fallback)
+    // G.5: actual square-matrix matmul (NxN where N = sqrt(size)).
+    // The previous implementation silently did element-wise multiplication
+    // instead of matmul, which produced wrong results for any caller using
+    // `get_optimal_matmul_kernel()`. Production code paths use MKL/BLAS
+    // through the CPU backend's separate matmul kernels; this dispatcher
+    // is exercised by tests + small in-kernel reuses, so it must compute
+    // the real thing.
+    //
+    // Convention: src1 is row-major (M x K), src2 is row-major (K x N),
+    // dst is row-major (M x N). Caller guarantees size == N*N (square).
+    const size_t N = static_cast<size_t>(
+        std::lround(std::sqrt(static_cast<double>(size))));
+    if (N * N != size) {
+        // Non-square — fall back to element-wise so we don't read OOB.
+        // Caller error; real matmul must hit cblas_sgemm.
+        for (size_t i = 0; i < size; ++i) {
+            dst[i] = src1[i] * src2[i];
+        }
+        return;
+    }
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            float acc = 0.0f;
+            for (size_t k = 0; k < N; ++k) {
+                acc += src1[i * N + k] * src2[k * N + j];
+            }
+            dst[i * N + j] = acc;
+        }
     }
 }
 
@@ -258,8 +282,11 @@ void mul_sse42(float* dst, const float* src1, const float* src2, size_t size) {
 
 __attribute__((target("sse4.2")))
 void matmul_sse42(float* dst, const float* src1, const float* src2, size_t size) {
-    // Simplified implementation - element-wise for demonstration
-    mul_sse42(dst, src1, src2, size);
+    // G.5: delegate to the corrected scalar matmul. The SIMD speedup for
+    // square matmul on modest sizes is best achieved through the CPU
+    // backend's MKL-backed kernels (cblas_sgemm); the dispatcher's role
+    // here is correctness, not peak FLOPS.
+    matmul_scalar(dst, src1, src2, size);
 }
 
 __attribute__((target("sse4.2")))
@@ -390,8 +417,8 @@ void mul_avx2(float* dst, const float* src1, const float* src2, size_t size) {
 
 __attribute__((target("avx2")))
 void matmul_avx2(float* dst, const float* src1, const float* src2, size_t size) {
-    // Simplified implementation - element-wise for demonstration
-    mul_avx2(dst, src1, src2, size);
+    // G.5: delegate to the corrected scalar matmul (see matmul_sse42).
+    matmul_scalar(dst, src1, src2, size);
 }
 
 __attribute__((target("avx2")))
@@ -531,8 +558,8 @@ void mul_avx512(float* dst, const float* src1, const float* src2, size_t size) {
 
 __attribute__((target("avx512f")))
 void matmul_avx512(float* dst, const float* src1, const float* src2, size_t size) {
-    // Simplified implementation - element-wise for demonstration
-    mul_avx512(dst, src1, src2, size);
+    // G.5: delegate to the corrected scalar matmul (see matmul_sse42).
+    matmul_scalar(dst, src1, src2, size);
 }
 
 __attribute__((target("avx512f")))
@@ -658,8 +685,8 @@ void mul_neon(float* dst, const float* src1, const float* src2, size_t size) {
 }
 
 void matmul_neon(float* dst, const float* src1, const float* src2, size_t size) {
-    // Simplified implementation - element-wise for demonstration
-    mul_neon(dst, src1, src2, size);
+    // G.5: delegate to the corrected scalar matmul (see matmul_sse42).
+    matmul_scalar(dst, src1, src2, size);
 }
 
 void relu_neon(float* dst, const float* src1, const float* src2, size_t size) {

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "distributed.hpp"
+#include "work_executor.hpp"  // B.3: async worker thread pool
 #include <vector>
 #include <memory>
 #include <thread>
@@ -159,6 +160,25 @@ public:
 
     auto supports_device(Device::Type device_type) const -> bool override;
 
+    // B.3: real async via dedicated worker thread. The CommunicationBackend
+    // async API returns `void`, so the executor runs each sync collective
+    // on a background thread; DDP/FSDP-style overlap is achieved by
+    // calling `wait_pending_async()` before depending on the result.
+    // supports_async_stream() stays false (no GPU stream concept).
+    auto all_reduce_async(Tensor& tensor, ReduceOp op,
+                          void* stream) -> void override;
+    auto all_gather_async(const Tensor& tensor,
+                          std::vector<Tensor>& output,
+                          void* stream) -> void override;
+    auto reduce_scatter_async(const std::vector<Tensor>& tensors,
+                              Tensor& output, ReduceOp op,
+                              void* stream) -> void override;
+
+    /// Block the caller until every enqueued async collective has
+    /// completed. Re-throws the first exception caught from a worker
+    /// task. Called by DDP/FSDP before the optimizer step.
+    auto wait_pending_async() -> void;
+
 private:
     int rank_{-1};
     int world_size_{-1};
@@ -174,6 +194,11 @@ private:
     int server_socket_{-1};
     int server_port_{0};
     std::unique_ptr<std::thread> accept_thread_;
+
+    // B.3: worker for async collectives. Lazily constructed on first
+    // *_async() call so cost is zero for sync-only deployments.
+    std::unique_ptr<WorkExecutor> async_executor_;
+    auto async_executor() -> WorkExecutor&;
 
     // Helper methods
 

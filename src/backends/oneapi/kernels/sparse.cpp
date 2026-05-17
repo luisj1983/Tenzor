@@ -43,6 +43,77 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         throw std::runtime_error("oneapi spmv_kernel requires CSR format");
     }
 
+    // E.3: native sycl::half / bfloat16 path. Each work-item loads FP16
+    // values, casts to FP32 for accumulation (standard mixed-precision
+    // pattern for sparse FP16 — FP16 lacks the dynamic range for row
+    // sums), and writes back FP16. No tensor-level widen-narrow.
+    if (A.values().dtype() == DType::Float16) {
+        const auto& shape = A.shape();
+        int64_t m = shape[0];
+        Tensor y({m}, DType::Float16, A.values().device());
+        auto crow = A.crow_indices();
+        auto col = A.col_indices();
+        auto vals = A.values();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr  = col.data<std::int64_t>();
+        // Tenzor stores Float16 as `tenzor::Float16` (2-byte struct).
+        // reinterpret to sycl::half* for the SYCL kernel — both are
+        // identical 2-byte IEEE-754 binary16 representations.
+        const auto* val_ptr_c = reinterpret_cast<const sycl::half*>(vals.data<tenzor::Float16>());
+        const auto* x_ptr_c   = reinterpret_cast<const sycl::half*>(x.data<tenzor::Float16>());
+        auto*       y_ptr     = reinterpret_cast<sycl::half*>(y.data<tenzor::Float16>());
+        const auto* val_ptr   = val_ptr_c;
+        const auto* x_ptr     = x_ptr_c;
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                float sum = 0.0f;
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += static_cast<float>(val_ptr[j]) *
+                           static_cast<float>(x_ptr[col_ptr[j]]);
+                }
+                y_ptr[row] = static_cast<sycl::half>(sum);
+            }).wait();
+        return y;
+    }
+    if (A.values().dtype() == DType::BFloat16) {
+        // SYCL bfloat16 storage as uint16_t with bit_cast for arithmetic.
+        const auto& shape = A.shape();
+        int64_t m = shape[0];
+        Tensor y({m}, DType::BFloat16, A.values().device());
+        auto crow = A.crow_indices();
+        auto col = A.col_indices();
+        auto vals = A.values();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr  = col.data<std::int64_t>();
+        auto* val_ptr  = vals.data<uint16_t>();
+        auto* x_ptr    = x.data<uint16_t>();
+        auto* y_ptr    = y.data<uint16_t>();
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                float sum = 0.0f;
+                auto bf_to_f32 = [](uint16_t bits) -> float {
+                    uint32_t expanded = static_cast<uint32_t>(bits) << 16;
+                    float result;
+                    std::memcpy(&result, &expanded, sizeof(result));
+                    return result;
+                };
+                auto f32_to_bf = [](float v) -> uint16_t {
+                    uint32_t bits;
+                    std::memcpy(&bits, &v, sizeof(bits));
+                    // Round-to-nearest-even, IEEE convention.
+                    uint32_t rounding_bias = 0x7FFF + ((bits >> 16) & 1u);
+                    return static_cast<uint16_t>((bits + rounding_bias) >> 16);
+                };
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += bf_to_f32(val_ptr[j]) * bf_to_f32(x_ptr[col_ptr[j]]);
+                }
+                y_ptr[row] = f32_to_bf(sum);
+            }).wait();
+        return y;
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
 
@@ -186,6 +257,16 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
         throw std::runtime_error("oneapi sparse_to_dense_kernel requires CSR format");
     }
 
+    // E.3: F16/BF16 via widen-to-F32.
+    if (A.values().dtype() == DType::Float16 ||
+        A.values().dtype() == DType::BFloat16) {
+        DType orig = A.values().dtype();
+        auto vals_f32 = A.values().to(DType::Float32);
+        auto A_f32 = SparseTensor::sparse_csr(A.crow_indices(), A.col_indices(),
+                                              vals_f32, A.shape());
+        return sparse_to_dense_kernel(A_f32, queue).to(orig);
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
     int64_t n = shape[1];
@@ -266,6 +347,17 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
         throw std::runtime_error("oneapi sparse_add_kernel requires CSR format");
     }
 
+    // E.3: F16/BF16 via widen-to-F32 (mirrors spmm/spmv).
+    if (A.values().dtype() == DType::Float16 ||
+        A.values().dtype() == DType::BFloat16) {
+        DType orig = A.values().dtype();
+        auto vals_f32 = A.values().to(DType::Float32);
+        auto A_f32 = SparseTensor::sparse_csr(A.crow_indices(), A.col_indices(),
+                                              vals_f32, A.shape());
+        auto B_f32 = B.to(DType::Float32);
+        return sparse_add_kernel(A_f32, B_f32, queue).to(orig);
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
     int64_t n = shape[1];
@@ -336,6 +428,23 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
 
 auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                    sycl::queue& queue) -> SparseTensor {
+    // E.3: F16/BF16 via widen-to-F32. Hoisted above the #if so both
+    // historical-oneMKL and native-SYCL paths share the precision dispatch.
+    if (A.values().dtype() == DType::Float16 ||
+        A.values().dtype() == DType::BFloat16) {
+        DType orig = A.values().dtype();
+        auto a_vals_f32 = A.values().to(DType::Float32);
+        auto A_f32 = SparseTensor::sparse_csr(A.crow_indices(), A.col_indices(),
+                                              a_vals_f32, A.shape());
+        auto b_vals_f32 = B.values().to(DType::Float32);
+        auto B_f32 = SparseTensor::sparse_csr(B.crow_indices(), B.col_indices(),
+                                              b_vals_f32, B.shape());
+        auto C_f32 = spgemm_kernel(A_f32, B_f32, queue);
+        auto C_vals_orig = C_f32.values().to(orig);
+        return SparseTensor::sparse_csr(C_f32.crow_indices(),
+                                        C_f32.col_indices(),
+                                        C_vals_orig, C_f32.shape());
+    }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: dense-intermediate approach using `spmm_kernel`
     // and `sparse_to_dense_kernel`. Disabled because those inner helpers use
@@ -632,6 +741,16 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
 
 auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
                         sycl::queue& queue) -> Tensor {
+    // E.3: F16/BF16 via widen-to-F32.
+    if (L.values().dtype() == DType::Float16 ||
+        L.values().dtype() == DType::BFloat16) {
+        DType orig = L.values().dtype();
+        auto vals_f32 = L.values().to(DType::Float32);
+        auto L_f32 = SparseTensor::sparse_csr(L.crow_indices(), L.col_indices(),
+                                              vals_f32, L.shape());
+        auto b_f32 = b.to(DType::Float32);
+        return sparse_trsv_kernel(L_f32, b_f32, upper, queue).to(orig);
+    }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: disabled because oneMKL's sparse::trsv here
     // is wired for Int32 CSR indices, while Tenzor's SparseTensor API uses
@@ -809,6 +928,16 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
 
 auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
                         sycl::queue& queue) -> Tensor {
+    // E.3: F16/BF16 via widen-to-F32.
+    if (L.values().dtype() == DType::Float16 ||
+        L.values().dtype() == DType::BFloat16) {
+        DType orig = L.values().dtype();
+        auto vals_f32 = L.values().to(DType::Float32);
+        auto L_f32 = SparseTensor::sparse_csr(L.crow_indices(), L.col_indices(),
+                                              vals_f32, L.shape());
+        auto B_f32 = B.to(DType::Float32);
+        return sparse_trsm_kernel(L_f32, B_f32, upper, queue).to(orig);
+    }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: disabled because oneMKL's sparse::trsm here
     // is wired for Int32 CSR indices, while Tenzor's SparseTensor API uses

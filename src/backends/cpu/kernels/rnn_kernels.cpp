@@ -841,15 +841,16 @@ auto gru_forward_kernel(
     const Tensor& input,
     const Tensor& W_ih,
     const Tensor& W_hh,
-    const Tensor& bias,
+    const Tensor& bias_ih,   // F.2: PyTorch convention — two biases.
+    const Tensor& bias_hh,   //       Empty tensor means "no bias".
     const Tensor& h0
 ) -> std::vector<Tensor> {
-    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
     if (input.dtype() != DType::Float32) {
         DType orig = input.dtype();
         auto results = gru_forward_kernel(
             input.to(DType::Float32), W_ih.to(DType::Float32), W_hh.to(DType::Float32),
-            bias.numel() > 0 ? bias.to(DType::Float32) : bias,
+            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh,
             h0.to(DType::Float32));
         for (auto& t : results) t = t.to(orig);
         return results;
@@ -868,42 +869,55 @@ auto gru_forward_kernel(
     Tensor W_hh_contig = W_hh.contiguous();
     Tensor h0_contig = h0.contiguous();
 
-    // Get bias pointer (may be null)
-    const float* bias_ptr = nullptr;
-    Tensor bias_contig;
-    if (bias.numel() > 0) {
-        bias_contig = bias.contiguous();
-        bias_ptr = bias_contig.data<float>();
+    // Get bias pointers (either may be null).
+    const float* bias_ih_ptr = nullptr;
+    const float* bias_hh_ptr = nullptr;
+    Tensor bias_ih_contig, bias_hh_contig;
+    if (bias_ih.numel() > 0) {
+        bias_ih_contig = bias_ih.contiguous();
+        bias_ih_ptr = bias_ih_contig.data<float>();
+    }
+    if (bias_hh.numel() > 0) {
+        bias_hh_contig = bias_hh.contiguous();
+        bias_hh_ptr = bias_hh_contig.data<float>();
     }
 
     // Allocate output tensors
     Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
     Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
 
+    // F.2: oneDNN's vanilla_gru applies the bias differently from PyTorch
+    // (it computes `n = tanh(W_ih@x + b_ih + r*(W_hh@h) + b_hh)` instead of
+    // PyTorch's `n = tanh((W_ih@x + b_ih) + r*(W_hh@h + b_hh))`). Skip it
+    // when either bias is set so the PyTorch-faithful SIMD path runs.
+    // When both biases are empty, oneDNN's output is bit-equivalent and
+    // typically faster, so we keep it for that case.
+    if (!bias_ih_ptr && !bias_hh_ptr) {
 #ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN first - 2-4x faster than SIMD for larger sequences
-    bool onednn_success = rnn_onednn::gru_forward_onednn(
-        input_contig.data<float>(),
-        W_ih_contig.data<float>(),
-        W_hh_contig.data<float>(),
-        bias_ptr,
-        h0_contig.data<float>(),
-        output.data<float>(),
-        h_n.data<float>(),
-        seq_len, batch, input_size, hidden
-    );
-
-    if (onednn_success) {
-        return {output, h_n};
-    }
+        bool onednn_success = rnn_onednn::gru_forward_onednn(
+            input_contig.data<float>(),
+            W_ih_contig.data<float>(),
+            W_hh_contig.data<float>(),
+            nullptr,
+            h0_contig.data<float>(),
+            output.data<float>(),
+            h_n.data<float>(),
+            seq_len, batch, input_size, hidden
+        );
+        if (onednn_success) {
+            return {output, h_n};
+        }
 #endif
+    }
 
-    // SIMD-optimized implementation (fallback)
+    // SIMD-optimized implementation — takes both biases separately with
+    // PyTorch-faithful n-gate semantics.
     lstm::gru_forward(
         input_contig.data<float>(),
         W_ih_contig.data<float>(),
         W_hh_contig.data<float>(),
-        bias_ptr,
+        bias_ih_ptr,
+        bias_hh_ptr,
         h0_contig.data<float>(),
         output.data<float>(),
         h_n.data<float>(),
@@ -1136,14 +1150,22 @@ auto gru_multilayer_forward_kernel(
         // Get initial state for this layer
         Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
 
-        // Get bias or empty tensor
-        Tensor bias_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
-                             ? bias_list[l]
-                             : empty({0}, DType::Float32, input.device());
+        // F.2: PyTorch GRU contract — multi-layer caller passes a single
+        // combined bias from the legacy contract (one tensor per layer).
+        // Split it: the convention used by `gru.cpp` for the legacy
+        // multi-layer GRU is `bias = bias_ih` (the bias_hh contribution
+        // is folded into the cell's accumulators by the autograd-aware
+        // GRUCell path). For the fused multi-layer kernel we propagate
+        // the legacy single-bias as bias_ih and pass an empty bias_hh.
+        Tensor bias_ih_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
+                                ? bias_list[l]
+                                : empty({0}, DType::Float32, input.device());
+        Tensor bias_hh_empty = empty({0}, DType::Float32, input.device());
 
         // Call single-layer kernel
         auto layer_output = gru_forward_kernel(
-            layer_input, W_ih_list[l], W_hh_list[l], bias_tensor, h0_layer
+            layer_input, W_ih_list[l], W_hh_list[l],
+            bias_ih_tensor, bias_hh_empty, h0_layer
         );
 
         h_states.push_back(layer_output[1]);

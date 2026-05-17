@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/vit.hpp"
+#include "tenzor/models/hub.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -13,6 +14,7 @@
 #include <random>
 #include <stdexcept>
 #include <filesystem>
+#include <mutex>
 
 namespace tenzor {
 namespace models {
@@ -488,47 +490,86 @@ auto ViT_Huge_Patch16(int64_t num_classes, bool pretrained, int64_t img_size)
 // ViTModelHub Implementation
 // ============================================================================
 
-auto ViTModelHub::download_pretrained(const std::string& model_name) -> std::string {
-    // Determine cache directory
-    std::string cache_path;
-    const char* home = std::getenv("HOME");
-    if (home) {
-        cache_path = std::string(home) + "/.cache/tenzor/vit";
-    } else {
-        cache_path = "/tmp/tenzor_cache/vit";
+// ----------------------------------------------------------------------------
+// ViT pretrained-model registry — HuggingFace timm + Google JAX-port URLs.
+// We lazily register these with ModelHub on first download so the rest of
+// the hub plumbing (libcurl fetch, SHA verification, on-disk caching,
+// safetensors/.bin dispatch, key remapping) is reused as-is.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+struct ViTRegistry {
+    std::once_flag flag;
+
+    void register_once() {
+        std::call_once(flag, []() {
+            using MWI = ModelWeightInfo;
+
+            // timm safetensors mirrors — preferred (no pickle, faster).
+            // Field order: { name, url, sha256, size, description, safetensors_url }.
+            const std::vector<MWI> entries = {
+                MWI{ "vit_base_patch16_224",
+                     "https://huggingface.co/timm/vit_base_patch16_224.augreg2_in21k_ft_in1k/resolve/main/pytorch_model.bin",
+                     /*sha256=*/"",
+                     /*size=*/0,
+                     /*description=*/"ViT-Base/16, 224px (timm augreg2 IN21k→IN1k)",
+                     /*safetensors_url=*/"https://huggingface.co/timm/vit_base_patch16_224.augreg2_in21k_ft_in1k/resolve/main/model.safetensors" },
+                MWI{ "vit_base_patch32_224",
+                     "https://huggingface.co/timm/vit_base_patch32_224.augreg_in21k_ft_in1k/resolve/main/pytorch_model.bin",
+                     "", 0, "ViT-Base/32, 224px (timm augreg IN21k→IN1k)",
+                     "https://huggingface.co/timm/vit_base_patch32_224.augreg_in21k_ft_in1k/resolve/main/model.safetensors" },
+                MWI{ "vit_large_patch16_224",
+                     "https://huggingface.co/timm/vit_large_patch16_224.augreg_in21k_ft_in1k/resolve/main/pytorch_model.bin",
+                     "", 0, "ViT-Large/16, 224px (timm augreg IN21k→IN1k)",
+                     "https://huggingface.co/timm/vit_large_patch16_224.augreg_in21k_ft_in1k/resolve/main/model.safetensors" },
+                MWI{ "vit_large_patch32_224",
+                     "https://huggingface.co/timm/vit_large_patch32_224.orig_in21k_ft_in1k/resolve/main/pytorch_model.bin",
+                     "", 0, "ViT-Large/32, 224px (timm orig IN21k→IN1k)",
+                     "https://huggingface.co/timm/vit_large_patch32_224.orig_in21k_ft_in1k/resolve/main/model.safetensors" },
+                MWI{ "vit_huge_patch14_224",
+                     "https://huggingface.co/timm/vit_huge_patch14_224.orig_in21k/resolve/main/pytorch_model.bin",
+                     "", 0, "ViT-Huge/14, 224px (timm orig IN21k)",
+                     "https://huggingface.co/timm/vit_huge_patch14_224.orig_in21k/resolve/main/model.safetensors" },
+                MWI{ "vit_huge_patch16_224",
+                     "https://huggingface.co/timm/vit_huge_patch16_224.orig_in21k/resolve/main/pytorch_model.bin",
+                     "", 0, "ViT-Huge/16, 224px (timm orig IN21k)",
+                     "https://huggingface.co/timm/vit_huge_patch16_224.orig_in21k/resolve/main/model.safetensors" },
+            };
+            ModelHub::register_models(entries);
+        });
     }
+};
 
-    // Create cache directory if it doesn't exist
-    std::filesystem::create_directories(cache_path);
-
-    // Model checkpoint path
-    auto model_dir = cache_path + "/" + model_name;
-    auto checkpoint_file = model_dir + "/pytorch_model.bin";
-
-    // Check if already downloaded
-    if (std::filesystem::exists(checkpoint_file)) {
-        return checkpoint_file;
-    }
-
-    // In a real implementation, this would download from a model hub
-    // For now, we'll throw an error and let the user manually download
-    throw std::runtime_error(
-        "Model '" + model_name + "' not found in cache. "
-        "Please download the model from a model hub (e.g., Hugging Face) to: " + model_dir);
+ViTRegistry& vit_registry() {
+    static ViTRegistry r;
+    return r;
 }
 
-auto ViTModelHub::load_pretrained_weights([[maybe_unused]] nn::Module& model,
-                                         [[maybe_unused]] const std::string& checkpoint_path) -> void {
-    // In a real implementation, this would:
-    // 1. Load PyTorch checkpoint file
-    // 2. Map parameter names (e.g., "vit.encoder.layer.0" -> "vit.encoder.layers.0")
-    // 3. Load weights into model
+} // namespace
 
-    // For now, we'll throw a not-implemented error
-    throw std::runtime_error(
-        "Pretrained weight loading not yet implemented. "
-        "This requires integration with PyTorch C++ API or custom checkpoint format. "
-        "Checkpoint path: " + checkpoint_path);
+auto ViTModelHub::download_pretrained(const std::string& model_name) -> std::string {
+    // Ensure the canonical ViT entries are visible to ModelHub. Registration
+    // is idempotent and safe to call from any thread (std::call_once).
+    vit_registry().register_once();
+
+    // Delegate to ModelHub: handles cache lookup, libcurl fetch, retry,
+    // SHA verification (when populated), and progress reporting. Prefer
+    // the safetensors mirror when registered — faster and pickle-free.
+    return ModelHub::download_pretrained_safetensors(
+        model_name, /*prefer_safetensors=*/true);
+}
+
+auto ViTModelHub::load_pretrained_weights(nn::Module& model,
+                                          const std::string& checkpoint_path) -> void {
+    // ModelHub::load_pretrained_weights dispatches by file extension:
+    //   .safetensors        -> SafeTensorsSerializer
+    //   .pth / .pt / .bin   -> tenzor::io::load_torch_pickle (native C++ pickle reader)
+    //   *                   -> Tenzor native format
+    // It also applies the timm/torchvision → tenzor key remap (Sequential
+    // `module_N` etc.). strict=false so partial loads (e.g. head pruned)
+    // succeed cleanly with a warning.
+    ModelHub::load_pretrained_weights(model, checkpoint_path, /*strict=*/false);
 }
 
 } // namespace models

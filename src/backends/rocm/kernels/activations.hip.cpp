@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <cmath>
@@ -57,8 +58,8 @@ __global__ void relu_forward_kernel(const T* input, T* output, int64_t n) {
 // Forward: max(0, x) for Float16
 __global__ void relu_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = val > 0.0f ? input[idx] : __float2half(0.0f);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = val > 0.0f ? input[idx] : tenzor::rocm::safe_f2h(0.0f);
     }
 }
 
@@ -75,8 +76,8 @@ __global__ void relu_backward_kernel(const T* grad_output, const T* input,
 __global__ void relu_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                           __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        grad_input[idx] = val > 0.0f ? grad_output[idx] : __float2half(0.0f);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        grad_input[idx] = val > 0.0f ? grad_output[idx] : tenzor::rocm::safe_f2h(0.0f);
     }
 }
 
@@ -149,7 +150,7 @@ __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
 // Float16 sigmoid forward - compute in float for precision
 __global__ void sigmoid_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float sigmoid_x;
         if (x >= 0.0f) {
             sigmoid_x = 1.0f / (1.0f + expf(-x));
@@ -157,7 +158,7 @@ __global__ void sigmoid_forward_kernel_fp16(const __half* input, __half* output,
             float exp_x = expf(x);
             sigmoid_x = exp_x / (1.0f + exp_x);
         }
-        output[idx] = __float2half(sigmoid_x);
+        output[idx] = tenzor::rocm::safe_f2h(sigmoid_x);
     }
 }
 
@@ -165,7 +166,7 @@ __global__ void sigmoid_forward_kernel_fp16(const __half* input, __half* output,
 __global__ void sigmoid_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                              __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float sigmoid_x;
         if (x >= 0.0f) {
             sigmoid_x = 1.0f / (1.0f + expf(-x));
@@ -173,8 +174,8 @@ __global__ void sigmoid_backward_kernel_fp16(const __half* grad_output, const __
             float exp_x = expf(x);
             sigmoid_x = exp_x / (1.0f + exp_x);
         }
-        float grad = __half2float(grad_output[idx]) * sigmoid_x * (1.0f - sigmoid_x);
-        grad_input[idx] = __float2half(grad);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * sigmoid_x * (1.0f - sigmoid_x);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -226,8 +227,8 @@ __global__ void tanh_forward_kernel(const T* input, T* output, int64_t n) {
 // Forward: tanh(x) for Float16 - compute in float for precision
 __global__ void tanh_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half(tanhf(val));
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(tanhf(val));
     }
 }
 
@@ -245,10 +246,10 @@ __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
 __global__ void tanh_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                           __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         float tanh_x = tanhf(val);
-        float grad = __half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x);
-        grad_input[idx] = __float2half(grad);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * (1.0f - tanh_x * tanh_x);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -333,8 +334,8 @@ __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
 // GELU forward for Float16 - compute in float32 for precision
 __global__ void gelu_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half(gelu_forward_impl(val));
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(gelu_forward_impl(val));
     }
 }
 
@@ -342,9 +343,9 @@ __global__ void gelu_forward_kernel_fp16(const __half* input, __half* output, in
 __global__ void gelu_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                           __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float grad = __half2float(grad_output[idx]);
-        float val = __half2float(input[idx]);
-        grad_input[idx] = __float2half(grad * gelu_backward_impl(val));
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad * gelu_backward_impl(val));
     }
 }
 
@@ -407,8 +408,8 @@ __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
 __global__ void leaky_relu_forward_kernel_fp16(const __half* input, __half* output,
                                                int64_t n, float alpha) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half(val > 0.0f ? val : alpha * val);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(val > 0.0f ? val : alpha * val);
     }
 }
 
@@ -416,9 +417,9 @@ __global__ void leaky_relu_forward_kernel_fp16(const __half* input, __half* outp
 __global__ void leaky_relu_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                                 __half* grad_input, int64_t n, float alpha) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        float grad = __half2float(grad_output[idx]) * (val > 0.0f ? 1.0f : alpha);
-        grad_input[idx] = __float2half(grad);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * (val > 0.0f ? 1.0f : alpha);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -483,8 +484,8 @@ __global__ void elu_backward_kernel(const T* grad_output, const T* input,
 // Float16 ELU forward
 __global__ void elu_forward_kernel_fp16(const __half* input, __half* output, int64_t n, float alpha) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
-        output[idx] = __float2half(x > 0.0f ? x : alpha * (expf(x) - 1.0f));
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(x > 0.0f ? x : alpha * (expf(x) - 1.0f));
     }
 }
 
@@ -492,9 +493,9 @@ __global__ void elu_forward_kernel_fp16(const __half* input, __half* output, int
 __global__ void elu_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                          __half* grad_input, int64_t n, float alpha) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
-        float grad = __half2float(grad_output[idx]) * (x > 0.0f ? 1.0f : alpha * expf(x));
-        grad_input[idx] = __float2half(grad);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * (x > 0.0f ? 1.0f : alpha * expf(x));
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -567,8 +568,8 @@ __global__ void selu_forward_kernel_fp16(const __half* input, __half* output, in
     const float scale = 1.0507009873554804934193349852946f;
 
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
-        output[idx] = __float2half(scale * (x > 0.0f ? x : alpha * (expf(x) - 1.0f)));
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(scale * (x > 0.0f ? x : alpha * (expf(x) - 1.0f)));
     }
 }
 
@@ -579,9 +580,9 @@ __global__ void selu_backward_kernel_fp16(const __half* grad_output, const __hal
     const float scale = 1.0507009873554804934193349852946f;
 
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
-        float grad = __half2float(grad_output[idx]) * scale * (x > 0.0f ? 1.0f : alpha * expf(x));
-        grad_input[idx] = __float2half(grad);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * scale * (x > 0.0f ? 1.0f : alpha * expf(x));
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -646,9 +647,9 @@ __global__ void swish_backward_kernel(const T* grad_output, const T* input,
 // Float16 Swish forward
 __global__ void swish_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
-        output[idx] = __float2half(x * sigmoid_x);
+        output[idx] = tenzor::rocm::safe_f2h(x * sigmoid_x);
     }
 }
 
@@ -656,10 +657,10 @@ __global__ void swish_forward_kernel_fp16(const __half* input, __half* output, i
 __global__ void swish_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                            __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
-        float grad = __half2float(grad_output[idx]) * (sigmoid_x + x * sigmoid_x * (1.0f - sigmoid_x));
-        grad_input[idx] = __float2half(grad);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * (sigmoid_x + x * sigmoid_x * (1.0f - sigmoid_x));
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -740,9 +741,9 @@ __global__ void mish_backward_kernel(const T* grad_output, const T* input,
 // Float16 Mish forward
 __global__ void mish_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float softplus_x = x > 20.0f ? x : logf(1.0f + expf(x));
-        output[idx] = __float2half(x * tanhf(softplus_x));
+        output[idx] = tenzor::rocm::safe_f2h(x * tanhf(softplus_x));
     }
 }
 
@@ -750,13 +751,13 @@ __global__ void mish_forward_kernel_fp16(const __half* input, __half* output, in
 __global__ void mish_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                           __half* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float softplus_x = x > 20.0f ? x : logf(1.0f + expf(x));
         float tanh_softplus = tanhf(softplus_x);
         float sech_squared = 1.0f - tanh_softplus * tanh_softplus;
         float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
-        float grad = __half2float(grad_output[idx]) * (tanh_softplus + x * sech_squared * sigmoid_x);
-        grad_input[idx] = __float2half(grad);
+        float grad = tenzor::rocm::safe_h2f(grad_output[idx]) * (tanh_softplus + x * sech_squared * sigmoid_x);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -835,7 +836,7 @@ __global__ void softplus_backward_kernel(const T* grad_output, const T* input,
 // Float16 Softplus forward
 __global__ void softplus_forward_kernel_fp16(const __half* input, __half* output, int64_t n, float beta, float threshold) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float bx = beta * x;
         float result;
         if (bx > threshold) {
@@ -845,7 +846,7 @@ __global__ void softplus_forward_kernel_fp16(const __half* input, __half* output
         } else {
             result = logf(1.0f + expf(bx)) / beta;
         }
-        output[idx] = __float2half(result);
+        output[idx] = tenzor::rocm::safe_f2h(result);
     }
 }
 
@@ -853,18 +854,18 @@ __global__ void softplus_forward_kernel_fp16(const __half* input, __half* output
 __global__ void softplus_backward_kernel_fp16(const __half* grad_output, const __half* input,
                                               __half* grad_input, int64_t n, float beta, float threshold) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        float x = __half2float(input[idx]);
+        float x = tenzor::rocm::safe_h2f(input[idx]);
         float bx = beta * x;
         float grad;
         if (bx > threshold) {
-            grad = __half2float(grad_output[idx]);
+            grad = tenzor::rocm::safe_h2f(grad_output[idx]);
         } else if (bx < -threshold) {
-            grad = __half2float(grad_output[idx]) * expf(bx);
+            grad = tenzor::rocm::safe_h2f(grad_output[idx]) * expf(bx);
         } else {
             float sig = 1.0f / (1.0f + expf(-bx));
-            grad = __half2float(grad_output[idx]) * sig;
+            grad = tenzor::rocm::safe_h2f(grad_output[idx]) * sig;
         }
-        grad_input[idx] = __float2half(grad);
+        grad_input[idx] = tenzor::rocm::safe_f2h(grad);
     }
 }
 
@@ -1076,7 +1077,7 @@ __global__ void softmax_forward_kernel_fp16(const __half* input, __half* output,
     // Step 1: Find max value for numerical stability
     float max_val = -FLT_MAX;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        max_val = fmaxf(max_val, __half2float(input_row[i]));
+        max_val = fmaxf(max_val, tenzor::rocm::safe_h2f(input_row[i]));
     }
     max_val = block_reduce_max(max_val, shared);
     __syncthreads();
@@ -1092,10 +1093,10 @@ __global__ void softmax_forward_kernel_fp16(const __half* input, __half* output,
     float sum_exp = 0.0f;
     float inv_temp = 1.0f / temperature;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        float val = __half2float(input_row[i]);
+        float val = tenzor::rocm::safe_h2f(input_row[i]);
         float exp_val = expf((val - max_val) * inv_temp);
         // Temporarily store in output (as float bits, will overwrite)
-        output_row[i] = __float2half(exp_val);
+        output_row[i] = tenzor::rocm::safe_f2h(exp_val);
         sum_exp += exp_val;
     }
     sum_exp = block_reduce_sum(sum_exp, shared);
@@ -1110,8 +1111,8 @@ __global__ void softmax_forward_kernel_fp16(const __half* input, __half* output,
 
     // Step 3: Normalize
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        float exp_val = __half2float(output_row[i]);
-        output_row[i] = __float2half(exp_val / sum_exp);
+        float exp_val = tenzor::rocm::safe_h2f(output_row[i]);
+        output_row[i] = tenzor::rocm::safe_f2h(exp_val / sum_exp);
     }
 }
 
@@ -1132,7 +1133,7 @@ __global__ void softmax_backward_kernel_fp16(const __half* grad_output, const __
     // Compute sum(grad_output * softmax)
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum += __half2float(grad_out_row[i]) * __half2float(out_row[i]);
+        sum += tenzor::rocm::safe_h2f(grad_out_row[i]) * tenzor::rocm::safe_h2f(out_row[i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -1146,9 +1147,9 @@ __global__ void softmax_backward_kernel_fp16(const __half* grad_output, const __
 
     // Compute gradient: softmax[i] * (grad_output[i] - sum)
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        float out_val = __half2float(out_row[i]);
-        float grad_val = __half2float(grad_out_row[i]);
-        grad_in_row[i] = __float2half(out_val * (grad_val - sum));
+        float out_val = tenzor::rocm::safe_h2f(out_row[i]);
+        float grad_val = tenzor::rocm::safe_h2f(grad_out_row[i]);
+        grad_in_row[i] = tenzor::rocm::safe_f2h(out_val * (grad_val - sum));
     }
 }
 
@@ -1316,7 +1317,7 @@ __global__ void log_softmax_forward_kernel_fp16(const __half* input, __half* out
     // Step 1: Find max value for numerical stability
     float max_val = -FLT_MAX;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        max_val = fmaxf(max_val, __half2float(input_row[i]));
+        max_val = fmaxf(max_val, tenzor::rocm::safe_h2f(input_row[i]));
     }
     max_val = block_reduce_max(max_val, shared);
     __syncthreads();
@@ -1331,7 +1332,7 @@ __global__ void log_softmax_forward_kernel_fp16(const __half* input, __half* out
     // Step 2: Compute sum(exp(x - max))
     float sum_exp = 0.0f;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum_exp += expf(__half2float(input_row[i]) - max_val);
+        sum_exp += expf(tenzor::rocm::safe_h2f(input_row[i]) - max_val);
     }
     sum_exp = block_reduce_sum(sum_exp, shared);
     __syncthreads();
@@ -1345,8 +1346,8 @@ __global__ void log_softmax_forward_kernel_fp16(const __half* input, __half* out
 
     // Step 3: Compute log_softmax = x - max - log_sum_exp
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        float val = __half2float(input_row[i]);
-        output_row[i] = __float2half(val - max_val - log_sum_exp);
+        float val = tenzor::rocm::safe_h2f(input_row[i]);
+        output_row[i] = tenzor::rocm::safe_f2h(val - max_val - log_sum_exp);
     }
 }
 
@@ -1367,7 +1368,7 @@ __global__ void log_softmax_backward_kernel_fp16(const __half* grad_output, cons
     // Compute sum(grad_output)
     float sum_grad = 0.0f;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum_grad += __half2float(grad_out_row[i]);
+        sum_grad += tenzor::rocm::safe_h2f(grad_out_row[i]);
     }
     sum_grad = block_reduce_sum(sum_grad, shared);
     __syncthreads();
@@ -1381,9 +1382,9 @@ __global__ void log_softmax_backward_kernel_fp16(const __half* grad_output, cons
 
     // Compute gradient: grad_output - exp(log_softmax) * sum_grad
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        float grad_val = __half2float(grad_out_row[i]);
-        float out_val = __half2float(out_row[i]);
-        grad_in_row[i] = __float2half(grad_val - expf(out_val) * sum_grad);
+        float grad_val = tenzor::rocm::safe_h2f(grad_out_row[i]);
+        float out_val = tenzor::rocm::safe_h2f(out_row[i]);
+        grad_in_row[i] = tenzor::rocm::safe_f2h(grad_val - expf(out_val) * sum_grad);
     }
 }
 

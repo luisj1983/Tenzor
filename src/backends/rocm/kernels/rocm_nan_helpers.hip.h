@@ -62,5 +62,58 @@ __device__ __host__ inline bool is_nan_bits(hip_bfloat16 x) {
     return (exp == 0xFFu) && (mant != 0u);
 }
 
+// ============================================================================
+// E.2: NaN-preserving half / bfloat16 conversions.
+//
+// HIP's __float2half / __half2float / __float2bfloat16 / __bfloat162float
+// intrinsics have been observed to canonicalize or strip NaN payloads
+// under fast-math (and on a few driver versions silently turn NaN into
+// ±inf). The kernels in this backend rely on NaN propagating exactly for
+// gradcheck and for the nansum/nanmean family of reductions.
+//
+// safe_f2h / safe_h2f / safe_f2bf / safe_bf2f fast-path finite values
+// through the vendor intrinsic and emit a canonical qNaN bit pattern
+// whenever the input is NaN. They're drop-in replacements for the raw
+// intrinsics in NaN-correct arithmetic.
+// ============================================================================
+
+__device__ __host__ inline __half safe_f2h(float x) {
+    if (is_nan_bits(x)) {
+        uint16_t nan_bits = 0x7E00u;   // canonical Float16 qNaN
+        __half h;
+        *reinterpret_cast<uint16_t*>(&h) = nan_bits;
+        return h;
+    }
+    return __float2half(x);
+}
+
+__device__ __host__ inline float safe_h2f(__half x) {
+    if (is_nan_bits(x)) {
+        union { float f; uint32_t u; } pun;
+        pun.u = 0x7FC00000u;            // canonical Float32 qNaN
+        return pun.f;
+    }
+    return __half2float(x);
+}
+
+__device__ __host__ inline hip_bfloat16 safe_f2bf(float x) {
+    if (is_nan_bits(x)) {
+        uint16_t nan_bits = 0x7FC0u;    // canonical bf16 qNaN
+        hip_bfloat16 b;
+        *reinterpret_cast<uint16_t*>(&b) = nan_bits;
+        return b;
+    }
+    return hip_bfloat16(x);
+}
+
+__device__ __host__ inline float safe_bf2f(hip_bfloat16 x) {
+    if (is_nan_bits(x)) {
+        union { float f; uint32_t u; } pun;
+        pun.u = 0x7FC00000u;
+        return pun.f;
+    }
+    return static_cast<float>(x);
+}
+
 }  // namespace rocm
 }  // namespace tenzor

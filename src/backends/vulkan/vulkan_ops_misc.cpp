@@ -1342,8 +1342,12 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         sort_shader = "bitonic_sort_f16";
         work_dtype = DType::Float16;
         elem_size = sizeof(uint16_t);
-    } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
-        // Cast to Int32, sort using i32 shader, indices are dtype-independent
+    } else if (input.dtype() == DType::Int8  || input.dtype() == DType::UInt8 ||
+               input.dtype() == DType::Int16 || input.dtype() == DType::UInt16 ||
+               input.dtype() == DType::Bool) {
+        // E.8: cast small int dtypes to Int32 and reuse the i32 sort shader.
+        // Sort indices are dtype-independent, so a single widened sort gives
+        // identical orderings.
         Tensor int32_input = input.to(DType::Int32);
         return dispatchArgSort(int32_input, dim, descending);
     } else if (input.dtype() == DType::BFloat16) {

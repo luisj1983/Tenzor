@@ -98,6 +98,18 @@ public:
     /** @brief Load optimizer state from dictionary */
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+
+    /** @brief Hyperparameters: lr, momentum, dampening, weight_decay, nesterov. */
+    auto defaults() const -> std::unordered_map<std::string, double> override {
+        return {
+            {"lr",           lr_},
+            {"momentum",     momentum_},
+            {"dampening",    dampening_},
+            {"weight_decay", weight_decay_},
+            {"nesterov",     nesterov_ ? 1.0 : 0.0},
+        };
+    }
+
 private:
     double lr_;
     double momentum_;

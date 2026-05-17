@@ -169,24 +169,18 @@ auto nested_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
                                          input.ragged_dim());
     }
 
-    // Softmax along ragged dim — need per-segment processing.
-    // Try dispatching to a native nested softmax kernel.
-    try {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input.values(), input.offsets()};
-        auto result = dispatch<OpId::NestedSoftmax>(inputs, attrs);
-        return NestedTensor::from_jagged(result[0], input.offsets(),
-                                         input.ragged_dim());
-    } catch (...) {
-        // Fall back to per-segment softmax
-        return segmented_unary(input, [](const Tensor& seg) {
-            OpAttributes a;
-            a.set(AttrKey::Dim, static_cast<int64_t>(0));
-            std::vector<Tensor> seg_inputs = {seg};
-            return dispatch_single(OpId::Softmax, seg_inputs, a);
-        });
-    }
+    // Softmax along ragged dim — dispatch to native NestedSoftmax kernel.
+    // B.4: every shipped backend (CPU/CUDA/ROCm/OneAPI/Vulkan) registers
+    // OpId::NestedSoftmax, so the previous try/catch around dispatch was a
+    // workaround for partial coverage that no longer applies. The catch is
+    // removed so a real kernel failure surfaces to the caller instead of
+    // being masked by the silently-slower segmented fallback.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.values(), input.offsets()};
+    auto result = dispatch<OpId::NestedSoftmax>(inputs, attrs);
+    return NestedTensor::from_jagged(result[0], input.offsets(),
+                                     input.ragged_dim());
 }
 
 auto nested_log_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
@@ -200,61 +194,28 @@ auto nested_log_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor 
                                          input.ragged_dim());
     }
 
-    try {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input.values(), input.offsets()};
-        auto result = dispatch<OpId::NestedLogSoftmax>(inputs, attrs);
-        return NestedTensor::from_jagged(result[0], input.offsets(),
-                                         input.ragged_dim());
-    } catch (...) {
-        return segmented_unary(input, [](const Tensor& seg) {
-            OpAttributes a;
-            a.set(AttrKey::Dim, static_cast<int64_t>(0));
-            std::vector<Tensor> seg_inputs = {seg};
-            return dispatch_single(OpId::LogSoftmax, seg_inputs, a);
-        });
-    }
+    // B.4: native NestedLogSoftmax kernel is registered in every shipped
+    // backend; the previous try/catch fallback is removed so real failures
+    // surface.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.values(), input.offsets()};
+    auto result = dispatch<OpId::NestedLogSoftmax>(inputs, attrs);
+    return NestedTensor::from_jagged(result[0], input.offsets(),
+                                     input.ragged_dim());
 }
 
 auto nested_layer_norm(const NestedTensor& input, const Tensor& weight,
                        const Tensor& bias, double eps) -> NestedTensor {
-    // Try native nested layer norm kernel
-    try {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Eps, eps);
-        std::vector<Tensor> inputs = {input.values(), input.offsets(), weight, bias};
-        auto result = dispatch<OpId::NestedLayerNorm>(inputs, attrs);
-        return NestedTensor::from_jagged(result[0], input.offsets(),
-                                         input.ragged_dim());
-    } catch (...) {
-        // Fall back: layer norm on each segment independently.
-        auto offsets_cpu = (input.offsets().device().type != Device::Type::CPU)
-            ? input.offsets().to(Device::cpu()) : input.offsets();
-        const auto* off_ptr = offsets_cpu.data<int64_t>();
-        int64_t B = input.batch_size();
-
-        std::vector<Tensor> results;
-        results.reserve(B);
-        for (int64_t i = 0; i < B; ++i) {
-            auto seg = input.values().slice(0, off_ptr[i], off_ptr[i + 1]);
-            // Manual layer norm: normalize over last dim(s)
-            auto mean_val = tenzor::mean(seg, -1, /*keepdim=*/true);
-            auto diff = seg - mean_val;
-            auto var_val = tenzor::mean(diff * diff, -1, /*keepdim=*/true);
-            auto normed = diff / tenzor::sqrt(tenzor::add(var_val, eps));
-            auto out = normed * weight + bias;
-            results.push_back(out);
-        }
-
-        if (results.empty()) {
-            return NestedTensor::from_jagged(
-                tenzor::zeros({0}, input.dtype(), input.device()),
-                input.offsets(), input.ragged_dim());
-        }
-        return NestedTensor::from_jagged(
-            tenzor::cat(results, 0), input.offsets(), input.ragged_dim());
-    }
+    // B.4: native NestedLayerNorm kernel is registered in every shipped
+    // backend; the previous try/catch + segmented fallback is removed so
+    // real kernel failures surface to the caller.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Eps, eps);
+    std::vector<Tensor> inputs = {input.values(), input.offsets(), weight, bias};
+    auto result = dispatch<OpId::NestedLayerNorm>(inputs, attrs);
+    return NestedTensor::from_jagged(result[0], input.offsets(),
+                                     input.ragged_dim());
 }
 
 auto nested_sum(const NestedTensor& input, int64_t dim,

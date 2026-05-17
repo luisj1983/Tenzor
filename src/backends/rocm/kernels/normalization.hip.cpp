@@ -5,6 +5,7 @@
  * Implements LayerNorm, GroupNorm, and InstanceNorm operations with forward and backward passes.
  */
 
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
@@ -157,20 +158,20 @@ __global__ void layer_norm_forward_kernel_fp16(
     // Compute mean in float
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        sum += __half2float(input_row[i]);
+        sum += tenzor::rocm::safe_h2f(input_row[i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
 
     float mean = sum / static_cast<float>(normalized_size);
     if (threadIdx.x == 0 && mean_out) {
-        mean_out[batch_idx] = __float2half(mean);
+        mean_out[batch_idx] = tenzor::rocm::safe_f2h(mean);
     }
 
     // Compute variance in float
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float diff = __half2float(input_row[i]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input_row[i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -179,20 +180,20 @@ __global__ void layer_norm_forward_kernel_fp16(
     float variance = var_sum / static_cast<float>(normalized_size);
     float rstd = rsqrtf(variance + eps);
     if (threadIdx.x == 0 && rstd_out) {
-        rstd_out[batch_idx] = __float2half(rstd);
+        rstd_out[batch_idx] = tenzor::rocm::safe_f2h(rstd);
     }
 
     // Normalize and apply affine transform
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float normalized = (__half2float(input_row[i]) - mean) * rstd;
+        float normalized = (tenzor::rocm::safe_h2f(input_row[i]) - mean) * rstd;
         if (weight && bias) {
-            output_row[i] = __float2half(normalized * __half2float(weight[i]) + __half2float(bias[i]));
+            output_row[i] = tenzor::rocm::safe_f2h(normalized * tenzor::rocm::safe_h2f(weight[i]) + tenzor::rocm::safe_h2f(bias[i]));
         } else if (weight) {
-            output_row[i] = __float2half(normalized * __half2float(weight[i]));
+            output_row[i] = tenzor::rocm::safe_f2h(normalized * tenzor::rocm::safe_h2f(weight[i]));
         } else if (bias) {
-            output_row[i] = __float2half(normalized + __half2float(bias[i]));
+            output_row[i] = tenzor::rocm::safe_f2h(normalized + tenzor::rocm::safe_h2f(bias[i]));
         } else {
-            output_row[i] = __float2half(normalized);
+            output_row[i] = tenzor::rocm::safe_f2h(normalized);
         }
     }
 }
@@ -379,16 +380,16 @@ __global__ void layer_norm_backward_kernel_fp16(
     const __half* input_row = input + batch_idx * normalized_size;
     __half* grad_in_row = grad_input + batch_idx * normalized_size;
 
-    float m = __half2float(mean[batch_idx]);
-    float rs = __half2float(rstd[batch_idx]);
+    float m = tenzor::rocm::safe_h2f(mean[batch_idx]);
+    float rs = tenzor::rocm::safe_h2f(rstd[batch_idx]);
 
     // Compute ds and db (dot products) in float
     float ds = 0.0f;
     float db = 0.0f;
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float x_hat = (__half2float(input_row[i]) - m) * rs;
-        float w = weight ? __half2float(weight[i]) : 1.0f;
-        float go = __half2float(grad_out_row[i]);
+        float x_hat = (tenzor::rocm::safe_h2f(input_row[i]) - m) * rs;
+        float w = weight ? tenzor::rocm::safe_h2f(weight[i]) : 1.0f;
+        float go = tenzor::rocm::safe_h2f(grad_out_row[i]);
         ds += go * w * x_hat;
         db += go * w;
     }
@@ -401,10 +402,10 @@ __global__ void layer_norm_backward_kernel_fp16(
     // Compute gradient for input
     float scale = 1.0f / static_cast<float>(normalized_size);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        float x_hat = (__half2float(input_row[i]) - m) * rs;
-        float w = weight ? __half2float(weight[i]) : 1.0f;
-        float go = __half2float(grad_out_row[i]);
-        grad_in_row[i] = __float2half(rs * w * (go - scale * (db + x_hat * ds)));
+        float x_hat = (tenzor::rocm::safe_h2f(input_row[i]) - m) * rs;
+        float w = weight ? tenzor::rocm::safe_h2f(weight[i]) : 1.0f;
+        float go = tenzor::rocm::safe_h2f(grad_out_row[i]);
+        grad_in_row[i] = tenzor::rocm::safe_f2h(rs * w * (go - scale * (db + x_hat * ds)));
 
         // Accumulate gradients for weight and bias in float
         if (grad_weight_f32) {
@@ -420,7 +421,7 @@ __global__ void layer_norm_backward_kernel_fp16(
 __global__ void convert_grad_f32_to_f16(const float* src, __half* dst, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        dst[idx] = __float2half(src[idx]);
+        dst[idx] = tenzor::rocm::safe_f2h(src[idx]);
     }
 }
 
@@ -677,7 +678,7 @@ __global__ void group_norm_forward_kernel_fp16(
         int64_t c_local = i / HW;
         int64_t hw = i % HW;
         int64_t c = g * channels_per_group + c_local;
-        sum += __half2float(input[n * C * HW + c * HW + hw]);
+        sum += tenzor::rocm::safe_h2f(input[n * C * HW + c * HW + hw]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -690,7 +691,7 @@ __global__ void group_norm_forward_kernel_fp16(
         int64_t c_local = i / HW;
         int64_t hw = i % HW;
         int64_t c = g * channels_per_group + c_local;
-        float diff = __half2float(input[n * C * HW + c * HW + hw]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input[n * C * HW + c * HW + hw]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -712,15 +713,15 @@ __global__ void group_norm_forward_kernel_fp16(
         int64_t c = g * channels_per_group + c_local;
         int64_t in_idx = n * C * HW + c * HW + hw;
 
-        float normalized = (__half2float(input[in_idx]) - mean) * rstd;
+        float normalized = (tenzor::rocm::safe_h2f(input[in_idx]) - mean) * rstd;
         if (weight && bias) {
-            output[in_idx] = __float2half(normalized * __half2float(weight[c]) + __half2float(bias[c]));
+            output[in_idx] = tenzor::rocm::safe_f2h(normalized * tenzor::rocm::safe_h2f(weight[c]) + tenzor::rocm::safe_h2f(bias[c]));
         } else if (weight) {
-            output[in_idx] = __float2half(normalized * __half2float(weight[c]));
+            output[in_idx] = tenzor::rocm::safe_f2h(normalized * tenzor::rocm::safe_h2f(weight[c]));
         } else if (bias) {
-            output[in_idx] = __float2half(normalized + __half2float(bias[c]));
+            output[in_idx] = tenzor::rocm::safe_f2h(normalized + tenzor::rocm::safe_h2f(bias[c]));
         } else {
-            output[in_idx] = __float2half(normalized);
+            output[in_idx] = tenzor::rocm::safe_f2h(normalized);
         }
     }
 }
@@ -972,7 +973,7 @@ __global__ void instance_norm_forward_kernel_fp16(
     // Compute mean in float
     float sum = 0.0f;
     for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
-        sum += __half2float(input_ptr[i]);
+        sum += tenzor::rocm::safe_h2f(input_ptr[i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
@@ -982,7 +983,7 @@ __global__ void instance_norm_forward_kernel_fp16(
     // Compute variance in float
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
-        float diff = __half2float(input_ptr[i]) - mean;
+        float diff = tenzor::rocm::safe_h2f(input_ptr[i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
@@ -992,12 +993,12 @@ __global__ void instance_norm_forward_kernel_fp16(
     float rstd = rsqrtf(variance + eps);
 
     // Normalize and apply affine
-    float w = weight ? __half2float(weight[c]) : 1.0f;
-    float b = bias ? __half2float(bias[c]) : 0.0f;
+    float w = weight ? tenzor::rocm::safe_h2f(weight[c]) : 1.0f;
+    float b = bias ? tenzor::rocm::safe_h2f(bias[c]) : 0.0f;
 
     for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
-        float normalized = (__half2float(input_ptr[i]) - mean) * rstd;
-        output_ptr[i] = __float2half(normalized * w + b);
+        float normalized = (tenzor::rocm::safe_h2f(input_ptr[i]) - mean) * rstd;
+        output_ptr[i] = tenzor::rocm::safe_f2h(normalized * w + b);
     }
 }
 

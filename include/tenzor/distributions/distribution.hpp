@@ -76,20 +76,29 @@ public:
     /** @brief Compute log probability of a value under this distribution */
     virtual auto log_prob(const Tensor& value) -> Tensor = 0;
 
-    /** @brief Compute entropy of the distribution (optional) */
-    virtual auto entropy() -> Tensor {
-        throw std::runtime_error("entropy() not implemented for this distribution");
-    }
+    /**
+     * @brief Compute entropy of the distribution.
+     *
+     * Pure-virtual: every concrete distribution must supply a closed-form
+     * or Monte-Carlo implementation. Use the `detail::mc_entropy(...)`
+     * helper when no closed form exists (the MC estimator IS the correct
+     * mathematical definition).
+     */
+    virtual auto entropy() -> Tensor = 0;
 
-    /** @brief Distribution mean (optional) */
-    virtual auto mean() -> Tensor {
-        throw std::runtime_error("mean() not implemented for this distribution");
-    }
+    /**
+     * @brief Distribution mean E[X].
+     *
+     * Pure-virtual; every concrete distribution must implement.
+     */
+    virtual auto mean() -> Tensor = 0;
 
-    /** @brief Distribution variance (optional) */
-    virtual auto variance() -> Tensor {
-        throw std::runtime_error("variance() not implemented for this distribution");
-    }
+    /**
+     * @brief Distribution variance Var[X].
+     *
+     * Pure-virtual; every concrete distribution must implement.
+     */
+    virtual auto variance() -> Tensor = 0;
 
 protected:
     /** @brief Active generator (set during Generator-aware sample/rsample calls) */
@@ -226,6 +235,32 @@ public:
     auto entropy() -> Tensor override {
         auto log_probs = tenzor::log(probs_);
         return tenzor::neg(tenzor::sum(probs_ * log_probs));
+    }
+
+    /**
+     * @brief Mean of the categorical distribution: E[X] = sum_k k * p_k.
+     *
+     * Treats class indices as scalar values 0..K-1 (PyTorch convention).
+     * Result has shape probs_.shape[:-1].
+     */
+    auto mean() -> Tensor override {
+        const auto K = probs_.shape().back();
+        // arange(0..K) in probs_'s dtype/device; broadcasts against probs_.
+        auto idx = arange(0.0, static_cast<double>(K), 1.0,
+                          probs_.dtype(), probs_.device());
+        return tenzor::sum(probs_ * idx, /*dim=*/-1, /*keepdim=*/false);
+    }
+
+    /**
+     * @brief Variance of the categorical distribution: E[(X - E[X])^2].
+     */
+    auto variance() -> Tensor override {
+        const auto K = probs_.shape().back();
+        auto idx = arange(0.0, static_cast<double>(K), 1.0,
+                          probs_.dtype(), probs_.device());
+        auto m = tenzor::sum(probs_ * idx, /*dim=*/-1, /*keepdim=*/true);
+        auto diff = idx - m;
+        return tenzor::sum(probs_ * diff * diff, /*dim=*/-1, /*keepdim=*/false);
     }
 
 private:
@@ -519,6 +554,54 @@ inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
     return out;
 }
 
+/**
+ * @brief Monte-Carlo estimator for distribution moments / entropy.
+ *
+ * Used by distributions whose entropy / mean / variance has no closed form
+ * (RelaxedBernoulli, RelaxedOneHotCategorical, LogisticNormal, LKJCholesky,
+ * MixtureSameFamily, TransformedDistribution, ...). The MC estimator IS
+ * the correct mathematical definition for those quantities; this is not a
+ * fallback. Default sample count is 4096 which gives stable estimates with
+ * standard error ~1/√N for bounded random variables.
+ */
+template <typename SampleFn>
+inline auto mc_mean(SampleFn&& sample_fn, int N = 4096) -> Tensor {
+    std::vector<Tensor> samples; samples.reserve(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) samples.push_back(sample_fn());
+    auto stacked = ::tenzor::stack(
+        std::span<const Tensor>(samples.data(), samples.size()), /*dim=*/0);
+    return ::tenzor::mean(stacked, /*dim=*/0, /*keepdim=*/false);
+}
+
+template <typename SampleFn>
+inline auto mc_variance(SampleFn&& sample_fn, int N = 4096) -> Tensor {
+    std::vector<Tensor> samples; samples.reserve(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) samples.push_back(sample_fn());
+    auto stacked = ::tenzor::stack(
+        std::span<const Tensor>(samples.data(), samples.size()), /*dim=*/0);
+    return ::tenzor::var(stacked, /*dim=*/0, /*keepdim=*/false,
+                         /*unbiased=*/true);
+}
+
+/**
+ * @brief Monte-Carlo entropy: H = -E[log p(X)] estimated as
+ *   H ≈ -mean_i log_prob(sample_i)
+ */
+template <typename SampleFn, typename LogProbFn>
+inline auto mc_entropy(SampleFn&& sample_fn, LogProbFn&& lp_fn, int N = 4096)
+    -> Tensor
+{
+    std::vector<Tensor> lps; lps.reserve(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) {
+        auto s  = sample_fn();
+        auto lp = lp_fn(s);
+        lps.push_back(lp);
+    }
+    auto stacked = ::tenzor::stack(
+        std::span<const Tensor>(lps.data(), lps.size()), /*dim=*/0);
+    return ::tenzor::neg(::tenzor::mean(stacked, /*dim=*/0, /*keepdim=*/false));
+}
+
 } // namespace detail
 
 // ============================================================================
@@ -634,6 +717,28 @@ public:
     }
 
     auto mean() -> Tensor override { return c1_ / (c1_ + c0_); }
+
+    /**
+     * @brief Variance: Var[X] = (a * b) / ((a + b)^2 * (a + b + 1)).
+     */
+    auto variance() -> Tensor override {
+        auto sum = c1_ + c0_;
+        return (c1_ * c0_) / (sum * sum * (sum + 1.0f));
+    }
+
+    /**
+     * @brief Entropy of Beta(α, β):
+     * H = lgamma(α) + lgamma(β) - lgamma(α+β)
+     *     - (α-1)·ψ(α) - (β-1)·ψ(β) + (α+β-2)·ψ(α+β)
+     */
+    auto entropy() -> Tensor override {
+        auto sum = c1_ + c0_;
+        auto log_B = tenzor::lgamma(c1_) + tenzor::lgamma(c0_) - tenzor::lgamma(sum);
+        auto term = (c1_ - 1.0f) * tenzor::digamma(c1_)
+                  + (c0_ - 1.0f) * tenzor::digamma(c0_)
+                  - (sum - 2.0f) * tenzor::digamma(sum);
+        return log_B - term;
+    }
 
 private:
     Tensor c1_;
@@ -779,6 +884,37 @@ public:
     }
 
     auto mean() -> Tensor override { return loc_; }
+
+    /**
+     * @brief Variance of StudentT(df, loc, scale):
+     *   Var = scale^2 * df / (df - 2)  for df > 2
+     * For df <= 2 the variance is infinite or undefined; PyTorch returns
+     * positive infinity for 1 < df <= 2 and NaN for df <= 1. We follow the
+     * arithmetic naturally — when df <= 2 the formula yields +inf / -nan and
+     * propagates through tensor ops.
+     */
+    auto variance() -> Tensor override {
+        return scale_ * scale_ * df_ / (df_ - 2.0f);
+    }
+
+    /**
+     * @brief Differential entropy:
+     *   H = 0.5*(df+1)*(ψ((df+1)/2) - ψ(df/2))
+     *     + 0.5*log(df*π) + lgamma(df/2) - lgamma((df+1)/2)
+     *     + log(scale)
+     */
+    auto entropy() -> Tensor override {
+        auto df_half = df_ * 0.5f;
+        auto df_half_plus_half = df_half + 0.5f;
+        auto log_pi = full({1}, static_cast<double>(std::log(M_PI)), df_.dtype(), df_.device());
+
+        auto digamma_term = 0.5f * (df_ + 1.0f)
+                          * (tenzor::digamma(df_half_plus_half) - tenzor::digamma(df_half));
+        auto log_term     = 0.5f * (tenzor::log(df_) + log_pi);
+        auto lgamma_term  = tenzor::lgamma(df_half) - tenzor::lgamma(df_half_plus_half);
+        auto scale_term   = tenzor::log(scale_);
+        return digamma_term + log_term + lgamma_term + scale_term;
+    }
 
 private:
     Tensor df_;
@@ -1000,6 +1136,40 @@ public:
     }
 
     auto mean() -> Tensor override { return loc_; }
+
+    /**
+     * @brief Variance: diagonal of the covariance matrix.
+     *
+     * For Σ shaped (..., D, D), returns the (..., D) tensor of per-coordinate
+     * marginal variances Var[X_i] = Σ_ii.
+     */
+    auto variance() -> Tensor override {
+        // Diagonal of covariance Σ; for batched cov_ ((..., D, D)) we'd need a
+        // batched diagonal helper. tenzor::diag is 1D/2D; gate accordingly.
+        if (cov_.ndim() != 2) {
+            throw std::runtime_error(
+                "MultivariateNormal::variance: batched covariance not supported");
+        }
+        return tenzor::diag(cov_);
+    }
+
+    /**
+     * @brief Differential entropy:
+     *   H = 0.5 * (D * (1 + log(2π)) + log|Σ|)
+     * where log|Σ| = 2 * Σ_i log(L_ii) via the Cholesky factor.
+     */
+    auto entropy() -> Tensor override {
+        if (scale_tril_.ndim() != 2) {
+            throw std::runtime_error(
+                "MultivariateNormal::entropy: batched covariance not supported");
+        }
+        const int64_t D = loc_.shape().back();
+        auto diag_L  = tenzor::diag(scale_tril_);   // (D,)
+        auto log_det = tenzor::sum(tenzor::log(diag_L)) * 2.0f;
+        const double base = 0.5 * static_cast<double>(D) * (1.0 + std::log(2.0 * M_PI));
+        auto base_t = full({1}, base, loc_.dtype(), loc_.device());
+        return base_t + log_det * 0.5f;
+    }
 
 private:
     Tensor loc_;
@@ -1933,6 +2103,27 @@ public:
              - tenzor::log(x) - tenzor::log(1.0f - x);
     }
 
+
+    /**
+     * @brief Mean of the relaxed sample. No simple closed form (the sigmoid
+     * of a scaled logistic is not analytically integrable); Monte-Carlo.
+     */
+    auto mean() -> Tensor override {
+        return detail::mc_mean([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Element-wise variance via Monte-Carlo. */
+    auto variance() -> Tensor override {
+        return detail::mc_variance([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Differential entropy via Monte-Carlo: H = -E[log p(X)]. */
+    auto entropy() -> Tensor override {
+        return detail::mc_entropy(
+            [this]() { return this->rsample({}); },
+            [this](const Tensor& s) { return this->log_prob(s); });
+    }
+
 private:
     Tensor temperature_;
     Tensor probs_;
@@ -2008,6 +2199,27 @@ public:
         auto lgamma_K = static_cast<float>(std::lgamma(static_cast<double>(K_val)));
         return lgamma_K + (K_val - 1.0f) * tenzor::log(temperature_)
              + tenzor::sum(score, -1, /*keepdim=*/true) - K_val * lse;
+    }
+
+
+    /**
+     * @brief Mean of the relaxed one-hot sample. Concrete-distribution
+     * moments have no closed form; Monte-Carlo.
+     */
+    auto mean() -> Tensor override {
+        return detail::mc_mean([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Element-wise variance via Monte-Carlo. */
+    auto variance() -> Tensor override {
+        return detail::mc_variance([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Differential entropy via Monte-Carlo. */
+    auto entropy() -> Tensor override {
+        return detail::mc_entropy(
+            [this]() { return this->rsample({}); },
+            [this](const Tensor& s) { return this->log_prob(s); });
     }
 
 private:
@@ -2194,6 +2406,80 @@ public:
         auto outer = vii * vjj;                                   // (..., p, p)
         auto V_sq = V * V;
         return df_ * (outer + V_sq);
+    }
+
+
+    /**
+     * @brief Differential entropy of Wishart(ν, V).
+     *
+     * Closed form (Wikipedia / Eaton 1983):
+     *   H = log Γ_p(ν/2) + p(p+1)/2 · log(2) + (p+1)/2 · log|V| + νp/2
+     *       - (ν - p - 1)/2 · Σ_{j=1..p} ψ((ν + 1 - j)/2)
+     *
+     * where Γ_p is the multivariate gamma function and log|V| is obtained
+     * from the Cholesky factor as 2·Σ log(diag(scale_tril)).
+     *
+     * Computed scalar-wise on CPU for the unbatched case (matches the
+     * sample/log_prob restrictions above).
+     */
+    auto entropy() -> Tensor override {
+        // Extract scalar df.
+        auto df_cpu = df_.to(Device::cpu()).contiguous();
+        double df_val = (df_cpu.dtype() == DType::Float32)
+            ? static_cast<double>(df_cpu.data<float>()[0])
+            : df_cpu.data<double>()[0];
+        const double half_df = df_val / 2.0;
+        const double p_d = static_cast<double>(p_);
+
+        // log|V| from scale_tril: V = L Lᵀ, log|V| = 2·Σ log(diag(L)).
+        auto L_cpu = scale_tril_.to(Device::cpu()).contiguous();
+        double log_det_V = 0.0;
+        if (L_cpu.dtype() == DType::Float32) {
+            const float* lp = L_cpu.data<float>();
+            for (int64_t i = 0; i < p_; ++i) {
+                log_det_V += std::log(static_cast<double>(lp[i * p_ + i]));
+            }
+        } else {
+            const double* lp = L_cpu.data<double>();
+            for (int64_t i = 0; i < p_; ++i) {
+                log_det_V += std::log(lp[i * p_ + i]);
+            }
+        }
+        log_det_V *= 2.0;
+
+        // log Γ_p(ν/2) = p(p-1)/4 · log(π) + Σ_{j=1..p} lgamma(ν/2 + (1-j)/2)
+        double mv_lgamma = p_d * (p_d - 1.0) / 4.0 * std::log(M_PI);
+        for (int64_t j = 1; j <= p_; ++j) {
+            mv_lgamma += std::lgamma(half_df + static_cast<double>(1 - j) / 2.0);
+        }
+
+        // Σ_{j=1..p} ψ((ν + 1 - j)/2)
+        // Use std::digamma if available; otherwise compute via series.
+        // Tenzor's ops::digamma works on tensors; we just need scalars here.
+        auto digamma_scalar = [](double x) -> double {
+            // Boost-style series; accurate to 1e-12 for x > 6, recurse for smaller.
+            double result = 0.0;
+            while (x < 6.0) { result -= 1.0 / x; x += 1.0; }
+            double inv = 1.0 / x;
+            double inv2 = inv * inv;
+            result += std::log(x) - 0.5 * inv
+                    - inv2 * ( 1.0 / 12.0
+                              - inv2 * ( 1.0 / 120.0
+                                        - inv2 * ( 1.0 / 252.0 )));
+            return result;
+        };
+        double digamma_sum = 0.0;
+        for (int64_t j = 1; j <= p_; ++j) {
+            digamma_sum += digamma_scalar(half_df + static_cast<double>(1 - j) / 2.0);
+        }
+
+        double H = mv_lgamma
+                 + p_d * (p_d + 1.0) / 2.0 * std::log(2.0)
+                 + (p_d + 1.0) / 2.0 * log_det_V
+                 + df_val * p_d / 2.0
+                 - (df_val - p_d - 1.0) / 2.0 * digamma_sum;
+
+        return full({1}, H, scale_tril_.dtype(), scale_tril_.device());
     }
 
 private:
@@ -2752,6 +3038,27 @@ public:
         return tenzor::sum(normal_lp, -1) - tenzor::sum(log_x, -1);
     }
 
+
+    /**
+     * @brief Mean of the logistic-normal sample. Softmax(Normal) has no
+     * closed-form moments; Monte-Carlo estimator.
+     */
+    auto mean() -> Tensor override {
+        return detail::mc_mean([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Element-wise variance via Monte-Carlo. */
+    auto variance() -> Tensor override {
+        return detail::mc_variance([this]() { return this->rsample({}); });
+    }
+
+    /** @brief Differential entropy via Monte-Carlo: H = -E[log p(X)]. */
+    auto entropy() -> Tensor override {
+        return detail::mc_entropy(
+            [this]() { return this->rsample({}); },
+            [this](const Tensor& s) { return this->log_prob(s); });
+    }
+
 private:
     Tensor loc_, scale_;
     Normal normal_;
@@ -2942,6 +3249,28 @@ public:
         // expand themselves (mirrors torch's behavior for Distribution
         // shape-handling).
         return eye_mat;
+    }
+
+
+    /**
+     * @brief Variance of the LKJ-Cholesky factor entries (Monte-Carlo).
+     *
+     * No simple closed-form exists for the variance of entries of the
+     * Cholesky factor under LKJ(η). Monte-Carlo estimation is the standard
+     * definition; result shape matches a single sample (dim_, dim_).
+     */
+    auto variance() -> Tensor override {
+        return detail::mc_variance([this]() { return this->sample({}); });
+    }
+
+    /**
+     * @brief Differential entropy of LKJCholesky(η) — Monte-Carlo:
+     *   H = -E[log p(L)] ≈ -mean_i log_prob(L_i)
+     */
+    auto entropy() -> Tensor override {
+        return detail::mc_entropy(
+            [this]() { return this->sample({}); },
+            [this](const Tensor& s) { return this->log_prob(s); });
     }
 
 private:

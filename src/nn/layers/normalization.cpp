@@ -2820,7 +2820,11 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
     }
 
-    // Vulkan fast path: dispatch to GPU RMSNorm shader (inference only)
+    // Vulkan fast path: dispatch to GPU RMSNorm shader, no autograd wrapper.
+    // E.11: this branch is an inference-time optimization (skips Variable
+    // wrapping) — training/grad-tracked calls fall through to the standard
+    // path below which also uses Vulkan's FusedRMSNorm but plumbs the
+    // result through RMSNormBackward for full autograd support.
     if (!needs_input_grad && input.tensor().device().type == Device::Type::Vulkan) {
         const Tensor& x = input.tensor();
 

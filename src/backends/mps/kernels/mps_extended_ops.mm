@@ -277,16 +277,15 @@ std::vector<Tensor> mps_sort_kernel(const Tensor& input, int64_t dim, bool desce
         [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
         return {out_values, out_indices};
     }
-    // Non-last-dim: CPU fallback via shared memory
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Descending, descending);
-    auto result = dispatch(OpId::Sort, {cpu_in}, attrs);
-    std::vector<Tensor> gpu_result;
-    for (auto& t : result) gpu_result.push_back(t.to(dev));
-    return gpu_result;
+    // H: non-last-dim — permute on-device so dim is last, then recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_sort_kernel(transposed, ndim - 1, descending);
 }
 
 Tensor mps_argsort_kernel(const Tensor& input, int64_t dim, bool descending) {
@@ -323,12 +322,21 @@ Tensor mps_argsort_kernel(const Tensor& input, int64_t dim, bool descending) {
         [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
         return out_indices;
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_bool(AttrKey::Descending, descending);
-    return dispatch(OpId::ArgSort, {cpu_in}, attrs)[0].to(dev);
+    // H: non-last-dim — permute on-device so dim is last, then recurse,
+    // then inverse-permute the indices back (argsort preserves shape).
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    auto idx_perm = mps_argsort_kernel(transposed, ndim - 1, descending);
+    std::vector<int64_t> inv(ndim);
+    for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+    OpAttributes ipattrs;
+    ipattrs.set(AttrKey::Dims, inv);
+    return dispatch(OpId::Permute, {idx_perm}, ipattrs)[0].contiguous();
 }
 
 std::vector<Tensor> mps_topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest) {
@@ -371,16 +379,15 @@ std::vector<Tensor> mps_topk_kernel(const Tensor& input, int64_t k, int64_t dim,
         [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
         return {out_values, out_indices};
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    attrs.set_int(AttrKey::K, k);
-    attrs.set_bool(AttrKey::Largest, largest);
-    auto result = dispatch(OpId::TopK, {cpu_in}, attrs);
-    std::vector<Tensor> gpu_result;
-    for (auto& t : result) gpu_result.push_back(t.to(dev));
-    return gpu_result;
+    // H: non-last-dim — permute on-device and recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_topk_kernel(transposed, k, ndim - 1, largest);
 }
 
 std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
@@ -431,14 +438,15 @@ std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
                     scratch_idx.data_ptr(), num_rows * sizeof(int32_t));
         return {out_values, out_indices};
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    auto result = dispatch(OpId::Median, {cpu_in}, attrs);
-    std::vector<Tensor> gpu_result;
-    for (auto& t : result) gpu_result.push_back(t.to(dev));
-    return gpu_result;
+    // H: non-last-dim — permute on-device and recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_median_kernel(transposed, ndim - 1);
 }
 
 std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
@@ -487,14 +495,15 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
                     scratch_idx.data_ptr(), num_rows * sizeof(int32_t));
         return {out_values, out_indices};
     }
-    auto dev = input.device();
-    auto cpu_in = input.to(Device::cpu());
-    OpAttributes attrs;
-    attrs.set_int(AttrKey::Dim, dim);
-    auto result = dispatch(OpId::Mode, {cpu_in}, attrs);
-    std::vector<Tensor> gpu_result;
-    for (auto& t : result) gpu_result.push_back(t.to(dev));
-    return gpu_result;
+    // H: non-last-dim — permute on-device and recurse.
+    std::vector<int64_t> perm;
+    perm.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+    perm.push_back(dim);
+    OpAttributes pattrs;
+    pattrs.set(AttrKey::Dims, perm);
+    auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+    return mps_mode_kernel(transposed, ndim - 1);
 }
 
 // ============================================================================
@@ -701,30 +710,117 @@ Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_thres
 // the GPU->CPU->GPU roundtrip since MPS uses shared memory.
 // ============================================================================
 
+// H: native MPS sparse SpMM/SpMV — Metal compute shaders. CSR layout:
+// crow (m+1, int64), col (nnz, int64), vals (nnz, dtype). One Metal
+// thread per output row (SpMV) or per (row, col) pair (SpMM).
+
 Tensor mps_sparse_spmm_kernel(const Tensor& crow, const Tensor& col, const Tensor& vals,
                                const Tensor& dense) {
-    // Direct Accelerate sparse routines on shared memory
-    // For now, delegate to CPU dispatch but skip the .to() calls since
-    // MPS tensors ARE in shared memory on Apple Silicon
+    ensure_initialized();
     auto dev = crow.device();
-    // Create CPU-device views pointing to same memory
-    auto cpu_crow = crow.to(Device::cpu());
-    auto cpu_col = col.to(Device::cpu());
-    auto cpu_vals = vals.to(Device::cpu());
-    auto cpu_dense = dense.to(Device::cpu());
-    auto result = dispatch(OpId::SparseSpMM, {cpu_crow, cpu_col, cpu_vals, cpu_dense}, OpAttributes{});
-    return result[0].to(dev);
+    auto B_shape = dense.shape();
+    uint32_t m = static_cast<uint32_t>(crow.numel() - 1);
+    uint32_t n = static_cast<uint32_t>(B_shape.back());
+
+    Tensor output({static_cast<int64_t>(m), static_cast<int64_t>(n)},
+                   dense.dtype(), dev);
+
+    const std::string shader_name =
+        (dense.dtype() == DType::Float16) ? "sparse_spmm_kernel_f16"
+                                          : "sparse_spmm_kernel_f32";
+    // Float64 has no native Metal type; route as Float32 widening.
+    Tensor vals_use = vals;
+    Tensor dense_use = dense;
+    Tensor output_use = output;
+    if (vals.dtype() == DType::Float64) {
+        vals_use   = vals.to(DType::Float32);
+        dense_use  = dense.to(DType::Float32);
+        output_use = Tensor({static_cast<int64_t>(m), static_cast<int64_t>(n)},
+                            DType::Float32, dev);
+    }
+
+    auto pipeline = get_pipeline(shader_name);
+    id<MTLBuffer> buf_crow  = get_buffer(crow);
+    id<MTLBuffer> buf_col   = get_buffer(col);
+    id<MTLBuffer> buf_vals  = get_buffer(vals_use);
+    id<MTLBuffer> buf_B     = get_buffer(dense_use);
+    id<MTLBuffer> buf_C     = get_buffer(output_use);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:buf_crow  offset:0 atIndex:0];
+    [enc setBuffer:buf_col   offset:0 atIndex:1];
+    [enc setBuffer:buf_vals  offset:0 atIndex:2];
+    [enc setBuffer:buf_B     offset:0 atIndex:3];
+    [enc setBuffer:buf_C     offset:0 atIndex:4];
+    [enc setBytes:&m length:sizeof(m) atIndex:5];
+    [enc setBytes:&n length:sizeof(n) atIndex:6];
+
+    MTLSize grid = MTLSizeMake(n, m, 1);
+    NSUInteger tg_w = std::min<NSUInteger>(pipeline.threadExecutionWidth, n);
+    NSUInteger tg_h = std::min<NSUInteger>(
+        pipeline.maxTotalThreadsPerThreadgroup / tg_w, m);
+    [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg_w, tg_h, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    if (vals.dtype() == DType::Float64) {
+        return output_use.to(DType::Float64);
+    }
+    return output_use;
 }
 
 Tensor mps_sparse_spmv_kernel(const Tensor& crow, const Tensor& col, const Tensor& vals,
                                const Tensor& vec) {
+    ensure_initialized();
     auto dev = crow.device();
-    auto cpu_crow = crow.to(Device::cpu());
-    auto cpu_col = col.to(Device::cpu());
-    auto cpu_vals = vals.to(Device::cpu());
-    auto cpu_vec = vec.to(Device::cpu());
-    auto result = dispatch(OpId::SparseSpMV, {cpu_crow, cpu_col, cpu_vals, cpu_vec}, OpAttributes{});
-    return result[0].to(dev);
+    uint32_t m = static_cast<uint32_t>(crow.numel() - 1);
+
+    Tensor output({static_cast<int64_t>(m)}, vals.dtype(), dev);
+
+    const std::string shader_name =
+        (vals.dtype() == DType::Float16) ? "sparse_spmv_kernel_f16"
+                                         : "sparse_spmv_kernel_f32";
+    Tensor vals_use = vals;
+    Tensor vec_use = vec;
+    Tensor output_use = output;
+    if (vals.dtype() == DType::Float64) {
+        vals_use   = vals.to(DType::Float32);
+        vec_use    = vec.to(DType::Float32);
+        output_use = Tensor({static_cast<int64_t>(m)}, DType::Float32, dev);
+    }
+
+    auto pipeline = get_pipeline(shader_name);
+    id<MTLBuffer> buf_crow = get_buffer(crow);
+    id<MTLBuffer> buf_col  = get_buffer(col);
+    id<MTLBuffer> buf_vals = get_buffer(vals_use);
+    id<MTLBuffer> buf_x    = get_buffer(vec_use);
+    id<MTLBuffer> buf_y    = get_buffer(output_use);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:buf_crow offset:0 atIndex:0];
+    [enc setBuffer:buf_col  offset:0 atIndex:1];
+    [enc setBuffer:buf_vals offset:0 atIndex:2];
+    [enc setBuffer:buf_x    offset:0 atIndex:3];
+    [enc setBuffer:buf_y    offset:0 atIndex:4];
+    [enc setBytes:&m length:sizeof(m) atIndex:5];
+
+    MTLSize grid = MTLSizeMake(m, 1, 1);
+    NSUInteger tg = std::min<NSUInteger>(
+        pipeline.maxTotalThreadsPerThreadgroup, m);
+    [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    if (vals.dtype() == DType::Float64) {
+        return output_use.to(DType::Float64);
+    }
+    return output_use;
 }
 
 // ============================================================================

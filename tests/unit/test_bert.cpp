@@ -609,18 +609,33 @@ TEST_F(BertTest, ModelHubParameterNameMapping) {
     EXPECT_NE(mapped.find("encoder.layers.0"), std::string::npos);
 }
 
-TEST_F(BertTest, ModelHubDownloadNotImplemented) {
-    // Should throw error since downloading is not yet implemented
-    EXPECT_THROW(
-        BertModelHub::download_model("bert-base-uncased"),
-        std::runtime_error
-    );
+// A.4: BertModelHub::download_model is now implemented end-to-end via
+// ModelHub::download_pretrained_safetensors (libcurl + safetensors mirror).
+// The test exercises the public entry point — succeeds when cached or
+// network-reachable; the older "throws because not implemented" assertion
+// no longer matches reality.
+TEST_F(BertTest, ModelHubDownloadEntryPoint) {
+    // Don't assert success unconditionally — CI may be offline. Just verify
+    // the call either returns a path (cached / downloaded) or throws a
+    // network/curl runtime_error. It should NEVER throw "not implemented".
+    try {
+        auto path = BertModelHub::download_model("bert-base-uncased");
+        EXPECT_FALSE(path.empty());
+        EXPECT_TRUE(std::filesystem::exists(path));
+    } catch (const std::runtime_error& e) {
+        // Accept network/curl errors; reject the legacy "not implemented".
+        std::string msg = e.what();
+        EXPECT_EQ(msg.find("not yet implemented"), std::string::npos)
+            << "download_model should not throw 'not yet implemented' anymore; got: " << msg;
+    }
 }
 
-TEST_F(BertTest, ModelHubLoadCheckpointNotImplemented) {
-    // Should throw error since checkpoint loading is not yet implemented
+// A.4: load_pytorch_checkpoint is now implemented (delegates to
+// tenzor::io::load_torch_pickle / SafeTensorsSerializer by extension).
+// A non-existent path now throws "file not found", not "not implemented".
+TEST_F(BertTest, ModelHubLoadCheckpointMissingFile) {
     EXPECT_THROW(
-        BertModelHub::load_pytorch_checkpoint("dummy_path.bin"),
+        BertModelHub::load_pytorch_checkpoint("nonexistent_path.bin"),
         std::runtime_error
     );
 }

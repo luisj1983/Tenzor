@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
@@ -265,10 +266,10 @@ __global__ void lstm_cell_forward_fused_fp16(
         int64_t o_offset = gate_offset + 3 * hidden_size;
 
         // Load and convert to float for computation
-        float i_gate = __half2float(gates[i_offset]);
-        float f_gate = __half2float(gates[f_offset]);
-        float g_gate = __half2float(gates[g_offset]);
-        float o_gate = __half2float(gates[o_offset]);
+        float i_gate = tenzor::rocm::safe_h2f(gates[i_offset]);
+        float f_gate = tenzor::rocm::safe_h2f(gates[f_offset]);
+        float g_gate = tenzor::rocm::safe_h2f(gates[g_offset]);
+        float o_gate = tenzor::rocm::safe_h2f(gates[o_offset]);
 
         // Apply activations
         float i_t = 1.0f / (1.0f + expf(-i_gate));
@@ -276,7 +277,7 @@ __global__ void lstm_cell_forward_fused_fp16(
         float o_t = 1.0f / (1.0f + expf(-o_gate));
         float g_t = tanhf(g_gate);
 
-        float c_prev_val = __half2float(c_prev[idx]);
+        float c_prev_val = tenzor::rocm::safe_h2f(c_prev[idx]);
 
         // Update cell state
         float c_t = f_t * c_prev_val + i_t * g_t;
@@ -285,8 +286,8 @@ __global__ void lstm_cell_forward_fused_fp16(
         float h_t = o_t * tanhf(c_t);
 
         // Store outputs
-        c_out[idx] = __float2half(c_t);
-        h_out[idx] = __float2half(h_t);
+        c_out[idx] = tenzor::rocm::safe_f2h(c_t);
+        h_out[idx] = tenzor::rocm::safe_f2h(h_t);
     }
 }
 
@@ -316,22 +317,22 @@ __global__ void lstm_cell_backward_fused_fp16(
         int64_t o_offset = gate_offset + 3 * hidden_size;
 
         // Load and convert to float
-        float i_gate = __half2float(gates[i_offset]);
-        float f_gate = __half2float(gates[f_offset]);
-        float g_gate = __half2float(gates[g_offset]);
-        float o_gate = __half2float(gates[o_offset]);
+        float i_gate = tenzor::rocm::safe_h2f(gates[i_offset]);
+        float f_gate = tenzor::rocm::safe_h2f(gates[f_offset]);
+        float g_gate = tenzor::rocm::safe_h2f(gates[g_offset]);
+        float o_gate = tenzor::rocm::safe_h2f(gates[o_offset]);
 
         float i_t = 1.0f / (1.0f + expf(-i_gate));
         float f_t = 1.0f / (1.0f + expf(-f_gate));
         float g_t = tanhf(g_gate);
         float o_t = 1.0f / (1.0f + expf(-o_gate));
 
-        float c_prev_val = __half2float(c_prev[idx]);
-        float c_t = __half2float(c_out[idx]);
+        float c_prev_val = tenzor::rocm::safe_h2f(c_prev[idx]);
+        float c_t = tenzor::rocm::safe_h2f(c_out[idx]);
         float tanh_c_t = tanhf(c_t);
 
-        float dh = __half2float(grad_h[idx]);
-        float dc = __half2float(grad_c[idx]);
+        float dh = tenzor::rocm::safe_h2f(grad_h[idx]);
+        float dc = tenzor::rocm::safe_h2f(grad_c[idx]);
 
         // Gradients
         dc += dh * o_t * (1.0f - tanh_c_t * tanh_c_t);
@@ -348,11 +349,11 @@ __global__ void lstm_cell_backward_fused_fp16(
         float dg_gate = dg_t * (1.0f - g_t * g_t);
 
         // Store gradients
-        grad_gates[i_offset] = __float2half(di_gate);
-        grad_gates[f_offset] = __float2half(df_gate);
-        grad_gates[g_offset] = __float2half(dg_gate);
-        grad_gates[o_offset] = __float2half(do_gate);
-        grad_c_prev[idx] = __float2half(dc_prev);
+        grad_gates[i_offset] = tenzor::rocm::safe_f2h(di_gate);
+        grad_gates[f_offset] = tenzor::rocm::safe_f2h(df_gate);
+        grad_gates[g_offset] = tenzor::rocm::safe_f2h(dg_gate);
+        grad_gates[o_offset] = tenzor::rocm::safe_f2h(do_gate);
+        grad_c_prev[idx] = tenzor::rocm::safe_f2h(dc_prev);
     }
 }
 

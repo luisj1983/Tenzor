@@ -184,8 +184,12 @@ auto ExportedProgram::load(const std::string& path) -> ExportedProgram {
 
     uint32_t version = read_uint32(file);
     if (version != TZEP_VERSION) {
-        throw std::runtime_error("ExportedProgram::load: unsupported version " +
-                                 std::to_string(version));
+        throw std::runtime_error(
+            "ExportedProgram::load: unsupported version " +
+            std::to_string(version) +
+            " (this build supports TZEP version " +
+            std::to_string(TZEP_VERSION) +
+            "). Re-export the program with the current Tenzor build.");
     }
 
     auto impl = std::make_shared<Impl>();

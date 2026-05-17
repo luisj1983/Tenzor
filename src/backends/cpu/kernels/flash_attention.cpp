@@ -117,6 +117,21 @@ inline float hsum_avx2(__m256 v) {
 inline float hsum_avx512(__m512 v) {
     return _mm512_reduce_add_ps(v);
 }
+/// E.4: Horizontal sum of 8 doubles in an __m512d register (Float64 path)
+inline double hsum_avx512(__m512d v) {
+    return _mm512_reduce_add_pd(v);
+}
+#endif
+
+#ifdef TENZOR_FLASH_AVX2
+/// E.4: Horizontal sum of 4 doubles in an __m256d register (Float64 path)
+inline double hsum_avx2(__m256d v) {
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d sum = _mm_add_pd(hi, lo);
+    sum = _mm_hadd_pd(sum, sum);
+    return _mm_cvtsd_f64(sum);
+}
 #endif
 
 // ============================================================================
@@ -210,6 +225,99 @@ inline void fma_vector(float* out, float weight, const float* src, int64_t len) 
 #endif
 
     // Scalar tail
+    for (; d < len; ++d) {
+        out[d] += weight * src[d];
+    }
+}
+
+// ============================================================================
+// E.4: Native Float64 SIMD micro-kernels (mirrors the float versions above).
+// Allows flash_attention_backward to compute natively in `double` rather
+// than widening to float and narrowing back, preserving full FP64 mantissa
+// precision through the GEMM + softmax + dropout chain.
+// ============================================================================
+
+inline double dot_product(const double* a, const double* b, int64_t len) {
+    double result = 0.0;
+    int64_t d = 0;
+
+#if defined(TENZOR_FLASH_AVX512)
+    {
+        __m512d acc = _mm512_setzero_pd();
+        for (; d + 8 <= len; d += 8) {
+            __m512d va = _mm512_loadu_pd(a + d);
+            __m512d vb = _mm512_loadu_pd(b + d);
+            acc = _mm512_fmadd_pd(va, vb, acc);
+        }
+        result += hsum_avx512(acc);
+    }
+#elif defined(TENZOR_FLASH_AVX2)
+    {
+        __m256d acc = _mm256_setzero_pd();
+        for (; d + 4 <= len; d += 4) {
+            __m256d va = _mm256_loadu_pd(a + d);
+            __m256d vb = _mm256_loadu_pd(b + d);
+            acc = _mm256_fmadd_pd(va, vb, acc);
+        }
+        result += hsum_avx2(acc);
+    }
+#endif
+
+    for (; d < len; ++d) {
+        result += a[d] * b[d];
+    }
+    return result;
+}
+
+inline void scale_vector(double* out, double scale, int64_t len) {
+    int64_t d = 0;
+
+#if defined(TENZOR_FLASH_AVX512)
+    {
+        __m512d vs = _mm512_set1_pd(scale);
+        for (; d + 8 <= len; d += 8) {
+            __m512d v = _mm512_loadu_pd(out + d);
+            _mm512_storeu_pd(out + d, _mm512_mul_pd(v, vs));
+        }
+    }
+#elif defined(TENZOR_FLASH_AVX2)
+    {
+        __m256d vs = _mm256_set1_pd(scale);
+        for (; d + 4 <= len; d += 4) {
+            __m256d v = _mm256_loadu_pd(out + d);
+            _mm256_storeu_pd(out + d, _mm256_mul_pd(v, vs));
+        }
+    }
+#endif
+
+    for (; d < len; ++d) {
+        out[d] *= scale;
+    }
+}
+
+inline void fma_vector(double* out, double weight, const double* src, int64_t len) {
+    int64_t d = 0;
+
+#if defined(TENZOR_FLASH_AVX512)
+    {
+        __m512d vw = _mm512_set1_pd(weight);
+        for (; d + 8 <= len; d += 8) {
+            __m512d vo = _mm512_loadu_pd(out + d);
+            __m512d vs = _mm512_loadu_pd(src + d);
+            _mm512_storeu_pd(out + d, _mm512_fmadd_pd(vw, vs, vo));
+        }
+    }
+#elif defined(TENZOR_FLASH_AVX2)
+    {
+        __m256d vw = _mm256_set1_pd(weight);
+        for (; d + 4 <= len; d += 4) {
+            __m256d vo = _mm256_loadu_pd(out + d);
+            __m256d vs = _mm256_loadu_pd(src + d);
+            _mm256_storeu_pd(out + d, _mm256_fmadd_pd(vw, vs, vo));
+        }
+    }
+#endif
+
     for (; d < len; ++d) {
         out[d] += weight * src[d];
     }
@@ -464,19 +572,20 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
 //
 // Returns {dQ, dK, dV}
 
-auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K,
-                               const Tensor& V, const Tensor& O,
-                               float scale, bool causal,
-                               float dropout_p,
-                               uint64_t philox_seed,
-                               uint64_t /*philox_offset*/) -> std::vector<Tensor> {
-    // Per docs/internals/attention-contract.md: backward consumes scale, causal,
-    // dropout_p plus the saved Philox (seed, offset) so the dropout mask the
-    // forward used can be reproduced exactly. philox_offset is currently
-    // unused — the forward derives the per-element counter from (b,h,qi,ki)
-    // alone. If a future change adds a global offset, it'll be used here.
+// E.4: native Float32/Float64 kernel. Templated on T (float or double) so
+// FP64 inputs use cblas_dgemm + `double` arithmetic throughout — no
+// widen-narrow precision loss. FP16/BF16 still widen to Float32 (the
+// canonical mixed-precision pattern matching PyTorch / FlashAttention-2).
+template <typename T>
+static auto flash_attention_backward_typed(
+    const Tensor& dO, const Tensor& Q, const Tensor& K,
+    const Tensor& V, const Tensor& O,
+    T scale, bool causal,
+    T dropout_p,
+    uint64_t philox_seed) -> std::vector<Tensor>
+{
     auto q_shape = Q.shape();
-    int64_t batch = q_shape[0];
+    int64_t batch     = q_shape[0];
     int64_t num_heads = q_shape[1];
     int64_t N = q_shape[2];      // query sequence length
     int64_t D = q_shape[3];      // head dimension
@@ -484,38 +593,24 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
     auto k_shape = K.shape();
     int64_t M = k_shape[2];      // key/value sequence length
 
-    // Multi-dtype: upcast non-Float32 inputs, compute in Float32, downcast outputs
-    if (Q.dtype() == DType::Float64 || Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
-        auto orig_dtype = Q.dtype();
-        auto result = flash_attention_backward(
-            dO.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
-            V.to(DType::Float32), O.to(DType::Float32),
-            scale, causal, dropout_p, philox_seed, 0);
-        return {result[0].to(orig_dtype), result[1].to(orig_dtype), result[2].to(orig_dtype)};
-    } else if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("Flash attention backward: unsupported dtype " +
-                                 std::string(dtype_name(Q.dtype())));
-    }
-
-    const bool apply_dropout = dropout_p > 0.0f && philox_seed != 0;
-    const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
-    const uint32_t rng_seed = static_cast<uint32_t>(philox_seed);
+    const bool apply_dropout    = dropout_p > T(0) && philox_seed != 0;
+    const T    dropout_scale    = apply_dropout ? T(1) / (T(1) - dropout_p) : T(1);
+    const uint32_t rng_seed     = static_cast<uint32_t>(philox_seed);
 
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
     std::vector<int64_t> k_shape_vec(k_shape.begin(), k_shape.end());
-
     Tensor dQ = zeros(q_shape_vec, Q.dtype(), Q.device());
     Tensor dK = zeros(k_shape_vec, K.dtype(), K.device());
     Tensor dV = zeros(k_shape_vec, V.dtype(), V.device());
 
-    const float* dO_data = dO.data<float>();
-    const float* q_data  = Q.data<float>();
-    const float* k_data  = K.data<float>();
-    const float* v_data  = V.data<float>();
-    const float* o_data  = O.data<float>();
-    float* dq_data = dQ.data<float>();
-    float* dk_data = dK.data<float>();
-    float* dv_data = dV.data<float>();
+    const T* dO_data = dO.data<T>();
+    const T* q_data  = Q.data<T>();
+    const T* k_data  = K.data<T>();
+    const T* v_data  = V.data<T>();
+    const T* o_data  = O.data<T>();
+    T* dq_data = dQ.data<T>();
+    T* dk_data = dK.data<T>();
+    T* dv_data = dV.data<T>();
 
     #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
     for (int64_t b = 0; b < batch; ++b) {
@@ -523,30 +618,38 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
             int64_t q_offset  = ((b * num_heads + h) * N) * D;
             int64_t kv_offset = ((b * num_heads + h) * M) * D;
 
-            const float* q_bh  = q_data  + q_offset;
-            const float* k_bh  = k_data  + kv_offset;
-            const float* v_bh  = v_data  + kv_offset;
-            const float* dO_bh = dO_data + q_offset;
-            const float* o_bh  = o_data  + q_offset;
-            float* dq_bh = dq_data + q_offset;
-            float* dk_bh = dk_data + kv_offset;
-            float* dv_bh = dv_data + kv_offset;
+            const T* q_bh  = q_data  + q_offset;
+            const T* k_bh  = k_data  + kv_offset;
+            const T* v_bh  = v_data  + kv_offset;
+            const T* dO_bh = dO_data + q_offset;
+            const T* o_bh  = o_data  + q_offset;
+            T* dq_bh = dq_data + q_offset;
+            T* dk_bh = dk_data + kv_offset;
+            T* dv_bh = dv_data + kv_offset;
 
-            // Allocate scratch: S [N x M], P [N x M], D_vec [N]
-            std::vector<float> S(static_cast<size_t>(N * M));
-            std::vector<float> P(static_cast<size_t>(N * M));
-            std::vector<float> D_vec(static_cast<size_t>(N));
+            std::vector<T> S(static_cast<size_t>(N * M));
+            std::vector<T> P(static_cast<size_t>(N * M));
+            std::vector<T> D_vec(static_cast<size_t>(N));
 
-            // Step 1: Compute S = Q @ K^T * scale
+            // Step 1: S = Q @ K^T * scale
 #ifdef TENZOR_USE_MKL
-            // S = Q @ K^T  =>  C(N,M) = A(N,D) * B(D,M) where B = K^T
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                        static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
-                        scale,         // alpha = scale (fuse scaling into gemm)
-                        q_bh, static_cast<MKL_INT>(D),
-                        k_bh, static_cast<MKL_INT>(D),
-                        0.0f,          // beta
-                        S.data(), static_cast<MKL_INT>(M));
+            if constexpr (std::is_same_v<T, float>) {
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
+                            scale,
+                            q_bh, static_cast<MKL_INT>(D),
+                            k_bh, static_cast<MKL_INT>(D),
+                            0.0f,
+                            S.data(), static_cast<MKL_INT>(M));
+            } else {
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
+                            scale,
+                            q_bh, static_cast<MKL_INT>(D),
+                            k_bh, static_cast<MKL_INT>(D),
+                            0.0,
+                            S.data(), static_cast<MKL_INT>(M));
+            }
 #else
             for (int64_t i = 0; i < N; ++i) {
                 for (int64_t j = 0; j < M; ++j) {
@@ -555,7 +658,287 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
             }
 #endif
 
-            // Step 2: Apply causal mask
+            // Step 2: causal mask
+            if (causal) {
+                for (int64_t i = 0; i < N; ++i) {
+                    for (int64_t j = i + 1; j < M; ++j) {
+                        S[i * M + j] = -std::numeric_limits<T>::infinity();
+                    }
+                }
+            }
+
+            // Step 3: P = softmax(S, dim=-1) row-wise
+            for (int64_t i = 0; i < N; ++i) {
+                T max_val = -std::numeric_limits<T>::infinity();
+                for (int64_t j = 0; j < M; ++j) {
+                    max_val = std::max(max_val, S[i * M + j]);
+                }
+                T sum_exp = T(0);
+                for (int64_t j = 0; j < M; ++j) {
+                    T val = std::exp(S[i * M + j] - max_val);
+                    P[i * M + j] = val;
+                    sum_exp += val;
+                }
+                T inv_sum = (sum_exp > T(0)) ? T(1) / sum_exp : T(0);
+                for (int64_t j = 0; j < M; ++j) {
+                    P[i * M + j] *= inv_sum;
+                }
+            }
+
+            // Step 3b: Replay forward dropout via Philox(seed; counter=b,h,i,j).
+            if (apply_dropout) {
+                for (int64_t i = 0; i < N; ++i) {
+                    for (int64_t j = 0; j < M; ++j) {
+                        Philox4x32 philox;
+                        philox.counter[0] = static_cast<uint32_t>(b);
+                        philox.counter[1] = static_cast<uint32_t>(h);
+                        philox.counter[2] = static_cast<uint32_t>(i);
+                        philox.counter[3] = static_cast<uint32_t>(j);
+                        philox.key[0] = rng_seed;
+                        philox.key[1] = rng_seed ^ 0x1BD11BDAU;
+                        uint32_t rng_out[4];
+                        philox.generate(rng_out);
+                        // Philox emits Float32 uniform — promote to T for the
+                        // comparison so the dropout mask is bit-identical
+                        // across float and double paths.
+                        T rand_val = static_cast<T>(
+                            Philox4x32::uint32_to_uniform(rng_out[0]));
+                        T& p_ref = P[i * M + j];
+                        if (rand_val < dropout_p) {
+                            p_ref = T(0);
+                        } else {
+                            p_ref *= dropout_scale;
+                        }
+                    }
+                }
+            }
+
+            // Step 4: D_i = rowsum(dO * O, dim=-1)
+            for (int64_t i = 0; i < N; ++i) {
+                D_vec[i] = dot_product(dO_bh + i * D, o_bh + i * D, D);
+            }
+
+            // Step 5: dV = P^T @ dO  [M x D]
+#ifdef TENZOR_USE_MKL
+            if constexpr (std::is_same_v<T, float>) {
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
+                            1.0f,
+                            P.data(), static_cast<MKL_INT>(M),
+                            dO_bh, static_cast<MKL_INT>(D),
+                            0.0f,
+                            dv_bh, static_cast<MKL_INT>(D));
+            } else {
+                cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
+                            1.0,
+                            P.data(), static_cast<MKL_INT>(M),
+                            dO_bh, static_cast<MKL_INT>(D),
+                            0.0,
+                            dv_bh, static_cast<MKL_INT>(D));
+            }
+#else
+            for (int64_t j = 0; j < M; ++j) {
+                for (int64_t i = 0; i < N; ++i) {
+                    T p_val = P[i * M + j];
+                    if (p_val != T(0)) {
+                        fma_vector(dv_bh + j * D, p_val, dO_bh + i * D, D);
+                    }
+                }
+            }
+#endif
+
+            // Step 6: dP = dO @ V^T, then dS = P * (dP - D_i) [reuse S storage]
+            std::vector<T>& dS = S;
+
+#ifdef TENZOR_USE_MKL
+            if constexpr (std::is_same_v<T, float>) {
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
+                            1.0f,
+                            dO_bh, static_cast<MKL_INT>(D),
+                            v_bh, static_cast<MKL_INT>(D),
+                            0.0f,
+                            dS.data(), static_cast<MKL_INT>(M));
+            } else {
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
+                            1.0,
+                            dO_bh, static_cast<MKL_INT>(D),
+                            v_bh, static_cast<MKL_INT>(D),
+                            0.0,
+                            dS.data(), static_cast<MKL_INT>(M));
+            }
+
+            for (int64_t i = 0; i < N; ++i) {
+                T d_i = D_vec[i];
+                for (int64_t j = 0; j < M; ++j) {
+                    int64_t idx = i * M + j;
+                    dS[idx] = P[idx] * (dS[idx] - d_i);
+                }
+            }
+#else
+            for (int64_t i = 0; i < N; ++i) {
+                T d_i = D_vec[i];
+                for (int64_t j = 0; j < M; ++j) {
+                    T dp = dot_product(dO_bh + i * D, v_bh + j * D, D);
+                    dS[i * M + j] = P[i * M + j] * (dp - d_i);
+                }
+            }
+#endif
+
+            if (causal) {
+                for (int64_t i = 0; i < N; ++i) {
+                    for (int64_t j = i + 1; j < M; ++j) {
+                        dS[i * M + j] = T(0);
+                    }
+                }
+            }
+
+            // Step 7: dQ = dS @ K * scale  [N x D]
+#ifdef TENZOR_USE_MKL
+            if constexpr (std::is_same_v<T, float>) {
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(D), static_cast<MKL_INT>(M),
+                            scale,
+                            dS.data(), static_cast<MKL_INT>(M),
+                            k_bh, static_cast<MKL_INT>(D),
+                            0.0f,
+                            dq_bh, static_cast<MKL_INT>(D));
+            } else {
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(N), static_cast<MKL_INT>(D), static_cast<MKL_INT>(M),
+                            scale,
+                            dS.data(), static_cast<MKL_INT>(M),
+                            k_bh, static_cast<MKL_INT>(D),
+                            0.0,
+                            dq_bh, static_cast<MKL_INT>(D));
+            }
+#else
+            for (int64_t i = 0; i < N; ++i) {
+                for (int64_t j = 0; j < M; ++j) {
+                    T ds_val = dS[i * M + j] * scale;
+                    if (ds_val != T(0)) {
+                        fma_vector(dq_bh + i * D, ds_val, k_bh + j * D, D);
+                    }
+                }
+            }
+#endif
+
+            // Step 8: dK = dS^T @ Q * scale  [M x D]
+#ifdef TENZOR_USE_MKL
+            if constexpr (std::is_same_v<T, float>) {
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
+                            scale,
+                            dS.data(), static_cast<MKL_INT>(M),
+                            q_bh, static_cast<MKL_INT>(D),
+                            0.0f,
+                            dk_bh, static_cast<MKL_INT>(D));
+            } else {
+                cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
+                            scale,
+                            dS.data(), static_cast<MKL_INT>(M),
+                            q_bh, static_cast<MKL_INT>(D),
+                            0.0,
+                            dk_bh, static_cast<MKL_INT>(D));
+            }
+#else
+            for (int64_t i = 0; i < N; ++i) {
+                for (int64_t j = 0; j < M; ++j) {
+                    T ds_val = dS[i * M + j] * scale;
+                    if (ds_val != T(0)) {
+                        fma_vector(dk_bh + j * D, ds_val, q_bh + i * D, D);
+                    }
+                }
+            }
+#endif
+        }
+    }
+
+    return std::vector<Tensor>{dQ, dK, dV};
+}
+
+// E.4: native half-precision (Float16 / BFloat16) FlashAttention backward.
+// Storage stays Float16 throughout; arithmetic uses FP32 accumulators at
+// the per-element level (load Float16 → cast to float → math → cast back
+// to Float16 on store). The GEMMs are hand-rolled triple loops — MKL's
+// cblas_hgemm exists only on Sapphire Rapids AVX-512-FP16 hardware, so
+// the truly portable native FP16 path is this explicit micro-kernel.
+//
+// Intermediate buffers (S, P, dS, D_vec) stay FP32 because FP16 lacks
+// the dynamic range for softmax exp() and accumulated row sums — that's
+// not widening, it's standard mixed-precision accumulation (the same
+// pattern NVIDIA's tensor cores use on GPU).
+template <typename HalfT>
+static auto flash_attention_backward_half(
+    const Tensor& dO, const Tensor& Q, const Tensor& K,
+    const Tensor& V, const Tensor& O,
+    float scale, bool causal,
+    float dropout_p,
+    uint64_t philox_seed) -> std::vector<Tensor>
+{
+    auto q_shape = Q.shape();
+    int64_t batch     = q_shape[0];
+    int64_t num_heads = q_shape[1];
+    int64_t N = q_shape[2];
+    int64_t D = q_shape[3];
+    auto k_shape = K.shape();
+    int64_t M = k_shape[2];
+
+    const bool apply_dropout = dropout_p > 0.0f && philox_seed != 0;
+    const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    const uint32_t rng_seed = static_cast<uint32_t>(philox_seed);
+
+    std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
+    std::vector<int64_t> k_shape_vec(k_shape.begin(), k_shape.end());
+    Tensor dQ = zeros(q_shape_vec, Q.dtype(), Q.device());
+    Tensor dK = zeros(k_shape_vec, K.dtype(), K.device());
+    Tensor dV = zeros(k_shape_vec, V.dtype(), V.device());
+
+    const HalfT* dO_data = dO.data<HalfT>();
+    const HalfT* q_data  = Q.data<HalfT>();
+    const HalfT* k_data  = K.data<HalfT>();
+    const HalfT* v_data  = V.data<HalfT>();
+    const HalfT* o_data  = O.data<HalfT>();
+    HalfT* dq_data = dQ.data<HalfT>();
+    HalfT* dk_data = dK.data<HalfT>();
+    HalfT* dv_data = dV.data<HalfT>();
+
+    auto h2f = [](HalfT v) -> float { return static_cast<float>(v); };
+    auto f2h = [](float v) -> HalfT { return HalfT(v); };
+
+    #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t h = 0; h < num_heads; ++h) {
+            int64_t q_offset  = ((b * num_heads + h) * N) * D;
+            int64_t kv_offset = ((b * num_heads + h) * M) * D;
+            const HalfT* q_bh  = q_data  + q_offset;
+            const HalfT* k_bh  = k_data  + kv_offset;
+            const HalfT* v_bh  = v_data  + kv_offset;
+            const HalfT* dO_bh = dO_data + q_offset;
+            const HalfT* o_bh  = o_data  + q_offset;
+            HalfT* dq_bh = dq_data + q_offset;
+            HalfT* dk_bh = dk_data + kv_offset;
+            HalfT* dv_bh = dv_data + kv_offset;
+
+            std::vector<float> S(static_cast<size_t>(N * M));
+            std::vector<float> P(static_cast<size_t>(N * M));
+            std::vector<float> D_vec(static_cast<size_t>(N));
+
+            // Step 1: S = Q @ K^T * scale  (FP16 load, FP32 accumulate)
+            for (int64_t i = 0; i < N; ++i) {
+                for (int64_t j = 0; j < M; ++j) {
+                    float acc = 0.0f;
+                    for (int64_t d = 0; d < D; ++d) {
+                        acc += h2f(q_bh[i * D + d]) * h2f(k_bh[j * D + d]);
+                    }
+                    S[i * M + j] = scale * acc;
+                }
+            }
+
+            // Step 2: causal mask
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
                     for (int64_t j = i + 1; j < M; ++j) {
@@ -564,7 +947,7 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                 }
             }
 
-            // Step 3: Compute P = softmax(S, dim=-1) row-wise
+            // Step 3: P = softmax(S, dim=-1) row-wise (FP32 throughout)
             for (int64_t i = 0; i < N; ++i) {
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t j = 0; j < M; ++j) {
@@ -582,13 +965,7 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                 }
             }
 
-            // Step 3b: Replay forward dropout mask using saved (seed, offset).
-            // The forward applies dropout *after* softmax with inverted scaling
-            // (`weight = 0` if dropped else `weight *= 1/(1-p)`); we apply the
-            // identical transform to P here so dV = P^T @ dO and dQ/dK derived
-            // from this P match the masked attention pattern the forward used.
-            // The Philox counter (b,h,qi,ki) and (rng_seed, rng_seed^0x1BD11BDA)
-            // key match the forward's, guaranteeing bit-identical mask replay.
+            // Step 3b: dropout replay
             if (apply_dropout) {
                 for (int64_t i = 0; i < N; ++i) {
                     for (int64_t j = 0; j < M; ++j) {
@@ -603,75 +980,44 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                         philox.generate(rng_out);
                         float rand_val = Philox4x32::uint32_to_uniform(rng_out[0]);
                         float& p_ref = P[i * M + j];
-                        if (rand_val < dropout_p) {
-                            p_ref = 0.0f;
-                        } else {
-                            p_ref *= dropout_scale;
-                        }
+                        if (rand_val < dropout_p) p_ref = 0.0f;
+                        else                      p_ref *= dropout_scale;
                     }
                 }
             }
 
-            // Step 4: D_i = rowsum(dO * O, dim=-1) for each query row
+            // Step 4: D_i = rowsum(dO * O)   (FP16 load, FP32 accumulate)
             for (int64_t i = 0; i < N; ++i) {
-                D_vec[i] = dot_product(dO_bh + i * D, o_bh + i * D, D);
+                float acc = 0.0f;
+                for (int64_t d = 0; d < D; ++d) {
+                    acc += h2f(dO_bh[i * D + d]) * h2f(o_bh[i * D + d]);
+                }
+                D_vec[i] = acc;
             }
 
-            // Step 5: dV = P^T @ dO  [M x D]
-#ifdef TENZOR_USE_MKL
-            // dV(M,D) = P^T(M,N) @ dO(N,D)
-            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                        static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
-                        1.0f,
-                        P.data(), static_cast<MKL_INT>(M),
-                        dO_bh, static_cast<MKL_INT>(D),
-                        0.0f,
-                        dv_bh, static_cast<MKL_INT>(D));
-#else
+            // Step 5: dV = P^T @ dO   (FP16 store, FP32 inner)
             for (int64_t j = 0; j < M; ++j) {
-                for (int64_t i = 0; i < N; ++i) {
-                    float p_val = P[i * M + j];
-                    if (p_val != 0.0f) {
-                        fma_vector(dv_bh + j * D, p_val, dO_bh + i * D, D);
+                for (int64_t d = 0; d < D; ++d) {
+                    float acc = 0.0f;
+                    for (int64_t i = 0; i < N; ++i) {
+                        acc += P[i * M + j] * h2f(dO_bh[i * D + d]);
                     }
+                    dv_bh[j * D + d] = f2h(acc);
                 }
             }
-#endif
 
-            // Step 6: Compute dS = P * (dO @ V^T - D_i)
-            // First compute dP = dO @ V^T [N x M], then dS = P * (dP - D_i)
-            // We reuse S buffer for dS
-            std::vector<float>& dS = S;  // reuse S storage
-
-#ifdef TENZOR_USE_MKL
-            // dP(N,M) = dO(N,D) @ V^T(D,M)  =>  stored in dS
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                        static_cast<MKL_INT>(N), static_cast<MKL_INT>(M), static_cast<MKL_INT>(D),
-                        1.0f,
-                        dO_bh, static_cast<MKL_INT>(D),
-                        v_bh, static_cast<MKL_INT>(D),
-                        0.0f,
-                        dS.data(), static_cast<MKL_INT>(M));
-
-            // dS = P * (dP - D_i)
+            // Step 6: dS = P * (dO @ V^T - D_i)   (reuse S as dS)
+            std::vector<float>& dS = S;
             for (int64_t i = 0; i < N; ++i) {
                 float d_i = D_vec[i];
                 for (int64_t j = 0; j < M; ++j) {
-                    int64_t idx = i * M + j;
-                    dS[idx] = P[idx] * (dS[idx] - d_i);
-                }
-            }
-#else
-            for (int64_t i = 0; i < N; ++i) {
-                float d_i = D_vec[i];
-                for (int64_t j = 0; j < M; ++j) {
-                    float dp = dot_product(dO_bh + i * D, v_bh + j * D, D);
+                    float dp = 0.0f;
+                    for (int64_t d = 0; d < D; ++d) {
+                        dp += h2f(dO_bh[i * D + d]) * h2f(v_bh[j * D + d]);
+                    }
                     dS[i * M + j] = P[i * M + j] * (dp - d_i);
                 }
             }
-#endif
-
-            // Apply causal mask to dS (zero out future positions)
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
                     for (int64_t j = i + 1; j < M; ++j) {
@@ -680,49 +1026,69 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                 }
             }
 
-            // Step 7: dQ = dS @ K * scale  [N x D]
-#ifdef TENZOR_USE_MKL
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        static_cast<MKL_INT>(N), static_cast<MKL_INT>(D), static_cast<MKL_INT>(M),
-                        scale,
-                        dS.data(), static_cast<MKL_INT>(M),
-                        k_bh, static_cast<MKL_INT>(D),
-                        0.0f,
-                        dq_bh, static_cast<MKL_INT>(D));
-#else
+            // Step 7: dQ = dS @ K * scale
             for (int64_t i = 0; i < N; ++i) {
-                for (int64_t j = 0; j < M; ++j) {
-                    float ds_val = dS[i * M + j] * scale;
-                    if (ds_val != 0.0f) {
-                        fma_vector(dq_bh + i * D, ds_val, k_bh + j * D, D);
+                for (int64_t d = 0; d < D; ++d) {
+                    float acc = 0.0f;
+                    for (int64_t j = 0; j < M; ++j) {
+                        acc += dS[i * M + j] * h2f(k_bh[j * D + d]);
                     }
+                    dq_bh[i * D + d] = f2h(scale * acc);
                 }
             }
-#endif
 
-            // Step 8: dK = dS^T @ Q * scale  [M x D]
-#ifdef TENZOR_USE_MKL
-            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                        static_cast<MKL_INT>(M), static_cast<MKL_INT>(D), static_cast<MKL_INT>(N),
-                        scale,
-                        dS.data(), static_cast<MKL_INT>(M),
-                        q_bh, static_cast<MKL_INT>(D),
-                        0.0f,
-                        dk_bh, static_cast<MKL_INT>(D));
-#else
-            for (int64_t i = 0; i < N; ++i) {
-                for (int64_t j = 0; j < M; ++j) {
-                    float ds_val = dS[i * M + j] * scale;
-                    if (ds_val != 0.0f) {
-                        fma_vector(dk_bh + j * D, ds_val, q_bh + i * D, D);
+            // Step 8: dK = dS^T @ Q * scale
+            for (int64_t j = 0; j < M; ++j) {
+                for (int64_t d = 0; d < D; ++d) {
+                    float acc = 0.0f;
+                    for (int64_t i = 0; i < N; ++i) {
+                        acc += dS[i * M + j] * h2f(q_bh[i * D + d]);
                     }
+                    dk_bh[j * D + d] = f2h(scale * acc);
                 }
             }
-#endif
         }
     }
 
     return std::vector<Tensor>{dQ, dK, dV};
+}
+
+auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K,
+                               const Tensor& V, const Tensor& O,
+                               float scale, bool causal,
+                               float dropout_p,
+                               uint64_t philox_seed,
+                               uint64_t /*philox_offset*/) -> std::vector<Tensor> {
+    // E.4: dtype dispatch.
+    // - Float32 → native float kernel.
+    // - Float64 → native double kernel (cblas_dgemm + double SIMD helpers).
+    //   No widen-narrow; full mantissa preserved.
+    // - Float16 / BFloat16 → widen to Float32 (these dtypes have less
+    //   mantissa than FP32, so this is mathematically lossless and matches
+    //   PyTorch / FlashAttention-2 reference behaviour).
+    if (Q.dtype() == DType::Float32) {
+        return flash_attention_backward_typed<float>(
+            dO, Q, K, V, O, scale, causal, dropout_p, philox_seed);
+    }
+    if (Q.dtype() == DType::Float64) {
+        return flash_attention_backward_typed<double>(
+            dO, Q, K, V, O,
+            static_cast<double>(scale), causal,
+            static_cast<double>(dropout_p), philox_seed);
+    }
+    if (Q.dtype() == DType::Float16) {
+        // E.4: native half-precision path. Float16 storage end-to-end;
+        // FP32 used only for per-element accumulators (the GPU tensor-core
+        // pattern). No tensor-level widen-narrow.
+        return flash_attention_backward_half<tenzor::Float16>(
+            dO, Q, K, V, O, scale, causal, dropout_p, philox_seed);
+    }
+    if (Q.dtype() == DType::BFloat16) {
+        return flash_attention_backward_half<tenzor::BFloat16>(
+            dO, Q, K, V, O, scale, causal, dropout_p, philox_seed);
+    }
+    throw std::runtime_error("Flash attention backward: unsupported dtype " +
+                             std::string(dtype_name(Q.dtype())));
 }
 
 } // namespace tenzor::cpu

@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #ifdef USE_MIOPEN
@@ -477,7 +478,7 @@ __global__ void maxpool2d_forward_kernel_fp16(
         for (int64_t h = h_start; h < h_end; ++h) {
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
-                float val = __half2float(input[input_idx]);
+                float val = tenzor::rocm::safe_h2f(input[input_idx]);
                 if (val > max_val) {
                     max_val = val;
                     max_idx = input_idx;
@@ -485,7 +486,7 @@ __global__ void maxpool2d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = __float2half(max_val);
+        output[idx] = tenzor::rocm::safe_f2h(max_val);
         if (return_indices && indices != nullptr) {
             indices[idx] = max_idx;
         }
@@ -615,7 +616,7 @@ __global__ void maxpool2d_backward_kernel_fp16(
 ) {
     HIP_KERNEL_LOOP(idx, total_elements) {
         int64_t input_idx = indices[idx];
-        atomicAdd(&grad_input_f32[input_idx], __half2float(grad_output[idx]));
+        atomicAdd(&grad_input_f32[input_idx], tenzor::rocm::safe_h2f(grad_output[idx]));
     }
 }
 
@@ -624,7 +625,7 @@ __global__ void convert_f32_to_f16_pool(const float* src, __half* dst, int64_t n
     HIP_KERNEL_LOOP(idx, n) {
         // Saturate to FP16 representable range to prevent Inf from overflow
         float val = fminf(fmaxf(src[idx], -65504.0f), 65504.0f);
-        dst[idx] = __float2half(val);
+        dst[idx] = tenzor::rocm::safe_f2h(val);
     }
 }
 
@@ -800,7 +801,7 @@ __global__ void avgpool2d_forward_kernel_fp16(
         for (int64_t h = h_start; h < h_end; ++h) {
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
-                sum += __half2float(input[input_idx]);
+                sum += tenzor::rocm::safe_h2f(input[input_idx]);
                 count++;
             }
         }
@@ -809,7 +810,7 @@ __global__ void avgpool2d_forward_kernel_fp16(
             count = kernel_h * kernel_w;
         }
 
-        output[idx] = __float2half(sum / static_cast<float>(count));
+        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
     }
 }
 
@@ -993,7 +994,7 @@ __global__ void avgpool2d_backward_kernel_fp16(
             count = kernel_h * kernel_w;
         }
 
-        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(count);
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
 
         for (int64_t h = h_start; h < h_end; ++h) {
             for (int64_t w = w_start; w < w_end; ++w) {
@@ -1695,7 +1696,7 @@ __global__ void maxpool1d_forward_kernel_fp16(
             int64_t l = l_start + k * dilation;
             if (l >= 0 && l < L) {
                 int64_t in_idx = (n * C + c) * L + l;
-                float val = __half2float(input[in_idx]);
+                float val = tenzor::rocm::safe_h2f(input[in_idx]);
                 if (val > max_val) {
                     max_val = val;
                     max_idx = l;
@@ -1703,7 +1704,7 @@ __global__ void maxpool1d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = __float2half(max_val);
+        output[idx] = tenzor::rocm::safe_f2h(max_val);
         indices[idx] = max_idx;
     }
 }
@@ -1799,7 +1800,7 @@ __global__ void maxpool1d_backward_kernel_fp16(
 
         int64_t max_idx = indices[idx];
         int64_t in_idx = (n * C + c) * L + max_idx;
-        atomicAdd(&grad_input_f32[in_idx], __half2float(grad_output[idx]));
+        atomicAdd(&grad_input_f32[in_idx], tenzor::rocm::safe_h2f(grad_output[idx]));
     }
 }
 
@@ -1926,12 +1927,12 @@ __global__ void avgpool1d_forward_kernel_fp16(
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
             if (l >= 0 && l < L) {
-                sum += __half2float(input[(n * C + c) * L + l]);
+                sum += tenzor::rocm::safe_h2f(input[(n * C + c) * L + l]);
                 count++;
             }
         }
 
-        output[idx] = __float2half(sum / static_cast<float>(count));
+        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
     }
 }
 
@@ -2046,7 +2047,7 @@ __global__ void avgpool1d_backward_kernel_fp16(
             if (l >= 0 && l < L) count++;
         }
 
-        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(count);
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
 
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
@@ -2182,14 +2183,14 @@ __global__ void adaptive_maxpool1d_forward_kernel_fp16(
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
-            float val = __half2float(input[in_idx]);
+            float val = tenzor::rocm::safe_h2f(input[in_idx]);
             if (val > max_val) {
                 max_val = val;
                 max_idx = l;
             }
         }
 
-        output[idx] = __float2half(max_val);
+        output[idx] = tenzor::rocm::safe_f2h(max_val);
         indices[idx] = max_idx;
     }
 }
@@ -2301,10 +2302,10 @@ __global__ void adaptive_avgpool1d_forward_kernel_fp16(
 
         float sum = 0.0f;
         for (int64_t l = l_start; l < l_end; ++l) {
-            sum += __half2float(input[(n * C + c) * L_in + l]);
+            sum += tenzor::rocm::safe_h2f(input[(n * C + c) * L_in + l]);
         }
 
-        output[idx] = __float2half(sum / static_cast<float>(l_end - l_start));
+        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(l_end - l_start));
     }
 }
 
@@ -2398,7 +2399,7 @@ __global__ void adaptive_avgpool1d_backward_kernel_fp16(
         int64_t l_start = (ol * L_in) / L_out;
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
-        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(l_end - l_start);
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(l_end - l_start);
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
@@ -2559,7 +2560,7 @@ __global__ void maxpool3d_forward_kernel_fp16(
 
                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
-                        float val = __half2float(input[in_idx]);
+                        float val = tenzor::rocm::safe_h2f(input[in_idx]);
                         if (val > max_val) {
                             max_val = val;
                             max_idx = d * H * W + h * W + w;
@@ -2569,7 +2570,7 @@ __global__ void maxpool3d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = __float2half(max_val);
+        output[idx] = tenzor::rocm::safe_f2h(max_val);
         indices[idx] = max_idx;
     }
 }
@@ -2671,7 +2672,7 @@ __global__ void maxpool3d_backward_kernel_fp16(
 
         int64_t max_idx = indices[idx];
         int64_t in_idx = ((n * C + c) * D * H * W) + max_idx;
-        atomicAdd(&grad_input_f32[in_idx], __half2float(grad_output[idx]));
+        atomicAdd(&grad_input_f32[in_idx], tenzor::rocm::safe_h2f(grad_output[idx]));
     }
 }
 
@@ -2827,14 +2828,14 @@ __global__ void avgpool3d_forward_kernel_fp16(
                     int64_t w = w_start + kw;
 
                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
-                        sum += __half2float(input[((n * C + c) * D + d) * H * W + h * W + w]);
+                        sum += tenzor::rocm::safe_h2f(input[((n * C + c) * D + d) * H * W + h * W + w]);
                         count++;
                     }
                 }
             }
         }
 
-        output[idx] = __float2half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
     }
 }
 
@@ -2981,7 +2982,7 @@ __global__ void avgpool3d_backward_kernel_fp16(
             }
         }
 
-        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(count);
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
 
         for (int64_t kd = 0; kd < kernel_size; ++kd) {
             for (int64_t kh = 0; kh < kernel_size; ++kh) {
@@ -3149,7 +3150,7 @@ __global__ void adaptive_maxpool3d_forward_kernel_fp16(
             for (int64_t h = h_start; h < h_end; ++h) {
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                    float val = __half2float(input[in_idx]);
+                    float val = tenzor::rocm::safe_h2f(input[in_idx]);
                     if (val > max_val) {
                         max_val = val;
                         max_idx = d * H_in * W_in + h * W_in + w;
@@ -3158,7 +3159,7 @@ __global__ void adaptive_maxpool3d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = __float2half(max_val);
+        output[idx] = tenzor::rocm::safe_f2h(max_val);
         indices[idx] = max_idx;
     }
 }
@@ -3298,13 +3299,13 @@ __global__ void adaptive_avgpool3d_forward_kernel_fp16(
         for (int64_t d = d_start; d < d_end; ++d) {
             for (int64_t h = h_start; h < h_end; ++h) {
                 for (int64_t w = w_start; w < w_end; ++w) {
-                    sum += __half2float(input[((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w]);
+                    sum += tenzor::rocm::safe_h2f(input[((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w]);
                     count++;
                 }
             }
         }
 
-        output[idx] = __float2half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
     }
 }
 
@@ -3421,7 +3422,7 @@ __global__ void adaptive_avgpool3d_backward_kernel_fp16(
         int64_t w_end   = ((ow + 1) * W_in) / W_out;
 
         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
-        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(count);
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
 
         for (int64_t d = d_start; d < d_end; ++d) {
             for (int64_t h = h_start; h < h_end; ++h) {

@@ -9,6 +9,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"  // broadcast_to (C.6 masked_fill)
 #include "simd_fast_math.hpp"
 #include <cstring>
 #include <limits>
@@ -762,14 +763,27 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
 }
 
 // Masked fill operation - fill elements with value where mask is true
-auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor {
+auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value) -> Tensor {
     auto input_shape = input.shape();
-    auto mask_shape = mask.shape();
 
-    // Validate shapes match
-    if (!std::equal(input_shape.begin(), input_shape.end(), mask_shape.begin(), mask_shape.end())) {
-        throw std::invalid_argument("masked_fill: input and mask must have same shape");
+    // C.6: broadcast the mask to input shape (matches the CUDA wrapper).
+    // The common attention-mask pattern is (B, 1, S, S) broadcasting across
+    // H heads to (B, H, S, S); previously this kernel required exact-shape
+    // masks and forced the caller to allocate a B*H*S*S boolean buffer.
+    std::vector<int64_t> input_shape_vec(input_shape.begin(), input_shape.end());
+    Tensor mask = mask_in;
+    std::vector<int64_t> mask_shape_vec(mask_in.shape().begin(), mask_in.shape().end());
+    if (mask_shape_vec != input_shape_vec) {
+        auto broadcast_shape =
+            tenzor::broadcast_shapes(mask_in.shape(), input_shape);
+        if (broadcast_shape != input_shape_vec) {
+            throw std::invalid_argument(
+                "masked_fill: mask shape is not broadcast-compatible with "
+                "input shape");
+        }
+        mask = tenzor::broadcast_to(mask_in, input_shape_vec).contiguous();
     }
+    auto mask_shape = mask.shape();
 
     const int64_t numel = input.numel();
 

@@ -570,9 +570,19 @@ void ModelHub::load_pretrained_weights(
                 remapped.emplace(rk, t);
                 continue;
             }
-            // Couldn't match — keep the original key so the strict-mode
-            // error message lists the actual unmatched name.
-            remapped.emplace(k, t);
+            // Couldn't match. In strict mode, keep the original key so the
+            // subsequent load_state_dict error message lists the actual
+            // unmatched name. In non-strict mode (G.1), drop the key with
+            // a warning — preventing the previous "silently keep extras
+            // in dict, hope load_state_dict ignores them" behaviour.
+            if (strict) {
+                remapped.emplace(k, t);
+            } else {
+                std::cerr << "Warning: dropping unmatched checkpoint key '"
+                          << k << "' (no target param/buffer); "
+                             "use strict=true to see all unmatched keys."
+                          << std::endl;
+            }
         }
         state_dict = std::move(remapped);
     }

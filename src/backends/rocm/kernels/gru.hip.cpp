@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
@@ -296,11 +297,11 @@ __global__ void gru_cell_forward_fused_fp16(
 
     if (idx < total_elements) {
         // Load and convert to float for computation
-        float r_gate = __half2float(reset_gates[idx]);
-        float z_gate = __half2float(update_gates[idx]);
-        float n_input = __half2float(new_gates_input[idx]);
-        float n_hidden = __half2float(new_gates_hidden[idx]);
-        float h_prev_val = __half2float(h_prev[idx]);
+        float r_gate = tenzor::rocm::safe_h2f(reset_gates[idx]);
+        float z_gate = tenzor::rocm::safe_h2f(update_gates[idx]);
+        float n_input = tenzor::rocm::safe_h2f(new_gates_input[idx]);
+        float n_hidden = tenzor::rocm::safe_h2f(new_gates_hidden[idx]);
+        float h_prev_val = tenzor::rocm::safe_h2f(h_prev[idx]);
 
         // Apply sigmoid activation to reset and update gates
         float r_t = 1.0f / (1.0f + expf(-r_gate));
@@ -314,7 +315,7 @@ __global__ void gru_cell_forward_fused_fp16(
         float h_t = (1.0f - z_t) * n_t + z_t * h_prev_val;
 
         // Store output
-        h_out[idx] = __float2half(h_t);
+        h_out[idx] = tenzor::rocm::safe_f2h(h_t);
     }
 }
 
@@ -343,11 +344,11 @@ __global__ void gru_cell_backward_fused_fp16(
 
     if (idx < total_elements) {
         // Recompute forward pass values (in float)
-        float r_gate = __half2float(reset_gates[idx]);
-        float z_gate = __half2float(update_gates[idx]);
-        float n_input = __half2float(new_gates_input[idx]);
-        float n_hidden = __half2float(new_gates_hidden[idx]);
-        float h_prev_val = __half2float(h_prev[idx]);
+        float r_gate = tenzor::rocm::safe_h2f(reset_gates[idx]);
+        float z_gate = tenzor::rocm::safe_h2f(update_gates[idx]);
+        float n_input = tenzor::rocm::safe_h2f(new_gates_input[idx]);
+        float n_hidden = tenzor::rocm::safe_h2f(new_gates_hidden[idx]);
+        float h_prev_val = tenzor::rocm::safe_h2f(h_prev[idx]);
 
         float r_t = 1.0f / (1.0f + expf(-r_gate));
         float z_t = 1.0f / (1.0f + expf(-z_gate));
@@ -356,7 +357,7 @@ __global__ void gru_cell_backward_fused_fp16(
         float n_t = tanhf(n_combined);
 
         // Load incoming gradient
-        float dh = __half2float(grad_h[idx]);
+        float dh = tenzor::rocm::safe_h2f(grad_h[idx]);
 
         // Gradient through h_t = (1 - z_t) * n_t + z_t * h_prev
         float dn_t = dh * (1.0f - z_t);
@@ -378,14 +379,14 @@ __global__ void gru_cell_backward_fused_fp16(
         float dz_gate = dz_t * z_t * (1.0f - z_t);
 
         // Store gradients
-        grad_reset[idx] = __float2half(dr_gate);
-        grad_update[idx] = __float2half(dz_gate);
-        grad_new_input[idx] = __float2half(dn_input);
-        grad_new_hidden[idx] = __float2half(dn_hidden_val);
+        grad_reset[idx] = tenzor::rocm::safe_f2h(dr_gate);
+        grad_update[idx] = tenzor::rocm::safe_f2h(dz_gate);
+        grad_new_input[idx] = tenzor::rocm::safe_f2h(dn_input);
+        grad_new_hidden[idx] = tenzor::rocm::safe_f2h(dn_hidden_val);
 
         // Gradient for previous hidden also comes from new gate hidden part
         dh_prev_val += dn_hidden_val;
-        grad_h_prev[idx] = __float2half(dh_prev_val);
+        grad_h_prev[idx] = tenzor::rocm::safe_f2h(dh_prev_val);
     }
 }
 
@@ -407,11 +408,11 @@ __global__ void gru_sequence_step_kernel_fp16(
         int64_t h = idx % hidden;
 
         // Load gate values and convert to float
-        float r_gate = __half2float(rz_gates[b * 2 * hidden + h]);
-        float z_gate = __half2float(rz_gates[b * 2 * hidden + hidden + h]);
-        float n_ih = __half2float(n_ih_gates[idx]);
-        float n_hh = __half2float(n_hh_gates[idx]);
-        float h_prev_val = __half2float(h_prev[idx]);
+        float r_gate = tenzor::rocm::safe_h2f(rz_gates[b * 2 * hidden + h]);
+        float z_gate = tenzor::rocm::safe_h2f(rz_gates[b * 2 * hidden + hidden + h]);
+        float n_ih = tenzor::rocm::safe_h2f(n_ih_gates[idx]);
+        float n_hh = tenzor::rocm::safe_h2f(n_hh_gates[idx]);
+        float h_prev_val = tenzor::rocm::safe_h2f(h_prev[idx]);
 
         // Apply sigmoid to r and z
         float r_t = 1.0f / (1.0f + expf(-r_gate));
@@ -421,7 +422,7 @@ __global__ void gru_sequence_step_kernel_fp16(
         float n_t = tanhf(n_ih + r_t * n_hh);
 
         // Compute new hidden state: h_t = (1 - z_t) * n_t + z_t * h_prev
-        h_out[idx] = __float2half((1.0f - z_t) * n_t + z_t * h_prev_val);
+        h_out[idx] = tenzor::rocm::safe_f2h((1.0f - z_t) * n_t + z_t * h_prev_val);
     }
 }
 
@@ -433,9 +434,9 @@ __global__ void add_bias_kernel_fp16(const __half* __restrict__ bias, __half* __
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch * gate_size) {
         int64_t g = idx % gate_size;
-        float gate_val = __half2float(gates[idx]);
-        float bias_val = __half2float(bias[g]);
-        gates[idx] = __float2half(gate_val + bias_val);
+        float gate_val = tenzor::rocm::safe_h2f(gates[idx]);
+        float bias_val = tenzor::rocm::safe_h2f(bias[g]);
+        gates[idx] = tenzor::rocm::safe_f2h(gate_val + bias_val);
     }
 }
 
@@ -449,9 +450,9 @@ __global__ void combine_rz_gates_kernel_fp16(const __half* __restrict__ gates_ih
                                               int64_t hidden) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch * 2 * hidden) {
-        float ih_val = __half2float(gates_ih[idx]);
-        float hh_val = __half2float(gates_hh[idx]);
-        rz_gates[idx] = __float2half(ih_val + hh_val);
+        float ih_val = tenzor::rocm::safe_h2f(gates_ih[idx]);
+        float hh_val = tenzor::rocm::safe_h2f(gates_hh[idx]);
+        rz_gates[idx] = tenzor::rocm::safe_f2h(ih_val + hh_val);
     }
 }
 

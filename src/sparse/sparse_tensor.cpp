@@ -6,6 +6,7 @@
 #include "tenzor/ops/advanced.hpp"
 #include <algorithm>
 #include <numeric>
+#include <unordered_map>  // B.5: direct CSR→BSR block index
 #include <optional>
 #include <stdexcept>
 
@@ -1150,7 +1151,138 @@ auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> Spars
     int64_t nblockrows = (nrows + bh - 1) / bh;
     int64_t nblockcols = (ncols + bw - 1) / bw;
 
-    // Convert to dense first, then extract blocks
+    // B.5: direct CSR → BSR (no dense round-trip). For a CSR input we walk
+    // each row, bucket entries by their block-column index `c / bw`, and
+    // accumulate into a block buffer keyed by (br, bc). O(nnz + nnzb·bh·bw)
+    // memory vs the prior O(nrows·ncols) of to_dense(). The dense-path
+    // fallback below is retained for COO/CSC inputs (which go through CSR
+    // first via the existing `to_csr().to_bsr()` chain).
+    if (layout_ == SparseLayout::CSR &&
+        (values_.dtype() == DType::Float32 || values_.dtype() == DType::Float64)) {
+        // Pull CSR arrays to CPU for the build loop. The output Tensors are
+        // allocated on the same device as the input.
+        auto crow_cpu = (crow_indices_.device().type != Device::Type::CPU)
+            ? crow_indices_.to(Device::cpu()) : crow_indices_;
+        auto col_cpu  = (col_indices_.device().type  != Device::Type::CPU)
+            ? col_indices_.to(Device::cpu())  : col_indices_;
+        auto vals_cpu = (values_.device().type != Device::Type::CPU)
+            ? values_.to(Device::cpu()) : values_;
+
+        const int64_t* crow = crow_cpu.data<int64_t>();
+        const int64_t* col  = col_cpu.data<int64_t>();
+
+        const bool is_f32 = (values_.dtype() == DType::Float32);
+        const float*  vp_f32 = is_f32 ? vals_cpu.data<float>()  : nullptr;
+        const double* vp_f64 = is_f32 ? nullptr                 : vals_cpu.data<double>();
+
+        struct BlockKey { int64_t br, bc; };
+        // map (br,bc) → linear index into block_vals
+        std::unordered_map<int64_t, int64_t> block_index;
+        std::vector<BlockKey> block_keys;
+        std::vector<float>  block_vals_f32;
+        std::vector<double> block_vals_f64;
+        block_index.reserve(static_cast<size_t>(nnz_ / std::max<int64_t>(1, bh * bw)));
+
+        const int64_t block_stride = bh * bw;
+        auto key_pack = [nblockcols](int64_t br, int64_t bc) -> int64_t {
+            return br * nblockcols + bc;
+        };
+
+        for (int64_t r = 0; r < nrows; ++r) {
+            int64_t br = r / bh;
+            int64_t rr = r % bh;
+            int64_t row_start = crow[r];
+            int64_t row_end   = crow[r + 1];
+            for (int64_t k = row_start; k < row_end; ++k) {
+                int64_t c  = col[k];
+                int64_t bc = c / bw;
+                int64_t cc = c % bw;
+                int64_t key = key_pack(br, bc);
+                auto it = block_index.find(key);
+                int64_t blk_idx;
+                if (it == block_index.end()) {
+                    blk_idx = static_cast<int64_t>(block_keys.size());
+                    block_keys.push_back({br, bc});
+                    block_index.emplace(key, blk_idx);
+                    if (is_f32) block_vals_f32.resize(block_vals_f32.size() + block_stride, 0.0f);
+                    else        block_vals_f64.resize(block_vals_f64.size() + block_stride, 0.0);
+                } else {
+                    blk_idx = it->second;
+                }
+                int64_t offset = blk_idx * block_stride + rr * bw + cc;
+                if (is_f32) block_vals_f32[offset] = vp_f32[k];
+                else        block_vals_f64[offset] = vp_f64[k];
+            }
+        }
+
+        // Sort blocks by (br, bc) for deterministic BSR output.
+        std::vector<int64_t> perm(block_keys.size());
+        std::iota(perm.begin(), perm.end(), int64_t(0));
+        std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
+            const auto& ka = block_keys[a];
+            const auto& kb = block_keys[b];
+            return (ka.br != kb.br) ? (ka.br < kb.br) : (ka.bc < kb.bc);
+        });
+
+        const int64_t nnzb = static_cast<int64_t>(block_keys.size());
+        auto row_ptr = Tensor({nblockrows + 1}, DType::Int64, values_.device());
+        auto col_ind = Tensor({nnzb}, DType::Int64, values_.device());
+        auto vals_out = Tensor({nnzb, bh, bw}, values_.dtype(), values_.device());
+
+        auto row_ptr_cpu = Tensor({nblockrows + 1}, DType::Int64, Device::cpu());
+        auto col_ind_cpu = Tensor({nnzb}, DType::Int64, Device::cpu());
+        auto* rp = row_ptr_cpu.data<int64_t>();
+        auto* ci = col_ind_cpu.data<int64_t>();
+        std::memset(rp, 0, static_cast<size_t>(nblockrows + 1) * sizeof(int64_t));
+        for (int64_t i = 0; i < nnzb; ++i) {
+            rp[block_keys[perm[i]].br + 1]++;
+        }
+        for (int64_t i = 0; i < nblockrows; ++i) rp[i + 1] += rp[i];
+        for (int64_t i = 0; i < nnzb; ++i) {
+            ci[i] = block_keys[perm[i]].bc;
+        }
+
+        // Pack block values in sorted order.
+        if (is_f32) {
+            auto vals_cpu_out = Tensor({nnzb, bh, bw}, DType::Float32, Device::cpu());
+            auto* vp = vals_cpu_out.data<float>();
+            for (int64_t i = 0; i < nnzb; ++i) {
+                std::memcpy(vp + i * block_stride,
+                            block_vals_f32.data() + perm[i] * block_stride,
+                            block_stride * sizeof(float));
+            }
+            vals_out = (values_.device().type != Device::Type::CPU)
+                ? vals_cpu_out.to(values_.device()) : vals_cpu_out;
+        } else {
+            auto vals_cpu_out = Tensor({nnzb, bh, bw}, DType::Float64, Device::cpu());
+            auto* vp = vals_cpu_out.data<double>();
+            for (int64_t i = 0; i < nnzb; ++i) {
+                std::memcpy(vp + i * block_stride,
+                            block_vals_f64.data() + perm[i] * block_stride,
+                            block_stride * sizeof(double));
+            }
+            vals_out = (values_.device().type != Device::Type::CPU)
+                ? vals_cpu_out.to(values_.device()) : vals_cpu_out;
+        }
+        row_ptr = (values_.device().type != Device::Type::CPU)
+            ? row_ptr_cpu.to(values_.device()) : row_ptr_cpu;
+        col_ind = (values_.device().type != Device::Type::CPU)
+            ? col_ind_cpu.to(values_.device()) : col_ind_cpu;
+
+        return sparse_bsr(row_ptr, col_ind, vals_out, shape_, block_size);
+    }
+
+    // B.5: non-CSR layouts (CSC / COO) — route through to_csr() (which
+    // itself uses cusparse / rocsparse on GPU; on-device bincount+cumsum
+    // on OneAPI / Vulkan / CPU) and then recurse into the direct CSR→BSR
+    // path above. No dense materialization at any stage.
+    if (layout_ != SparseLayout::CSR) {
+        return to_csr().to_bsr(block_size);
+    }
+
+    // Unsupported dtype (e.g. complex) still falls back to dense scan as
+    // a correctness backstop; widening sparse complex would require a
+    // separate set of complex helpers throughout sparse_tensor.cpp.
     auto dense = to_dense();
     auto cont = dense.contiguous();
 

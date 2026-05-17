@@ -21,6 +21,7 @@
 #include <netdb.h>
 #include <ifaddrs.h>
 #include <iostream>
+#include "tenzor/utils/log.hpp"  // D.1: TENZOR_LOG_ERROR
 
 #if defined(TENZOR_USE_CUDA)
     #include <cuda_runtime.h>
@@ -58,10 +59,18 @@ namespace distributed {
 NCCLBackend::NCCLBackend() = default;
 
 NCCLBackend::~NCCLBackend() {
+    // D.2: log destructor finalize failures via the central tenzor logger
+    // (D.1). Throwing from a destructor is forbidden (terminates the
+    // process), but silent swallow made hung shutdowns invisible.
     try {
         finalize();
+    } catch (const std::exception& e) {
+        TENZOR_LOG_ERROR("NCCLBackend::~NCCLBackend: finalize() threw: {}",
+                         e.what());
     } catch (...) {
-        // Ignore errors during destruction
+        TENZOR_LOG_ERROR(
+            "NCCLBackend::~NCCLBackend: finalize() threw an unknown "
+            "exception type");
     }
 }
 

@@ -228,6 +228,23 @@ set(CMAKE_BUILD_RPATH "$ORIGIN:${CMAKE_SOURCE_DIR}/bin")
 find_package(Threads REQUIRED)
 find_package(OpenMP)
 
+# D.1: spdlog for structured logging across distributed / serving / io.
+# Prefer the system package; FetchContent as fallback so offline builds
+# still work if spdlog isn't installed (FetchContent is also already used
+# elsewhere in this build for cudnn_frontend).
+find_package(spdlog QUIET CONFIG)
+if(NOT spdlog_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG        v1.14.1
+    )
+    set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(spdlog)
+endif()
+
 # Include CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 

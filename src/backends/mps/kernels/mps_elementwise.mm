@@ -608,32 +608,35 @@ static Tensor dispatch_reduce_all(const std::string& shader_name,
     return output;
 }
 
+Tensor mps_sum_kernel_impl(const Tensor& input, int64_t dim, bool keepdim);
+
 Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    // H: non-contiguous → materialize on-device via .contiguous() (no CPU
+    // round-trip). Permute non-last dim to last on-device then recurse.
     if (!input.is_contiguous()) {
-        // Non-contiguous: fall back to CPU for correctness
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        Tensor result;
-        if (dim >= 0) result = tenzor::sum(cpu_in, dim, keepdim);
-        else          result = tenzor::sum(cpu_in);
-        return result.to(dev);
+        return mps_sum_kernel(input.contiguous(), dim, keepdim);
     }
-
-    auto shape = input.shape();
-    int64_t ndim = shape.size();
-
-    // Full reduction (no dim specified)
     if (dim < 0) {
         return dispatch_reduce_all("sum_all_kernel", input);
     }
-
-    // Dimensional reduction: must be contiguous and reduce along last dim
-    // for the per-row shader to work. If not last dim, fall back to CPU.
+    auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim != ndim - 1) {
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        return tenzor::sum(cpu_in, dim, keepdim).to(dev);
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        return mps_sum_kernel(transposed, ndim - 1, keepdim);
     }
+    return mps_sum_kernel_impl(input, dim, keepdim);
+}
+
+Tensor mps_sum_kernel_impl(const Tensor& input, int64_t dim, bool keepdim) {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
 
     int64_t reduce_size = shape[ndim - 1];
     int64_t num_rows = input.numel() / reduce_size;
@@ -651,28 +654,36 @@ Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
     return result;
 }
 
+// Forward decl so wrapper can split the contiguous + last-dim impl path.
+Tensor mps_mean_kernel_impl(const Tensor& input, int64_t dim, bool keepdim);
+
 Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    // H: non-contiguous → .contiguous() on-device. Non-last-dim → permute
+    // on-device. Both replace the prior CPU round-trip.
     if (!input.is_contiguous()) {
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        Tensor result;
-        if (dim >= 0) result = tenzor::mean(cpu_in, dim, keepdim);
-        else          result = tenzor::mean(cpu_in);
-        return result.to(dev);
+        return mps_mean_kernel(input.contiguous(), dim, keepdim);
     }
-
-    auto shape = input.shape();
-    int64_t ndim = shape.size();
-
     if (dim < 0) {
         return dispatch_reduce_all("mean_all_kernel", input);
     }
-
+    auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim != ndim - 1) {
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        return tenzor::mean(cpu_in, dim, keepdim).to(dev);
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        return mps_mean_kernel(transposed, ndim - 1, keepdim);
     }
+    return mps_mean_kernel_impl(input, dim, keepdim);
+}
+
+Tensor mps_mean_kernel_impl(const Tensor& input, int64_t dim, bool keepdim) {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
 
     int64_t reduce_size = shape[ndim - 1];
     int64_t num_rows = input.numel() / reduce_size;
@@ -692,12 +703,20 @@ Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
 
 Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
                       Tensor& out_indices) {
-    if (!input.is_contiguous() || dim != static_cast<int64_t>(input.shape().size()) - 1) {
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        auto [vals, idxs] = tenzor::max(cpu_in, dim, keepdim);
-        out_indices = idxs.to(dev);
-        return vals.to(dev);
+    // H: handle non-contiguous + non-last-dim on-device via permute+recurse.
+    if (!input.is_contiguous()) {
+        return mps_max_kernel(input.contiguous(), dim, keepdim, out_indices);
+    }
+    int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim >= 0 && dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        return mps_max_kernel(transposed, ndim - 1, keepdim, out_indices);
     }
 
     ensure_initialized();
@@ -1305,20 +1324,31 @@ std::vector<Tensor> mps_linear_backward_kernel(const Tensor& grad_output,
     // grad_weight = grad_output^T @ input    (native MPSMatrixMultiplication)
     // grad_bias = sum(grad_output, dim=0)    (native sum reduction)
     //
-    // For now, route through CPU for correctness (transpose + matmul
-    // requires contiguous materialization that our zero-copy transpose
-    // doesn't provide). A future pass can compose from native MPS matmul.
-    auto dev = grad_output.device();
-    auto cpu_go = grad_output.to(Device::cpu());
-    auto cpu_in = input.to(Device::cpu());
-    auto cpu_w = weight.to(Device::cpu());
+    // H: compose LinearBackward from native MPS ops. Zero-copy transpose
+    // followed by .contiguous() materializes the buffer the MPS matmul
+    // needs without going through CPU.
+    //   grad_input  = grad_output @ weight
+    //   grad_weight = grad_output^T @ input
+    //   grad_bias   = sum(grad_output, dim=0)
+    Tensor weight_use = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor input_use  = input.is_contiguous()  ? input  : input.contiguous();
+    Tensor grad_use   = grad_output.is_contiguous() ? grad_output
+                                                    : grad_output.contiguous();
 
-    auto cpu_result = dispatch(OpId::LinearBackward, std::vector<Tensor>{cpu_go, cpu_in, cpu_w},
-                               OpAttributes());
-    std::vector<Tensor> result;
-    result.reserve(cpu_result.size());
-    for (auto& t : cpu_result) result.push_back(t.to(dev));
-    return result;
+    Tensor grad_input  = tenzor::matmul(grad_use, weight_use);
+    Tensor go_t        = tenzor::transpose(grad_use, -1, -2).contiguous();
+    Tensor grad_weight = tenzor::matmul(go_t, input_use);
+    Tensor grad_bias;
+    // Sum grad_output across all leading dims to produce a (out_features,) bias grad.
+    if (grad_use.ndim() == 2) {
+        grad_bias = mps_sum_kernel(grad_use, /*dim=*/0, /*keepdim=*/false);
+    } else {
+        // Flatten leading dims to one, then sum dim 0.
+        int64_t out_features = grad_use.shape().back();
+        Tensor flat = grad_use.reshape({-1, out_features});
+        grad_bias = mps_sum_kernel(flat, /*dim=*/0, /*keepdim=*/false);
+    }
+    return {grad_input, grad_weight, grad_bias};
 }
 
 // ============================================================================
@@ -1408,19 +1438,49 @@ Tensor mps_cast_kernel(const Tensor& input, DType target_dtype) {
     // Same type — no-op
     if (src == target_dtype) return input;
 
-    // Determine shader name for common pairs
-    std::string shader_name;
-    if (src == DType::Float32 && target_dtype == DType::Float16) shader_name = "cast_f32_to_f16_kernel";
-    else if (src == DType::Float16 && target_dtype == DType::Float32) shader_name = "cast_f16_to_f32_kernel";
-    else if (src == DType::Float32 && target_dtype == DType::Int32) shader_name = "cast_f32_to_i32_kernel";
-    else if (src == DType::Int32 && target_dtype == DType::Float32) shader_name = "cast_i32_to_f32_kernel";
-    else {
-        // Exotic pair — CPU roundtrip
-        auto dev = input.device();
-        auto cpu_in = input.to(Device::cpu());
-        auto cpu_result = dispatch(OpId::Cast, std::vector<Tensor>{cpu_in},
-            OpAttributes().set(AttrKey::DType, static_cast<int64_t>(target_dtype)));
-        return cpu_result[0].to(dev);
+    // H: direct Metal cast shaders for every common dtype pair. Pairs
+    // not directly named go through a two-step on-device cast via f32
+    // (still 100% MPS, no CPU dispatch).
+    auto direct_shader = [](DType s, DType t) -> std::string {
+        if (s == DType::Float32 && t == DType::Float16) return "cast_f32_to_f16_kernel";
+        if (s == DType::Float16 && t == DType::Float32) return "cast_f16_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::Int32)   return "cast_f32_to_i32_kernel";
+        if (s == DType::Int32   && t == DType::Float32) return "cast_i32_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::Int64)   return "cast_f32_to_i64_kernel";
+        if (s == DType::Int64   && t == DType::Float32) return "cast_i64_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::UInt8)   return "cast_f32_to_u8_kernel";
+        if (s == DType::UInt8   && t == DType::Float32) return "cast_u8_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::Int8)    return "cast_f32_to_i8_kernel";
+        if (s == DType::Int8    && t == DType::Float32) return "cast_i8_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::Int16)   return "cast_f32_to_i16_kernel";
+        if (s == DType::Int16   && t == DType::Float32) return "cast_i16_to_f32_kernel";
+        if (s == DType::Float32 && t == DType::Bool)    return "cast_f32_to_bool_kernel";
+        if (s == DType::Bool    && t == DType::Float32) return "cast_bool_to_f32_kernel";
+        if (s == DType::Int32   && t == DType::Int64)   return "cast_i32_to_i64_kernel";
+        if (s == DType::Int64   && t == DType::Int32)   return "cast_i64_to_i32_kernel";
+        if (s == DType::Float16 && t == DType::Int32)   return "cast_f16_to_i32_kernel";
+        if (s == DType::Int32   && t == DType::Float16) return "cast_i32_to_f16_kernel";
+        if (s == DType::Float16 && t == DType::Int64)   return "cast_f16_to_i64_kernel";
+        if (s == DType::Int64   && t == DType::Float16) return "cast_i64_to_f16_kernel";
+        if (s == DType::Float32 && t == DType::UInt32)  return "cast_f32_to_u32_kernel";
+        if (s == DType::UInt32  && t == DType::Float32) return "cast_u32_to_f32_kernel";
+        return {};
+    };
+
+    std::string shader_name = direct_shader(src, target_dtype);
+    if (shader_name.empty()) {
+        // Two-step on-device cast via Float32. e.g. Int8 → Int16 becomes
+        // Int8 → Float32 → Int16. Recursion stays on MPS.
+        std::string s1 = direct_shader(src, DType::Float32);
+        std::string s2 = direct_shader(DType::Float32, target_dtype);
+        if (!s1.empty() && !s2.empty()) {
+            return mps_cast_kernel(mps_cast_kernel(input, DType::Float32),
+                                    target_dtype);
+        }
+        throw std::runtime_error(
+            std::string("MPS Cast: no shader path for ") +
+            std::string(dtype_name(src)) + " → " +
+            std::string(dtype_name(target_dtype)));
     }
 
     ensure_initialized();

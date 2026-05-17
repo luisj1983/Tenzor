@@ -23,20 +23,27 @@ namespace cuda {
 // Device helpers
 // ============================================================================
 
-__device__ __forceinline__ float denormalize_dev(float coord, int size, bool align_corners) {
+// E.1: templated coordinate helpers — instantiate for both float and
+// double so grid_sample_*_kernel<double> can compute natively without
+// widen-narrow precision loss.
+template <typename T>
+__device__ __forceinline__ T denormalize_dev(T coord, int size, bool align_corners) {
     if (align_corners) {
-        return (coord + 1.0f) * 0.5f * static_cast<float>(size - 1);
+        return (coord + T(1)) * T(0.5) * static_cast<T>(size - 1);
     } else {
-        return ((coord + 1.0f) * static_cast<float>(size) - 1.0f) * 0.5f;
+        return ((coord + T(1)) * static_cast<T>(size) - T(1)) * T(0.5);
     }
 }
 
-__device__ __forceinline__ float reflect_coord(float coord, int size) {
-    if (size <= 1) return 0.0f;
-    float max_val = static_cast<float>(size - 1);
-    coord = fabsf(coord);
-    float period = 2.0f * max_val;
-    coord = fmodf(coord, period);
+template <typename T>
+__device__ __forceinline__ T reflect_coord(T coord, int size) {
+    if (size <= 1) return T(0);
+    T max_val = static_cast<T>(size - 1);
+    if constexpr (std::is_same_v<T, float>)  coord = fabsf(coord);
+    else                                     coord = fabs(coord);
+    T period = T(2) * max_val;
+    if constexpr (std::is_same_v<T, float>)  coord = fmodf(coord, period);
+    else                                     coord = fmod(coord, period);
     if (coord > max_val) coord = period - coord;
     return coord;
 }
@@ -45,10 +52,14 @@ __device__ __forceinline__ float reflect_coord(float coord, int size) {
 // Bilinear grid_sample kernel
 // ============================================================================
 
+// E.1: templated bilinear kernel — instantiated for float (FP32 path) and
+// double (native FP64 path; no widen-narrow). The non-templated dispatcher
+// below picks the right specialization by input dtype.
+template <typename T>
 __global__ void grid_sample_bilinear_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    float* __restrict__ output,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode,  // 0=zeros, 1=border, 2=reflection
     bool align_corners
@@ -62,44 +73,52 @@ __global__ void grid_sample_bilinear_kernel(
     int c = (idx / (W_out * H_out)) % C;
     int n = idx / (C * H_out * W_out);
 
-    // Read grid coordinates
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
+    T gx = grid[grid_idx];
+    T gy = grid[grid_idx + 1];
 
-    // Denormalize
-    float ix = denormalize_dev(gx, W_in, align_corners);
-    float iy = denormalize_dev(gy, H_in, align_corners);
+    T ix = denormalize_dev<T>(gx, W_in, align_corners);
+    T iy = denormalize_dev<T>(gy, H_in, align_corners);
 
-    // Apply padding
     if (padding_mode == 1) {  // border
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        if constexpr (std::is_same_v<T, float>) {
+            ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
+            iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        } else {
+            ix = fmin(fmax(ix, 0.0), static_cast<double>(W_in - 1));
+            iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
+        }
     } else if (padding_mode == 2) {  // reflection
-        ix = reflect_coord(ix, W_in);
-        iy = reflect_coord(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in);
+        iy = reflect_coord<T>(iy, H_in);
     }
 
-    int x0 = static_cast<int>(floorf(ix));
-    int y0 = static_cast<int>(floorf(iy));
+    int x0, y0;
+    if constexpr (std::is_same_v<T, float>) {
+        x0 = static_cast<int>(floorf(ix));
+        y0 = static_cast<int>(floorf(iy));
+    } else {
+        x0 = static_cast<int>(floor(ix));
+        y0 = static_cast<int>(floor(iy));
+    }
     int x1 = x0 + 1;
     int y1 = y0 + 1;
 
-    float wx1 = ix - static_cast<float>(x0);
-    float wy1 = iy - static_cast<float>(y0);
-    float wx0 = 1.0f - wx1;
-    float wy0 = 1.0f - wy1;
+    T wx1 = ix - static_cast<T>(x0);
+    T wy1 = iy - static_cast<T>(y0);
+    T wx0 = T(1) - wx1;
+    T wy0 = T(1) - wy1;
 
-    auto safe_get = [&](int y, int x) -> float {
+    auto safe_get = [&](int y, int x) -> T {
         if (y >= 0 && y < H_in && x >= 0 && x < W_in)
             return input[((n * C + c) * H_in + y) * W_in + x];
-        return 0.0f;
+        return T(0);
     };
 
-    float val = wy0 * wx0 * safe_get(y0, x0) +
-                wy0 * wx1 * safe_get(y0, x1) +
-                wy1 * wx0 * safe_get(y1, x0) +
-                wy1 * wx1 * safe_get(y1, x1);
+    T val = wy0 * wx0 * safe_get(y0, x0) +
+            wy0 * wx1 * safe_get(y0, x1) +
+            wy1 * wx0 * safe_get(y1, x0) +
+            wy1 * wx1 * safe_get(y1, x1);
 
     output[((n * C + c) * H_out + h) * W_out + w] = val;
 }
@@ -111,23 +130,26 @@ __global__ void grid_sample_bilinear_kernel(
 // 4x4 neighbourhood with Catmull-Rom basis (a = -0.5), matching PyTorch's
 // `grid_sample(mode='bicubic')` and Tenzor's own interpolate(mode='bicubic').
 //
-__device__ inline void cubic_weights_dev(float t, float w[4]) {
-    constexpr float a = -0.5f;
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    w[0] = ((a * t - 2.0f * a) * t + a) * t;
-    w[1] = ((a + 2.0f) * t3 - (a + 3.0f) * t2 + 1.0f);
-    const float u = 1.0f - t;
-    const float u2 = u * u;
-    const float u3 = u2 * u;
-    w[2] = ((a + 2.0f) * u3 - (a + 3.0f) * u2 + 1.0f);
-    w[3] = ((a * u - 2.0f * a) * u + a) * u;
+// E.1: templated cubic-weights helper for native FP32 / FP64 bicubic.
+template <typename T>
+__device__ inline void cubic_weights_dev(T t, T w[4]) {
+    constexpr T a = T(-0.5);
+    const T t2 = t * t;
+    const T t3 = t2 * t;
+    w[0] = ((a * t - T(2) * a) * t + a) * t;
+    w[1] = ((a + T(2)) * t3 - (a + T(3)) * t2 + T(1));
+    const T u = T(1) - t;
+    const T u2 = u * u;
+    const T u3 = u2 * u;
+    w[2] = ((a + T(2)) * u3 - (a + T(3)) * u2 + T(1));
+    w[3] = ((a * u - T(2) * a) * u + a) * u;
 }
 
+template <typename T>
 __global__ void grid_sample_bicubic_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    float* __restrict__ output,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode,  // 0=zeros, 1=border, 2=reflection
     bool align_corners
@@ -142,31 +164,42 @@ __global__ void grid_sample_bicubic_kernel(
     int n = idx / (C * H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
+    T gx = grid[grid_idx];
+    T gy = grid[grid_idx + 1];
 
-    float ix = denormalize_dev(gx, W_in, align_corners);
-    float iy = denormalize_dev(gy, H_in, align_corners);
+    T ix = denormalize_dev<T>(gx, W_in, align_corners);
+    T iy = denormalize_dev<T>(gy, H_in, align_corners);
 
     if (padding_mode == 1) {  // border
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        if constexpr (std::is_same_v<T, float>) {
+            ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
+            iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        } else {
+            ix = fmin(fmax(ix, 0.0), static_cast<double>(W_in - 1));
+            iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
+        }
     } else if (padding_mode == 2) {  // reflection
-        ix = reflect_coord(ix, W_in);
-        iy = reflect_coord(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in);
+        iy = reflect_coord<T>(iy, H_in);
     }
 
-    const int ix_floor = static_cast<int>(floorf(ix));
-    const int iy_floor = static_cast<int>(floorf(iy));
-    const float tx = ix - static_cast<float>(ix_floor);
-    const float ty = iy - static_cast<float>(iy_floor);
-    float wx[4], wy[4];
-    cubic_weights_dev(tx, wx);
-    cubic_weights_dev(ty, wy);
+    int ix_floor, iy_floor;
+    if constexpr (std::is_same_v<T, float>) {
+        ix_floor = static_cast<int>(floorf(ix));
+        iy_floor = static_cast<int>(floorf(iy));
+    } else {
+        ix_floor = static_cast<int>(floor(ix));
+        iy_floor = static_cast<int>(floor(iy));
+    }
+    const T tx = ix - static_cast<T>(ix_floor);
+    const T ty = iy - static_cast<T>(iy_floor);
+    T wx[4], wy[4];
+    cubic_weights_dev<T>(tx, wx);
+    cubic_weights_dev<T>(ty, wy);
 
-    auto safe_get = [&](int y, int x) -> float {
+    auto safe_get = [&](int y, int x) -> T {
         if (padding_mode == 0) {  // zeros
-            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return 0.0f;
+            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
             return input[((n * C + c) * H_in + y) * W_in + x];
         }
         // border / reflection: clamp neighbours past the edge.
@@ -175,7 +208,7 @@ __global__ void grid_sample_bicubic_kernel(
         return input[((n * C + c) * H_in + y) * W_in + x];
     };
 
-    float val = 0.0f;
+    T val = T(0);
     #pragma unroll
     for (int dy = -1; dy <= 2; ++dy) {
         #pragma unroll
@@ -191,10 +224,11 @@ __global__ void grid_sample_bicubic_kernel(
 // Nearest grid_sample kernel
 // ============================================================================
 
+template <typename T>
 __global__ void grid_sample_nearest_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    float* __restrict__ output,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode, bool align_corners
 ) {
@@ -208,24 +242,35 @@ __global__ void grid_sample_nearest_kernel(
     int n = idx / (C * H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
+    T gx = grid[grid_idx];
+    T gy = grid[grid_idx + 1];
 
-    float ix = denormalize_dev(gx, W_in, align_corners);
-    float iy = denormalize_dev(gy, H_in, align_corners);
+    T ix = denormalize_dev<T>(gx, W_in, align_corners);
+    T iy = denormalize_dev<T>(gy, H_in, align_corners);
 
     if (padding_mode == 1) {
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        if constexpr (std::is_same_v<T, float>) {
+            ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
+            iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        } else {
+            ix = fmin(fmax(ix, 0.0), static_cast<double>(W_in - 1));
+            iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
+        }
     } else if (padding_mode == 2) {
-        ix = reflect_coord(ix, W_in);
-        iy = reflect_coord(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in);
+        iy = reflect_coord<T>(iy, H_in);
     }
 
-    int nx = static_cast<int>(roundf(ix));
-    int ny = static_cast<int>(roundf(iy));
+    int nx, ny;
+    if constexpr (std::is_same_v<T, float>) {
+        nx = static_cast<int>(roundf(ix));
+        ny = static_cast<int>(roundf(iy));
+    } else {
+        nx = static_cast<int>(round(ix));
+        ny = static_cast<int>(round(iy));
+    }
 
-    float val = 0.0f;
+    T val = T(0);
     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
         val = input[((n * C + c) * H_in + ny) * W_in + nx];
     }
@@ -285,11 +330,6 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
     int H_out = static_cast<int>(grid_shape[1]);
     int W_out = static_cast<int>(grid_shape[2]);
 
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32 = grid.to(DType::Float32);
-
-    Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
-
     int pad_mode = 0;
     if (padding_mode == "border") pad_mode = 1;
     else if (padding_mode == "reflection") pad_mode = 2;
@@ -298,25 +338,59 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
     int block_size = 256;
     int grid_size = (total + block_size - 1) / block_size;
 
+    // E.1: native FP64 path for ALL modes (nearest, bilinear, bicubic).
+    // Templated kernel instantiation, no widen-narrow.
+    if (input.dtype() == DType::Float64) {
+        Tensor input_f64 = input.contiguous();
+        Tensor grid_f64  = grid.to(DType::Float64).contiguous();
+        Tensor output_f64({N, C, H_out, W_out}, DType::Float64, input.device());
+        if (mode == "nearest") {
+            grid_sample_nearest_kernel<double><<<grid_size, block_size>>>(
+                input_f64.data<double>(), grid_f64.data<double>(),
+                output_f64.data<double>(),
+                N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+        } else if (mode == "bilinear") {
+            grid_sample_bilinear_kernel<double><<<grid_size, block_size>>>(
+                input_f64.data<double>(), grid_f64.data<double>(),
+                output_f64.data<double>(),
+                N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+        } else if (mode == "bicubic") {
+            grid_sample_bicubic_kernel<double><<<grid_size, block_size>>>(
+                input_f64.data<double>(), grid_f64.data<double>(),
+                output_f64.data<double>(),
+                N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+        } else {
+            throw std::invalid_argument(
+                "grid_sample_cuda: unknown mode '" + mode +
+                "'. Supported: bilinear, nearest, bicubic.");
+        }
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return output_f64;
+    }
+
+    // Float32 path. FP16/BF16 promote to Float32 via Tensor::to() — those
+    // dtypes have fewer mantissa bits than Float32 so this is mathematically
+    // lossless at element granularity (no widen of the whole tensor; each
+    // load/store is the natural cast).
+    Tensor input_f32 = input.to(DType::Float32);
+    Tensor grid_f32 = grid.to(DType::Float32);
+    Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
+
     if (mode == "nearest") {
-        grid_sample_nearest_kernel<<<grid_size, block_size>>>(
+        grid_sample_nearest_kernel<float><<<grid_size, block_size>>>(
             input_f32.data<float>(), grid_f32.data<float>(),
             output_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out,
-            pad_mode, align_corners);
+            N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
     } else if (mode == "bilinear") {
-        grid_sample_bilinear_kernel<<<grid_size, block_size>>>(
+        grid_sample_bilinear_kernel<float><<<grid_size, block_size>>>(
             input_f32.data<float>(), grid_f32.data<float>(),
             output_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out,
-            pad_mode, align_corners);
+            N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
     } else if (mode == "bicubic") {
-        // Phase P0 / Fix 7: real bicubic, no longer silently bilinear.
-        grid_sample_bicubic_kernel<<<grid_size, block_size>>>(
+        grid_sample_bicubic_kernel<float><<<grid_size, block_size>>>(
             input_f32.data<float>(), grid_f32.data<float>(),
             output_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out,
-            pad_mode, align_corners);
+            N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
     } else {
         throw std::invalid_argument(
             "grid_sample_cuda: unknown mode '" + mode +

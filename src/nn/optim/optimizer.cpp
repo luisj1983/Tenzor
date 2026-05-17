@@ -136,12 +136,45 @@ auto Optimizer::load_state(const std::string& path) -> void {
     load_state_dict(state);
 }
 
-auto Optimizer::set_lr(double /*lr*/) -> void {
-    throw std::runtime_error("Optimizer::set_lr() not implemented for this optimizer type");
+auto Optimizer::set_lr(double lr) -> void {
+    // Default implementation: write lr into every ParamGroup so any optimizer
+    // that uses the standard group container picks it up on the next step().
+    // Optimizers without param_groups_ should override this method.
+    if (param_groups_.empty()) {
+        throw std::runtime_error(
+            "Optimizer::set_lr(): no parameter groups registered; "
+            "derived optimizer must override set_lr() or populate param_groups_.");
+    }
+    for (auto& group : param_groups_) {
+        group.lr = lr;
+    }
 }
 
 auto Optimizer::get_lr() const -> double {
-    throw std::runtime_error("Optimizer::get_lr() not implemented for this optimizer type");
+    // Default implementation: return the lr of the first ParamGroup. Mirrors
+    // PyTorch's convention (param_groups[0]['lr']). When groups carry distinct
+    // learning rates, callers that need per-group lrs should use param_groups()
+    // directly. Optimizers without param_groups_ should override.
+    if (param_groups_.empty()) {
+        throw std::runtime_error(
+            "Optimizer::get_lr(): no parameter groups registered; "
+            "derived optimizer must override get_lr() or populate param_groups_.");
+    }
+    return param_groups_.front().lr;
+}
+
+auto Optimizer::defaults() const -> std::unordered_map<std::string, double> {
+    // Base implementation: the universal hyperparameters every group carries
+    // (lr, weight_decay), read from the first ParamGroup. Concrete optimizers
+    // override to merge in their own state (momentum/eps/beta*/etc.).
+    if (param_groups_.empty()) {
+        return {};
+    }
+    const auto& g = param_groups_.front();
+    return {
+        {"lr",           g.lr},
+        {"weight_decay", g.weight_decay},
+    };
 }
 
 } // namespace tenzor::optim

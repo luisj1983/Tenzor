@@ -680,11 +680,20 @@ inline void lstm_forward_bidirectional(
  *   n = tanh(W_in @ x + r * (W_hn @ h + b_hn) + b_n)
  *   h_new = (1 - z) * n + z * h
  */
+// F.2: PyTorch-faithful GRU cell. Takes bias_ih and bias_hh SEPARATELY so
+// the n-gate's `r * (W_hh @ h + b_hh)` term is computed exactly. Calling
+// with `bias_ih` and `bias_hh = nullptr` reproduces the legacy single-bias
+// semantics for back-compat.
+//   r = sigmoid(W_ih @ x + b_ih_r + W_hh @ h + b_hh_r)
+//   z = sigmoid(W_ih @ x + b_ih_z + W_hh @ h + b_hh_z)
+//   n = tanh((W_ih @ x + b_ih_n) + r * (W_hh @ h + b_hh_n))
+//   h_new = (1 - z) * n + z * h
 inline void gru_cell_fused(
     const float* gates_ih,  // (batch, 3*hidden) - pre-computed input gates [r_i, z_i, n_i]
     const float* h,         // (batch, hidden) - previous hidden
     const float* W_hh,      // (3*hidden, hidden) - hidden weights
-    const float* bias,      // (3*hidden) or nullptr
+    const float* bias_ih,   // (3*hidden) or nullptr — input-side bias
+    const float* bias_hh,   // (3*hidden) or nullptr — hidden-side bias
     float* h_out,           // (batch, hidden) - new hidden
     float* workspace,       // (batch, 3*hidden) - temp buffer
     int64_t batch,
@@ -717,16 +726,25 @@ inline void gru_cell_fused(
             __m256 n_ih = _mm256_loadu_ps(g_ih + 2 * hidden + d);
             __m256 n_hh = _mm256_loadu_ps(g_hh + 2 * hidden + d);
 
-            if (bias) {
-                r_gate = _mm256_add_ps(r_gate, _mm256_loadu_ps(bias + d));
-                z_gate = _mm256_add_ps(z_gate, _mm256_loadu_ps(bias + hidden + d));
-                n_ih = _mm256_add_ps(n_ih, _mm256_loadu_ps(bias + 2 * hidden + d));
+            // F.2: apply PyTorch GRU bias convention. b_ih is summed into
+            // every gate's i-side; b_hh is summed into the r/z gates'
+            // h-side (combined into the gate sum) and — critically — into
+            // the n gate's h-side BEFORE the r multiplication.
+            if (bias_ih) {
+                r_gate = _mm256_add_ps(r_gate, _mm256_loadu_ps(bias_ih + d));
+                z_gate = _mm256_add_ps(z_gate, _mm256_loadu_ps(bias_ih + hidden + d));
+                n_ih   = _mm256_add_ps(n_ih,   _mm256_loadu_ps(bias_ih + 2 * hidden + d));
+            }
+            if (bias_hh) {
+                r_gate = _mm256_add_ps(r_gate, _mm256_loadu_ps(bias_hh + d));
+                z_gate = _mm256_add_ps(z_gate, _mm256_loadu_ps(bias_hh + hidden + d));
+                n_hh   = _mm256_add_ps(n_hh,   _mm256_loadu_ps(bias_hh + 2 * hidden + d));
             }
 
             __m256 r = sigmoid_avx2(r_gate);
             __m256 z = sigmoid_avx2(z_gate);
 
-            // n = tanh(n_ih + r * n_hh)
+            // n = tanh(n_ih + r * (n_hh + b_hh_n))
             __m256 n_gate = _mm256_fmadd_ps(r, n_hh, n_ih);
             __m256 n = tanh_avx2(n_gate);
 
@@ -746,10 +764,15 @@ inline void gru_cell_fused(
             float n_ih = g_ih[2 * hidden + d];
             float n_hh = g_hh[2 * hidden + d];
 
-            if (bias) {
-                r_gate += bias[d];
-                z_gate += bias[hidden + d];
-                n_ih += bias[2 * hidden + d];
+            if (bias_ih) {
+                r_gate += bias_ih[d];
+                z_gate += bias_ih[hidden + d];
+                n_ih   += bias_ih[2 * hidden + d];
+            }
+            if (bias_hh) {
+                r_gate += bias_hh[d];
+                z_gate += bias_hh[hidden + d];
+                n_hh   += bias_hh[2 * hidden + d];
             }
 
             float r = sigmoid_scalar(r_gate);
@@ -768,7 +791,8 @@ inline void gru_forward(
     const float* input,
     const float* W_ih,
     const float* W_hh,
-    const float* bias,
+    const float* bias_ih,   // F.2: PyTorch convention — two biases.
+    const float* bias_hh,   //       Either may be nullptr.
     const float* h0,
     float* output,
     float* h_n,
@@ -800,7 +824,8 @@ inline void gru_forward(
         const float* gates_ih_t = gates_ih + t * batch * gate_size;
         float* output_t = output + t * batch * hidden;
 
-        gru_cell_fused(gates_ih_t, h_curr, W_hh, bias, output_t, gates_hh, batch, hidden);
+        gru_cell_fused(gates_ih_t, h_curr, W_hh, bias_ih, bias_hh,
+                       output_t, gates_hh, batch, hidden);
         std::memcpy(h_curr, output_t, batch * hidden * sizeof(float));
     }
 

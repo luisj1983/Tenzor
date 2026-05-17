@@ -91,6 +91,19 @@ public:
     /** @brief Load optimizer state from dictionary */
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+
+    /** @brief Hyperparameters: lr, beta1, beta2, eps, weight_decay, amsgrad. */
+    auto defaults() const -> std::unordered_map<std::string, double> override {
+        return {
+            {"lr",           lr_},
+            {"beta1",        beta1_},
+            {"beta2",        beta2_},
+            {"eps",          eps_},
+            {"weight_decay", weight_decay_},
+            {"amsgrad",      amsgrad_ ? 1.0 : 0.0},
+        };
+    }
+
 private:
     double lr_;
     double beta1_;
@@ -175,6 +188,19 @@ public:
 
     /** @brief Load optimizer state from dictionary */
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+
+    /** @brief Hyperparameters: lr, beta1, beta2, eps, weight_decay, amsgrad. */
+    auto defaults() const -> std::unordered_map<std::string, double> override {
+        return {
+            {"lr",           lr_},
+            {"beta1",        beta1_},
+            {"beta2",        beta2_},
+            {"eps",          eps_},
+            {"weight_decay", weight_decay_},
+            {"amsgrad",      amsgrad_ ? 1.0 : 0.0},
+        };
+    }
 
 private:
     double lr_;

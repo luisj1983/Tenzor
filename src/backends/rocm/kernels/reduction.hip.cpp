@@ -662,8 +662,8 @@ __global__ void scale_kernel(T* data, T scale, int64_t n) {
 __global__ void scale_kernel_fp16(__half* data, float scale, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float val = __half2float(data[idx]);
-        data[idx] = __float2half(val * scale);
+        float val = tenzor::rocm::safe_h2f(data[idx]);
+        data[idx] = tenzor::rocm::safe_f2h(val * scale);
     }
 }
 

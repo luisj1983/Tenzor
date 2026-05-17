@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
@@ -77,7 +78,7 @@ __global__ void add_bias_to_output_kernel_fp16(const __half* __restrict__ bias, 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch * features) {
         int64_t f = idx % features;
-        output[idx] = __float2half(__half2float(output[idx]) + __half2float(bias[f]));
+        output[idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(output[idx]) + tenzor::rocm::safe_h2f(bias[f]));
     }
 }
 
@@ -86,7 +87,7 @@ __global__ void sum_over_batch_kernel_fp16(const __half* __restrict__ grad, floa
                                             int64_t batch_offset, int64_t features) {
     int64_t f = blockIdx.x * blockDim.x + threadIdx.x;
     if (f < features) {
-        atomicAdd(&grad_bias_f32[f], __half2float(grad[batch_offset + f]));
+        atomicAdd(&grad_bias_f32[f], tenzor::rocm::safe_h2f(grad[batch_offset + f]));
     }
 }
 
@@ -167,7 +168,7 @@ __global__ void embedding_backward_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        atomicAdd(&grad_weight_f32[embedding_idx * embedding_dim + dim], __half2float(grad_output[tid]));
+        atomicAdd(&grad_weight_f32[embedding_idx * embedding_dim + dim], tenzor::rocm::safe_h2f(grad_output[tid]));
     }
 }
 
@@ -175,7 +176,7 @@ __global__ void embedding_backward_kernel_hip_fp16(
 __global__ void convert_f32_to_f16_kernel(const float* __restrict__ src, __half* __restrict__ dst, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        dst[idx] = __float2half(src[idx]);
+        dst[idx] = tenzor::rocm::safe_f2h(src[idx]);
     }
 }
 
@@ -619,10 +620,10 @@ __global__ void dropout_forward_kernel_fp16(
         float r = random_values[idx];
         if (r < p) {
             mask[idx] = 0.0f;
-            output[idx] = __float2half(0.0f);
+            output[idx] = tenzor::rocm::safe_f2h(0.0f);
         } else {
             mask[idx] = 1.0f;
-            output[idx] = __float2half(__half2float(input[idx]) * scale);
+            output[idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(input[idx]) * scale);
         }
     }
 }
@@ -637,7 +638,7 @@ __global__ void dropout_backward_kernel_hip_fp16(
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * mask[idx] * scale);
+        grad_input[idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(grad_output[idx]) * mask[idx] * scale);
     }
 }
 

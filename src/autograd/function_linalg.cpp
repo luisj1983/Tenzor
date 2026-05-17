@@ -377,33 +377,26 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // F is K x K
     auto S_sq = mul(S, S);  // (..., K)
 
-    // Build F matrix element-wise
-    // For simplicity, compute on CPU
-    auto s_data = S.contiguous();
-    auto f_shape = std::vector<int64_t>(S.shape().begin(), S.shape().end());
-    f_shape[f_shape.size() - 1] = K;
-    f_shape.push_back(K);
+    // B.8: batch-aware F matrix.
+    // For S shaped (..., K), build F shaped (..., K, K) with
+    //   F[..., i, j] = 1 / (s_j^2 - s_i^2)   for i != j
+    //   F[..., i, i] = 0
+    // Using unsqueeze + broadcast preserves all leading batch dims so
+    // higher-order autograd through batched SVD works correctly.
+    // S_row varies over j (last dim of the (..., 1, K) broadcast), S_col
+    // varies over i (last-but-one dim of the (..., K, 1) broadcast).
+    auto S_row = unsqueeze(S_sq, S_sq.ndim() - 1);   // (..., 1, K)  varies over j
+    auto S_col = unsqueeze(S_sq, S_sq.ndim());       // (..., K, 1)  varies over i
+    auto diffs = sub(S_row, S_col);                  // diffs[..., i, j] = s_j^2 - s_i^2
 
-    // Create F as zeros
-    // Simplified: we need batch-aware F construction
-    // For now, compute F for last two dims
-    auto F_tensor = zeros({K, K}, S.dtype(), S.device());
-
-    // Fill F: this requires element access, do it with a simpler approach
-    // Use outer products of S
-    // s_j^2 - s_i^2 = (s_j - s_i)(s_j + s_i)
-    // Reshape S for broadcasting: S_row (1, K), S_col (K, 1)
-    auto S_row = reshape(S_sq, {1, K});
-    auto S_col = reshape(S_sq, {K, 1});
-    auto diffs = sub(S_row, S_col);  // (K, K): diffs[i][j] = s_j^2 - s_i^2
-
-    // Clamp small |s_j^2 - s_i^2| to epsilon for near-degenerate singular values
-    auto eps_val = detail::dtype_epsilon(S.dtype());
-    auto eps_t = full({K, K}, eps_val, S.dtype(), S.device());
+    // Clamp small |s_j^2 - s_i^2| to epsilon for near-degenerate singular
+    // values. eps_t/mask shapes broadcast against the batched diffs.
+    auto eps_val   = detail::dtype_epsilon(S.dtype());
+    auto eps_t     = full({K, K}, eps_val, S.dtype(), S.device());
     auto abs_diffs = abs(diffs);
     auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
 
-    // Replace diagonal with 1 to avoid division by zero
+    // Replace diagonal with 1 to avoid division by zero (broadcasts over batch).
     auto mask = eye(K, std::nullopt, S.dtype(), S.device());
     safe_diffs = add(safe_diffs, mask);
 
@@ -570,10 +563,15 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
     auto N = W.shape()[W.ndim() - 1];
 
-    // Construct F matrix: F_{ij} = 1/(w_j - w_i) for i != j, 0 on diagonal
-    auto W_row = reshape(W, {1, N});
-    auto W_col = reshape(W, {N, 1});
-    auto diffs = sub(W_row, W_col);  // (N, N): diffs[i][j] = w_j - w_i
+    // B.8: batch-aware F matrix. For W shaped (..., N), build F shaped
+    //   (..., N, N) via unsqueeze+broadcast: F[..., i, j] = 1/(w_j - w_i)
+    //   for i != j, 0 on diagonal. This makes higher-order autograd
+    //   through batched eigh produce correct gradients.
+    // W_row varies over j (last dim of the (..., 1, N) broadcast); W_col
+    // varies over i (last-but-one dim of the (..., N, 1) broadcast).
+    auto W_row = unsqueeze(W, W.ndim() - 1);  // (..., 1, N)  varies over j
+    auto W_col = unsqueeze(W, W.ndim());      // (..., N, 1)  varies over i
+    auto diffs = sub(W_row, W_col);           // diffs[..., i, j] = w_j - w_i
 
     // Clamp small |w_j - w_i| to epsilon to avoid singularity from degenerate eigenvalues
     auto eps_val = detail::dtype_epsilon(W.dtype());

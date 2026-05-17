@@ -266,21 +266,42 @@ public:
     /**
      * @brief Set learning rate on the optimizer.
      *
-     * Base implementation throws. Derived classes should override.
-     * Used by schedulers to adjust the learning rate.
+     * Base implementation writes @p lr into every ParamGroup, which is the
+     * correct behaviour for any optimizer that uses the standard
+     * param_groups_ container. Optimizers that maintain LR outside of
+     * param_groups_ should override.
      *
-     * @param lr New learning rate
+     * Used by LR schedulers.
+     *
+     * @param lr New learning rate (applied to all parameter groups)
      */
     virtual auto set_lr(double lr) -> void;
 
     /**
      * @brief Get current learning rate from the optimizer.
      *
-     * Base implementation throws. Derived classes should override.
+     * Base implementation returns the LR of the first ParamGroup
+     * (matches PyTorch's `param_groups[0]['lr']` convention). Callers that
+     * need per-group LRs should use param_groups() directly.
      *
-     * @return Current learning rate
+     * @return Current learning rate of the first parameter group
      */
     virtual auto get_lr() const -> double;
+
+    /**
+     * @brief Canonical hyperparameter map for state-dict serialization.
+     *
+     * Mirrors PyTorch's `Optimizer.defaults`. Returns a flattened key/value
+     * map of every scalar hyperparameter the optimizer cares about — at the
+     * minimum {"lr", "weight_decay"} from the first ParamGroup. Concrete
+     * optimizers override to expose their own params (Adam adds beta1,
+     * beta2, eps; SGD adds momentum, dampening, nesterov; etc.). Tuple-typed
+     * hyperparameters (e.g. Adam's betas) are flattened to scalar keys
+     * (beta1, beta2) so the map fits a uniform serialization format.
+     *
+     * @return Map of hyperparameter name to scalar value
+     */
+    virtual auto defaults() const -> std::unordered_map<std::string, double>;
 
 protected:
     /**

@@ -1229,6 +1229,40 @@ kernel void cast_i32_to_f32_kernel(
     output[id] = float(input[id]);
 }
 
+// H: cast shaders for the remaining common dtype pairs. The dispatcher
+// in mps_elementwise.mm composes pairs not directly named (e.g.
+// i8 → f64) via two-step cast through f32 — still 100% on-device.
+
+#define CAST_KERNEL(NAME, IN_T, OUT_T)                                        \
+kernel void NAME(                                                             \
+    device const IN_T* input  [[buffer(0)]],                                  \
+    device       OUT_T* output [[buffer(1)]],                                 \
+    uint id [[thread_position_in_grid]])                                      \
+{                                                                             \
+    output[id] = OUT_T(input[id]);                                            \
+}
+
+CAST_KERNEL(cast_f32_to_i64_kernel,   float, long)
+CAST_KERNEL(cast_i64_to_f32_kernel,   long,  float)
+CAST_KERNEL(cast_f32_to_u8_kernel,    float, uchar)
+CAST_KERNEL(cast_u8_to_f32_kernel,    uchar, float)
+CAST_KERNEL(cast_f32_to_i8_kernel,    float, char)
+CAST_KERNEL(cast_i8_to_f32_kernel,    char,  float)
+CAST_KERNEL(cast_f32_to_i16_kernel,   float, short)
+CAST_KERNEL(cast_i16_to_f32_kernel,   short, float)
+CAST_KERNEL(cast_f32_to_bool_kernel,  float, bool)
+CAST_KERNEL(cast_bool_to_f32_kernel,  bool,  float)
+CAST_KERNEL(cast_i32_to_i64_kernel,   int,   long)
+CAST_KERNEL(cast_i64_to_i32_kernel,   long,  int)
+CAST_KERNEL(cast_f16_to_i32_kernel,   half,  int)
+CAST_KERNEL(cast_i32_to_f16_kernel,   int,   half)
+CAST_KERNEL(cast_f16_to_i64_kernel,   half,  long)
+CAST_KERNEL(cast_i64_to_f16_kernel,   long,  half)
+CAST_KERNEL(cast_f32_to_u32_kernel,   float, uint)
+CAST_KERNEL(cast_u32_to_f32_kernel,   uint,  float)
+
+#undef CAST_KERNEL
+
 // ============================================================================
 // Activation functions: LeakyReLU, ELU, Softplus, GELU, Swish, Mish, LogSigmoid
 // ============================================================================

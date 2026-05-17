@@ -453,15 +453,17 @@ auto ClampBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     auto min_tensor = full(input_shape_vec, min_, input.dtype(), input.device());
     auto max_tensor = full(input_shape_vec, max_, input.dtype(), input.device());
 
-    // Mask = (input >= min) & (input <= max)
-    // For now, use clamp and compare approach
-    auto clamped = clamp(input, min_, max_);
-
-    // grad = grad_output where input == clamped else 0
-    // This is approximately: mask = 1 - abs(sign(input - clamped))
-    auto diff = sub(input, clamped);
+    // Mask = (input >= min) & (input <= max) — inclusive at the boundary,
+    // matching PyTorch's clamp_backward convention. The formula
+    //     mask = 1 - |sign(input - clamp(input, min, max))|
+    // is exact (not an approximation): sign(0) == 0 gives mask = 1 in the
+    // interior AND at exact boundary points; sign(±) == ±1 gives mask = 0
+    // outside the clamp range. Re-using `clamp` is the cleanest way to
+    // express the inclusive boundary check across all backends.
+    auto clamped   = clamp(input, min_, max_);
+    auto diff      = sub(input, clamped);
     auto diff_sign = abs(sign(diff));
-    auto mask = sub(ones_tensor, diff_sign);
+    auto mask      = sub(ones_tensor, diff_sign);
 
     return {mul(grad_output, mask)};
 }

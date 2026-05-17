@@ -427,7 +427,8 @@ namespace cpu {
                               const Tensor& bias_ih, const Tensor& bias_hh,
                               const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
     auto gru_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
-                             const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+                             const Tensor& bias_ih, const Tensor& bias_hh,
+                             const Tensor& h0) -> std::vector<Tensor>;
     auto bilstm_forward_kernel(const Tensor& input,
                                 const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
                                 const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
@@ -2189,9 +2190,15 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // bias may be empty tensor if not provided
+        // F.2: input convention is [input, W_ih, W_hh, bias_ih, h0, bias_hh].
+        // The bias_hh slot was added in Phase 8.5; older callers omit it
+        // (5 inputs), in which case bias_hh is treated as empty.
+        const Tensor empty_t = empty({0}, inputs[0].dtype(), inputs[0].device());
+        const Tensor& bias_ih = inputs[3];
+        const Tensor& h0      = inputs[4];
+        const Tensor& bias_hh = inputs.size() > 5 ? inputs[5] : empty_t;
         return cpu::gru_forward_kernel(inputs[0], inputs[1], inputs[2],
-                                        inputs[3], inputs[4]);
+                                        bias_ih, bias_hh, h0);
     });
 
     // Multi-layer LSTM with fused oneDNN primitive

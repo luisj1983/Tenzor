@@ -94,9 +94,11 @@ public:
      * `key` (lower `key` → lower new rank). Pass `color == -1` to indicate
      * "do not participate"; that rank receives `nullptr`.
      *
-     * The default implementation throws — backends that genuinely support
-     * sub-group creation (NCCL via `ncclCommSplit`, MPI via
-     * `MPI_Comm_split`) override this.
+     * The default implementation throws an actionable error — backends
+     * that support sub-group creation (NCCL via `ncclCommSplit`, MPI via
+     * `MPI_Comm_split`, Gloo via gather+rendezvous) override this. The
+     * default-throw shape is preserved (rather than `= 0`) so test mock
+     * subclasses can inherit ProcessGroupBase without implementing split.
      *
      * @param color Group identifier; ranks sharing `color` form one sub-PG.
      *              Use `-1` to opt out (returns nullptr).

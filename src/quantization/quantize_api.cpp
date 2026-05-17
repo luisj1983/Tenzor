@@ -80,13 +80,23 @@ public:
                     std::dynamic_pointer_cast<nn::Conv2d>(child) != nullptr;
 
                 if (is_quantizable) {
+                    // B.1: honour the QConfig's weight_scheme rather than
+                    // hardcoding per-tensor. PerChannel schemes quantize the
+                    // OUTPUT-channel axis of the weight tensor, which by
+                    // PyTorch convention is axis 0 for Linear (out_features
+                    // x in_features) and Conv2d (out_channels x in_channels
+                    // x kH x kW). Per-tensor schemes use axis = -1.
+                    const auto wscheme = qconfig_.weight_scheme();
+                    const bool per_channel =
+                        wscheme == nn::quantization::QuantizationScheme::PerChannelSymmetric ||
+                        wscheme == nn::quantization::QuantizationScheme::PerChannelAsymmetric;
+                    const int64_t axis = per_channel ? 0 : -1;
                     auto fake_quant = std::make_shared<nn::quantization::FakeQuantize>(
                         qconfig_.weight_dtype(),
-                        qconfig_.activation_scheme(),
-                        false,   // not learnable
-                        true,    // observer enabled
-                        -1       // per-tensor
-                    );
+                        wscheme,
+                        /*learnable=*/false,
+                        /*observer_enabled=*/true,
+                        axis);
                     qat_seq->add_module(fake_quant);
                 }
             }

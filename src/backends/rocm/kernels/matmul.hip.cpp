@@ -6,6 +6,7 @@
  * Supports both 2D matrix multiplication and batched operations for float and double precision.
  */
 
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
@@ -367,28 +368,28 @@ __global__ void matmul_wmma_fp16_kernel(
         if (row < M && a_col < K) {
             As[ty][tx] = A[row * K + a_col];
         } else {
-            As[ty][tx] = __float2half(0.0f);
+            As[ty][tx] = tenzor::rocm::safe_f2h(0.0f);
         }
 
         int b_row = t * 16 + ty;
         if (b_row < K && col < N) {
             Bs[ty][tx] = B[b_row * N + col];
         } else {
-            Bs[ty][tx] = __float2half(0.0f);
+            Bs[ty][tx] = tenzor::rocm::safe_f2h(0.0f);
         }
 
         __syncthreads();
 
         #pragma unroll
         for (int k = 0; k < 16; ++k) {
-            sum += __half2float(As[ty][k]) * __half2float(Bs[k][tx]);
+            sum += tenzor::rocm::safe_h2f(As[ty][k]) * tenzor::rocm::safe_h2f(Bs[k][tx]);
         }
 
         __syncthreads();
     }
 
     if (row < M && col < N) {
-        C[row * N + col] = __float2half(sum);
+        C[row * N + col] = tenzor::rocm::safe_f2h(sum);
     }
 }
 
@@ -422,28 +423,28 @@ __global__ void matmul_tiled_bf16_kernel(
         if (row < M && a_col < K) {
             As[ty][tx] = A[row * K + a_col];
         } else {
-            As[ty][tx] = __float2bfloat16(0.0f);
+            As[ty][tx] = tenzor::rocm::safe_f2bf(0.0f);
         }
 
         int b_row = t * TILE_SIZE + ty;
         if (b_row < K && col < N) {
             Bs[ty][tx] = B[b_row * N + col];
         } else {
-            Bs[ty][tx] = __float2bfloat16(0.0f);
+            Bs[ty][tx] = tenzor::rocm::safe_f2bf(0.0f);
         }
 
         __syncthreads();
 
         #pragma unroll
         for (int k = 0; k < TILE_SIZE; ++k) {
-            sum += __bfloat162float(As[ty][k]) * __bfloat162float(Bs[k][tx]);
+            sum += tenzor::rocm::safe_bf2f(As[ty][k]) * tenzor::rocm::safe_bf2f(Bs[k][tx]);
         }
 
         __syncthreads();
     }
 
     if (row < M && col < N) {
-        C[row * N + col] = __float2bfloat16(sum);
+        C[row * N + col] = tenzor::rocm::safe_f2bf(sum);
     }
 }
 #endif // __HIP_BFLOAT16__

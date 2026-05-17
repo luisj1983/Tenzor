@@ -342,7 +342,16 @@ auto torch_storage_name_to_dtype(const std::string& mod, const std::string& name
     if (name == "ByteStorage")    return {DType::UInt8, 1};
     if (name == "BoolStorage")    return {DType::Bool, 1};
     throw std::runtime_error(
-        "torch_pickle: unsupported torch storage dtype: torch." + name);
+        "torch_pickle: unsupported torch storage dtype: torch." + name +
+        ". Supported storage types: FloatStorage (Float32), "
+        "DoubleStorage (Float64), HalfStorage (Float16), "
+        "BFloat16Storage (BFloat16), LongStorage (Int64), "
+        "IntStorage (Int32), ShortStorage (Int16), CharStorage (Int8), "
+        "ByteStorage (UInt8), BoolStorage (Bool). "
+        "Complex64/Complex128/quantized storages are not implemented in the "
+        "native pickle reader; re-save the model as safetensors "
+        "(`model.safetensors`) and load through "
+        "ModelHub::load_pretrained_weights instead.");
 }
 
 // Read raw bytes from the ZIP `data/N` entry into a freshly-allocated CPU

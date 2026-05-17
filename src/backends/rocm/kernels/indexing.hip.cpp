@@ -1,3 +1,4 @@
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -621,7 +622,7 @@ auto masked_fill_hip(
             dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<__half*>(output.data<Float16>()),
             mask.data<bool>(),
-            __float2half(static_cast<float>(value)),
+            tenzor::rocm::safe_f2h(static_cast<float>(value)),
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1851,7 +1852,7 @@ auto masked_fill_hip(
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<__half*>(output.data<Float16>()),
             mask.data<bool>(),
-            __float2half(static_cast<float>(value)),
+            tenzor::rocm::safe_f2h(static_cast<float>(value)),
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
@@ -2618,7 +2619,7 @@ __global__ void nonzero_flag_kernel_hip<__half>(
     int64_t n) {
 
     HIP_KERNEL_LOOP(i, n) {
-        flags[i] = (__hne(input[i], __float2half(0.0f))) ? 1 : 0;
+        flags[i] = (__hne(input[i], tenzor::rocm::safe_f2h(0.0f))) ? 1 : 0;
     }
 }
 

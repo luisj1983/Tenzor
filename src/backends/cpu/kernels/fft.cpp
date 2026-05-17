@@ -45,6 +45,12 @@ inline DType to_complex_dtype(DType dt) {
         case DType::Float64: return DType::Complex128;
         case DType::Complex64: return DType::Complex64;
         case DType::Complex128: return DType::Complex128;
+        // E.5: Float16 / BFloat16 → Complex64 (FP32-mantissa). MKL DFTI is
+        // FP32/FP64 only; the FFT computes in single precision and the
+        // output is Complex64. AVX-512 FP16 (Sapphire Rapids) gets a
+        // native FP16 path elsewhere when TENZOR_HAS_AVX512_FP16 is set.
+        case DType::Float16:
+        case DType::BFloat16: return DType::Complex64;
         default: return DType::Complex64;
     }
 }
@@ -147,6 +153,14 @@ inline DFTI_CONFIG_VALUE dfti_precision(DType dt) {
         case DType::Float64:
         case DType::Complex128:
             return DFTI_DOUBLE;
+        // E.5: Float16 / BFloat16 compute through DFTI_SINGLE — values are
+        // widened to Float32 before the DFTI call and narrowed if the
+        // caller wants Float16 output. Explicit entries make the mapping
+        // obvious in callers that grep for dfti_precision().
+        case DType::Float16:
+        case DType::BFloat16:
+        case DType::Float32:
+        case DType::Complex64:
         default:
             return DFTI_SINGLE;
     }
@@ -588,6 +602,44 @@ void mkl_fftn_complex(const CType* src, CType* dst,
 // Public kernel functions
 // ============================================================================
 
+// E.5: per-element FP16/BF16 → Complex64 builder.
+// Instead of `input.to(Complex64)` which allocates an intermediate
+// Float32 tensor then a Complex64 tensor, this writes directly into the
+// final Complex64 destination buffer. Each Float16/BF16 element is loaded
+// at FP16 storage size, cast to float via the half-operator (a single
+// inline SSE/AVX instruction on hardware that has F16C), packed as
+// std::complex<float>(value, 0). No tensor-level widen step; the FFT
+// then runs natively in Complex64 (FP32 math) because the output dtype
+// is genuinely Complex64 by spec — there's no Complex16/Complex32 dtype
+// in Tenzor for the FFT output to narrow to.
+inline auto build_complex64_from_half(const Tensor& input) -> Tensor {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor out(shape_vec, DType::Complex64, input.device());
+    auto* dst = out.data<std::complex<float>>();
+    const int64_t n = input.numel();
+
+    if (input.dtype() == DType::Float16) {
+        const auto* src = input.data<tenzor::Float16>();
+        #pragma omp parallel for if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            dst[i] = std::complex<float>(static_cast<float>(src[i]), 0.0f);
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const auto* src = input.data<tenzor::BFloat16>();
+        #pragma omp parallel for if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            dst[i] = std::complex<float>(static_cast<float>(src[i]), 0.0f);
+        }
+    } else {
+        // Caller mistake — only Float16/BFloat16 routed here.
+        throw std::runtime_error(
+            "build_complex64_from_half: unsupported dtype " +
+            std::string(dtype_name(input.dtype())));
+    }
+    return out;
+}
+
 auto fft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                 std::string_view norm) -> Tensor {
     dim = normalize_dim(dim, input.ndim());
@@ -595,9 +647,27 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
     DType out_dtype = to_complex_dtype(input.dtype());
     auto precision = dfti_precision(input.dtype());
 
-    // Ensure input is complex
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(out_dtype) : input;
+    // E.5: input dtype dispatch.
+    // - Float16 / BFloat16: per-element load+cast directly into the
+    //   Complex64 destination buffer via `build_complex64_from_half`.
+    //   No intermediate Float32 tensor is allocated; each half-precision
+    //   element is read at its native storage size and packed as
+    //   std::complex<float>(value, 0). The FFT then runs in Complex64
+    //   (FP32 internal math) because the OUTPUT dtype is Complex64 by
+    //   spec — Float16 FFT has no Complex16 counterpart in Tenzor's
+    //   DType enum (or in NumPy/SciPy/PyTorch).
+    // - Float32 / Float64 / Complex64 / Complex128: native cast to the
+    //   matching complex type (real → complex with imag = 0, complex
+    //   passes through). MKL DFTI handles the FFT in the native precision.
+    Tensor inp;
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        inp = build_complex64_from_half(input);
+    } else if (input.dtype() == DType::Float32 ||
+               input.dtype() == DType::Float64) {
+        inp = input.to(out_dtype);
+    } else {
+        inp = input;  // already complex
+    }
     auto cont = inp.contiguous();
     auto shape = cont.shape();
     int64_t N_in = shape[dim];

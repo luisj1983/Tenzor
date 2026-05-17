@@ -31,7 +31,13 @@ auto RandomRotation::operator()(const Tensor& input, const Tensor& target)
     }
 
     // Generate random angle in [min_degrees_, max_degrees_]
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> dist(min_degrees_, max_degrees_);
     float angle_deg = dist(rng);
     float angle_rad = angle_deg * static_cast<float>(M_PI) / 180.0f;
@@ -108,7 +114,13 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     // Work with a copy to avoid modifying the original
     Tensor output = input;
@@ -200,7 +212,13 @@ auto Cutout::operator()(const Tensor& input, const Tensor& target)
             "Cutout requires at least 2D input (H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     // Assume last two dims are H, W
     int64_t H = shape[shape.size() - 2];
@@ -250,7 +268,13 @@ auto RandomVerticalFlip::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
     if (dist(rng) >= p_) {
@@ -289,7 +313,13 @@ auto RandomHorizontalFlip::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
     if (dist(rng) >= p_) {
@@ -365,7 +395,13 @@ auto RandomCrop::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomCrop size exceeds (padded) input dimensions");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_int_distribution<int64_t> dist_y(0, H - height_);
     std::uniform_int_distribution<int64_t> dist_x(0, W - width_);
 
@@ -458,7 +494,13 @@ auto RandomResizedCrop::operator()(const Tensor& input, const Tensor& target)
     int64_t W = shape[shape.size() - 1];
     float area = static_cast<float>(H * W);
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> scale_dist(scale_min_, scale_max_);
     std::uniform_real_distribution<float> ratio_dist(std::log(ratio_min_), std::log(ratio_max_));
 
@@ -526,7 +568,13 @@ auto GaussianBlur::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("GaussianBlur requires at least 2D input");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> sigma_dist(sigma_min_, sigma_max_);
     float sigma = sigma_dist(rng);
 
@@ -597,7 +645,13 @@ auto RandomAffine::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomAffine requires at least 2D input (H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
@@ -693,7 +747,13 @@ auto RandomErasing::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomErasing requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -762,7 +822,13 @@ auto RandomPerspective::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomPerspective requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -922,7 +988,13 @@ auto ElasticTransform::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("ElasticTransform requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -1049,7 +1121,13 @@ MixUp::MixUp(float alpha) : alpha_(alpha) {
 auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
                         const Tensor& input2, const Tensor& target2)
     -> std::pair<Tensor, Tensor> {
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     // Sample lambda from Beta(alpha, alpha) using gamma variates
     std::gamma_distribution<float> gamma_dist(alpha_, 1.0f);
@@ -1104,7 +1182,13 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
         throw std::invalid_argument("CutMix requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     // Sample lambda from Beta(alpha, alpha)
     std::gamma_distribution<float> gamma_dist(alpha_, 1.0f);
@@ -1445,7 +1529,13 @@ auto RandAugment::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandAugment requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     int64_t C = shape[0];
     int64_t H = shape[1];
@@ -1493,7 +1583,13 @@ auto TrivialAugmentWide::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("TrivialAugmentWide requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     int64_t C = shape[0];
     int64_t H = shape[1];
@@ -1544,7 +1640,13 @@ auto AugMix::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("AugMix requires 3D input (C, H, W)");
     }
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
+    // call pulls a fresh seed from the global generator (advances per call),
+    // so two runs with the same manual_seed produce bit-identical outputs
+    // across vision augments. When no manual_seed is set, get_global_seed()
+    // falls back to a time-based seed (matches PyTorch's behaviour).
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(
+        tenzor::get_global_seed()));
 
     int64_t C = shape[0];
     int64_t H = shape[1];

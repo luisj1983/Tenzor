@@ -4,6 +4,9 @@
  */
 
 #include "tenzor/models/bert.hpp"
+#include "tenzor/models/hub.hpp"
+#include "tenzor/io/torch_pickle.hpp"
+#include "tenzor/nn/safetensors.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -14,6 +17,7 @@
 #include <stdexcept>
 #include <filesystem>
 #include <numeric>
+#include <mutex>
 
 namespace tenzor {
 namespace models {
@@ -552,37 +556,74 @@ auto BertModelHub::load_pretrained_weights(nn::Module& model,
     model.load_state_dict(mapped_state);
 }
 
+// ----------------------------------------------------------------------------
+// BERT pretrained-model registry.
+// Registers each canonical HuggingFace BERT family entry exactly once with
+// the central ModelHub. Subsequent calls go through ModelHub's libcurl
+// downloader, safetensors-mirror dispatch, SHA verification, and cache.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+struct BertRegistry {
+    std::once_flag flag;
+
+    void register_once() {
+        std::call_once(flag, []() {
+            using MWI = ModelWeightInfo;
+            // Field order: { name, url, sha256, size, description, safetensors_url }.
+            const std::vector<MWI> entries = {
+                MWI{ "bert-base-uncased",
+                     "https://huggingface.co/bert-base-uncased/resolve/main/pytorch_model.bin",
+                     /*sha256=*/"",
+                     /*size=*/0,
+                     /*description=*/"BERT-Base uncased (110M, English, 12L/768H/12A)",
+                     /*safetensors_url=*/"https://huggingface.co/bert-base-uncased/resolve/main/model.safetensors" },
+                MWI{ "bert-base-cased",
+                     "https://huggingface.co/bert-base-cased/resolve/main/pytorch_model.bin",
+                     "", 0, "BERT-Base cased (110M, English, 12L/768H/12A)",
+                     "https://huggingface.co/bert-base-cased/resolve/main/model.safetensors" },
+                MWI{ "bert-large-uncased",
+                     "https://huggingface.co/bert-large-uncased/resolve/main/pytorch_model.bin",
+                     "", 0, "BERT-Large uncased (340M, English, 24L/1024H/16A)",
+                     "https://huggingface.co/bert-large-uncased/resolve/main/model.safetensors" },
+                MWI{ "bert-large-cased",
+                     "https://huggingface.co/bert-large-cased/resolve/main/pytorch_model.bin",
+                     "", 0, "BERT-Large cased (340M, English, 24L/1024H/16A)",
+                     "https://huggingface.co/bert-large-cased/resolve/main/model.safetensors" },
+                MWI{ "bert-base-multilingual-cased",
+                     "https://huggingface.co/bert-base-multilingual-cased/resolve/main/pytorch_model.bin",
+                     "", 0, "BERT-Base multilingual cased (104 languages)",
+                     "https://huggingface.co/bert-base-multilingual-cased/resolve/main/model.safetensors" },
+            };
+            ModelHub::register_models(entries);
+        });
+    }
+};
+
+BertRegistry& bert_registry() {
+    static BertRegistry r;
+    return r;
+}
+
+} // namespace
+
 auto BertModelHub::download_model(const std::string& model_name,
-                             const std::string& cache_dir) -> std::string {
-    // Determine cache directory
-    std::string cache_path = cache_dir;
-    if (cache_path.empty()) {
-        // Use ~/.cache/tenzor as default
-        const char* home = std::getenv("HOME");
-        if (home) {
-            cache_path = std::string(home) + "/.cache/tenzor";
-        } else {
-            cache_path = "/tmp/tenzor_cache";
-        }
+                                  const std::string& cache_dir) -> std::string {
+    bert_registry().register_once();
+
+    // Honour the caller-supplied cache_dir if non-empty by setting it on the
+    // ModelHub (the singleton config is mutable). Empty means "use default".
+    if (!cache_dir.empty()) {
+        auto cfg = ModelHub::get_config();
+        cfg.cache_dir = cache_dir;
+        ModelHub::set_config(cfg);
     }
 
-    // Create cache directory if it doesn't exist
-    std::filesystem::create_directories(cache_path);
-
-    // Model checkpoint path
-    auto model_dir = cache_path + "/" + model_name;
-    auto checkpoint_file = model_dir + "/pytorch_model.bin";
-
-    // Check if already downloaded
-    if (std::filesystem::exists(checkpoint_file)) {
-        return checkpoint_file;
-    }
-
-    // In a real implementation, this would download from Hugging Face Hub
-    // For now, we'll throw an error and let the user manually download
-    throw std::runtime_error(
-        "Model '" + model_name + "' not found in cache. "
-        "Please download the model from Hugging Face Hub to: " + model_dir);
+    // Delegate to ModelHub. Prefer safetensors mirror over legacy .bin —
+    // safer parse, no pickle. ModelHub returns the local cache path.
+    return ModelHub::download_pretrained_safetensors(
+        model_name, /*prefer_safetensors=*/true);
 }
 
 auto BertModelHub::map_parameter_name(const std::string& hf_name) -> std::string {
@@ -641,17 +682,31 @@ auto BertModelHub::map_parameter_name(const std::string& hf_name) -> std::string
     return name;
 }
 
-auto BertModelHub::load_pytorch_checkpoint([[maybe_unused]] const std::string& checkpoint_path)
+auto BertModelHub::load_pytorch_checkpoint(const std::string& checkpoint_path)
     -> std::unordered_map<std::string, Tensor> {
-    // In a real implementation, this would use a PyTorch checkpoint loader
-    // or a custom binary format reader
+    if (!std::filesystem::exists(checkpoint_path)) {
+        throw std::runtime_error(
+            "BertModelHub::load_pytorch_checkpoint: file not found: " + checkpoint_path);
+    }
 
-    // For now, we'll return an empty map and throw an error
-    throw std::runtime_error(
-        "PyTorch checkpoint loading not yet implemented. "
-        "This requires integration with PyTorch C++ API or custom checkpoint format.");
+    // Dispatch by extension to the right deserializer (safetensors / pickle).
+    // For HuggingFace BERT, the canonical extensions are .safetensors and .bin.
+    auto ends_with = [](const std::string& s, const std::string& suffix) {
+        return s.size() >= suffix.size() &&
+               s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
 
-    return {};
+    if (ends_with(checkpoint_path, ".safetensors")) {
+        // SafeTensors path: parsed in ModelHub's static method.
+        // Delegate to ModelHub::load_pretrained_weights' deserializer via
+        // a direct call into the SafeTensors serializer to keep symmetry.
+        return nn::SafeTensorsSerializer::load(checkpoint_path);
+    }
+
+    // .bin / .pth / .pt — PyTorch pickle archive. tenzor::io::load_torch_pickle
+    // implements a native C++ reader that parses the torch.save zip + pickle
+    // protocol (no PyTorch runtime dependency).
+    return tenzor::io::load_torch_pickle(checkpoint_path);
 }
 
 auto BertModelHub::verify_checkpoint_compatibility(

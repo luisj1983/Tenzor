@@ -346,7 +346,7 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  * @brief Element-wise division kernel for half precision
  *
  * F8: emits NaN / ±Inf as explicit Float16 bit patterns rather than relying
- * on `__float2half(NaN)` to forward the special value through. On some HIP
+ * on `tenzor::rocm::safe_f2h(NaN)` to forward the special value through. On some HIP
  * builds the conversion silently canonicalises NaN to a finite value (the
  * same root cause documented in `transform.hip.cpp::cast_to_f16_kernel`).
  *
@@ -356,8 +356,8 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  */
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float fa = __half2float(a[idx]);
-        float fb = __half2float(b[idx]);
+        float fa = tenzor::rocm::safe_h2f(a[idx]);
+        float fb = tenzor::rocm::safe_h2f(b[idx]);
         float fv = fa / fb;
         unsigned int vb = __float_as_uint(fv);
         unsigned int exp  = (vb >> 23) & 0xFFu;
@@ -375,7 +375,7 @@ __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int6
             *reinterpret_cast<unsigned short*>(&h) = bits16;
             c[idx] = h;
         } else {
-            c[idx] = __float2half(fv);
+            c[idx] = tenzor::rocm::safe_f2h(fv);
         }
     }
 }
@@ -403,7 +403,7 @@ __global__ void broadcast_div_kernel_f16(
         }
 
         // IEEE 754 div semantics: 0/0 → NaN, x/0 → ±Inf for x ≠ 0.
-        c[out_idx] = __float2half(__half2float(a[idx_a]) / __half2float(b[idx_b]));
+        c[out_idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(a[idx_a]) / tenzor::rocm::safe_h2f(b[idx_b]));
     }
 }
 
@@ -863,9 +863,9 @@ __global__ void pow_kernel_f64(const double* input, double* output, double expon
  */
 __global__ void pow_kernel_f16(const __half* input, __half* output, float exponent, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         float result = powf(val, exponent);
-        output[idx] = __float2half(result);
+        output[idx] = tenzor::rocm::safe_f2h(result);
     }
 }
 
@@ -895,9 +895,9 @@ __global__ void clamp_kernel_f64(const double* input, double* output, double min
  */
 __global__ void clamp_kernel_f16(const __half* input, __half* output, float min_val, float max_val, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         float result = fminf(fmaxf(val, min_val), max_val);
-        output[idx] = __float2half(result);
+        output[idx] = tenzor::rocm::safe_f2h(result);
     }
 }
 
@@ -928,107 +928,107 @@ __global__ void sign_kernel_f64(const double* input, double* output, int64_t n) 
 
 __global__ void sqrt_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(sqrtf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(sqrtf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void exp_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(expf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(expf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void log_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(logf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(logf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void sign_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half((val > 0.0f) - (val < 0.0f));
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h((val > 0.0f) - (val < 0.0f));
     }
 }
 
 __global__ void sin_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(sinf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(sinf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void cos_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(cosf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(cosf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void tan_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(tanf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(tanf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void asin_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(asinf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(asinf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void acos_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(acosf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(acosf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void atan_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(atanf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(atanf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void sinh_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(sinhf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(sinhf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void cosh_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(coshf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(coshf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void reciprocal_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half(1.0f / val);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(1.0f / val);
     }
 }
 
 __global__ void floor_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(floorf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(floorf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void ceil_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(ceilf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(ceilf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void round_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(roundf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(roundf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
 __global__ void div_inplace_kernel_f16(__half* a, const __half* b, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float divisor = __half2float(b[idx]);
-        float result = __half2float(a[idx]) / divisor;
-        a[idx] = __float2half(result);
+        float divisor = tenzor::rocm::safe_h2f(b[idx]);
+        float result = tenzor::rocm::safe_h2f(a[idx]) / divisor;
+        a[idx] = tenzor::rocm::safe_f2h(result);
     }
 }
 
@@ -1040,7 +1040,7 @@ __global__ void dot_kernel_f16(const __half* a, const __half* b, float* partial_
 
     float sum = 0.0f;
     while (idx < n) {
-        sum += __half2float(a[idx]) * __half2float(b[idx]);
+        sum += tenzor::rocm::safe_h2f(a[idx]) * tenzor::rocm::safe_h2f(b[idx]);
         idx += blockDim.x * gridDim.x;
     }
     sdata[tid] = sum;
@@ -2270,7 +2270,7 @@ __global__ void trunc_kernel_device(const T* input, T* output, int64_t n) {
 
 __global__ void trunc_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(truncf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(truncf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -3168,7 +3168,7 @@ __global__ void final_reduce_kernel_float_to_half(const float* partial, __half* 
     }
 
     if (tid == 0) {
-        output[0] = __float2half(sdata[0]);
+        output[0] = tenzor::rocm::safe_f2h(sdata[0]);
     }
 }
 
@@ -3308,7 +3308,7 @@ auto fill_kernel(const Tensor& tensor, double value, hipStream_t stream) -> Tens
             result.data<int64_t>(), static_cast<int64_t>(value), n);
     } else if (tensor.dtype() == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(static_cast<float>(value)), n);
+            reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(value)), n);
     } else if (tensor.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
@@ -3362,7 +3362,7 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             result.data<int8_t>(), static_cast<int8_t>(0), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(0.0f), n);
+            reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(0.0f), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(0.0f), n);
@@ -3428,7 +3428,7 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             result.data<int8_t>(), static_cast<int8_t>(1), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(1.0f), n);
+            reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(1.0f), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(1.0f), n);
@@ -3501,7 +3501,7 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
             result.data<int8_t>(), static_cast<int8_t>(value), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(static_cast<float>(value)), n);
+            reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(value)), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
@@ -3589,7 +3589,7 @@ __global__ void randn_kernel_device_f64(double* output, hiprandState* states, in
  */
 __global__ void rand_kernel_device_f16(__half* output, hiprandState* states, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(hiprand_uniform(&states[idx]));
+        output[idx] = tenzor::rocm::safe_f2h(hiprand_uniform(&states[idx]));
     }
 }
 
@@ -3601,7 +3601,7 @@ __global__ void rand_kernel_device_f16(__half* output, hiprandState* states, int
  */
 __global__ void randn_kernel_device_f16(__half* output, hiprandState* states, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(hiprand_normal(&states[idx]));
+        output[idx] = tenzor::rocm::safe_f2h(hiprand_normal(&states[idx]));
     }
 }
 
@@ -3830,7 +3830,7 @@ auto arange_kernel(double start, double end, double step, DType dtype, Device de
             break;
         case DType::Float16:
             hipLaunchKernelGGL(arange_kernel_impl<__half>, grid, block, 0, stream,
-                reinterpret_cast<__half*>(result.data<Float16>()), __float2half(static_cast<float>(start)), __float2half(static_cast<float>(step)), n);
+                reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(start)), tenzor::rocm::safe_f2h(static_cast<float>(step)), n);
             break;
         case DType::Int8:
             hipLaunchKernelGGL(arange_kernel_impl<int8_t>, grid, block, 0, stream,
@@ -3877,8 +3877,8 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
         case DType::Float16:
             hipLaunchKernelGGL(linspace_kernel_impl<__half>, grid, block, 0, stream,
                 reinterpret_cast<__half*>(result.data<Float16>()),
-                __float2half(static_cast<float>(start)),
-                __float2half(static_cast<float>(step)), steps);
+                tenzor::rocm::safe_f2h(static_cast<float>(start)),
+                tenzor::rocm::safe_f2h(static_cast<float>(step)), steps);
             break;
         case DType::BFloat16:
             hipLaunchKernelGGL(linspace_kernel_impl<hip_bfloat16>, grid, block, 0, stream,
@@ -4240,7 +4240,7 @@ __global__ void log2_kernel_f64(const double* input, double* output, int64_t n) 
 
 __global__ void log2_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(log2f(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(log2f(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4258,7 +4258,7 @@ __global__ void log10_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void log10_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(log10f(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(log10f(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4276,7 +4276,7 @@ __global__ void log1p_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void log1p_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(log1pf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(log1pf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4294,7 +4294,7 @@ __global__ void exp2_kernel_f64(const double* input, double* output, int64_t n) 
 
 __global__ void exp2_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(exp2f(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(exp2f(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4312,7 +4312,7 @@ __global__ void expm1_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void expm1_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(expm1f(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(expm1f(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4330,7 +4330,7 @@ __global__ void erf_kernel_f64(const double* input, double* output, int64_t n) {
 
 __global__ void erf_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(erff(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(erff(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4348,7 +4348,7 @@ __global__ void erfc_kernel_f64(const double* input, double* output, int64_t n) 
 
 __global__ void erfc_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(erfcf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(erfcf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -4445,9 +4445,9 @@ __global__ void atan2_kernel_f64(const double* a, const double* b, double* outpu
 
 __global__ void atan2_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(atan2f(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(atan2f(va, vb));
     }
 }
 
@@ -4465,9 +4465,9 @@ __global__ void fmod_kernel_f64(const double* a, const double* b, double* output
 
 __global__ void fmod_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(fmodf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(fmodf(va, vb));
     }
 }
 
@@ -4485,9 +4485,9 @@ __global__ void remainder_kernel_f64(const double* a, const double* b, double* o
 
 __global__ void remainder_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(remainderf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(remainderf(va, vb));
     }
 }
 
@@ -4509,10 +4509,10 @@ __global__ void lerp_kernel_f64(const double* a, const double* b, const double* 
 
 __global__ void lerp_kernel_f16(const __half* a, const __half* b, const __half* weight, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        float vw = __half2float(weight[idx]);
-        output[idx] = __float2half(va + vw * (vb - va));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        float vw = tenzor::rocm::safe_h2f(weight[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(va + vw * (vb - va));
     }
 }
 
@@ -4552,26 +4552,26 @@ __global__ void logical_xor_kernel_device(const T* a, const T* b, uint8_t* outpu
 
 __global__ void logical_and_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>((__half2float(a[idx]) != 0.0f) && (__half2float(b[idx]) != 0.0f) ? 1 : 0);
+        output[idx] = static_cast<uint8_t>((tenzor::rocm::safe_h2f(a[idx]) != 0.0f) && (tenzor::rocm::safe_h2f(b[idx]) != 0.0f) ? 1 : 0);
     }
 }
 
 __global__ void logical_or_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>((__half2float(a[idx]) != 0.0f) || (__half2float(b[idx]) != 0.0f) ? 1 : 0);
+        output[idx] = static_cast<uint8_t>((tenzor::rocm::safe_h2f(a[idx]) != 0.0f) || (tenzor::rocm::safe_h2f(b[idx]) != 0.0f) ? 1 : 0);
     }
 }
 
 __global__ void logical_not_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(__half2float(input[idx]) == 0.0f ? 1 : 0);
+        output[idx] = static_cast<uint8_t>(tenzor::rocm::safe_h2f(input[idx]) == 0.0f ? 1 : 0);
     }
 }
 
 __global__ void logical_xor_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        bool ba = (__half2float(a[idx]) != 0.0f);
-        bool bb = (__half2float(b[idx]) != 0.0f);
+        bool ba = (tenzor::rocm::safe_h2f(a[idx]) != 0.0f);
+        bool bb = (tenzor::rocm::safe_h2f(b[idx]) != 0.0f);
         output[idx] = static_cast<uint8_t>(ba != bb ? 1 : 0);
     }
 }
@@ -4594,9 +4594,9 @@ __global__ void minimum_kernel_f64(const double* a, const double* b, double* out
 
 __global__ void minimum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(fminf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(fminf(va, vb));
     }
 }
 
@@ -4614,9 +4614,9 @@ __global__ void maximum_kernel_f64(const double* a, const double* b, double* out
 
 __global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(fmaxf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(fmaxf(va, vb));
     }
 }
 
@@ -5672,11 +5672,11 @@ __global__ void cross_kernel_f16(const __half* a, const __half* b, __half* c,
         int64_t o = idx / dim_stride;
         int64_t i = idx % dim_stride;
         int64_t base = o * 3 * dim_stride + i;
-        float a0 = __half2float(a[base]), a1 = __half2float(a[base + dim_stride]), a2 = __half2float(a[base + 2*dim_stride]);
-        float b0 = __half2float(b[base]), b1 = __half2float(b[base + dim_stride]), b2 = __half2float(b[base + 2*dim_stride]);
-        c[base]                  = __float2half(a1*b2 - a2*b1);
-        c[base + dim_stride]     = __float2half(a2*b0 - a0*b2);
-        c[base + 2*dim_stride]   = __float2half(a0*b1 - a1*b0);
+        float a0 = tenzor::rocm::safe_h2f(a[base]), a1 = tenzor::rocm::safe_h2f(a[base + dim_stride]), a2 = tenzor::rocm::safe_h2f(a[base + 2*dim_stride]);
+        float b0 = tenzor::rocm::safe_h2f(b[base]), b1 = tenzor::rocm::safe_h2f(b[base + dim_stride]), b2 = tenzor::rocm::safe_h2f(b[base + 2*dim_stride]);
+        c[base]                  = tenzor::rocm::safe_f2h(a1*b2 - a2*b1);
+        c[base + dim_stride]     = tenzor::rocm::safe_f2h(a2*b0 - a0*b2);
+        c[base + 2*dim_stride]   = tenzor::rocm::safe_f2h(a0*b1 - a1*b0);
     }
 }
 
@@ -5950,8 +5950,8 @@ __device__ inline double betainc_dev_f64(double a, double b, double x) {
     }                                                                                         \
     __global__ void NAME##_kernel_f16(const __half* in, __half* out, int64_t n) {            \
         HIP_KERNEL_LOOP(idx, n) {                                                             \
-            float x = __half2float(in[idx]);                                                  \
-            out[idx] = __float2half(FN_F32_EXPR);                                             \
+            float x = tenzor::rocm::safe_h2f(in[idx]);                                                  \
+            out[idx] = tenzor::rocm::safe_f2h(FN_F32_EXPR);                                             \
         }                                                                                     \
     }                                                                                         \
     __global__ void NAME##_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) { \
@@ -6049,11 +6049,11 @@ __global__ void multigammaln_kernel_f64(const double* in, double* out, int64_t n
 }
 __global__ void multigammaln_kernel_f16(const __half* in, __half* out, int64_t n, int d, float log_pi_coeff) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
+        float x = tenzor::rocm::safe_h2f(in[idx]);
         float val = log_pi_coeff;
         for (int j = 0; j < d; ++j)
             val += lgammaf(x - static_cast<float>(j) * 0.5f);
-        out[idx] = __float2half(val);
+        out[idx] = tenzor::rocm::safe_f2h(val);
     }
 }
 __global__ void multigammaln_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n, int d, float log_pi_coeff) {
@@ -6109,7 +6109,7 @@ __global__ void beta_kernel_f64(const double* a, const double* b, double* out, i
 }
 __global__ void beta_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        out[idx] = __float2half(beta_dev_f32(__half2float(a[idx]), __half2float(b[idx])));
+        out[idx] = tenzor::rocm::safe_f2h(beta_dev_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(b[idx])));
     }
 }
 __global__ void beta_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
@@ -6155,7 +6155,7 @@ __global__ void zeta_kernel_f64(const double* s, const double* q, double* out, i
 }
 __global__ void zeta_kernel_f16(const __half* s, const __half* q, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        out[idx] = __float2half(zeta_dev_f32(__half2float(s[idx]), __half2float(q[idx])));
+        out[idx] = tenzor::rocm::safe_f2h(zeta_dev_f32(tenzor::rocm::safe_h2f(s[idx]), tenzor::rocm::safe_h2f(q[idx])));
     }
 }
 __global__ void zeta_kernel_bf16(const hip_bfloat16* s, const hip_bfloat16* q, hip_bfloat16* out, int64_t n) {
@@ -6201,7 +6201,7 @@ __global__ void polygamma_kernel_f64(int n, const double* in, double* out, int64
 }
 __global__ void polygamma_kernel_f16(int n, const __half* in, __half* out, int64_t numel) {
     HIP_KERNEL_LOOP(idx, numel) {
-        out[idx] = __float2half(polygamma_dev_f32(n, __half2float(in[idx])));
+        out[idx] = tenzor::rocm::safe_f2h(polygamma_dev_f32(n, tenzor::rocm::safe_h2f(in[idx])));
     }
 }
 __global__ void polygamma_kernel_bf16(int n, const hip_bfloat16* in, hip_bfloat16* out, int64_t numel) {
@@ -6254,10 +6254,10 @@ __global__ void betainc_kernel_f64(const double* a, const double* b, const doubl
 __global__ void betainc_kernel_f16(const __half* a, const __half* b, const __half* x, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         double r = betainc_dev_f64(
-            static_cast<double>(__half2float(a[idx])),
-            static_cast<double>(__half2float(b[idx])),
-            static_cast<double>(__half2float(x[idx])));
-        out[idx] = __float2half(static_cast<float>(r));
+            static_cast<double>(tenzor::rocm::safe_h2f(a[idx])),
+            static_cast<double>(tenzor::rocm::safe_h2f(b[idx])),
+            static_cast<double>(tenzor::rocm::safe_h2f(x[idx])));
+        out[idx] = tenzor::rocm::safe_f2h(static_cast<float>(r));
     }
 }
 __global__ void betainc_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, const hip_bfloat16* x, hip_bfloat16* out, int64_t n) {
@@ -6755,7 +6755,7 @@ __global__ void rsqrt_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void rsqrt_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(rsqrtf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(rsqrtf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -6779,8 +6779,8 @@ __global__ void square_kernel_f64(const double* input, double* output, int64_t n
 
 __global__ void square_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        output[idx] = __float2half(val * val);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(val * val);
     }
 }
 
@@ -6802,7 +6802,7 @@ __global__ void asinh_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void asinh_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(asinhf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(asinhf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -6820,7 +6820,7 @@ __global__ void acosh_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void acosh_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(acoshf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(acoshf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -6838,7 +6838,7 @@ __global__ void atanh_kernel_f64(const double* input, double* output, int64_t n)
 
 __global__ void atanh_kernel_f16(const __half* input, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(atanhf(__half2float(input[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(atanhf(tenzor::rocm::safe_h2f(input[idx])));
     }
 }
 
@@ -6860,9 +6860,9 @@ __global__ void hypot_kernel_f64(const double* a, const double* b, double* outpu
 
 __global__ void hypot_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(hypotf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(hypotf(va, vb));
     }
 }
 
@@ -6884,9 +6884,9 @@ __global__ void copysign_kernel_f64(const double* a, const double* b, double* ou
 
 __global__ void copysign_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(copysignf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(copysignf(va, vb));
     }
 }
 
@@ -6908,9 +6908,9 @@ __global__ void nextafter_kernel_f64(const double* a, const double* b, double* o
 
 __global__ void nextafter_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = __half2float(a[idx]);
-        float vb = __half2float(b[idx]);
-        output[idx] = __float2half(nextafterf(va, vb));
+        float va = tenzor::rocm::safe_h2f(a[idx]);
+        float vb = tenzor::rocm::safe_h2f(b[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(nextafterf(va, vb));
     }
 }
 
@@ -7002,7 +7002,7 @@ __global__ void igamma_kernel_f64(const double* a, const double* x, double* outp
 
 __global__ void igamma_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(device_igamma_series_f32(__half2float(a[idx]), __half2float(x[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(device_igamma_series_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
     }
 }
 
@@ -7020,7 +7020,7 @@ __global__ void igammac_kernel_f64(const double* a, const double* x, double* out
 
 __global__ void igammac_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(1.0f - device_igamma_series_f32(__half2float(a[idx]), __half2float(x[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(1.0f - device_igamma_series_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
     }
 }
 
@@ -7043,10 +7043,10 @@ __global__ void addcmul_kernel_f64(const double* input, const double* t1, const 
 
 __global__ void addcmul_kernel_f16(const __half* input, const __half* t1, const __half* t2, __half* output, float value, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float vi = __half2float(input[idx]);
-        float v1 = __half2float(t1[idx]);
-        float v2 = __half2float(t2[idx]);
-        output[idx] = __float2half(vi + value * v1 * v2);
+        float vi = tenzor::rocm::safe_h2f(input[idx]);
+        float v1 = tenzor::rocm::safe_h2f(t1[idx]);
+        float v2 = tenzor::rocm::safe_h2f(t2[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(vi + value * v1 * v2);
     }
 }
 
@@ -7064,10 +7064,10 @@ __global__ void addcdiv_kernel_f64(const double* input, const double* t1, const 
 
 __global__ void addcdiv_kernel_f16(const __half* input, const __half* t1, const __half* t2, __half* output, float value, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float vi = __half2float(input[idx]);
-        float v1 = __half2float(t1[idx]);
-        float v2 = __half2float(t2[idx]);
-        output[idx] = __float2half(vi + value * v1 / v2);
+        float vi = tenzor::rocm::safe_h2f(input[idx]);
+        float v1 = tenzor::rocm::safe_h2f(t1[idx]);
+        float v2 = tenzor::rocm::safe_h2f(t2[idx]);
+        output[idx] = tenzor::rocm::safe_f2h(vi + value * v1 / v2);
     }
 }
 
@@ -8428,8 +8428,8 @@ __global__ void deg2rad_kernel_f64(const double* in, double* out, int64_t n) {
 }
 __global__ void deg2rad_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
-        out[idx] = __float2half(x * (3.14159265358979323846f / 180.0f));
+        float x = tenzor::rocm::safe_h2f(in[idx]);
+        out[idx] = tenzor::rocm::safe_f2h(x * (3.14159265358979323846f / 180.0f));
     }
 }
 __global__ void deg2rad_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
@@ -8474,8 +8474,8 @@ __global__ void rad2deg_kernel_f64(const double* in, double* out, int64_t n) {
 }
 __global__ void rad2deg_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
-        out[idx] = __float2half(x * (180.0f / 3.14159265358979323846f));
+        float x = tenzor::rocm::safe_h2f(in[idx]);
+        out[idx] = tenzor::rocm::safe_f2h(x * (180.0f / 3.14159265358979323846f));
     }
 }
 __global__ void rad2deg_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
@@ -8538,8 +8538,8 @@ __global__ void logit_kernel_f64(const double* in, double* out, int64_t n, doubl
 }
 __global__ void logit_kernel_f16(const __half* in, __half* out, int64_t n, float eps) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
-        out[idx] = __float2half(logit_dev_f32(x, eps));
+        float x = tenzor::rocm::safe_h2f(in[idx]);
+        out[idx] = tenzor::rocm::safe_f2h(logit_dev_f32(x, eps));
     }
 }
 __global__ void logit_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n, float eps) {
@@ -8594,7 +8594,7 @@ __global__ void signbit_kernel_f64(const double* input, uint8_t* output, int64_t
 }
 __global__ void signbit_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         uint32_t bits; memcpy(&bits, &val, sizeof(bits));
         output[idx] = static_cast<uint8_t>((bits >> 31) & 1u);
     }
@@ -8643,7 +8643,7 @@ __global__ void isposinf_kernel_f64(const double* input, uint8_t* output, int64_
 }
 __global__ void isposinf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         uint32_t bits; memcpy(&bits, &val, sizeof(bits));
         output[idx] = static_cast<uint8_t>(bits == 0x7F800000u ? 1 : 0);
     }
@@ -8688,7 +8688,7 @@ __global__ void isneginf_kernel_f64(const double* input, uint8_t* output, int64_
 }
 __global__ void isneginf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
+        float val = tenzor::rocm::safe_h2f(input[idx]);
         uint32_t bits; memcpy(&bits, &val, sizeof(bits));
         output[idx] = static_cast<uint8_t>(bits == 0xFF800000u ? 1 : 0);
     }
@@ -8765,9 +8765,9 @@ __global__ void xlog1py_kernel_f64(const double* x, const double* y, double* out
 }
 __global__ void xlog1py_kernel_f16(const __half* x, const __half* y, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float xv = __half2float(x[idx]);
-        float yv = __half2float(y[idx]);
-        out[idx] = __float2half((xv == 0.0f) ? 0.0f : xv * log1pf(yv));
+        float xv = tenzor::rocm::safe_h2f(x[idx]);
+        float yv = tenzor::rocm::safe_h2f(y[idx]);
+        out[idx] = tenzor::rocm::safe_f2h((xv == 0.0f) ? 0.0f : xv * log1pf(yv));
     }
 }
 
@@ -8817,9 +8817,9 @@ __global__ void ldexp_kernel_f64(const double* x, const double* n_in, double* ou
 }
 __global__ void ldexp_kernel_f16(const __half* x, const __half* n_in, __half* out, int64_t count) {
     HIP_KERNEL_LOOP(idx, count) {
-        float xv = __half2float(x[idx]);
-        int nv = static_cast<int>(__half2float(n_in[idx]));
-        out[idx] = __float2half(ldexpf(xv, nv));
+        float xv = tenzor::rocm::safe_h2f(x[idx]);
+        int nv = static_cast<int>(tenzor::rocm::safe_h2f(n_in[idx]));
+        out[idx] = tenzor::rocm::safe_f2h(ldexpf(xv, nv));
     }
 }
 
@@ -8875,8 +8875,8 @@ __global__ void frexp_kernel_f64(const double* input, double* mantissa, int32_t*
 __global__ void frexp_kernel_f16(const __half* input, __half* mantissa, int32_t* exponent, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         int exp_val;
-        float m = frexpf(__half2float(input[idx]), &exp_val);
-        mantissa[idx] = __float2half(m);
+        float m = frexpf(tenzor::rocm::safe_h2f(input[idx]), &exp_val);
+        mantissa[idx] = tenzor::rocm::safe_f2h(m);
         exponent[idx] = static_cast<int32_t>(exp_val);
     }
 }
@@ -9072,9 +9072,9 @@ __global__ void logaddexp_kernel_f64(const double* a, const double* b, double* o
 }
 __global__ void logaddexp_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(a[idx]), y = __half2float(b[idx]);
+        float x = tenzor::rocm::safe_h2f(a[idx]), y = tenzor::rocm::safe_h2f(b[idx]);
         float m = fmaxf(x, y);
-        out[idx] = __float2half(m + log1pf(expf(-fabsf(x - y))));
+        out[idx] = tenzor::rocm::safe_f2h(m + log1pf(expf(-fabsf(x - y))));
     }
 }
 __global__ void logaddexp_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
@@ -9132,9 +9132,9 @@ __global__ void logaddexp2_kernel_f64(const double* a, const double* b, double* 
 }
 __global__ void logaddexp2_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(a[idx]), y = __half2float(b[idx]);
+        float x = tenzor::rocm::safe_h2f(a[idx]), y = tenzor::rocm::safe_h2f(b[idx]);
         float m = fmaxf(x, y);
-        out[idx] = __float2half(m + log2f(1.0f + exp2f(-fabsf(x - y))));
+        out[idx] = tenzor::rocm::safe_f2h(m + log2f(1.0f + exp2f(-fabsf(x - y))));
     }
 }
 __global__ void logaddexp2_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
@@ -9190,8 +9190,8 @@ __global__ void xlogy_kernel_f64(const double* x, const double* y, double* out, 
 }
 __global__ void xlogy_kernel_f16(const __half* x, const __half* y, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float xv = __half2float(x[idx]);
-        out[idx] = __float2half((xv == 0.0f) ? 0.0f : xv * logf(__half2float(y[idx])));
+        float xv = tenzor::rocm::safe_h2f(x[idx]);
+        out[idx] = tenzor::rocm::safe_f2h((xv == 0.0f) ? 0.0f : xv * logf(tenzor::rocm::safe_h2f(y[idx])));
     }
 }
 __global__ void xlogy_kernel_bf16(const hip_bfloat16* x, const hip_bfloat16* y, hip_bfloat16* out, int64_t n) {
@@ -9269,7 +9269,7 @@ __global__ void i0e_kernel_f64(const double* in, double* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = i0e_dev_f64(in[idx]); }
 }
 __global__ void i0e_kernel_f16(const __half* in, __half* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = __float2half(i0e_dev_f32(__half2float(in[idx]))); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::safe_f2h(i0e_dev_f32(tenzor::rocm::safe_h2f(in[idx]))); }
 }
 __global__ void i0e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i0e_dev_f32(static_cast<float>(in[idx]))); }
@@ -9347,7 +9347,7 @@ __global__ void i1e_kernel_f64(const double* in, double* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = i1e_dev_f64(in[idx]); }
 }
 __global__ void i1e_kernel_f16(const __half* in, __half* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = __float2half(i1e_dev_f32(__half2float(in[idx]))); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::safe_f2h(i1e_dev_f32(tenzor::rocm::safe_h2f(in[idx]))); }
 }
 __global__ void i1e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i1e_dev_f32(static_cast<float>(in[idx]))); }
@@ -9400,12 +9400,12 @@ __global__ void entr_kernel_f64(const double* in, double* out, int64_t n) {
 }
 __global__ void entr_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
+        float x = tenzor::rocm::safe_h2f(in[idx]);
         float r;
         if (x > 0.0f) r = -x * logf(x);
         else if (x == 0.0f) r = 0.0f;
         else r = -HUGE_VALF;
-        out[idx] = __float2half(r);
+        out[idx] = tenzor::rocm::safe_f2h(r);
     }
 }
 __global__ void entr_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
@@ -9462,8 +9462,8 @@ __global__ void spherical_bessel_j0_kernel_f64(const double* in, double* out, in
 }
 __global__ void spherical_bessel_j0_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float x = __half2float(in[idx]);
-        out[idx] = __float2half((x == 0.0f) ? 1.0f : sinf(x) / x);
+        float x = tenzor::rocm::safe_h2f(in[idx]);
+        out[idx] = tenzor::rocm::safe_f2h((x == 0.0f) ? 1.0f : sinf(x) / x);
     }
 }
 __global__ void spherical_bessel_j0_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {

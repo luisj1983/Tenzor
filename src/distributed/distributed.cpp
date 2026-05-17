@@ -15,6 +15,8 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
+#include <iostream>  // D.2: dtor error logging
+#include "tenzor/utils/log.hpp"  // D.1: TENZOR_LOG_ERROR
 
 namespace tenzor {
 namespace distributed {
@@ -68,10 +70,17 @@ ProcessGroup::ProcessGroup(std::unique_ptr<CommunicationBackend> backend,
 
 ProcessGroup::~ProcessGroup() {
     if (backend_) {
+        // D.2: log destructor finalize failures via tenzor logger (D.1).
         try {
             backend_->finalize();
+        } catch (const std::exception& e) {
+            TENZOR_LOG_ERROR(
+                "ProcessGroup::~ProcessGroup: backend finalize() threw: {}",
+                e.what());
         } catch (...) {
-            // Ignore errors during destruction
+            TENZOR_LOG_ERROR(
+                "ProcessGroup::~ProcessGroup: backend finalize() threw an "
+                "unknown exception type");
         }
     }
 }

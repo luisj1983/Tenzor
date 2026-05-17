@@ -6,6 +6,7 @@
  * thrust (HIP-compatible) for radix sort, prefix scan, and run-length encoding.
  */
 
+#include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
@@ -431,7 +432,7 @@ __global__ void iota_kernel(int64_t* output, int64_t n) {
 
 __global__ void half_to_float_kernel(const __half* input, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = __half2float(input[idx]);
+        output[idx] = tenzor::rocm::safe_h2f(input[idx]);
     }
 }
 

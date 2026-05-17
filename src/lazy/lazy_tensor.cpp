@@ -276,7 +276,10 @@ static auto matmul_shape(const std::vector<int64_t>& a,
 static auto binary_lazy_op(OpId op, const LazyTensor& a, const LazyTensor& b) -> LazyTensor {
     auto graph = merge_graphs(a, b);
     auto out_shape = broadcast_shape(a.shape(), b.shape());
-    auto out_dtype = a.dtype();  // simplified; real impl would do type promotion
+    // B.7: use the real type-promotion table from core/dtype.hpp so e.g.
+    // f16 + f32 → f32 and int32 + f64 → f64, matching eager-mode dtype
+    // selection rather than silently inheriting the first operand's dtype.
+    auto out_dtype = promote_types(a.dtype(), b.dtype());
     auto node = graph->add_node(op, {a.node(), b.node()}, out_shape, out_dtype, a.device());
     return LazyTensor(node, graph);
 }
