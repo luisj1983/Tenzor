@@ -995,3 +995,8 @@ tenzor_discover_tests(test_data_parallel_single_gpu_multidtype LABELS "unit" DIS
 add_executable(test_ddp_unused_params_multidtype test_ddp_unused_params_multidtype.cpp)
 target_link_libraries(test_ddp_unused_params_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_ddp_unused_params_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
+# Audit P0 #1 regression: softmax/log_softmax stride-from-shape bug
+add_executable(test_softmax_stride_audit test_softmax_stride_audit.cpp)
+target_link_libraries(test_softmax_stride_audit PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_softmax_stride_audit DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
