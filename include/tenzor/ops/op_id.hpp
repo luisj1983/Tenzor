@@ -744,6 +744,23 @@ enum class OpId : uint16_t {
     FlexAttentionBackward,         // Backward pass for FlexAttention
 
     // =========================================================================
+    // CTC Loss (696)
+    //
+    // CTCLossForward: device-native CTC forward-backward DP.
+    //   inputs: [log_probs (T, N, C), targets (N, S_max) Int32,
+    //            input_lengths (N,) Int32, target_lengths (N,) Int32]
+    //   attrs:  Blank (int, default 0), ZeroInfinity (bool, default false)
+    //   outputs: [loss_per_sample (N,) Float32, raw_grad (T, N, C) Float32]
+    //
+    // The raw_grad output holds d(loss_per_sample[n])/d(log_probs[:, n, :])
+    // already computed during the forward DP. The losses_advanced.cpp layer
+    // applies any "mean"/"sum" reduction and stashes raw_grad in
+    // CTCLossBackward, which only needs to scale it by the upstream gradient
+    // at backward time — no separate CTCLossBackward dispatch needed.
+    // =========================================================================
+    CTCLossForward = 696,
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstdint>
+#include <vector>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 
@@ -606,6 +607,16 @@ private:
     cudnnActivationDescriptor_t desc_ = nullptr;
 };
 
+/**
+ * @brief RAII wrapper around `cudnnRNNDescriptor_t`.
+ *
+ * The descriptor is configured via the cuDNN v8 RNN API
+ * (`cudnnSetRNNDescriptor_v8`), which is the documented entry point for both
+ * cuDNN 8.x and 9.x. The legacy v6 API (`cudnnSetRNNDescriptor_v6`) is offered
+ * as a fallback when building against cuDNN < 8 — in that case it omits the
+ * features introduced in v8 (recurrent projection, math-type selection, the
+ * `auxFlags` bitmap) since they don't exist in the older library.
+ */
 class RNNDescriptor {
 public:
     RNNDescriptor() {
@@ -623,24 +634,273 @@ public:
 
     cudnnRNNDescriptor_t get() const { return desc_; }
 
-    void set_lstm(cudnnHandle_t handle, int hidden_size, int num_layers,
-                  cudnnDropoutDescriptor_t dropout_desc, cudnnRNNInputMode_t input_mode,
-                  cudnnDirectionMode_t direction, cudnnDataType_t dtype) {
-        // Note: cuDNN 9.x+ uses different RNN API (cudnnRNNForward_v8, etc.)
-        // For now, we'll comment this out and focus on Conv2d operations
-        // Full RNN support would require using the new cudnnRNNForward_v8 API
+    /**
+     * @brief Configure as an LSTM via cuDNN v8 RNN API.
+     *
+     * @param handle        Active cuDNN handle (only used for the v6 fallback
+     *                      so cuDNN can allocate persistent buffers).
+     * @param input_size    Number of features in each input timestep.
+     * @param hidden_size   Number of features in the hidden state.
+     * @param proj_size     Output projection dimension (LSTMP). Pass 0 (or
+     *                      `hidden_size`) for no projection.
+     * @param num_layers    Number of stacked layers.
+     * @param bidirectional Build a bidirectional LSTM if true.
+     * @param dropout_desc  Inter-layer dropout descriptor (must be
+     *                      initialised; pass a descriptor configured with
+     *                      `dropout=0` when no dropout is desired).
+     * @param dtype         Element dtype of input / output / weights.
+     * @param math_prec     Compute precision. Defaults to Float32.
+     * @param math_type     Tensor-Core hint. Defaults to `CUDNN_DEFAULT_MATH`.
+     */
+    void set_lstm(cudnnHandle_t handle,
+                  int input_size,
+                  int hidden_size,
+                  int proj_size,
+                  int num_layers,
+                  bool bidirectional,
+                  cudnnDropoutDescriptor_t dropout_desc,
+                  cudnnDataType_t dtype,
+                  cudnnDataType_t math_prec = CUDNN_DATA_FLOAT,
+                  cudnnMathType_t math_type = CUDNN_DEFAULT_MATH) {
+        configure(handle,
+                  CUDNN_LSTM,
+                  CUDNN_RNN_DOUBLE_BIAS,
+                  input_size, hidden_size, proj_size, num_layers,
+                  bidirectional, dropout_desc,
+                  dtype, math_prec, math_type);
+    }
 
-        // Legacy API (cuDNN < 8):
-        // cudnnSetRNNDescriptor(...);
+    /**
+     * @brief Configure as a GRU. cuDNN does not support recurrent projection
+     * for GRU, so `proj_size` is implicitly 0.
+     */
+    void set_gru(cudnnHandle_t handle,
+                 int input_size,
+                 int hidden_size,
+                 int num_layers,
+                 bool bidirectional,
+                 cudnnDropoutDescriptor_t dropout_desc,
+                 cudnnDataType_t dtype,
+                 cudnnDataType_t math_prec = CUDNN_DATA_FLOAT,
+                 cudnnMathType_t math_type = CUDNN_DEFAULT_MATH) {
+        configure(handle,
+                  CUDNN_GRU,
+                  CUDNN_RNN_DOUBLE_BIAS,
+                  input_size, hidden_size, /*proj_size=*/0, num_layers,
+                  bidirectional, dropout_desc,
+                  dtype, math_prec, math_type);
+    }
 
-        // Modern API (cuDNN 8+):
-        // Would need cudnnSetRNNDescriptor_v8 or similar
-
-        throw std::runtime_error("cuDNN RNN operations not yet implemented for cuDNN 9.x+ (Conv2d is supported)");
+    /**
+     * @brief Configure as a basic Elman RNN with the chosen pointwise
+     * activation (tanh by default; ReLU also supported).
+     */
+    void set_rnn(cudnnHandle_t handle,
+                 int input_size,
+                 int hidden_size,
+                 int num_layers,
+                 bool bidirectional,
+                 cudnnDropoutDescriptor_t dropout_desc,
+                 cudnnDataType_t dtype,
+                 cudnnRNNMode_t cell_mode = CUDNN_RNN_TANH,
+                 cudnnDataType_t math_prec = CUDNN_DATA_FLOAT,
+                 cudnnMathType_t math_type = CUDNN_DEFAULT_MATH) {
+        if (cell_mode != CUDNN_RNN_TANH && cell_mode != CUDNN_RNN_RELU) {
+            throw std::runtime_error(
+                "RNNDescriptor::set_rnn: cell_mode must be CUDNN_RNN_TANH or CUDNN_RNN_RELU");
+        }
+        configure(handle,
+                  cell_mode,
+                  CUDNN_RNN_DOUBLE_BIAS,
+                  input_size, hidden_size, /*proj_size=*/0, num_layers,
+                  bidirectional, dropout_desc,
+                  dtype, math_prec, math_type);
     }
 
 private:
+    void configure(cudnnHandle_t handle,
+                   cudnnRNNMode_t cell_mode,
+                   cudnnRNNBiasMode_t bias_mode,
+                   int input_size,
+                   int hidden_size,
+                   int proj_size,
+                   int num_layers,
+                   bool bidirectional,
+                   cudnnDropoutDescriptor_t dropout_desc,
+                   cudnnDataType_t dtype,
+                   cudnnDataType_t math_prec,
+                   cudnnMathType_t math_type) {
+        const auto direction = bidirectional
+            ? CUDNN_BIDIRECTIONAL
+            : CUDNN_UNIDIRECTIONAL;
+        const auto input_mode = CUDNN_LINEAR_INPUT;
+
+#if defined(CUDNN_MAJOR) && CUDNN_MAJOR >= 8
+        // cuDNN 8.x and 9.x: a single v8 setter accepts every option.
+        CUDNN_CHECK(cudnnSetRNNDescriptor_v8(
+            desc_,
+            CUDNN_RNN_ALGO_STANDARD,
+            cell_mode,
+            bias_mode,
+            direction,
+            input_mode,
+            dtype,
+            math_prec,
+            math_type,
+            input_size,
+            hidden_size,
+            proj_size,
+            num_layers,
+            dropout_desc,
+            /*auxFlags=*/CUDNN_RNN_PADDED_IO_DISABLED));
+        (void)handle;
+#else
+        // cuDNN < 8 fallback. The v6 API lacks projection, math-type, and the
+        // padded-IO flag; reject configurations that depend on those features
+        // instead of silently dropping them.
+        if (proj_size != 0 && proj_size != hidden_size) {
+            throw std::runtime_error(
+                "RNNDescriptor: recurrent projection requires cuDNN >= 8");
+        }
+        if (math_type != CUDNN_DEFAULT_MATH) {
+            throw std::runtime_error(
+                "RNNDescriptor: math_type selection requires cuDNN >= 8");
+        }
+        CUDNN_CHECK(cudnnSetRNNDescriptor_v6(
+            handle,
+            desc_,
+            hidden_size,
+            num_layers,
+            dropout_desc,
+            input_mode,
+            direction,
+            cell_mode,
+            CUDNN_RNN_ALGO_STANDARD,
+            math_prec));
+        (void)bias_mode;
+        (void)input_size;
+        (void)dtype;
+#endif
+    }
+
     cudnnRNNDescriptor_t desc_ = nullptr;
+};
+
+/**
+ * @brief RAII wrapper around `cudnnRNNDataDescriptor_t`.
+ *
+ * cuDNN distinguishes the *RNN* descriptor (which fixes the cell shape) from
+ * the *RNN data* descriptor (which fixes the sequence layout: time-major vs
+ * batch-major, max seq length, per-sample length array, padding fill). This
+ * wrapper handles construction / destruction and exposes a setter for each
+ * layout; per-sample sequence lengths are stored on the host side and
+ * forwarded to `cudnnSetRNNDataDescriptor`. The companion device-side length
+ * array required by `cudnnRNNForward` is the caller's responsibility because
+ * its lifetime needs to span the cuDNN call but not necessarily the
+ * descriptor's.
+ */
+class RNNDataDescriptor {
+public:
+    RNNDataDescriptor() {
+        CUDNN_CHECK(cudnnCreateRNNDataDescriptor(&desc_));
+    }
+
+    ~RNNDataDescriptor() {
+        if (desc_) {
+            cudnnDestroyRNNDataDescriptor(desc_);
+        }
+    }
+
+    RNNDataDescriptor(const RNNDataDescriptor&) = delete;
+    RNNDataDescriptor& operator=(const RNNDataDescriptor&) = delete;
+
+    cudnnRNNDataDescriptor_t get() const { return desc_; }
+
+    /**
+     * @brief Configure a time-major (seq-major) RNN data descriptor.
+     *
+     * Layout: `[max_seq_length, batch_size, vector_size]`, contiguous in
+     * vector. Per-sample lengths default to `max_seq_length` (no truncation).
+     */
+    void set_seq_major(cudnnDataType_t dtype,
+                       int max_seq_length,
+                       int batch_size,
+                       int vector_size,
+                       const int* seq_lengths = nullptr,
+                       void* padding_fill = nullptr) {
+        set(dtype,
+            CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED,
+            max_seq_length, batch_size, vector_size,
+            seq_lengths, padding_fill);
+    }
+
+    /**
+     * @brief Configure a batch-major RNN data descriptor.
+     *
+     * Layout: `[batch_size, max_seq_length, vector_size]`. Matches PyTorch's
+     * `batch_first=True` convention.
+     */
+    void set_batch_major(cudnnDataType_t dtype,
+                         int max_seq_length,
+                         int batch_size,
+                         int vector_size,
+                         const int* seq_lengths = nullptr,
+                         void* padding_fill = nullptr) {
+        set(dtype,
+            CUDNN_RNN_DATA_LAYOUT_BATCH_MAJOR_UNPACKED,
+            max_seq_length, batch_size, vector_size,
+            seq_lengths, padding_fill);
+    }
+
+    /**
+     * @brief Configure a packed (variable-length, no padding) descriptor.
+     * Sequences must be sorted in descending length order.
+     */
+    void set_seq_major_packed(cudnnDataType_t dtype,
+                              int max_seq_length,
+                              int batch_size,
+                              int vector_size,
+                              const int* seq_lengths,
+                              void* padding_fill = nullptr) {
+        if (!seq_lengths) {
+            throw std::runtime_error(
+                "RNNDataDescriptor::set_seq_major_packed: seq_lengths is required");
+        }
+        set(dtype,
+            CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_PACKED,
+            max_seq_length, batch_size, vector_size,
+            seq_lengths, padding_fill);
+    }
+
+private:
+    void set(cudnnDataType_t dtype,
+             cudnnRNNDataLayout_t layout,
+             int max_seq_length,
+             int batch_size,
+             int vector_size,
+             const int* seq_lengths,
+             void* padding_fill) {
+        // cudnnSetRNNDataDescriptor requires a length-per-sample array, even
+        // when every sequence is the same length. Materialise a temporary
+        // filled with max_seq_length when the caller doesn't supply one.
+        std::vector<int> default_lengths;
+        const int* lens = seq_lengths;
+        if (!lens) {
+            default_lengths.assign(static_cast<size_t>(batch_size), max_seq_length);
+            lens = default_lengths.data();
+        }
+        CUDNN_CHECK(cudnnSetRNNDataDescriptor(
+            desc_,
+            dtype,
+            layout,
+            max_seq_length,
+            batch_size,
+            vector_size,
+            lens,
+            padding_fill));
+    }
+
+    cudnnRNNDataDescriptor_t desc_ = nullptr;
 };
 
 class DropoutDescriptor {
@@ -781,6 +1041,20 @@ auto cudnn_fused_conv2d_activation_forward(
     cudaStream_t stream
 ) -> Tensor;
 
+/// Per-axis fused Conv2d + Bias + Activation (Phase 2.1).
+auto cudnn_fused_conv2d_activation_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudnnActivationMode_t activation_mode,
+    double activation_coeff,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_fused_conv2d_relu_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -788,6 +1062,18 @@ auto cudnn_fused_conv2d_relu_forward(
     int64_t stride,
     int64_t padding,
     int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+/// Per-axis overload (Phase 2.1).
+auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor;
@@ -803,6 +1089,18 @@ auto cudnn_fused_conv2d_sigmoid_forward(
     cudaStream_t stream
 ) -> Tensor;
 
+/// Per-axis overload (Phase 2.1).
+auto cudnn_fused_conv2d_sigmoid_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_fused_conv2d_tanh_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -814,6 +1112,18 @@ auto cudnn_fused_conv2d_tanh_forward(
     cudaStream_t stream
 ) -> Tensor;
 
+/// Per-axis overload (Phase 2.1).
+auto cudnn_fused_conv2d_tanh_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_fused_conv2d_swish_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -821,6 +1131,18 @@ auto cudnn_fused_conv2d_swish_forward(
     int64_t stride,
     int64_t padding,
     int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+/// Per-axis overload (Phase 2.1).
+auto cudnn_fused_conv2d_swish_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor;
@@ -874,21 +1196,131 @@ auto cudnn_conv2d_backward_nhwc(
 ) -> std::tuple<Tensor, Tensor, Tensor>;
 
 // ============================================================================
-// cuDNN RNN/LSTM Operations
+// cuDNN RNN/LSTM/GRU Operations (cuDNN v8 RNN API)
 // ============================================================================
 
+/**
+ * @brief Result bundle returned from `cudnn_lstm_forward`.
+ *
+ * `output`        — (seq_len, batch, hidden * num_directions).
+ * `hy`            — (num_layers * num_directions, batch, hidden_or_proj).
+ * `cy`            — (num_layers * num_directions, batch, hidden).
+ * `reserve_space` — opaque buffer needed by `cudnn_lstm_backward`. Empty
+ *                   tensor when `fwd_mode == CUDNN_FWD_MODE_INFERENCE`.
+ * `weight_space`  — packed weight buffer that cuDNN consumed. Required by
+ *                   the backward pass so it can read the same packing.
+ */
+struct CudnnLSTMOutputs {
+    Tensor output;
+    Tensor hy;
+    Tensor cy;
+    Tensor reserve_space;
+    Tensor weight_space;
+};
+
+struct CudnnRNNOutputs {
+    Tensor output;
+    Tensor hy;
+    Tensor reserve_space;
+    Tensor weight_space;
+};
+
+/**
+ * @brief Full-sequence LSTM forward via cuDNN's v8 RNN API.
+ *
+ * Accepts the per-layer / per-direction weights in PyTorch / Tenzor layout
+ * and internally packs them into cuDNN's weight space using
+ * `cudnnGetRNNWeightParams`. The `weight_space` returned in the result must
+ * be passed verbatim to the backward call.
+ *
+ * @param input            (seq_len, batch, input_size), time-major.
+ * @param hx               (num_layers * num_directions, batch, hidden_or_proj).
+ *                         Empty tensor zero-initialises the hidden state.
+ * @param cx               (num_layers * num_directions, batch, hidden_size).
+ *                         Empty tensor zero-initialises the cell state.
+ * @param weights_ih       Per layer / direction. shape (4*hidden, input_size_l).
+ * @param weights_hh       Per layer / direction. shape (4*hidden, hidden_or_proj).
+ * @param biases_ih        Per layer / direction. shape (4*hidden). Empty tensor
+ *                         entries treated as zero.
+ * @param biases_hh        Same, for the recurrent bias.
+ * @param weights_hr       Optional recurrent projection weight per layer (one
+ *                         per direction). Shape (proj_size, hidden_size). Pass
+ *                         empty vector when `proj_size == 0`.
+ * @param hidden_size      LSTM cell hidden width.
+ * @param proj_size        LSTMP projection width, or 0 if unused.
+ * @param num_layers       Number of stacked layers.
+ * @param bidirectional    Bidirectional LSTM if true.
+ * @param dropout          Inter-layer dropout probability. Ignored when
+ *                         `fwd_mode == CUDNN_FWD_MODE_INFERENCE`.
+ * @param fwd_mode         INFERENCE skips the reserve-space allocation;
+ *                         TRAINING populates it for the backward call.
+ * @param stream           CUDA stream.
+ */
 auto cudnn_lstm_forward(
-    const Tensor& input,         // (seq_len, batch, input_size)
-    const Tensor& hx,            // (num_layers, batch, hidden_size)
-    const Tensor& cx,            // (num_layers, batch, hidden_size)
-    const Tensor& weights,       // Packed weights
+    const Tensor& input,
+    const Tensor& hx,
+    const Tensor& cx,
+    const std::vector<Tensor>& weights_ih,
+    const std::vector<Tensor>& weights_hh,
+    const std::vector<Tensor>& biases_ih,
+    const std::vector<Tensor>& biases_hh,
+    const std::vector<Tensor>& weights_hr,
     int64_t hidden_size,
+    int64_t proj_size,
     int64_t num_layers,
     bool bidirectional,
     float dropout,
+    cudnnForwardMode_t fwd_mode,
     cudaStream_t stream
-) -> std::tuple<Tensor, Tensor, Tensor>;
+) -> CudnnLSTMOutputs;
 
+/**
+ * @brief Bundle returned from `cudnn_lstm_backward`.
+ *
+ * `grad_input`       — gradient w.r.t. `input`.
+ * `grad_hx`          — gradient w.r.t. initial hidden state.
+ * `grad_cx`          — gradient w.r.t. initial cell state.
+ * `grad_weight_space` — packed weight-gradient buffer. Caller is expected to
+ *                       split it back into per-layer tensors via
+ *                       `cudnn_lstm_unpack_weight_grads`.
+ */
+struct CudnnLSTMGrads {
+    Tensor grad_input;
+    Tensor grad_hx;
+    Tensor grad_cx;
+    Tensor grad_weight_space;
+};
+
+struct CudnnRNNGrads {
+    Tensor grad_input;
+    Tensor grad_hx;
+    Tensor grad_weight_space;
+};
+
+/**
+ * @brief Full-sequence LSTM backward via `cudnnRNNBackwardData_v8` +
+ * `cudnnRNNBackwardWeights_v8`.
+ *
+ * Requires the forward pass to have been executed with
+ * `fwd_mode == CUDNN_FWD_MODE_TRAINING`; the `reserve_space` and
+ * `weight_space` from `CudnnLSTMOutputs` must be forwarded verbatim.
+ *
+ * @param grad_output      Gradient w.r.t. the per-step output. Shape matches
+ *                         `output`.
+ * @param grad_hy          Gradient w.r.t. final hidden state. Empty tensor =
+ *                         no contribution.
+ * @param grad_cy          Gradient w.r.t. final cell state. Empty tensor =
+ *                         no contribution.
+ * @param input / hx / cx  Original forward inputs (cuDNN needs them for both
+ *                         data and weight gradients).
+ * @param output           Forward output tensor (cuDNN requires re-reading
+ *                         the activations alongside the reserve space).
+ * @param weight_space     The same buffer returned by the forward call.
+ * @param reserve_space    The same buffer returned by the forward call.
+ * @param hidden_size / proj_size / num_layers / bidirectional / dropout —
+ *                         must match the forward configuration.
+ * @param stream           CUDA stream.
+ */
 auto cudnn_lstm_backward(
     const Tensor& grad_output,
     const Tensor& grad_hy,
@@ -897,15 +1329,129 @@ auto cudnn_lstm_backward(
     const Tensor& hx,
     const Tensor& cx,
     const Tensor& output,
-    const Tensor& hy,
-    const Tensor& cy,
-    const Tensor& weights,
+    const Tensor& weight_space,
+    const Tensor& reserve_space,
+    int64_t hidden_size,
+    int64_t proj_size,
+    int64_t num_layers,
+    bool bidirectional,
+    float dropout,
+    cudaStream_t stream
+) -> CudnnLSTMGrads;
+
+/**
+ * @brief Split a packed weight gradient buffer back into the
+ * `(W_ih, W_hh, b_ih, b_hh, W_hr)` layout used by the LSTM layer.
+ *
+ * The returned vectors are sized `num_layers * num_directions`, indexed as
+ * `[layer * num_directions + dir]`. `out_W_hr` is empty when `proj_size == 0`.
+ */
+void cudnn_lstm_unpack_weight_grads(
+    const Tensor& weight_space_grad,
+    int64_t input_size,
+    int64_t hidden_size,
+    int64_t proj_size,
+    int64_t num_layers,
+    bool bidirectional,
+    std::vector<Tensor>& out_W_ih,
+    std::vector<Tensor>& out_W_hh,
+    std::vector<Tensor>& out_b_ih,
+    std::vector<Tensor>& out_b_hh,
+    std::vector<Tensor>& out_W_hr,
+    cudaStream_t stream
+);
+
+/**
+ * @brief Full-sequence GRU forward via cuDNN's v8 RNN API. Mirrors the LSTM
+ * variant but omits the cell state and the recurrent projection.
+ */
+auto cudnn_gru_forward(
+    const Tensor& input,
+    const Tensor& hx,
+    const std::vector<Tensor>& weights_ih,
+    const std::vector<Tensor>& weights_hh,
+    const std::vector<Tensor>& biases_ih,
+    const std::vector<Tensor>& biases_hh,
+    int64_t hidden_size,
+    int64_t num_layers,
+    bool bidirectional,
+    float dropout,
+    cudnnForwardMode_t fwd_mode,
+    cudaStream_t stream
+) -> CudnnRNNOutputs;
+
+auto cudnn_gru_backward(
+    const Tensor& grad_output,
+    const Tensor& grad_hy,
+    const Tensor& input,
+    const Tensor& hx,
+    const Tensor& output,
+    const Tensor& weight_space,
+    const Tensor& reserve_space,
     int64_t hidden_size,
     int64_t num_layers,
     bool bidirectional,
     float dropout,
     cudaStream_t stream
-) -> std::tuple<Tensor, Tensor, Tensor, Tensor>;
+) -> CudnnRNNGrads;
+
+/**
+ * @brief Full-sequence Elman RNN (tanh / ReLU) forward via cuDNN's v8 RNN API.
+ *
+ * `cell_mode` selects the pointwise activation:
+ *   - `CUDNN_RNN_TANH` — `h_t = tanh(W_ih x_t + b_ih + W_hh h_{t-1} + b_hh)`
+ *   - `CUDNN_RNN_RELU` — same with ReLU instead of tanh.
+ */
+auto cudnn_rnn_forward(
+    const Tensor& input,
+    const Tensor& hx,
+    const std::vector<Tensor>& weights_ih,
+    const std::vector<Tensor>& weights_hh,
+    const std::vector<Tensor>& biases_ih,
+    const std::vector<Tensor>& biases_hh,
+    int64_t hidden_size,
+    int64_t num_layers,
+    bool bidirectional,
+    float dropout,
+    cudnnRNNMode_t cell_mode,
+    cudnnForwardMode_t fwd_mode,
+    cudaStream_t stream
+) -> CudnnRNNOutputs;
+
+auto cudnn_rnn_backward(
+    const Tensor& grad_output,
+    const Tensor& grad_hy,
+    const Tensor& input,
+    const Tensor& hx,
+    const Tensor& output,
+    const Tensor& weight_space,
+    const Tensor& reserve_space,
+    int64_t hidden_size,
+    int64_t num_layers,
+    bool bidirectional,
+    float dropout,
+    cudnnRNNMode_t cell_mode,
+    cudaStream_t stream
+) -> CudnnRNNGrads;
+
+/**
+ * @brief Split a packed GRU / RNN weight gradient back into per-layer
+ * `(W_ih, W_hh, b_ih, b_hh)` tensors. `gates_per_cell` is 3 for GRU and 1 for
+ * Elman RNN; the LSTM variant has its own helper.
+ */
+void cudnn_rnn_unpack_weight_grads(
+    const Tensor& weight_space_grad,
+    int64_t input_size,
+    int64_t hidden_size,
+    int64_t num_layers,
+    bool bidirectional,
+    cudnnRNNMode_t cell_mode,
+    std::vector<Tensor>& out_W_ih,
+    std::vector<Tensor>& out_W_hh,
+    std::vector<Tensor>& out_b_ih,
+    std::vector<Tensor>& out_b_hh,
+    cudaStream_t stream
+);
 
 // ============================================================================
 // cuDNN Pooling Operations
@@ -919,6 +1465,21 @@ auto cudnn_maxpool2d_forward(
     cudaStream_t stream
 ) -> std::pair<Tensor, Tensor>;  // Returns (output, indices)
 
+/**
+ * @brief Per-axis MaxPool2d forward (Phase 2.1).
+ *
+ * Underlying cuDNN PoolingDescriptor accepts separate `(kernel_h, kernel_w,
+ * pad_h, pad_w, stride_h, stride_w)`; the scalar overload above delegates to
+ * this one with duplicated values.
+ */
+auto cudnn_maxpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> std::pair<Tensor, Tensor>;
+
 auto cudnn_maxpool2d_backward(
     const Tensor& grad_output,
     const Tensor& input,
@@ -926,6 +1487,17 @@ auto cudnn_maxpool2d_backward(
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    cudaStream_t stream
+) -> Tensor;
+
+/// Per-axis MaxPool2d backward (Phase 2.1).
+auto cudnn_maxpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& output,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     cudaStream_t stream
 ) -> Tensor;
 
@@ -937,12 +1509,31 @@ auto cudnn_avgpool2d_forward(
     cudaStream_t stream
 ) -> Tensor;
 
+/// Per-axis AvgPool2d forward (Phase 2.1).
+auto cudnn_avgpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_avgpool2d_backward(
     const Tensor& grad_output,
     const Tensor& input,
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    cudaStream_t stream
+) -> Tensor;
+
+/// Per-axis AvgPool2d backward (Phase 2.1).
+auto cudnn_avgpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     cudaStream_t stream
 ) -> Tensor;
 

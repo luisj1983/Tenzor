@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// UniqueConsecutive — inverse mapping (no permutation; positions are already
+// in input order). For each i, inverse[i] = prefix_sum[i] - 1, where
+// prefix_sum is the inclusive scan of the consecutive-boundary mark buffer.
+//
+// This is the third dispatch in the mark -> prefix_sum -> scatter pipeline
+// and replaces the previous host-mediated subtract-one-tensor sequence.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer PrefixSum { int prefix_sum[]; };
+layout(set = 0, binding = 1) writeonly buffer Inverse  { int64_t inverse_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.num_elements) return;
+    inverse_data[gid] = int64_t(prefix_sum[gid]) - int64_t(1);
+}

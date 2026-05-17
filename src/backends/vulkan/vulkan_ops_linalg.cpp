@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 
 namespace tenzor {
@@ -2426,7 +2427,7 @@ auto VulkanBackend::dispatchQuantizedConv2d(
 
 auto VulkanBackend::dispatchFlashAttention(
     const Tensor& Q, const Tensor& K, const Tensor& V,
-    float scale, bool causal) -> Tensor
+    float scale, bool causal) -> std::pair<Tensor, Tensor>
 {
     // Q, K, V shapes: [batch, heads, seq_len, d_k] or [batch, seq_len, d_k]
     auto q_shape = Q.shape();
@@ -2493,6 +2494,15 @@ auto VulkanBackend::dispatchFlashAttention(
         Tensor output_flat({batch_heads, seq_len_q, head_v},
                            DType::Float32, Q.device());
 
+        // Phase 1.5: LSE buffer (binding 4) — always Float32 per
+        // `attention_contract.hpp` `kLseDType`. Shape (batch_heads, seq_q).
+        // The shader writes `row_max + log(row_sum)` per row (-INFINITY
+        // sentinel for fully-masked rows) in the SAME pass that writes the
+        // output. No host-side `logsumexp(Q @ Kᵀ * scale)` recompute, no
+        // materialisation of the (B,H,S_q,S_k) attention matrix.
+        Tensor lse_flat({batch_heads, seq_len_q},
+                       DType::Float32, Q.device());
+
         int32_t device_id = Q.device().index;
         auto* pipeline = getPipeline("flash_attention", device_id);
 
@@ -2516,12 +2526,14 @@ auto VulkanBackend::dispatchFlashAttention(
             {1, k_contig.data_ptr()},
             {2, v_contig.data_ptr()},
             {3, output_flat.data_ptr()},
+            {4, lse_flat.data_ptr()},
         };
         std::vector<size_t> sizes = {
             static_cast<size_t>(q_contig.numel()) * sizeof(float),
             static_cast<size_t>(k_contig.numel()) * sizeof(float),
             static_cast<size_t>(v_contig.numel()) * sizeof(float),
             static_cast<size_t>(output_flat.numel()) * sizeof(float),
+            static_cast<size_t>(lse_flat.numel()) * sizeof(float),
         };
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
@@ -2545,11 +2557,14 @@ auto VulkanBackend::dispatchFlashAttention(
         endSingleTimeCommands(cmd, device_id);
         synchronize(device_id);
 
-        // Restore original shape.
+        // Restore original shape. LSE is (B, H, S_q) for 4D inputs,
+        // (B, S_q) for 3D — collapsed batch_heads dim depending on rank.
         if (has_head_dim) {
-            return output_flat.reshape({q_shape[0], q_shape[1], seq_len_q, head_v});
+            Tensor output = output_flat.reshape({q_shape[0], q_shape[1], seq_len_q, head_v});
+            Tensor lse = lse_flat.reshape({q_shape[0], q_shape[1], seq_len_q});
+            return {output, lse};
         }
-        return output_flat;
+        return {output_flat, lse_flat};
     }
 
     // Step 1: Compute attention scores = Q @ K^T, scaled by 1/sqrt(d_k)
@@ -2562,12 +2577,13 @@ auto VulkanBackend::dispatchFlashAttention(
     scale_tensor.fill_(scale);
     scores = dispatchBinaryOp("mul", scores, scale_tensor);
 
-    // Step 3: Apply causal mask if requested
+    // Step 3: Apply causal mask if requested.
+    // Per docs/internals/attention-contract.md: sentinel MUST be -INFINITY,
+    // never -1e9 (saturates to -65504 in FP16 and leaks gradient mass
+    // through softmax).
     if (causal) {
-        // Create a causal mask: for each (i, j) where j > i, set score to -1e9
-        // Uses comparison + where pattern via existing Vulkan shaders
         Tensor mask_val({1}, scores.dtype(), scores.device());
-        mask_val.fill_(-1e9f);
+        mask_val.fill_(-std::numeric_limits<float>::infinity());
 
         // Generate row indices [0..seq_len_q-1] and col indices [0..seq_len_k-1]
         // and mask where col > row
@@ -2589,7 +2605,7 @@ auto VulkanBackend::dispatchFlashAttention(
         causal_mask = causal_mask.unsqueeze(0);
         causal_mask = dispatchExpand(causal_mask, {batch_heads, seq_len_q, seq_len_k});
 
-        // Apply mask: scores = where(mask, -1e9, scores)
+        // Apply mask: scores = where(mask, -INFINITY, scores)
         Tensor mask_expanded = dispatchExpand(mask_val, std::vector<int64_t>(scores.shape().begin(), scores.shape().end()));
         scores = dispatchWhere(causal_mask, mask_expanded, scores);
     }
@@ -2597,15 +2613,25 @@ auto VulkanBackend::dispatchFlashAttention(
     // Step 4: Apply softmax along last dimension
     Tensor attn_weights = dispatchSoftmax(scores, -1);  // [batch_heads, seq_len_q, seq_len_k]
 
+    // Step 4b: LSE from the (masked) pre-softmax scores. Always Float32
+    // per the contract (`attention_contract.hpp` `kLseDType`). The composed
+    // slow path needs LSE just like the fused fast path so the registry
+    // never has to recompute it from a host-side dispatch.
+    Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+    if (lse.dtype() != DType::Float32) {
+        lse = lse.to(DType::Float32);
+    }
+
     // Step 5: Compute output = attention_weights @ V
     Tensor output = dispatchBmm(attn_weights, v_flat);  // [batch_heads, seq_len_q, d_v]
 
     // Reshape back to original batch/head layout
     if (has_head_dim) {
         output = output.reshape({q_shape[0], q_shape[1], seq_len_q, V.shape()[3]});
+        lse = lse.reshape({q_shape[0], q_shape[1], seq_len_q});
     }
 
-    return fp16_saturate_if_needed(*this, output);
+    return {fp16_saturate_if_needed(*this, output), lse};
 }
 
 // ---------------------------------------------------------------------------

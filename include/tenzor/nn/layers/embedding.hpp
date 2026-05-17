@@ -281,7 +281,9 @@ private:
     /**
      * @brief Aggregate embeddings within each bag
      */
-    auto aggregate_embeddings(const Variable& embeddings, const Variable& offsets) -> Variable;
+    auto aggregate_embeddings(const Variable& embeddings,
+                              const Variable& indices,
+                              const Variable& offsets) -> Variable;
 };
 
 // Factory exposed via embedding.hpp for use by F::embedding in functional.cpp.

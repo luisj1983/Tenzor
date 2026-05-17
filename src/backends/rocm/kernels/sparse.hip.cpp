@@ -25,9 +25,14 @@
 #include "../rocsparse_handle_pool.hpp"
 #include <climits>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <list>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <thrust/device_ptr.h>
@@ -244,6 +249,226 @@ __global__ void csr_sparse_add_kernel(
     for (int64_t j = row_start; j < row_end; ++j) {
         out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
     }
+}
+
+// ============================================================================
+// SpSV LRU cache: amortises rocsparse_spsv preprocess across calls.
+//
+// Each cache entry pins the i32-converted CSR buffers, the rocSPARSE matrix
+// descriptor (already analysed) and the preprocess workspace. The trsm loop
+// only needs to run rocsparse_spsv_stage_compute per right-hand-side once
+// the descriptor is in the cache; on a hot key, all O(nnz) preprocess work
+// is reused. On a miss, we build the entry and insert; on overflow, we
+// evict the least-recently-used entry. Cache key is the (data-pointer triple
+// + N + nnz + dtype + fill_mode + diag_type) of the L matrix: the data
+// pointers are stable identifiers for the underlying device buffer, so the
+// same L instance hits the cache while a re-allocated copy correctly misses.
+// ============================================================================
+
+struct SpSVCacheKey {
+    const void* crow_ptr;
+    const void* col_ptr;
+    const void* vals_ptr;
+    int64_t N;
+    int64_t nnz;
+    DType dtype;
+    rocsparse_fill_mode fill_mode;
+    rocsparse_diag_type diag_type;
+
+    bool operator==(const SpSVCacheKey& o) const noexcept {
+        return crow_ptr == o.crow_ptr && col_ptr == o.col_ptr
+            && vals_ptr == o.vals_ptr && N == o.N && nnz == o.nnz
+            && dtype == o.dtype && fill_mode == o.fill_mode
+            && diag_type == o.diag_type;
+    }
+};
+
+struct SpSVCacheKeyHash {
+    size_t operator()(const SpSVCacheKey& k) const noexcept {
+        auto mix = [](size_t a, size_t b) noexcept {
+            return a ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2));
+        };
+        size_t h = std::hash<const void*>{}(k.crow_ptr);
+        h = mix(h, std::hash<const void*>{}(k.col_ptr));
+        h = mix(h, std::hash<const void*>{}(k.vals_ptr));
+        h = mix(h, std::hash<int64_t>{}(k.N));
+        h = mix(h, std::hash<int64_t>{}(k.nnz));
+        h = mix(h, std::hash<int>{}(static_cast<int>(k.dtype)));
+        h = mix(h, std::hash<int>{}(static_cast<int>(k.fill_mode)));
+        h = mix(h, std::hash<int>{}(static_cast<int>(k.diag_type)));
+        return h;
+    }
+};
+
+struct SpSVCacheEntry {
+    // Pinned i32 index buffers — must outlive the descriptor.
+    std::unique_ptr<HipBuffer> crow_i32;
+    std::unique_ptr<HipBuffer> col_i32;
+    // The cached matrix descriptor; preprocess has already been run against
+    // it with the workspace below.
+    rocsparse_spmat_descr mat_descr = nullptr;
+    std::unique_ptr<HipBuffer> workspace;
+    size_t workspace_size = 0;
+    // Dense vector descriptors used as placeholders during preprocess. Kept
+    // alive so the descriptor's internal references remain valid.
+    rocsparse_dnvec_descr placeholder_x = nullptr;
+    rocsparse_dnvec_descr placeholder_y = nullptr;
+    std::unique_ptr<HipBuffer> placeholder_x_buf;
+    std::unique_ptr<HipBuffer> placeholder_y_buf;
+
+    SpSVCacheEntry() = default;
+    SpSVCacheEntry(const SpSVCacheEntry&) = delete;
+    SpSVCacheEntry& operator=(const SpSVCacheEntry&) = delete;
+    SpSVCacheEntry(SpSVCacheEntry&&) = default;
+    SpSVCacheEntry& operator=(SpSVCacheEntry&&) = default;
+
+    ~SpSVCacheEntry() {
+        if (placeholder_x) rocsparse_destroy_dnvec_descr(placeholder_x);
+        if (placeholder_y) rocsparse_destroy_dnvec_descr(placeholder_y);
+        if (mat_descr) rocsparse_destroy_spmat_descr(mat_descr);
+    }
+};
+
+class SpSVLruCache {
+public:
+    static constexpr size_t kMaxEntries = 64;
+
+    SpSVCacheEntry* get(const SpSVCacheKey& key) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = map_.find(key);
+        if (it == map_.end()) return nullptr;
+        // Move accessed entry to the front of the LRU list.
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return it->second.entry.get();
+    }
+
+    SpSVCacheEntry* insert(const SpSVCacheKey& key,
+                           std::unique_ptr<SpSVCacheEntry> entry) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (map_.size() >= kMaxEntries) {
+            // Evict LRU (tail of list).
+            const SpSVCacheKey& victim = lru_.back();
+            map_.erase(victim);
+            lru_.pop_back();
+        }
+        lru_.push_front(key);
+        SpSVCacheEntry* raw = entry.get();
+        map_.emplace(key, Slot{std::move(entry), lru_.begin()});
+        return raw;
+    }
+
+private:
+    struct Slot {
+        std::unique_ptr<SpSVCacheEntry> entry;
+        std::list<SpSVCacheKey>::iterator lru_it;
+    };
+    std::mutex mu_;
+    std::list<SpSVCacheKey> lru_;
+    std::unordered_map<SpSVCacheKey, Slot, SpSVCacheKeyHash> map_;
+};
+
+inline SpSVLruCache& spsv_lru_cache() {
+    static SpSVLruCache c;
+    return c;
+}
+
+// Build a fresh cached entry: convert CSR row/col indices to i32, create
+// the descriptor with explicit i32 indextypes, set fill/diag attributes,
+// run buffer_size + preprocess. The returned entry holds all device-side
+// state needed for subsequent stage_compute calls.
+SpSVCacheEntry* sparse_trsv_lru_lookup_or_build(
+    const Tensor& L_crow, const Tensor& L_col, const Tensor& L_vals,
+    int64_t N, int64_t nnz, DType dtype,
+    rocsparse_fill_mode fill_mode, rocsparse_diag_type diag_type)
+{
+    SpSVCacheKey key{
+        L_crow.data_ptr(), L_col.data_ptr(), L_vals.data_ptr(),
+        N, nnz, dtype, fill_mode, diag_type
+    };
+    if (auto* hit = spsv_lru_cache().get(key)) return hit;
+
+    if (nnz > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::overflow_error(
+            "rocm_sparse_trsm: nnz exceeds int32 range required for rocSPARSE SpSV");
+    }
+    if (N + 1 > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::overflow_error(
+            "rocm_sparse_trsm: N exceeds int32 range required for rocSPARSE SpSV");
+    }
+    verify_i64_fits_i32(L_crow.data<int64_t>(), N + 1);
+    verify_i64_fits_i32(L_col.data<int64_t>(), nnz);
+
+    auto entry = std::make_unique<SpSVCacheEntry>();
+    entry->crow_i32 = std::make_unique<HipBuffer>((N + 1) * sizeof(int32_t));
+    entry->col_i32  = std::make_unique<HipBuffer>(nnz * sizeof(int32_t));
+
+    {
+        int threads = 256;
+        int blocks_crow = static_cast<int>((N + 1 + threads - 1) / threads);
+        cast_i64_to_i32<<<blocks_crow, threads>>>(
+            L_crow.data<int64_t>(), entry->crow_i32->as<int32_t>(), N + 1);
+        HIP_CHECK_SPARSE(hipGetLastError());
+        if (nnz > 0) {
+            int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
+            cast_i64_to_i32<<<blocks_nnz, threads>>>(
+                L_col.data<int64_t>(), entry->col_i32->as<int32_t>(), nnz);
+            HIP_CHECK_SPARSE(hipGetLastError());
+        }
+    }
+
+    const rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &entry->mat_descr, N, N, nnz,
+        entry->crow_i32->ptr,
+        entry->col_i32->ptr,
+        const_cast<void*>(L_vals.data_ptr()),
+        rocsparse_indextype_i32, rocsparse_indextype_i32,
+        rocsparse_index_base_zero, roc_dtype));
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        entry->mat_descr, rocsparse_spmat_fill_mode,
+        &fill_mode, sizeof(fill_mode)));
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        entry->mat_descr, rocsparse_spmat_diag_type,
+        &diag_type, sizeof(diag_type)));
+
+    // Allocate placeholder dense vectors for buffer_size + preprocess. We
+    // can't pass nullptr — rocSPARSE validates the descriptor pointers up
+    // front. The vec_x / vec_y used at compute-time will replace these.
+    size_t elem_size = (dtype == DType::Float32) ? sizeof(float) : sizeof(double);
+    entry->placeholder_x_buf = std::make_unique<HipBuffer>(N * elem_size);
+    entry->placeholder_y_buf = std::make_unique<HipBuffer>(N * elem_size);
+    HIP_CHECK_SPARSE(hipMemsetAsync(
+        entry->placeholder_x_buf->ptr, 0, N * elem_size, nullptr));
+    HIP_CHECK_SPARSE(hipMemsetAsync(
+        entry->placeholder_y_buf->ptr, 0, N * elem_size, nullptr));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(
+        &entry->placeholder_x, N, entry->placeholder_x_buf->ptr, roc_dtype));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(
+        &entry->placeholder_y, N, entry->placeholder_y_buf->ptr, roc_dtype));
+
+    rocsparse_handle handle = get_rocsparse_handle();
+    float  alpha_f = 1.0f;
+    double alpha_d = 1.0;
+    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
+                                            : static_cast<void*>(&alpha_d);
+
+    size_t buffer_size = 0;
+    ROCSPARSE_CHECK(rocsparse_spsv(
+        handle, rocsparse_operation_none, alpha, entry->mat_descr,
+        entry->placeholder_x, entry->placeholder_y,
+        roc_dtype, rocsparse_spsv_alg_default,
+        rocsparse_spsv_stage_buffer_size, &buffer_size, nullptr));
+    entry->workspace_size = buffer_size;
+    entry->workspace = std::make_unique<HipBuffer>(buffer_size);
+
+    ROCSPARSE_CHECK(rocsparse_spsv(
+        handle, rocsparse_operation_none, alpha, entry->mat_descr,
+        entry->placeholder_x, entry->placeholder_y,
+        roc_dtype, rocsparse_spsv_alg_default,
+        rocsparse_spsv_stage_preprocess, &buffer_size,
+        entry->workspace ? entry->workspace->ptr : nullptr));
+
+    return spsv_lru_cache().insert(key, std::move(entry));
 }
 
 } // anonymous namespace

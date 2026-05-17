@@ -14,6 +14,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -667,7 +668,7 @@ namespace oneapi {
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                       const std::string& mode, bool include_last_offset,
                                       sycl::queue& queue) -> Tensor;
-    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                        const Tensor& offsets, const OpAttributes& attrs,
                                        sycl::queue& queue) -> Tensor;
 
@@ -2925,14 +2926,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedConv2dReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            // Phase 2.1: per-axis read + dispatch through oneapi::conv2d_forward's
+            // per-axis overload (throws cleanly on asymmetric — see oneapi_kernel_registry.cpp E3).
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride, padding, dilation, groups, queue);
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+                groups, queue);
             // Drain the outer SYCL queue between conv2d_forward (oneDNN
             // interop stream) and relu_kernel (raw SYCL kernel). Without this
             // the two race on conv_out's USM memory and the test hangs in-binary.
@@ -2945,14 +2949,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride, padding, dilation, groups, queue);
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+                groups, queue);
             // conv2d_forward drives oneDNN on an interop stream created from
             // `queue`. dnnl_stream.wait() only drains the dnnl stream — the
             // outer sycl::queue can still have pending task graph state from
@@ -2970,14 +2975,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedConv2dTanh,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride, padding, dilation, groups, queue);
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+                groups, queue);
             queue.wait();
             Tensor tanh_out = oneapi::tanh_kernel(conv_out, queue);
             queue.wait();
@@ -2986,14 +2992,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedConv2dSwish,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride, padding, dilation, groups, queue);
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+                groups, queue);
             queue.wait();
             Tensor swish_out = oneapi::swish_kernel(conv_out, queue);
             queue.wait();
@@ -3007,15 +3014,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::FusedConv2dBnReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            const auto stride  = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding = ::tenzor::backend::attrs::padding_2d(attrs);
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
 
-            // Step 1: Conv2d forward
+            // Step 1: Conv2d forward (per-axis, with dilation = 1)
+            // Dispatches via OneAPI per-axis overload which throws cleanly on asymmetric.
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride, padding, 1, 1, queue);
+                stride[0], stride[1], padding[0], padding[1], 1, 1, 1, queue);
 
             // Step 2: BatchNorm forward with affine (using bn_running_mean/var as mean/var for inference-style)
             Tensor bn_out = oneapi::batchnorm2d_forward_affine(
@@ -3906,21 +3914,44 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Unfold,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            return oneapi::unfold_kernel(inputs[0], kernel_size, stride, padding, dilation, get_q(inputs));
+            const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
+                AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+            // Phase 2.1: OneAPI unfold kernel is scalar-only; reject asymmetric.
+            if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
+                padding[0] != padding[1] || dilation[0] != dilation[1]) {
+                throw std::invalid_argument(
+                    "Unfold (OneAPI): backend kernel only supports symmetric kernel/stride/padding/dilation; "
+                    "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
+                    ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
+            }
+            return oneapi::unfold_kernel(inputs[0],
+                kernel_size[0], stride[0], padding[0], dilation[0], get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::Fold,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto output_size = attrs.get_int_list(AttrKey::OutputSize);
-            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            return oneapi::fold_kernel(inputs[0], output_size, kernel_size, stride, padding, dilation, get_q(inputs));
+            const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
+                AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+            if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
+                padding[0] != padding[1] || dilation[0] != dilation[1]) {
+                throw std::invalid_argument(
+                    "Fold (OneAPI): backend kernel only supports symmetric kernel/stride/padding/dilation; "
+                    "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
+                    ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
+            }
+            return oneapi::fold_kernel(inputs[0], output_size,
+                kernel_size[0], stride[0], padding[0], dilation[0], get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::Roll,
@@ -4120,7 +4151,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::EmbeddingBagBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [grad_output, embeddings, offsets]
+            // inputs: [grad_output, indices (Int64), offsets]
             return {oneapi::embedding_bag_backward_kernel(
                 inputs[0], inputs[1], inputs[2], attrs, get_q(inputs))};
         });
@@ -4776,17 +4807,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::QuantizedConv2d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            // Phase 2.1: OneAPI quantized_conv2d_kernel is scalar-only; reject asymmetric.
+            if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+                throw std::invalid_argument(
+                    "QuantizedConv2d (OneAPI): backend kernel only supports symmetric stride/padding/dilation; "
+                    "got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
+            }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
-                                                     stride, padding, dilation, groups,
+                                                     stride[0], padding[0], dilation[0], groups,
                                                      input_scale, input_zp,
                                                      weight_scale, weight_zp, get_q(inputs))};
         });

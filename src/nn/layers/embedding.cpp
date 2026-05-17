@@ -392,15 +392,27 @@ private:
 
 class EmbeddingBagBackward : public Function {
 public:
-    EmbeddingBagBackward(Tensor offsets, bool has_offsets, std::string mode,
+    EmbeddingBagBackward(Tensor bag_indices, Tensor offsets, bool has_offsets,
+                         std::string mode,
                          int64_t total_elements, int64_t embedding_dim,
                          bool include_last_offset)
-        : offsets_(std::move(offsets)),
+        : bag_indices_(std::move(bag_indices)),
+          offsets_(std::move(offsets)),
           has_offsets_(has_offsets),
           mode_(std::move(mode)),
           total_elements_(total_elements),
           embedding_dim_(embedding_dim),
-          include_last_offset_(include_last_offset) {}
+          include_last_offset_(include_last_offset) {
+        // Stash the original vocabulary indices so the OpId::EmbeddingBagBackward
+        // dispatch path (which now takes indices, not the looked-up rows) can
+        // recover them. The current backward() loop returns grad-w.r.t-embeddings
+        // and doesn't use bag_indices_ directly — Embedding's own backward
+        // scatters that grad to the weight matrix using its own saved indices.
+        // save_for_backward keeps version-counter book-keeping consistent.
+        if (bag_indices_.is_valid()) {
+            save_for_backward({bag_indices_});
+        }
+    }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
         // inputs[0] = embeddings [total_elements, embedding_dim]
@@ -610,6 +622,10 @@ public:
     auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
+    Tensor bag_indices_;   ///< Original vocabulary indices (Int64) — saved so
+                           ///< that the OpId::EmbeddingBagBackward dispatch
+                           ///< path can recover them (the kernel signature
+                           ///< now takes indices, not the looked-up rows).
     Tensor offsets_;
     bool has_offsets_;
     std::string mode_;
@@ -1024,13 +1040,16 @@ auto EmbeddingBag::forward(const Variable& input, const Variable& offsets) -> Va
         offsets_empty = true;
     }
 
-    // If no offsets provided, treat entire input as single bag
+    // If no offsets provided, treat entire input as single bag.
+    // Always pass the original `input` (the integer vocabulary indices)
+    // through to aggregate_embeddings so EmbeddingBagBackward can stash it
+    // for the OpId::EmbeddingBagBackward kernel path.
     if (offsets_empty) {
-        return aggregate_embeddings(embeddings, Variable{});
+        return aggregate_embeddings(embeddings, input, Variable{});
     }
 
     // Otherwise, aggregate based on offsets
-    return aggregate_embeddings(embeddings, offsets);
+    return aggregate_embeddings(embeddings, input, offsets);
 }
 
 auto EmbeddingBag::forward_impl(const Variable& input) -> Variable {
@@ -1038,7 +1057,9 @@ auto EmbeddingBag::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{});
 }
 
-auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variable& offsets) -> Variable {
+auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings,
+                                        const Variable& indices,
+                                        const Variable& offsets) -> Variable {
     const auto& emb_tensor = embeddings.tensor();
     auto emb_shape = emb_tensor.shape();
 
@@ -1049,10 +1070,23 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     bool has_offsets = offsets.is_initialized() && offsets.tensor().numel() > 0;
     Tensor offsets_tensor = has_offsets ? offsets.tensor() : Tensor();
 
+    // Pull the raw indices tensor (Int64) if supplied; the grad_fn saves it
+    // for use by the OpId::EmbeddingBagBackward dispatch path (kernel now
+    // scatters into rows selected by indices, not by flat position).
+    Tensor indices_tensor;
+    if (indices.is_initialized()) {
+        try {
+            indices_tensor = indices.tensor();
+        } catch (...) {
+            // Variable lazy/uninitialized — leave empty.
+        }
+    }
+
     // If gradient tracking is needed, use EmbeddingBagBackward to preserve the graph
     if (embeddings.requires_grad() && is_grad_enabled()) {
         auto grad_fn = std::make_shared<EmbeddingBagBackward>(
-            offsets_tensor, has_offsets, mode_, total_elements, embedding_dim, include_last_offset_);
+            indices_tensor, offsets_tensor, has_offsets, mode_,
+            total_elements, embedding_dim, include_last_offset_);
 
         // Perform forward pass through the grad_fn
         auto outputs = grad_fn->forward({embeddings});

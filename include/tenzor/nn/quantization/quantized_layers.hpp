@@ -591,6 +591,7 @@ public:
         bool bias = true,
         bool batch_first = true,
         bool bidirectional = false,
+        float dropout = 0.0f,
         QuantizationParams weight_qparams = QuantizationParams(
             Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric)
     );
@@ -604,6 +605,7 @@ public:
     auto input_size() const -> int64_t { return input_size_; }
     auto hidden_size() const -> int64_t { return hidden_size_; }
     auto num_layers() const -> int64_t { return num_layers_; }
+    auto dropout() const -> float { return dropout_; }
 
     static auto from_float(Module& fp_lstm, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedLSTM>;
@@ -615,6 +617,7 @@ private:
     bool bias_;
     bool batch_first_;
     bool bidirectional_;
+    float dropout_;
 
     // Per-layer quantized weights: weight_ih, weight_hh, bias_ih, bias_hh
     struct LayerWeights {

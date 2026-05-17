@@ -9,8 +9,11 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <stdexcept>
 #include <string>
 #include <cmath>
@@ -450,40 +453,49 @@ public:
     // grad_outputs[0] is d(L_total)/d(reduced_loss).
     //   - reduction="mean"/"sum": scalar tensor.
     //   - reduction="none"      : shape [N].
+    //
+    // raw_grad_ lives on the *original* device of log_probs — CPU when the
+    // forward took the inline CPU path, GPU when forward dispatched through
+    // OpId::CTCLossForward. The scaling here uses device-native tensor ops
+    // (tenzor::mul) with no .to(CPU) round-trip.
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        Tensor grad_input = raw_grad_.clone();  // (T, N, C) float32 on CPU
+        const Tensor& upstream_raw = grad_outputs[0];
 
-        auto T = grad_input.shape()[0];
-        auto N = grad_input.shape()[1];
-        auto C = grad_input.shape()[2];
-
-        if (is_per_sample_) {
-            // reduction="none": multiply grad_input[:, n, :] by g_out[n].
-            auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
-            const float* g = g_cpu.data<float>();
-            float* d = grad_input.data<float>();
-            for (int64_t t = 0; t < T; ++t) {
-                for (int64_t n = 0; n < N; ++n) {
-                    const float scale = g[n];
-                    for (int64_t c = 0; c < C; ++c) {
-                        d[t * N * C + n * C + c] *= scale;
-                    }
-                }
-            }
-        } else {
-            // reduction="mean"/"sum": multiply by scalar (scale_ already baked
-            // in by the forward).
-            auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
-            const float scalar_g = g_cpu.numel() > 0 ? g_cpu.data<float>()[0] : 1.0f;
-            float* d = grad_input.data<float>();
-            for (int64_t i = 0; i < grad_input.numel(); ++i) {
-                d[i] *= scalar_g * scale_;
-            }
+        // Move/cast the upstream gradient to raw_grad_'s device and Float32
+        // (raw_grad_ is always Float32, see the forward). These ops are
+        // no-ops when already in the right device/dtype.
+        Tensor g = upstream_raw.dtype() == DType::Float32
+                   ? upstream_raw
+                   : upstream_raw.to(DType::Float32);
+        if (g.device() != raw_grad_.device()) {
+            g = g.to(raw_grad_.device());
         }
 
-        // Restore the caller's device and dtype so accumulation into
-        // log_probs.grad() works without a second conversion.
-        return {grad_input.to(orig_dtype_).to(orig_device_)};
+        Tensor grad_input;
+        if (is_per_sample_) {
+            // reduction="none": broadcast g (N,) against raw_grad (T, N, C)
+            // by reshaping to (1, N, 1).
+            const int64_t N = raw_grad_.shape()[1];
+            Tensor g_bcast = tenzor::reshape(g.contiguous(), {1, N, 1});
+            grad_input = tenzor::mul(raw_grad_, g_bcast);
+        } else {
+            // reduction="mean"/"sum": multiply by scalar; g is shape {} or
+            // {1}, both broadcast cleanly against (T, N, C). scale_ baked in
+            // by the forward (1/total_target_len for "mean", 1.0 for "sum").
+            grad_input = tenzor::mul(
+                tenzor::mul(raw_grad_, g.contiguous()),
+                static_cast<double>(scale_));
+        }
+
+        // Restore caller's dtype (raw_grad_ already lives on orig_device_,
+        // so the device cast is usually a no-op).
+        if (grad_input.dtype() != orig_dtype_) {
+            grad_input = grad_input.to(orig_dtype_);
+        }
+        if (grad_input.device() != orig_device_) {
+            grad_input = grad_input.to(orig_device_);
+        }
+        return {grad_input};
     }
 
     auto name() const -> std::string override { return "CTCLossBackward"; }
@@ -496,7 +508,8 @@ public:
     // intentionally not exposed — PyTorch's CTCLoss takes the same stance).
     TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
 
-    Tensor raw_grad_;             // (T, N, C) float32 on CPU — from forward DP pass
+    Tensor raw_grad_;             // (T, N, C) Float32 on the original device
+                                  // (CPU or GPU) — populated by the forward DP
     bool is_per_sample_ = false;  // reduction="none" → true
     float scale_ = 1.0f;          // 1/total_target_len for "mean", 1.0 for "sum"
     DType orig_dtype_ = DType::Float32;
@@ -524,7 +537,107 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
     int64_t N = lp_shape[1];
     int64_t C = lp_shape[2];
 
-    // Ensure CPU computation (CTC is inherently sequential per batch element)
+    const Device original_device = log_probs.tensor().device();
+    const DType original_dtype = log_probs.tensor().dtype();
+    const bool needs_grad = log_probs.requires_grad() && is_grad_enabled();
+
+    // -----------------------------------------------------------------------
+    // GPU device path: dispatch to the backend's native CTC kernel
+    // (OpId::CTCLossForward). The kernel returns {loss_per_sample (N,),
+    // raw_grad (T, N, C)} on the same device. Reductions and any necessary
+    // scaling are done with device-native tensor ops — no host round-trip
+    // for the heavy DP arithmetic.
+    // -----------------------------------------------------------------------
+    if (original_device.type != Device::Type::CPU) {
+        // Stage inputs onto the device with the expected dtypes.
+        Tensor lp_dev = log_probs.tensor();
+        if (lp_dev.dtype() != DType::Float32) lp_dev = lp_dev.to(DType::Float32);
+        lp_dev = lp_dev.contiguous();
+
+        auto to_int32_on_dev = [&](const Tensor& t) {
+            Tensor x = t;
+            if (x.device() != original_device) x = x.to(original_device);
+            if (x.dtype() != DType::Int32) x = x.to(DType::Int32);
+            return x.contiguous();
+        };
+        Tensor tgt_dev = to_int32_on_dev(targets);
+        Tensor il_dev  = to_int32_on_dev(input_lengths);
+        Tensor tl_dev  = to_int32_on_dev(target_lengths);
+
+        OpAttributes ctc_attrs;
+        ctc_attrs.set(AttrKey::Blank, blank_);
+        ctc_attrs.set(AttrKey::ZeroInfinity, zero_infinity_);
+
+        std::vector<Tensor> ctc_inputs = {lp_dev, tgt_dev, il_dev, tl_dev};
+        auto outputs = dispatch<OpId::CTCLossForward>(ctc_inputs, ctc_attrs);
+        if (outputs.size() != 2) {
+            throw std::runtime_error(
+                "CTCLoss: backend kernel did not return the expected "
+                "{loss_per_sample, raw_grad} pair");
+        }
+        Tensor losses_dev   = outputs[0];   // (N,) Float32
+        Tensor raw_grad_dev = outputs[1];   // (T_max, N, C) Float32
+
+        auto attach_grad_fn_dev = [&](Variable& out, bool per_sample, float scale) {
+            if (!needs_grad) return;
+            auto grad_fn = std::make_shared<CTCLossBackward>();
+            grad_fn->raw_grad_ = raw_grad_dev;   // already on original_device
+            grad_fn->is_per_sample_ = per_sample;
+            grad_fn->scale_ = scale;
+            grad_fn->orig_dtype_ = original_dtype;
+            grad_fn->orig_device_ = original_device;
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (log_probs.grad_fn()) next_funcs.push_back(log_probs.grad_fn());
+            grad_fn->set_next_functions(next_funcs);
+            grad_fn->set_input_variables({log_probs});
+
+            out.set_grad_fn(grad_fn);
+        };
+
+        if (reduction_ == "none") {
+            Tensor loss_out = losses_dev;
+            if (loss_out.dtype() != original_dtype) {
+                loss_out = loss_out.to(original_dtype);
+            }
+            Variable out(loss_out, needs_grad);
+            attach_grad_fn_dev(out, /*per_sample=*/true, /*scale=*/1.0f);
+            return out;
+        }
+
+        // For "mean" we need total_target_len (a scalar) — derive it on
+        // host by reading the small (N,) target_lengths Int32 tensor. This
+        // is a 4*N-byte transfer at most, not the algorithmic DP working
+        // set, and is functionally identical to PyTorch's behaviour.
+        float scale = 1.0f;
+        if (reduction_ == "mean") {
+            Tensor tl_cpu_small = (target_lengths.device() == Device::cpu())
+                                  ? target_lengths.to(DType::Int32).contiguous()
+                                  : target_lengths.to(Device::cpu()).to(DType::Int32).contiguous();
+            const int32_t* tl_ptr = tl_cpu_small.data<int32_t>();
+            float total_target_len = 0.0f;
+            for (int64_t n = 0; n < N; ++n) total_target_len += static_cast<float>(tl_ptr[n]);
+            if (total_target_len > 0.0f) scale = 1.0f / total_target_len;
+        }
+        // Reduction on the device: sum, then scalar-multiply by `scale`
+        // (which is 1.0 for "sum" and 1/total_target_len for "mean").
+        Tensor total = tenzor::sum(losses_dev);
+        if (scale != 1.0f) {
+            total = tenzor::mul(total, static_cast<double>(scale));
+        }
+        if (total.dtype() != original_dtype) total = total.to(original_dtype);
+        Variable out(total, needs_grad);
+        attach_grad_fn_dev(out, /*per_sample=*/false, scale);
+        return out;
+    }
+
+    // -----------------------------------------------------------------------
+    // CPU device path: inline implementation (unchanged). The kernel
+    // version in src/backends/cpu/kernels/ctc.cpp is also registered for
+    // dispatch parity, but invoking it here would require an extra
+    // attribute set + dispatch indirection without any benefit over the
+    // direct loop already written below.
+    // -----------------------------------------------------------------------
     Tensor lp_cpu = log_probs.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
     Tensor tgt_cpu = targets.to(Device::cpu()).to(DType::Int32).contiguous();
     Tensor il_cpu = input_lengths.to(Device::cpu()).to(DType::Int32).contiguous();
@@ -581,16 +694,12 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
         }
     }
 
-    // Create output tensor based on reduction
-    Device original_device = log_probs.tensor().device();
-    DType original_dtype = log_probs.tensor().dtype();
-
-    // Pack the gradient tensor once; used below for both reductions.
+    // (CPU path) Pack the gradient tensor once; used below for both
+    // reductions. original_device, original_dtype, needs_grad were
+    // captured at function entry.
     Tensor grad_tensor({T_max, N, C}, DType::Float32, Device::cpu());
     std::memcpy(grad_tensor.data<float>(), all_grads.data(),
                 all_grads.size() * sizeof(float));
-
-    const bool needs_grad = log_probs.requires_grad() && is_grad_enabled();
 
     auto attach_grad_fn = [&](Variable& out, bool per_sample, float scale) {
         if (!needs_grad) return;

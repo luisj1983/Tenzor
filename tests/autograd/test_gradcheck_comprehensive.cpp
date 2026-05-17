@@ -11,6 +11,8 @@
 #include <tenzor/tenzor.hpp>
 #include <cmath>
 
+#include "gradcheck_complex.hpp"
+
 using namespace tenzor;
 
 class GradCheckComprehensiveTest : public ::testing::Test {
@@ -666,18 +668,25 @@ TEST_F(GradCheckComprehensiveTest, Polygamma) {
 // FFT Operations
 // ============================================================================
 
-// FFT tests where the test function terminates in a real tensor work with
-// gradcheck. fft/ifft in isolation return complex, which breaks gradcheck's
-// scalar reduction (sum doesn't support complex, abs doesn't support complex).
-// Full complex-output support needs a dedicated complex-valued gradcheck
-// path — tracked in Phase 7 of the coverage plan. The rfft→irfft round-trip
-// below tests rfft/irfft backward through a real→real composition.
+// FFT / IFFT produce complex outputs from real inputs. The library-level
+// gradcheck() handles this via a scalar contraction L = sum(Re(y) + Im(y));
+// the stronger `gradcheck_complex` helper (see gradcheck_complex.hpp) runs
+// TWO backward passes — one seeded `(1+0i)` and one `(0+1i)` — so the real
+// and imaginary parts of the Jacobian are exercised independently.
 TEST_F(GradCheckComprehensiveTest, FFT) {
-    GTEST_SKIP() << "gradcheck needs complex-output support (Phase 7)";
+    auto x = make_centered_var({8});
+    auto f = [](const Variable& v) {
+        return fft_autograd::fft(v);
+    };
+    EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
 }
 
 TEST_F(GradCheckComprehensiveTest, IFFT) {
-    GTEST_SKIP() << "gradcheck needs complex-output support (Phase 7)";
+    auto x = make_centered_var({8});
+    auto f = [](const Variable& v) {
+        return fft_autograd::ifft(v);
+    };
+    EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
 }
 
 TEST_F(GradCheckComprehensiveTest, RFFT) {

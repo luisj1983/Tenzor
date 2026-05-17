@@ -940,9 +940,16 @@ public:
                              const Tensor& values, const Tensor& B,
                              int64_t N, int64_t K_rhs, bool upper) -> Tensor;
 
-    // Flash Attention — composed from existing matmul + softmax shaders (not a single fused kernel)
+    // Flash Attention — fused SPIR-V tiled kernel when the fast-path
+    // gating allows (Float32, head_dim/head_v <= 128); composed-ops
+    // fallback otherwise. Returns {output, lse} per the cross-backend
+    // attention contract (include/tenzor/ops/attention_contract.hpp).
+    // LSE is always Float32; shape (B, H, S_q) for 4D inputs,
+    // (B, S_q) for 3D. The shader writes `row_max + log(row_sum)` per
+    // row (-INFINITY sentinel for fully-masked rows) at binding 4 in
+    // the same pass as the output.
     auto dispatchFlashAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
-                                 float scale, bool causal) -> Tensor;
+                                 float scale, bool causal) -> std::pair<Tensor, Tensor>;
 
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;

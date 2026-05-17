@@ -483,8 +483,16 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
  *
  * Computes gradient w.r.t. embedding weights for EmbeddingBag.
  * Uses atomic_ref for scatter-add of gradients.
+ *
+ * Inputs:
+ *   grad_output: [num_bags, embedding_dim]
+ *   indices:     [total_elements]  (Int64) — original vocabulary indices
+ *   offsets:     [num_bags] or [num_bags+1] (Int64)
+ *
+ * Scatters grad_output[bag] into grad_weight[indices[i]] for each i in
+ * [offsets[bag], offsets[bag+1]).
  */
-auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                    const Tensor& offsets, const OpAttributes& attrs,
                                    sycl::queue& queue) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -492,7 +500,11 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
     std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
     bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
 
-    int64_t total_elements = embeddings.shape()[0];
+    if (indices.dtype() != DType::Int64) {
+        throw std::runtime_error("embedding_bag_backward: indices must be Int64");
+    }
+
+    int64_t total_elements = indices.numel();
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
 
@@ -500,11 +512,10 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
         return Tensor({num_embeddings, embedding_dim}, grad_output.dtype(), grad_output.device());
     }
 
-    // FP16/BF16: upcast to Float32, recurse, downcast
+    // FP16/BF16: upcast to Float32, recurse, downcast (indices stays Int64)
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         auto go_f32 = grad_output.to(DType::Float32);
-        auto emb_f32 = embeddings.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, emb_f32, offsets, attrs, queue);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs, queue);
         return result.to(grad_output.dtype());
     }
 
@@ -513,6 +524,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
     bool is_mean = (mode == "mean");
 
     const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
+    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
 
     if (grad_output.dtype() == DType::Float32) {
         float* gw_ptr = get_data_ptr<float>(grad_weight);
@@ -524,7 +536,8 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
             [=](sycl::id<1> idx) { gw_ptr[idx] = 0.0f; }
         );
 
-        // Scatter-add gradients per bag
+        // Scatter-add gradients per bag — distribute grad_output[bag] to
+        // grad_weight[indices[i]] for every i in the bag.
         queue.parallel_for<EmbeddingBagBackwardKernelFloat32>(
             sycl::range<2>(num_bags, embedding_dim),
             [=](sycl::id<2> idx) {
@@ -539,10 +552,12 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
                 if (is_mean) grad_val /= static_cast<float>(bag_size);
 
                 for (int64_t i = start; i < end; ++i) {
+                    int64_t row = indices_ptr[i];
+                    if (row < 0 || row >= num_embeddings) continue;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                     sycl::memory_scope::device,
                                     sycl::access::address_space::global_space>
-                        atomic_gw(gw_ptr[i * embedding_dim + j]);
+                        atomic_gw(gw_ptr[row * embedding_dim + j]);
                     atomic_gw.fetch_add(grad_val);
                 }
             }
@@ -570,10 +585,12 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
                 if (is_mean) grad_val /= static_cast<double>(bag_size);
 
                 for (int64_t i = start; i < end; ++i) {
+                    int64_t row = indices_ptr[i];
+                    if (row < 0 || row >= num_embeddings) continue;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                     sycl::memory_scope::device,
                                     sycl::access::address_space::global_space>
-                        atomic_gw(gw_ptr[i * embedding_dim + j]);
+                        atomic_gw(gw_ptr[row * embedding_dim + j]);
                     atomic_gw.fetch_add(grad_val);
                 }
             }

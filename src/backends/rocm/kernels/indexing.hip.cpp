@@ -2455,14 +2455,20 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 // EmbeddingBagBackward Operation
 // ==============================================================================
 
+// Scatter-add into rows selected by `indices` (the original vocabulary ids
+// the EmbeddingBag forward looked up). Each bag spans indices[start..end];
+// the upstream gradient grad_output[bag] is distributed to every row in that
+// bag (divided by bag_size for mean reduction).
 template<typename T>
 __global__ void embedding_bag_backward_kernel_hip(
     const T* grad_output,
+    const int64_t* indices,
     const int64_t* offsets,
     T* grad_weight,
     int64_t num_bags,
     int64_t total_elements,
     int64_t embedding_dim,
+    int64_t num_embeddings,
     int64_t offsets_size,
     bool is_mean)
 {
@@ -2480,13 +2486,15 @@ __global__ void embedding_bag_backward_kernel_hip(
             grad_val = grad_val / static_cast<T>(bag_size);
         }
         for (int64_t i = start; i < end; ++i) {
-            atomicAdd(&grad_weight[i * embedding_dim + j], grad_val);
+            int64_t row = indices[i];
+            if (row < 0 || row >= num_embeddings) continue;
+            atomicAdd(&grad_weight[row * embedding_dim + j], grad_val);
         }
     }
 }
 
 auto embedding_bag_backward_kernel(const Tensor& grad_output,
-                                   const Tensor& embeddings,
+                                   const Tensor& indices,
                                    const Tensor& offsets,
                                    const OpAttributes& attrs,
                                    hipStream_t stream) -> Tensor {
@@ -2495,7 +2503,11 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
     bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
 
-    int64_t total_elements = embeddings.shape()[0];
+    if (indices.dtype() != DType::Int64) {
+        throw std::runtime_error("embedding_bag_backward: indices must be Int64");
+    }
+
+    int64_t total_elements = indices.numel();
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
 
@@ -2503,11 +2515,10 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
         return Tensor({num_embeddings, embedding_dim}, grad_output.dtype(), grad_output.device());
     }
 
-    // FP16/BF16: upcast to Float32
+    // FP16/BF16: upcast to Float32 (indices stays Int64)
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         auto go_f32 = grad_output.to(DType::Float32);
-        auto emb_f32 = embeddings.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, emb_f32, offsets, attrs, stream);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs, stream);
         return result.to(grad_output.dtype());
     }
 
@@ -2523,17 +2534,17 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
         case DType::Float32:
             hipLaunchKernelGGL(embedding_bag_backward_kernel_hip<float>,
                 dim3(blocks), dim3(threads), 0, stream,
-                grad_output.data<float>(), offsets.data<int64_t>(),
+                grad_output.data<float>(), indices.data<int64_t>(), offsets.data<int64_t>(),
                 grad_weight.data<float>(), num_bags, total_elements,
-                embedding_dim, offsets_size, is_mean);
+                embedding_dim, num_embeddings, offsets_size, is_mean);
             HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Float64:
             hipLaunchKernelGGL(embedding_bag_backward_kernel_hip<double>,
                 dim3(blocks), dim3(threads), 0, stream,
-                grad_output.data<double>(), offsets.data<int64_t>(),
+                grad_output.data<double>(), indices.data<int64_t>(), offsets.data<int64_t>(),
                 grad_weight.data<double>(), num_bags, total_elements,
-                embedding_dim, offsets_size, is_mean);
+                embedding_dim, num_embeddings, offsets_size, is_mean);
             HIP_POST_LAUNCH_CHECK();
             break;
         default:

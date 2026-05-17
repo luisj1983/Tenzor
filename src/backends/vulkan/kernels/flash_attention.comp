@@ -33,7 +33,10 @@
 // gating):
 //   - Float32 only (no FP16 variant yet — M8 work).
 //   - head_dim and head_v up to MAX_HEAD_DIM = 128.
-//   - LSE saving (audit C1 Vulkan) and Philox dropout — M8 work.
+//   - Philox dropout NOT supported in-shader: the host wrapper routes
+//     dropout_p > 0 cases to a composed softmax + Philox-mask + matmul
+//     path that uses the `philox_dropout_mask.comp` shader. LSE is
+//     emitted from this shader unconditionally now (audit C1 Vulkan).
 //   - Workgroup size fixed at Br = 16 threads.
 //
 // Causal masking IS supported (audit C2 Vulkan fix): when push_constant.causal
@@ -54,6 +57,13 @@ layout(set = 0, binding = 0) buffer QBuf { float q_data[]; };
 layout(set = 0, binding = 1) buffer KBuf { float k_data[]; };
 layout(set = 0, binding = 2) buffer VBuf { float v_data[]; };
 layout(set = 0, binding = 3) buffer OBuf { float o_data[]; };
+// LSE output (binding 4) — always Float32 per `attention_contract.hpp`'s
+// kLseDType. Shape (B, H, S_q) flattened to (batch_heads, seq_q). Phase 1.5
+// rewrite: the per-row log-sum-exp is written from this shader in the same
+// pass that writes the output, eliminating the host-side
+// `logsumexp(Q @ Kᵀ * scale)` recompute that previously defeated
+// FlashAttention's memory savings.
+layout(set = 0, binding = 4) buffer LBuf { float lse_data[]; };
 
 layout(push_constant) uniform PushConstants {
     int seq_q;      // S_q
@@ -184,11 +194,27 @@ void main() {
         barrier();  // next iteration will overwrite Ks/Vs
     }
 
-    // Final normalization and write-back.
-    if (valid && row_sum > 0.0) {
-        float inv_sum = 1.0 / row_sum;
-        for (int d = 0; d < head_v; ++d) {
-            o_data[(batch * seq_q + q_row) * head_v + d] = o_vec[d] * inv_sum;
+    // Final normalization, write-back, and per-row LSE emission. The LSE
+    // contract (include/tenzor/ops/attention_contract.hpp lines 60-73, 125-138)
+    // demands `row_max + log(row_sum)` for live rows and `-INFINITY` for
+    // fully-masked rows so backward's `P = exp(S - L)` evaluates to 0 there.
+    if (valid) {
+        int lse_idx = batch * seq_q + q_row;
+        if (row_sum > 0.0) {
+            float inv_sum = 1.0 / row_sum;
+            for (int d = 0; d < head_v; ++d) {
+                o_data[(batch * seq_q + q_row) * head_v + d] = o_vec[d] * inv_sum;
+            }
+            lse_data[lse_idx] = row_max + log(row_sum);
+        } else {
+            // Fully-masked row: explicitly zero the output (the buffer is
+            // not guaranteed to be zero-initialised by the host) and emit
+            // the contract sentinel LSE so backward sees P = exp(S - L)
+            // = exp(anything - (-INF)) = 0.
+            for (int d = 0; d < head_v; ++d) {
+                o_data[(batch * seq_q + q_row) * head_v + d] = 0.0;
+            }
+            lse_data[lse_idx] = -1.0 / 0.0;  // -INFINITY
         }
     }
 }

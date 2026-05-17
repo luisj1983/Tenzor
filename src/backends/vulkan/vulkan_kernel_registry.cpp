@@ -1175,6 +1175,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 mode, include_last_offset)};
         });
 
+    // CTC Loss (audit Phase 3.7)
+    // Vulkan compute-shader port of src/backends/cuda/kernels/ctc.cu is TODO.
+    // Throws so the dispatcher never silently falls back to CPU.
+    table.register_kernel(OpId::CTCLossForward,
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                "CTCLossForward on Vulkan: not implemented. "
+                "Port src/backends/cuda/kernels/ctc.cu to a SPIR-V compute "
+                "shader, or run the loss on the CPU device "
+                "(no silent fallback is permitted).");
+        });
+
     // ========================================================================
     // Nonzero, OneHot, BoxIoU
     // ========================================================================
@@ -2455,33 +2467,59 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Expected speedup: 2-4x for long sequences (memory-bandwidth-bound).
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // F22: emit a real LSE alongside the output so the
-            // FlashAttentionBackward contract is satisfied. The Vulkan
-            // compute shader doesn't surface the per-row logsumexp from its
-            // online softmax, so we fall back to the composed-ops form
-            // `logsumexp(Q @ K^T * scale [+ mask], dim=-1)`. Both matmul
-            // and logsumexp route through Vulkan kernels — the cost is one
-            // extra (B, H, S, S) materialisation (the very thing FA's
-            // forward avoids), but only when the contract requires LSE.
-            // Once the shader-level fused LSE export lands (followup) the
-            // composed-ops branch will collapse to a noop.
+            // Phase 1.5: LSE is now emitted INSIDE the fused shader (binding
+            // 4) in the same pass as the output. The previous composed-ops
+            // `logsumexp(Q @ Kᵀ * scale)` recompute was deleted — that
+            // materialised the (B, H, S_q, S_k) attention matrix and
+            // defeated FlashAttention's whole reason for existing.
             //
-            // Philox seed/offset stay as `Tensor{}` placeholders because
-            // dropout > 0 still throws (the shader-level Philox refit is
-            // F13/F22-followup).
+            // Dropout: shader-level Philox is NOT supported. When
+            // `dropout_p > 0` in training mode we fall back to a composed
+            // softmax → Philox-mask → matmul path, which still keeps every
+            // operation on-device via the `philox_dropout_mask.comp`
+            // shader. The fused fast path is dropout-free.
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
             float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
             bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
 
-            // F22: composed-ops fallback when dropout > 0 in training mode.
-            // F13/F22-followup: Philox-keyed Bernoulli mask (deterministic from
-            // (seed, offset)) so the backward path can replay bit-exactly.
-            // Counter convention matches the CUDA/ROCm FA kernels.
+            // Collapse 3D inputs (B, S, D) to 4D (B, 1, S, D) at the
+            // dispatch boundary so downstream code only has to think about
+            // a single rank. The dispatch helper itself still handles 3D
+            // for the composed-ops slow path, but the registry boundary is
+            // normalised here.
+            const Tensor& Q_in = inputs[0];
+            const Tensor& K_in = inputs[1];
+            const Tensor& V_in = inputs[2];
+            auto promote_to_4d = [](const Tensor& t) -> Tensor {
+                if (t.ndim() == 4) return t;
+                if (t.ndim() == 3) {
+                    auto sh = t.shape();
+                    return tenzor::reshape(t, std::vector<int64_t>{sh[0], 1, sh[1], sh[2]});
+                }
+                return t;
+            };
+            const bool was_3d = (Q_in.ndim() == 3);
+            Tensor Q = promote_to_4d(Q_in);
+            Tensor K = promote_to_4d(K_in);
+            Tensor V = promote_to_4d(V_in);
+
+            auto collapse_back = [&](const Tensor& t, bool drop_head_for_lse) -> Tensor {
+                if (!was_3d) return t;
+                auto sh = t.shape();
+                if (drop_head_for_lse) {
+                    // LSE: (B, 1, S_q) -> (B, S_q)
+                    return tenzor::reshape(t, std::vector<int64_t>{sh[0], sh[2]});
+                }
+                // Output: (B, 1, S_q, Dv) -> (B, S_q, Dv)
+                return tenzor::reshape(t, std::vector<int64_t>{sh[0], sh[2], sh[3]});
+            };
+
+            // Dropout path: stay composed-ops (Philox-keyed Bernoulli mask
+            // built via `philox_dropout_mask.comp`, fully on-device). LSE
+            // still comes from `logsumexp` of the masked pre-softmax
+            // scores. Backward replays with the same (seed, offset).
             if (dropout_p > 0.0f && is_training) {
-                const Tensor& Q = inputs[0];
-                const Tensor& K = inputs[1];
-                const Tensor& V = inputs[2];
                 Tensor Kt = tenzor::transpose(K, -1, -2);
                 Tensor scores = tenzor::matmul(Q, Kt);
                 Tensor scaled = tenzor::mul(scores, static_cast<double>(scale));
@@ -2509,17 +2547,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 std::vector<Tensor> sm_in = {scaled};
                 Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
 
-                // F22-followup: device-side Philox via the
-                // `philox_dropout_mask.comp` compute shader — no CPU host
-                // loop, no CPU→GPU copy. Counter convention matches every
-                // other backend's Philox path so backward replay is
-                // bit-exact across backends.
                 auto philox = tenzor::new_philox_stream();
                 uint64_t seed_v = static_cast<uint64_t>(philox.seed.data<int64_t>()[0]);
                 uint64_t offset_v = static_cast<uint64_t>(philox.offset.data<int64_t>()[0]);
                 std::vector<int64_t> attn_shape(attn.shape().begin(), attn.shape().end());
-                // Shader emits Float32; cast to the attention dtype on-device
-                // (the cast itself is a Vulkan dispatch, not a CPU round-trip).
                 Tensor mask_dev = get_vulkan_backend()->dispatchPhiloxDropoutMask(
                     attn_shape, dropout_p, seed_v, offset_v);
                 if (mask_dev.dtype() != attn.dtype()) {
@@ -2529,53 +2560,27 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
                 Tensor output_comp = tenzor::matmul(attn_dropped, V);
                 Tensor lse_comp = tenzor::logsumexp(scaled, -1, /*keepdim=*/false);
-                return {output_comp, lse_comp, philox.seed, philox.offset};
-            }
-
-            Tensor output = get_vulkan_backend()->dispatchFlashAttention(
-                inputs[0], inputs[1], inputs[2], scale, causal);
-
-            // Compute LSE via composed ops. Q shape: [B, H, S_q, D].
-            // K shape: [B, H, S_kv, D]. scores = Q @ K^T * scale, with optional
-            // causal mask, then logsumexp(dim=-1) gives LSE of shape [B, H, S_q].
-            const Tensor& Q = inputs[0];
-            const Tensor& K = inputs[1];
-            Tensor lse;
-            if (Q.ndim() == 4 && K.ndim() == 4) {
-                // K^T over the last two dims: transpose(-2, -1).
-                Tensor K_t = tenzor::transpose(K, -2, -1);
-                Tensor scores = tenzor::matmul(Q, K_t);
-                // Multiply by scale via broadcast (scalar via mul-add helpers).
-                scores = tenzor::mul(scores, static_cast<double>(scale));
-                if (causal) {
-                    // Apply -inf to upper triangle (j > i) so logsumexp skips it.
-                    auto sshape = scores.shape();
-                    int64_t S_q = sshape[sshape.size() - 2];
-                    int64_t S_kv = sshape[sshape.size() - 1];
-                    // Build a broadcasted causal mask of shape (1, 1, S_q, S_kv).
-                    // We compose with `where` after building i<j as a bool tensor.
-                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                    Tensor col_idx = tenzor::arange(0, S_kv, 1, DType::Int64, Q.device());
-                    Tensor row_v = tenzor::reshape(row_idx, {S_q, 1});
-                    Tensor col_v = tenzor::reshape(col_idx, {1, S_kv});
-                    Tensor future = tenzor::gt(col_v, row_v);  // bool [S_q, S_kv]
-                    Tensor neg_inf = tenzor::full(
-                        std::vector<int64_t>(scores.shape().begin(), scores.shape().end()),
-                        -std::numeric_limits<double>::infinity(),
-                        scores.dtype(), scores.device());
-                    // Broadcast future to scores shape via where:
-                    // result = where(future_broadcast, neg_inf, scores)
-                    // future has shape [S_q, S_kv]; need to reshape/broadcast.
-                    Tensor future_b = tenzor::reshape(future, {1, 1, S_q, S_kv});
-                    scores = tenzor::where(future_b, neg_inf, scores);
+                if (lse_comp.dtype() != DType::Float32) {
+                    lse_comp = lse_comp.to(DType::Float32);
                 }
-                lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+                return {collapse_back(output_comp, /*drop_head_for_lse=*/false),
+                        collapse_back(lse_comp,   /*drop_head_for_lse=*/true),
+                        philox.seed, philox.offset};
             }
-            // 3D / other shapes: leave lse empty (caller falls back to
-            // composed backward). 4D is the only flash-shape that flows
-            // through Q @ K^T here.
 
-            return {output, lse, Tensor{}, Tensor{}};
+            // Fused fast path (or composed slow path on dtype/shape miss):
+            // `dispatchFlashAttention` now returns {output, lse} directly.
+            // Both come from on-device dispatches; the registry no longer
+            // touches host memory for LSE.
+            auto fa_result = get_vulkan_backend()->dispatchFlashAttention(
+                Q, K, V, scale, causal);
+            // Philox seed/offset are empty Tensors when dropout disabled,
+            // matching `attention_contract.hpp` (the contract requires
+            // empty Tensors, not absent slots, so downstream code can
+            // index into the return vector unconditionally).
+            return {collapse_back(fa_result.first, /*drop_head_for_lse=*/false),
+                    collapse_back(fa_result.second, /*drop_head_for_lse=*/true),
+                    Tensor{}, Tensor{}};
         });
     // FlashAttentionBackward — composed from Vulkan matmul + softmax backward
     table.register_kernel(OpId::FlashAttentionBackward,
@@ -2674,9 +2679,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
             if (score_mod_id == 0 || score_mod_id == 1) {
                 bool causal = (score_mod_id == 1);
-                Tensor output = get_vulkan_backend()->dispatchFlashAttention(
+                // Phase 1.5 made dispatchFlashAttention return {output, lse}
+                // — the fused shader emits per-row logsumexp directly
+                // (binding 4) in the same pass as the output.
+                auto [output, lse] = get_vulkan_backend()->dispatchFlashAttention(
                     inputs[0], inputs[1], inputs[2], scale, causal);
-                return {output, Tensor{}};
+
+                // Phase 2.10: per the attention contract
+                // (include/tenzor/ops/attention_contract.hpp,
+                // docs/internals/attention-contract.md), FlexAttention
+                // forward returns (output, lse) — LSE must always be a
+                // valid Float32 tensor, never empty. The Phase 1.5 shader
+                // emits LSE directly from the fused kernel; we just
+                // narrow-cast to Float32 if it came back in a wider dtype
+                // (-INFINITY sentinel for fully-masked rows is preserved).
+                if (lse.dtype() != DType::Float32) {
+                    lse = lse.to(DType::Float32);
+                }
+                return {output, lse};
             }
 
             if (score_mod_id == 2) {
@@ -2707,12 +2727,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                     -std::numeric_limits<float>::infinity(),
                     scores.dtype(), scores.device());
                 scores = scores + (outside.to(scores.dtype()) * neg_inf);
+                // Phase 2.10: emit a real Float32 LSE per the attention
+                // contract — computed on the masked, pre-softmax scores so
+                // that backward can recover P = exp(S - L).
+                Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+                if (lse.dtype() != DType::Float32) {
+                    lse = lse.to(DType::Float32);
+                }
                 NewOpAttributes sm_attrs;
                 sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
                 std::vector<Tensor> sm_in = {scores};
                 Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
                 Tensor output = tenzor::bmm(probs, V);
-                return {output, Tensor{}};
+                return {output, lse};
             }
 
             // Wave C: ScoreModId >= 3 routes through the process-wide score_mod
@@ -2736,12 +2763,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                                scores.dtype(), scores.device());
                 scores = scores * scale_t;
                 Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+                // Phase 2.10: emit a real Float32 LSE per the attention
+                // contract — computed on the post-functor, pre-softmax
+                // scores so that backward can recover P = exp(S - L).
+                Tensor lse = tenzor::logsumexp(modified, -1, /*keepdim=*/false);
+                if (lse.dtype() != DType::Float32) {
+                    lse = lse.to(DType::Float32);
+                }
                 NewOpAttributes sm_attrs;
                 sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
                 std::vector<Tensor> sm_in = {modified};
                 Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
                 Tensor output = tenzor::bmm(probs, V);
-                return {output, Tensor{}};
+                return {output, lse};
             }
 
             throw std::runtime_error(

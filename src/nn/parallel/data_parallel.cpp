@@ -23,8 +23,10 @@ DataParallel::DataParallel(
     std::shared_ptr<Module> module,
     std::vector<int> device_ids,
     int output_device,
-    int dim
-) : module_(module), device_ids_(device_ids), output_device_(output_device), dim_(dim) {
+    int dim,
+    ::tenzor::distributed::ReduceOp reduce_op
+) : module_(module), device_ids_(device_ids), output_device_(output_device), dim_(dim),
+    reduce_op_(reduce_op) {
     if (!module_) {
         throw std::invalid_argument("DataParallel: module cannot be null");
     }
@@ -70,12 +72,14 @@ DataParallel::DataParallel(
     std::vector<int> device_ids,
     int output_device,
     int dim,
-    std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg
+    std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg,
+    ::tenzor::distributed::ReduceOp reduce_op
 ) : device_ids_(std::move(device_ids)),
     output_device_(output_device),
     dim_(dim),
     module_factory_(std::move(factory)),
-    pg_(std::move(pg))
+    pg_(std::move(pg)),
+    reduce_op_(reduce_op)
 {
     if (!module_factory_) {
         throw std::invalid_argument("DataParallel(factory): factory cannot be null");
@@ -142,16 +146,12 @@ auto DataParallel::forward_impl(const Variable& input) -> Variable {
     // Gather outputs
     auto result = gather(outputs);
 
-    // Attach backward hook to synchronize gradients after backward pass
-    // Note: In a full autograd implementation, we would register a hook
-    // that gets called after the backward pass completes. For now, we
-    // document that users should call synchronize_gradients() manually
-    // after loss.backward() or integrate this into the backward engine.
-    //
-    // Example integration:
-    // result.set_backward_hook([this]() {
-    //     this->synchronize_gradients();
-    // });
+    // Gradient sync is wired into autograd via `register_grad_hooks()`
+    // (called from `replicate()` once the master parameter list is built).
+    // Each parameter has a `Variable::register_hook` that fires when its
+    // gradient is computed during backward(), triggering the configured
+    // all-reduce automatically. Callers do not need to call
+    // `synchronize_gradients()` manually after `loss.backward()`.
 
     return result;
 }
@@ -224,6 +224,110 @@ auto DataParallel::replicate() -> void {
     // here so the optimizer updates them and `synchronize_gradients` will
     // gather from per-device replicas and reduce onto the master.
     parameters_to_sync_ = module_->parameters();
+
+    // Wire backward hooks on every master parameter so the configured
+    // all-reduce fires automatically when each grad lands during backward().
+    register_grad_hooks();
+}
+
+auto DataParallel::register_grad_hooks() -> void {
+    // Idempotent — skip if already wired (parameter set is stable after
+    // the first call to replicate()).
+    if (!grad_hook_ids_.empty()) {
+        return;
+    }
+    // Single-device path or empty parameter set: nothing to sync.
+    if (device_ids_.size() <= 1 || parameters_to_sync_.empty()) {
+        return;
+    }
+
+    grad_hook_ids_.reserve(parameters_to_sync_.size());
+
+    const auto num_devices = static_cast<int>(device_ids_.size());
+    const auto reduce_op = reduce_op_;
+    auto pg = pg_;
+
+    for (auto& param : parameters_to_sync_) {
+        if (!param || !param->requires_grad()) {
+            grad_hook_ids_.push_back(0);  // placeholder, never used
+            continue;
+        }
+
+        // The hook receives the freshly-computed gradient for this parameter
+        // and returns the (possibly transformed) gradient that the engine
+        // will accumulate into param->grad(). We perform the all-reduce
+        // in-place on a copy and return that as the new gradient — this
+        // means the accumulated grad observes the reduced value directly,
+        // without a second pass that re-reads param->grad().
+        size_t id = param->register_hook(
+            [num_devices, reduce_op, pg](const Tensor& grad) -> Tensor {
+                Tensor g = grad;
+                if (pg != nullptr) {
+                    // Real process-group path (NCCL/Gloo/MPI). All ranks
+                    // contribute, then we normalize per `reduce_op`.
+                    int ws = pg->world_size();
+                    if (ws <= 1) {
+                        return g;  // single-rank PG = no-op
+                    }
+                    switch (reduce_op) {
+                        case ::tenzor::distributed::ReduceOp::SUM:
+                            pg->all_reduce(g, ::tenzor::distributed::ReduceOp::SUM);
+                            return g;
+                        case ::tenzor::distributed::ReduceOp::AVG: {
+                            pg->all_reduce(g, ::tenzor::distributed::ReduceOp::SUM);
+                            return g * (1.0 / static_cast<double>(ws));
+                        }
+                        case ::tenzor::distributed::ReduceOp::MAX:
+                            pg->all_reduce(g, ::tenzor::distributed::ReduceOp::MAX);
+                            return g;
+                        case ::tenzor::distributed::ReduceOp::MIN:
+                            pg->all_reduce(g, ::tenzor::distributed::ReduceOp::MIN);
+                            return g;
+                        case ::tenzor::distributed::ReduceOp::PRODUCT:
+                        case ::tenzor::distributed::ReduceOp::BAND:
+                        case ::tenzor::distributed::ReduceOp::BOR:
+                        case ::tenzor::distributed::ReduceOp::BXOR:
+                            throw std::invalid_argument(
+                                "DataParallel: ReduceOp PRODUCT/BAND/BOR/BXOR "
+                                "are not valid for gradient reduction");
+                    }
+                    throw std::invalid_argument(
+                        "DataParallel: unknown ReduceOp in grad hook");
+                }
+                // Shared-module path: gradients accumulate onto the master
+                // parameter (each replica's backward routes back to the same
+                // Variable), so the "reduce across replicas" is already done
+                // by accumulation. All that remains is the per-op
+                // normalization step.
+                switch (reduce_op) {
+                    case ::tenzor::distributed::ReduceOp::SUM:
+                        return g;
+                    case ::tenzor::distributed::ReduceOp::AVG:
+                        return g * (1.0 / static_cast<double>(num_devices));
+                    case ::tenzor::distributed::ReduceOp::MAX:
+                    case ::tenzor::distributed::ReduceOp::MIN:
+                        // Without a real PG, we can't take a true elementwise
+                        // max/min across replicas — the gradients have already
+                        // been summed by accumulation. Surface this as an
+                        // error rather than silently returning the sum.
+                        throw std::invalid_argument(
+                            "DataParallel: MAX/MIN ReduceOp requires a "
+                            "ProcessGroup (factory ctor with `pg`); "
+                            "shared-module path only supports SUM and AVG");
+                    case ::tenzor::distributed::ReduceOp::PRODUCT:
+                    case ::tenzor::distributed::ReduceOp::BAND:
+                    case ::tenzor::distributed::ReduceOp::BOR:
+                    case ::tenzor::distributed::ReduceOp::BXOR:
+                        throw std::invalid_argument(
+                            "DataParallel: ReduceOp PRODUCT/BAND/BOR/BXOR "
+                            "are not valid for gradient reduction");
+                }
+                throw std::invalid_argument(
+                    "DataParallel: unknown ReduceOp in grad hook");
+            }
+        );
+        grad_hook_ids_.push_back(id);
+    }
 }
 
 auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
@@ -365,154 +469,20 @@ auto DataParallel::gather(const std::vector<Variable>& outputs) -> Variable {
 }
 
 auto DataParallel::synchronize_gradients() -> void {
-    // Single device optimization - no synchronization needed
-    if (device_ids_.size() == 1) {
-        return;
-    }
-
-    // Early exit if no parameters to synchronize
-    if (parameters_to_sync_.empty()) {
-        return;
-    }
-
-    // B5: real PG all_reduce path. When a ProcessGroupBase is attached,
-    // for each parameter's gradient: all_reduce(SUM) across the group, then
-    // divide by world_size. This replaces the trivial `grad *= 1/N` workaround
-    // for the new factory-based DataParallel (the legacy shared-module ctor
-    // still flows through the CUDA path below since gradients accumulate on
-    // the master device under shared params).
-    if (pg_ != nullptr) {
-        int ws = pg_->world_size();
-        if (ws <= 1) return;  // single-rank PG = no-op
-        const double inv_ws = 1.0 / static_cast<double>(ws);
-        for (auto& param : parameters_to_sync_) {
-            if (!param || !param->has_grad()) continue;
-            auto grad_opt = param->grad();
-            if (!grad_opt.has_value()) continue;
-            Tensor grad = grad_opt.value();
-            // All-reduce with SUM, then scale to mean.
-            pg_->all_reduce(grad, ::tenzor::distributed::ReduceOp::SUM);
-            param->set_grad(grad * inv_ws);
-        }
-        return;
-    }
-
-#ifdef TENZOR_USE_CUDA
-    // Multi-GPU gradient synchronization using all-reduce pattern
+    // Gradient reduction is performed inline by the per-parameter
+    // `register_hook` callbacks installed in `register_grad_hooks()` —
+    // those fire during backward() and apply the configured `reduce_op_`
+    // to the freshly-computed gradient before it lands in param->grad().
     //
-    // Algorithm:
-    // 1. For each parameter, gather gradients from all device replicas
-    // 2. Sum gradients on master device
-    // 3. Average by dividing by number of devices
-    // 4. Update master parameter's gradient with averaged result
-    //
-    // Note: Since our current implementation shares the module across devices,
-    // the gradients accumulate in the master parameter. In a true multi-device
-    // setup with separate parameter copies per device, we would need to:
-    // - Fetch gradients from each device's parameter copy
-    // - Perform all-reduce (sum + average)
-    // - Optionally broadcast back to all devices
-
-    int num_devices = static_cast<int>(device_ids_.size());
-    float scale_factor = 1.0f / static_cast<float>(num_devices);
-
-    // Set master device for gradient operations
-    cudaSetDevice(output_device_);
-
-    // Create stream for async gradient operations
-    cudaStream_t grad_stream;
-    cudaStreamCreate(&grad_stream);
-
-    // For each parameter, average the gradients
-    for (auto& param : parameters_to_sync_) {
-        if (!param || !param->has_grad()) {
-            continue;
-        }
-
-        // Check if parameter has gradient computed
-        if (!param->has_grad()) {
-            continue;
-        }
-
-        // Get the gradient reference
-        auto grad_opt = param->grad();
-        if (!grad_opt.has_value()) {
-            continue;
-        }
-
-        Tensor grad_tensor = grad_opt.value();
-
-        // Validate gradient is on master device
-        const auto& grad_device = grad_tensor.device();
-        if (grad_device.type != Device::Type::CUDA || grad_device.index != output_device_) {
-            // Move gradient to master device if needed
-            grad_tensor = grad_tensor.cuda(output_device_);
-        }
-
-        // In our current architecture, gradients accumulate on the master device
-        // In a true multi-GPU setup, we would:
-        //
-        // 1. Create gradient copies for each device
-        // std::vector<Tensor> device_grads(num_devices);
-        //
-        // 2. Fetch gradients from each device
-        // for (int i = 0; i < num_devices; ++i) {
-        //     cudaSetDevice(device_ids_[i]);
-        //     device_grads[i] = replicas_[i]->get_parameter(param_name)->grad();
-        // }
-        //
-        // 3. Perform all-reduce (sum)
-        // cudaSetDevice(output_device_);
-        // Tensor summed_grad = device_grads[0];
-        // for (int i = 1; i < num_devices; ++i) {
-        //     Tensor grad_on_master = device_grads[i].cuda(output_device_);
-        //     summed_grad = summed_grad + grad_on_master;
-        // }
-        //
-        // 4. Average
-        // Tensor averaged_grad = summed_grad * scale_factor;
-        //
-        // 5. Update master parameter
-        // param->set_grad(averaged_grad);
-
-        // Current simplified approach: Scale the gradient by 1/num_devices
-        // This assumes gradients from all devices have been accumulated
-        // in the master parameter (which happens in our shared-module design)
-        Tensor scaled_grad = grad_tensor * scale_factor;
-
-        // Update the parameter's gradient
-        param->set_grad(scaled_grad);
+    // This method remains as a private no-op so legacy code paths that
+    // call it (or test fixtures, debug invocations) compile without
+    // emitting a spurious double-reduce. The early-out below documents
+    // the invariant: when num_devices_ == 1 or no params are tracked,
+    // there is nothing to do regardless of which path triggered the call.
+    if (device_ids_.size() == 1 || parameters_to_sync_.empty()) {
+        return;
     }
-
-    // Synchronize stream
-    cudaStreamSynchronize(grad_stream);
-    cudaStreamDestroy(grad_stream);
-
-    // Reset to master device
-    cudaSetDevice(output_device_);
-
-#else
-    // CPU fallback: Average gradients
-    // In a CPU multi-threading scenario, gradients would be accumulated
-    // through atomic operations or mutex-protected updates, then averaged here
-    int num_devices = static_cast<int>(device_ids_.size());
-    float scale_factor = 1.0f / static_cast<float>(num_devices);
-
-    for (auto& param : parameters_to_sync_) {
-        if (!param || !param->has_grad()) {
-            continue;
-        }
-
-        auto grad_opt = param->grad();
-        if (!grad_opt.has_value()) {
-            continue;
-        }
-
-        // Scale gradient by averaging factor
-        Tensor scaled_grad = grad_opt.value() * scale_factor;
-        param->set_grad(scaled_grad);
-    }
-#endif
+    // No-op: hooks already applied `reduce_op_` per-parameter during backward.
 }
 
 auto DataParallel::validate_devices() -> void {

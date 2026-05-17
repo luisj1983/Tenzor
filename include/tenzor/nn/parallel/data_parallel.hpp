@@ -15,6 +15,7 @@
 #include "../../nn/module.hpp"
 #include "../../autograd/variable.hpp"
 #include "../../core/device.hpp"
+#include "../../distributed/distributed.hpp"  // ReduceOp
 
 // Forward declaration — A1: real replica creation via factory + PG all_reduce.
 namespace tenzor::distributed { class ProcessGroupBase; }
@@ -100,7 +101,8 @@ public:
         std::shared_ptr<Module> module,
         std::vector<int> device_ids = {},
         int output_device = -1,
-        int dim = 0
+        int dim = 0,
+        ::tenzor::distributed::ReduceOp reduce_op = ::tenzor::distributed::ReduceOp::AVG
     );
 
     /**
@@ -131,7 +133,8 @@ public:
         std::vector<int> device_ids,
         int output_device = -1,
         int dim = 0,
-        std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg = nullptr
+        std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg = nullptr,
+        ::tenzor::distributed::ReduceOp reduce_op = ::tenzor::distributed::ReduceOp::AVG
     );
 
     /**
@@ -236,6 +239,20 @@ private:
     // is used (the old ctor's behavior).
     std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg_;
 
+    // Reduction op for gradient synchronization across replicas.
+    // SUM:  raw sum of grads (no normalization) — total gradient.
+    // AVG / MEAN: sum then divide by num_devices_ — mean gradient (default,
+    //             matches the original implicit behavior of `grad *= 1/N`).
+    // MAX / MIN: element-wise max / min across replicas (requires a real PG).
+    // PRODUCT, BAND, BOR, BXOR: rejected — undefined semantics for gradients.
+    ::tenzor::distributed::ReduceOp reduce_op_{::tenzor::distributed::ReduceOp::AVG};
+
+    // Hook IDs registered on the master module's parameters so that
+    // `synchronize_gradients` is invoked automatically when each parameter's
+    // gradient lands in the autograd engine. Indexed in lockstep with
+    // parameters_to_sync_; populated by register_grad_hooks().
+    std::vector<size_t> grad_hook_ids_;
+
     /**
      * @brief Replicate module to all devices.
      *
@@ -279,12 +296,28 @@ private:
     /**
      * @brief Synchronize gradients across devices.
      *
-     * After backward pass, averages gradients from all replicas
-     * into the master module's parameters.
+     * After backward pass, all-reduces gradients from all replicas
+     * into the master module's parameters using the configured `reduce_op_`.
      *
-     * Called automatically during backward pass via autograd hooks.
+     * Wired into the autograd engine via `register_grad_hooks()` — fires
+     * automatically when each parameter's gradient lands during backward().
+     * Private: callers should not need to invoke this manually.
      */
     auto synchronize_gradients() -> void;
+
+    /**
+     * @brief Wire automatic gradient sync into the autograd engine.
+     *
+     * Registers a `Variable::register_hook` on every parameter so that the
+     * configured `reduce_op_` all-reduce runs as soon as the parameter's
+     * gradient is computed during backward(). Replaces the requirement to
+     * call `synchronize_gradients()` manually after `loss.backward()`.
+     *
+     * Called once from `replicate()` after `parameters_to_sync_` is
+     * populated; subsequent forward passes reuse the already-registered
+     * hooks. Safe to call multiple times (no-op if already wired).
+     */
+    auto register_grad_hooks() -> void;
 
     /**
      * @brief Validate device availability.

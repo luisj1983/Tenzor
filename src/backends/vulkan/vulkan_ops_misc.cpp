@@ -5068,11 +5068,18 @@ auto VulkanBackend::dispatchMaskedScatterWithPrefix(const Tensor& input, const T
 
 // ============================================================================
 // UniqueConsecutive — consecutive dedup
-// Uses GPU boundary-marking shader + minimal host readback for variable-size output.
-// TODO: fully native multi-dispatch version (mark -> prefix_sum -> scatter)
+// Fully native 3-dispatch pipeline:
+//   Pass 1 (mark)      : unique_consecutive_mark shader -> Int32 marks buffer
+//   Pass 2 (prefix sum): dispatchCumSum                  -> Int32 inclusive scan
+//   Pass 3 (scatter)   : unique_compact (values)
+//                        unique_consecutive_inverse (inverse map)
+//                        unique_counts (boundary positions for counts)
+// The only host sync is a single 4-byte readback of the last prefix-sum entry,
+// which is mandatory for variable-size output allocation.
 // ============================================================================
 
 auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_inverse) -> std::tuple<Tensor, Tensor, Tensor> {
+    (void)return_inverse;  // currently always materialized; preserve API
     int64_t n = input.numel();
     auto dev = input.device();
 
@@ -5081,95 +5088,151 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
                 Tensor({0}, DType::Int64, dev)};
     }
 
-    // Step 1: Mark boundaries on GPU using unique_consecutive_mark shader
-    // marks[i] = 1 if input[i] != input[i-1], else 0; marks[0] = 1
     Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-
     int32_t device_id = dev.index;
-    auto* mark_pipeline = getPipeline("unique_consecutive_mark", device_id);
+    uint32_t wg_size = devices_[device_id].workgroupSize;
+    uint32_t wg = static_cast<uint32_t>(div_wg(n, wg_size));
 
+    const size_t f32_buf = static_cast<size_t>(n) * sizeof(float);
+    const size_t i32_buf = static_cast<size_t>(n) * sizeof(int32_t);
+    const size_t i64_buf = static_cast<size_t>(n) * sizeof(int64_t);
+
+    // ---- Pass 1: Mark boundaries on GPU ------------------------------------
+    // marks[i] = (i == 0 || input[i] != input[i-1]) ? 1 : 0
     Tensor marks({n}, DType::Int32, dev);
-    struct { uint32_t num_elements; } pc;
-    pc.num_elements = static_cast<uint32_t>(n);
+    {
+        auto* mark_pipeline = getPipeline("unique_consecutive_mark", device_id);
+        struct { uint32_t num_elements; } pc;
+        pc.num_elements = static_cast<uint32_t>(n);
 
-    size_t f32_buf = static_cast<size_t>(n) * sizeof(float);
-    size_t i32_buf = static_cast<size_t>(n) * sizeof(int32_t);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input_f32.data_ptr()}, {1, marks.data_ptr()}
+        };
+        std::vector<size_t> sizes = {f32_buf, i32_buf};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, mark_pipeline, bindings, sizes);
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, input_f32.data_ptr()}, {1, marks.data_ptr()}
-    };
-    std::vector<size_t> sizes = {f32_buf, i32_buf};
-
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, mark_pipeline, bindings, sizes);
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mark_pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           mark_pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, mark_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
-
-    // Step 2: Prefix sum of marks on GPU (gives inverse mapping)
-    Tensor marks_f32 = marks.to(DType::Float32);
-    Tensor inverse = dispatchCumSum(marks_f32, 0);
-    Tensor inverse_i64 = inverse.to(DType::Int64);
-    // Adjust: cumsum is 1-based (first element = 1), we need 0-based
-    Tensor one_tensor = dispatchFull({n}, 1.0f, DType::Int64);
-    inverse_i64 = inverse_i64 - one_tensor;
-
-    // Step 3: Scalar readback of unique count (mandatory for variable-size output allocation)
-    Tensor total_marks = dispatchReduction("sum", marks_f32, 0, false);
-    Tensor total_cpu = total_marks.to(Device::cpu());
-    int64_t nu = static_cast<int64_t>(total_cpu.data<float>()[0]);
-
-    // Step 4: Gather unique values on GPU using index_select-like pattern
-    // Find positions where marks == 1 using nonzero-like logic
-    // For simplicity, we do the compact step by gathering from the inverse map
-    // unique_output[k] = input[first position where inverse == k]
-    // Since consecutive, the first occurrence of each unique value is at marks == 1 positions
-
-    // Use masked_select to get unique values (marks acts as mask)
-    Tensor marks_bool = marks.to(DType::Bool);
-    Tensor unique_vals = dispatchMaskedSelect(input_f32, marks_bool);
-    if (input.dtype() != DType::Float32) {
-        unique_vals = unique_vals.to(input.dtype());
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mark_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               mark_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, mark_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
 
-    // Step 5: Compute counts on GPU: counts[k] = number of elements with inverse == k
-    // counts = diff of positions where marks == 1, plus trailing count
-    // Simpler: counts[k] = (position of (k+1)-th mark) - (position of k-th mark)
-    // For the last group: n - position_of_last_mark
-    // We can compute this from the prefix sum differences
+    // ---- Pass 2: Inclusive prefix sum of marks on GPU ----------------------
+    // prefix_sum stays in Int32 (cumsum handles the Int32->F32->Int32 internally).
+    Tensor prefix_sum = dispatchCumSum(marks, 0);
+
+    // ---- Minimal sync: read the last int32 of prefix_sum for n_unique ------
+    // Variable-size output allocation cannot avoid a single scalar readback.
+    synchronize(device_id);
+    Tensor last_elem = prefix_sum.slice(0, n - 1, n).to(Device::cpu());
+    int32_t nu_i32 = last_elem.data<int32_t>()[0];
+    int64_t nu = static_cast<int64_t>(nu_i32);
+
+    // ---- Pass 3a: Scatter unique values on GPU -----------------------------
+    // unique_compact: when (gid == 0 || prefix_sum[gid] != prefix_sum[gid-1]),
+    // writes output[prefix_sum[gid] - 1] = input_f32[gid].
+    Tensor unique_vals_f32({nu}, DType::Float32, dev);
+    {
+        auto* compact_pipeline = getPipeline("unique_compact", device_id);
+        struct { uint32_t numel; } pc;
+        pc.numel = static_cast<uint32_t>(n);
+
+        size_t out_bytes = static_cast<size_t>(nu) * sizeof(float);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input_f32.data_ptr()}, {1, prefix_sum.data_ptr()}, {2, unique_vals_f32.data_ptr()}
+        };
+        std::vector<size_t> sizes = {f32_buf, i32_buf, out_bytes};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, compact_pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compact_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               compact_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, compact_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+    Tensor unique_vals = (input.dtype() != DType::Float32)
+        ? unique_vals_f32.to(input.dtype()) : unique_vals_f32;
+
+    // ---- Pass 3b: Scatter inverse map on GPU -------------------------------
+    // For consecutive unique, the inverse is just prefix_sum[i] - 1 (no
+    // permutation, positions are already in input order).
+    Tensor inverse_i64({n}, DType::Int64, dev);
+    {
+        auto* inv_pipeline = getPipeline("unique_consecutive_inverse", device_id);
+        struct { uint32_t num_elements; } pc;
+        pc.num_elements = static_cast<uint32_t>(n);
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, prefix_sum.data_ptr()}, {1, inverse_i64.data_ptr()}
+        };
+        std::vector<size_t> sizes = {i32_buf, i64_buf};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, inv_pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, inv_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               inv_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, inv_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // ---- Pass 3c: Counts via boundary-position scatter ---------------------
+    // unique_counts scatters boundary positions, then counts are differences.
+    // Sentinel boundary_pos[nu] = n closes the last run.
     Tensor counts_result({nu}, DType::Int64, dev);
     if (nu > 0) {
-        // counts[i] for i < nu-1: number of elements between consecutive marks
-        // Extract mark positions using masked_select on arange
-        Tensor arange_t = dispatchArange(0, static_cast<float>(n), 1, DType::Int64, dev);
-        Tensor mark_positions = dispatchMaskedSelect(arange_t.to(DType::Float32), marks_bool).to(DType::Int64);
+        Tensor boundary_pos({nu + 1}, DType::Int64, dev);
+        {
+            auto* cnt_pipeline = getPipeline("unique_counts", device_id);
+            struct { uint32_t numel; uint32_t n_unique; } pc;
+            pc.numel = static_cast<uint32_t>(n);
+            pc.n_unique = static_cast<uint32_t>(nu);
 
-        if (nu == 1) {
-            // Only one unique value: count = n
-            counts_result = dispatchFull({1}, static_cast<float>(n), DType::Int64);
-        } else {
-            // counts[i] = mark_positions[i+1] - mark_positions[i] for i < nu-1
-            // counts[nu-1] = n - mark_positions[nu-1]
-            Tensor pos_shifted = mark_positions.slice(0, 1, nu);
-            Tensor pos_base = mark_positions.slice(0, 0, nu - 1);
-            Tensor counts_head = pos_shifted - pos_base;
+            size_t bp_bytes = static_cast<size_t>(nu + 1) * sizeof(int64_t);
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, marks.data_ptr()}, {1, prefix_sum.data_ptr()}, {2, boundary_pos.data_ptr()}
+            };
+            std::vector<size_t> sizes = {i32_buf, i32_buf, bp_bytes};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, cnt_pipeline, bindings, sizes);
 
-            // Last count
-            Tensor last_pos = mark_positions.slice(0, nu - 1, nu);
-            Tensor n_tensor = dispatchFull({1}, static_cast<float>(n), DType::Int64);
-            Tensor counts_tail = n_tensor - last_pos;
-
-            // Concatenate via direct dispatch
-            std::vector<Tensor> count_parts = {counts_head, counts_tail};
-            NewOpAttributes cat_attrs;
-            cat_attrs.set(AttrKey::Dim, int64_t{0});
-            counts_result = ::tenzor::dispatch<OpId::Cat>(
-                std::span<const Tensor>(count_parts), cat_attrs)[0];
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cnt_pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   cnt_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, cnt_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, wg, 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
         }
+
+        // Sentinel: boundary_pos[nu] = n. Direct host->device copy of one
+        // int64 — there's no native int64 scatter shader, and the older
+        // dispatchScatter path reinterprets int64 as float32 and clobbers
+        // the adjacent word (see dispatchUnique notes).
+        {
+            int64_t sentinel_val = static_cast<int64_t>(n);
+            auto* bp_base = static_cast<char*>(boundary_pos.data_ptr());
+            void* slot = bp_base + nu * sizeof(int64_t);
+            copy(slot, &sentinel_val, sizeof(int64_t), CopyKind::HostToDevice);
+        }
+
+        // counts[i] = boundary_pos[i+1] - boundary_pos[i], on GPU.
+        Tensor bp_starts = dispatchSlice(boundary_pos, {0}, {nu}, {1});
+        Tensor bp_ends   = dispatchSlice(boundary_pos, {1}, {nu + 1}, {1});
+        counts_result = dispatchBinaryOp("sub", bp_ends, bp_starts);
     }
 
     return {unique_vals, inverse_i64, counts_result};
