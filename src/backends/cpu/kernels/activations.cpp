@@ -1963,12 +1963,12 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
 
 // Backward: grad_input = grad_output - exp(log_softmax) * sum(grad_output)
 auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor {
-    if (output.numel() == 0) return output.clone();
-
     // Materialise contiguous copies so row-major index arithmetic is correct
     // for any non-contiguous (e.g. transposed) input tensors.
     auto cont_grad_output = grad_output.contiguous();
     auto cont_output      = output.contiguous();
+
+    if (cont_output.numel() == 0) return cont_output.clone();
 
     auto grad_input = zeros_like(cont_output);
 
