@@ -298,7 +298,7 @@ TEST_F(RobertaTest, NoSegmentEmbeddings) {
 // Performance Tests
 // ============================================================================
 
-TEST_F(RobertaTest, BenchmarkInference) {
+TEST_F(RobertaTest, DISABLED_BenchmarkInference) {
     // Disabled by default - enable for performance testing
     auto config = RobertaConfig::base();
     RobertaForSequenceClassification model(config, 2);

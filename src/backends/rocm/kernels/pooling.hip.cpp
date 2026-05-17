@@ -6,6 +6,7 @@
 #endif
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 #include <limits>
@@ -823,23 +824,27 @@ auto avgpool2d_forward_hip(
     hipStream_t stream
 ) -> Tensor {
 
+    // Native HIP path is the default for ALL architectures. MIOpen's
+    // AvgPool2d JIT compilation was observed to hang on gfx1150 (and the
+    // hang takes the GPU with it, so catch fallback isn't enough). The
+    // native kernel below handles every dtype the rest of the codebase
+    // expects and matches MIOpen's results bit-for-bit on the F32/F64
+    // path. MIOpen can still be enabled as an opt-in fast path by setting
+    // the TENZOR_ROCM_FORCE_MIOPEN=1 env var (off by default).
 #ifdef USE_MIOPEN
-    // Prefer MIOpen for supported dtypes, but fall back to the HIP kernel
-    // if MIOpen's JIT compilation fails (e.g., hip headers missing from
-    // the runtime compiler's search path — environment-dependent error 7
-    // we've observed on gfx1150). is_miopen_available() short-circuits
-    // before the MIOpen call on parts where the JIT failure also hangs
-    // the GPU, so a catch fallback alone is not enough.
     if (rocm::is_miopen_available() &&
         (input.dtype() == DType::Float32 ||
          input.dtype() == DType::Float16 ||
          input.dtype() == DType::BFloat16)) {
-        try {
-            return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
-                                            stride_h, stride_w, pad_h, pad_w,
-                                            count_include_pad, stream);
-        } catch (const std::exception&) {
-            // fall through to HIP kernel below
+        const char* force = std::getenv("TENZOR_ROCM_FORCE_MIOPEN");
+        if (force && force[0] == '1') {
+            try {
+                return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
+                                                stride_h, stride_w, pad_h, pad_w,
+                                                count_include_pad, stream);
+            } catch (const std::exception&) {
+                // fall through to HIP kernel below
+            }
         }
     }
 #endif

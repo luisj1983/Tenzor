@@ -89,29 +89,47 @@ set(ONEMKL_COMPILE_FLAGS "")
 if(ONEMKL_SYCL_FOUND)
     list(APPEND ONEMKL_COMPILE_FLAGS -DTENZOR_HAS_ONEMKL -I${ONEMKL_SYCL_INCLUDE_DIR})
 
-    # Check if oneMKL exposes geev (non-symmetric eigendecomposition)
-    include(CheckCXXSourceCompiles)
-    set(CMAKE_REQUIRED_INCLUDES ${ONEMKL_SYCL_INCLUDE_DIR})
-    set(CMAKE_REQUIRED_FLAGS "-fsycl")
-    set(CMAKE_REQUIRED_DEFINITIONS -DTENZOR_HAS_ONEMKL)
-    check_cxx_source_compiles("
-        #include <oneapi/mkl.hpp>
-        #include <sycl/sycl.hpp>
-        int main() {
-            sycl::queue q;
-            (void)::oneapi::mkl::lapack::geev_scratchpad_size<float>(
-                q, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec, 1, 1);
-            return 0;
-        }
-    " TENZOR_ONEMKL_HAS_GEEV)
-    unset(CMAKE_REQUIRED_INCLUDES)
-    unset(CMAKE_REQUIRED_FLAGS)
-    unset(CMAKE_REQUIRED_DEFINITIONS)
-    if(TENZOR_ONEMKL_HAS_GEEV)
+    # Check if oneMKL exposes `geev` (non-symmetric eigendecomposition) in its
+    # SYCL LAPACK interface. CMake's `check_cxx_source_compiles` uses the host
+    # C++ compiler with `-fsycl`, which tolerates unresolved oneMKL symbols at
+    # compile time and gives FALSE POSITIVES. Probe directly with icpx +
+    # `-fsycl -c` instead — that's the only reliable test.
+    #
+    # As of oneMKL 2025.3, the SYCL interface does NOT expose geev (the oneMath
+    # spec lists only symmetric eigenvalue routines: syevd / heevd / sygvd /
+    # hegvd). When this probe fails, `OpId::LinalgEig` is served by the always-
+    # compiled native SYCL Francis double-shift QR kernel in
+    # src/backends/oneapi/kernels/linalg.cpp (`linalg_eig_qr_kernel`).
+    set(_GEEV_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/geev_probe")
+    file(MAKE_DIRECTORY "${_GEEV_PROBE_DIR}")
+    file(WRITE "${_GEEV_PROBE_DIR}/geev_probe.cpp"
+"#include <oneapi/mkl.hpp>
+#include <sycl/sycl.hpp>
+int main() {
+    sycl::queue q;
+    (void)::oneapi::mkl::lapack::geev_scratchpad_size<float>(
+        q, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec, 1, 1);
+    return 0;
+}
+")
+    execute_process(
+        COMMAND ${SYCL_COMPILER} -fsycl -c
+                -o ${_GEEV_PROBE_DIR}/geev_probe.o
+                -I${ONEMKL_SYCL_INCLUDE_DIR}
+                -DTENZOR_HAS_ONEMKL
+                ${_GEEV_PROBE_DIR}/geev_probe.cpp
+        RESULT_VARIABLE _GEEV_PROBE_RC
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if(_GEEV_PROBE_RC EQUAL 0)
+        set(TENZOR_ONEMKL_HAS_GEEV TRUE CACHE INTERNAL "oneMKL SYCL geev available")
         list(APPEND ONEMKL_COMPILE_FLAGS -DTENZOR_HAS_ONEMKL_GEEV)
-        message(STATUS "oneMKL: geev (non-symmetric eigendecomposition) detected")
+        message(STATUS "oneMKL: geev (non-symmetric eigendecomposition) detected -- "
+                       "used as fast path for OpId::LinalgEig")
     else()
-        message(STATUS "oneMKL: geev not available — LinalgEig will use stub")
+        set(TENZOR_ONEMKL_HAS_GEEV FALSE CACHE INTERNAL "oneMKL SYCL geev unavailable")
+        message(STATUS "oneMKL: geev not exposed in SYCL interface (expected) -- "
+                       "OneAPI LinalgEig uses native SYCL Francis QR kernel.")
     endif()
 endif()
 

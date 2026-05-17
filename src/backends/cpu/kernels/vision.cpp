@@ -582,65 +582,419 @@ static void interpolate_bilinear_backward_impl(
     }
 }
 
-auto interpolate_backward_kernel(const Tensor& grad_output,
-                                  const std::vector<int64_t>& input_size,
-                                  const std::string& mode,
-                                  bool align_corners) -> Tensor {
-    if (mode != "bilinear" && mode != "nearest") {
-        throw std::runtime_error("interpolate_backward_kernel: mode '" + mode +
-                                 "' not yet supported (use 'bilinear' or 'nearest').");
-    }
-    auto shape = grad_output.shape();
-    if (shape.size() != 4) {
-        throw std::runtime_error("interpolate_backward_kernel: only 4D (N,C,H,W) supported.");
-    }
-    if (input_size.size() != 2) {
-        throw std::runtime_error("interpolate_backward_kernel: input_size must be [in_h, in_w].");
-    }
-    const int64_t N      = shape[0];
-    const int64_t C      = shape[1];
-    const int64_t out_h  = shape[2];
-    const int64_t out_w  = shape[3];
-    const int64_t in_h   = input_size[0];
-    const int64_t in_w   = input_size[1];
+// =========================================================================
+// Phase 2.20: full-set interpolate backward (CPU)
+// =========================================================================
+//
+// Adjoints of forward interpolation. Forward kernels gather pixels from input
+// to output via mode-specific weights; backward scatters output gradients back
+// to input using the same weights (transpose of the linear forward op).
+//
+// Supported modes:
+//   - "nearest"        — adjoint: each output gradient lands on its source pixel
+//   - "nearest-exact"  — PyTorch's UpsampleNearestExact (rounds 0.5 to even)
+//   - "linear"         — 1D, two-tap scatter
+//   - "bilinear"       — 2D, four-tap scatter (existing impl)
+//   - "bicubic"        — 2D, 16-tap Catmull-Rom scatter
+//   - "trilinear"      — 3D, eight-tap scatter
+//   - "area"           — adaptive average pooling adjoint (scatters
+//                        output/area uniformly to overlapping input pixels)
+//
+// Supported ranks: 3 (N,C,W), 4 (N,C,H,W), 5 (N,C,D,H,W).
 
-    Tensor grad_input = zeros({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
-    auto dispatch = [&](auto* dummy) {
-        using T = std::remove_pointer_t<decltype(dummy)>;
-        T* p = grad_input.data<T>();
-        if (mode == "bilinear") {
-            interpolate_bilinear_backward_impl<T>(
-                grad_output.data<T>(), p, N, C,
-                in_h, in_w, out_h, out_w, align_corners);
-        } else {
-            // 'nearest': adjoint is exact scatter to nearest input pixel.
-            // Each output pixel contributes its grad to one input pixel.
-            const float sh = static_cast<float>(in_h) / static_cast<float>(out_h);
-            const float sw = static_cast<float>(in_w) / static_cast<float>(out_w);
-            const T* go = grad_output.data<T>();
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    const T* go_nc = go + ((n * C + c) * out_h * out_w);
-                    T* gi_nc = p + ((n * C + c) * in_h * in_w);
-                    for (int64_t h = 0; h < out_h; ++h) {
-                        const int64_t hi = std::min<int64_t>(in_h - 1, static_cast<int64_t>(h * sh));
-                        for (int64_t w = 0; w < out_w; ++w) {
-                            const int64_t wi = std::min<int64_t>(in_w - 1, static_cast<int64_t>(w * sw));
-                            gi_nc[hi * in_w + wi] = static_cast<T>(
-                                static_cast<float>(gi_nc[hi * in_w + wi]) +
-                                static_cast<float>(go_nc[h * out_w + w]));
+namespace {
+
+// Source-coord rule shared by all modes that scale a single axis. Matches
+// PyTorch `aten/src/ATen/native/UpSample.h::area_pixel_compute_source_index`.
+inline float src_coord(int64_t dst, int64_t in_dim, int64_t out_dim, bool align_corners,
+                       bool half_pixel) {
+    if (align_corners) {
+        return out_dim > 1
+            ? static_cast<float>(dst) * static_cast<float>(in_dim - 1) /
+              static_cast<float>(out_dim - 1)
+            : 0.0f;
+    }
+    if (half_pixel) {
+        // align_corners=false (PyTorch default for {bilinear, bicubic, trilinear, linear})
+        return (static_cast<float>(dst) + 0.5f) *
+               static_cast<float>(in_dim) / static_cast<float>(out_dim) - 0.5f;
+    }
+    // Plain scale (nearest, area)
+    return static_cast<float>(dst) * static_cast<float>(in_dim) /
+           static_cast<float>(out_dim);
+}
+
+// Nearest source index (PyTorch UpsampleNearest1d et al.). Floor(dst*scale).
+inline int64_t nearest_src(int64_t dst, int64_t in_dim, int64_t out_dim) {
+    const float scale = static_cast<float>(in_dim) / static_cast<float>(out_dim);
+    return std::min(static_cast<int64_t>(std::floor(static_cast<float>(dst) * scale)),
+                    in_dim - 1);
+}
+
+// Nearest-exact rule per `_compute_source_index_nearest_exact`: floor((dst+0.5)*scale).
+inline int64_t nearest_exact_src(int64_t dst, int64_t in_dim, int64_t out_dim) {
+    const float scale = static_cast<float>(in_dim) / static_cast<float>(out_dim);
+    return std::min(static_cast<int64_t>(std::floor((static_cast<float>(dst) + 0.5f) * scale)),
+                    in_dim - 1);
+}
+
+// ----- 1D linear backward -----
+template<typename T>
+void interpolate_linear_backward_impl(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C, int64_t in_w, int64_t out_w, bool align_corners)
+{
+    const float scale_w = align_corners && out_w > 1
+        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
+        : static_cast<float>(in_w) / static_cast<float>(out_w);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + ((n * C + c) * out_w);
+            T* gi = grad_in + ((n * C + c) * in_w);
+            for (int64_t w = 0; w < out_w; ++w) {
+                const float src_w = align_corners ? w * scale_w
+                                                  : (w + 0.5f) * scale_w - 0.5f;
+                const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
+                const int64_t w1 = w0 + 1;
+                const float fw = src_w - w0;
+                const float g_val = static_cast<float>(go[w]);
+                auto add = [&](int64_t wi, float weight) {
+                    if (wi < 0 || wi >= in_w) return;
+                    gi[wi] = static_cast<T>(static_cast<float>(gi[wi]) + g_val * weight);
+                };
+                add(w0, 1.0f - fw);
+                add(w1, fw);
+            }
+        }
+    }
+}
+
+// ----- 2D bicubic backward (Catmull-Rom) -----
+template<typename T>
+void interpolate_bicubic_backward_impl(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C, int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w, bool align_corners)
+{
+    const float scale_h = align_corners && out_h > 1
+        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
+        : static_cast<float>(in_h) / static_cast<float>(out_h);
+    const float scale_w = align_corners && out_w > 1
+        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
+        : static_cast<float>(in_w) / static_cast<float>(out_w);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + ((n * C + c) * out_h * out_w);
+            T* gi = grad_in + ((n * C + c) * in_h * in_w);
+            for (int64_t h = 0; h < out_h; ++h) {
+                const float src_h = align_corners ? h * scale_h
+                                                  : (h + 0.5f) * scale_h - 0.5f;
+                const int64_t hi = static_cast<int64_t>(std::floor(src_h));
+                for (int64_t w = 0; w < out_w; ++w) {
+                    const float src_w = align_corners ? w * scale_w
+                                                      : (w + 0.5f) * scale_w - 0.5f;
+                    const int64_t wi = static_cast<int64_t>(std::floor(src_w));
+                    const float g_val = static_cast<float>(go[h * out_w + w]);
+                    for (int64_t dy = -1; dy <= 2; ++dy) {
+                        const int64_t iy = std::clamp<int64_t>(hi + dy, 0, in_h - 1);
+                        const float wy = cubic_interp_coeff(src_h - static_cast<float>(hi + dy));
+                        for (int64_t dx = -1; dx <= 2; ++dx) {
+                            const int64_t ix = std::clamp<int64_t>(wi + dx, 0, in_w - 1);
+                            const float wx = cubic_interp_coeff(src_w - static_cast<float>(wi + dx));
+                            const float weight = wy * wx;
+                            gi[iy * in_w + ix] = static_cast<T>(
+                                static_cast<float>(gi[iy * in_w + ix]) + g_val * weight);
                         }
                     }
                 }
             }
         }
+    }
+}
+
+// ----- 3D trilinear backward -----
+template<typename T>
+void interpolate_trilinear_backward_impl(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w, bool align_corners)
+{
+    const float scale_d = align_corners && out_d > 1
+        ? static_cast<float>(in_d - 1) / static_cast<float>(out_d - 1)
+        : static_cast<float>(in_d) / static_cast<float>(out_d);
+    const float scale_h = align_corners && out_h > 1
+        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
+        : static_cast<float>(in_h) / static_cast<float>(out_h);
+    const float scale_w = align_corners && out_w > 1
+        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
+        : static_cast<float>(in_w) / static_cast<float>(out_w);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + (((n * C + c) * out_d) * out_h * out_w);
+            T* gi = grad_in + (((n * C + c) * in_d) * in_h * in_w);
+            for (int64_t od = 0; od < out_d; ++od) {
+                const float src_d = align_corners ? od * scale_d
+                                                  : (od + 0.5f) * scale_d - 0.5f;
+                const int64_t d0 = static_cast<int64_t>(std::floor(src_d));
+                const int64_t d1 = d0 + 1;
+                const float fd = src_d - d0;
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    const float src_h = align_corners ? oh * scale_h
+                                                      : (oh + 0.5f) * scale_h - 0.5f;
+                    const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
+                    const int64_t h1 = h0 + 1;
+                    const float fh = src_h - h0;
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        const float src_w = align_corners ? ow * scale_w
+                                                          : (ow + 0.5f) * scale_w - 0.5f;
+                        const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
+                        const int64_t w1 = w0 + 1;
+                        const float fw = src_w - w0;
+                        const float g_val = static_cast<float>(
+                            go[(od * out_h + oh) * out_w + ow]);
+                        auto add = [&](int64_t di, int64_t hi, int64_t wi, float weight) {
+                            if (di < 0 || di >= in_d ||
+                                hi < 0 || hi >= in_h ||
+                                wi < 0 || wi >= in_w) return;
+                            const int64_t idx = (di * in_h + hi) * in_w + wi;
+                            gi[idx] = static_cast<T>(static_cast<float>(gi[idx]) + g_val * weight);
+                        };
+                        add(d0, h0, w0, (1-fd)*(1-fh)*(1-fw));
+                        add(d0, h0, w1, (1-fd)*(1-fh)*fw);
+                        add(d0, h1, w0, (1-fd)*fh*(1-fw));
+                        add(d0, h1, w1, (1-fd)*fh*fw);
+                        add(d1, h0, w0, fd*(1-fh)*(1-fw));
+                        add(d1, h0, w1, fd*(1-fh)*fw);
+                        add(d1, h1, w0, fd*fh*(1-fw));
+                        add(d1, h1, w1, fd*fh*fw);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ----- nearest backward (any rank): single-pixel scatter -----
+// nearest_exact=true uses PyTorch's "_exact" indexing rule.
+template<typename T>
+void nearest_backward_axis_scatter(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C,
+    const std::vector<int64_t>& in_spatial,
+    const std::vector<int64_t>& out_spatial,
+    bool nearest_exact)
+{
+    const int64_t spatial_dims = static_cast<int64_t>(in_spatial.size());
+    int64_t out_total = 1, in_total = 1;
+    for (int64_t s : out_spatial) out_total *= s;
+    for (int64_t s : in_spatial) in_total *= s;
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + ((n * C + c) * out_total);
+            T* gi = grad_in + ((n * C + c) * in_total);
+            for (int64_t out_idx = 0; out_idx < out_total; ++out_idx) {
+                // Decode out_idx into per-dim indices then map to in_idx.
+                int64_t in_idx = 0;
+                int64_t in_stride = 1;
+                int64_t tmp = out_idx;
+                std::vector<int64_t> src_indices(spatial_dims);
+                int64_t out_stride = 1;
+                // Compute strides for the spatial axes (last-axis-fastest).
+                // We need src for each dim, so unwind right-to-left.
+                for (int64_t d = spatial_dims - 1; d >= 0; --d) {
+                    const int64_t dim_idx = tmp % out_spatial[d];
+                    tmp /= out_spatial[d];
+                    src_indices[d] = nearest_exact
+                        ? nearest_exact_src(dim_idx, in_spatial[d], out_spatial[d])
+                        : nearest_src(dim_idx, in_spatial[d], out_spatial[d]);
+                    (void)out_stride;
+                }
+                for (int64_t d = spatial_dims - 1; d >= 0; --d) {
+                    in_idx += src_indices[d] * in_stride;
+                    in_stride *= in_spatial[d];
+                }
+                gi[in_idx] = static_cast<T>(
+                    static_cast<float>(gi[in_idx]) + static_cast<float>(go[out_idx]));
+            }
+        }
+    }
+}
+
+// ----- area backward (adaptive average pooling adjoint), any rank -----
+// Forward `area` divides each output cell's weight uniformly over the input
+// pixels whose centers fall inside the output cell's bin. Adjoint scatters
+// `grad_out / area` uniformly back to those same input pixels.
+template<typename T>
+void area_backward_impl(
+    const T* grad_out, T* grad_in,
+    int64_t N, int64_t C,
+    const std::vector<int64_t>& in_spatial,
+    const std::vector<int64_t>& out_spatial)
+{
+    const int64_t spatial_dims = static_cast<int64_t>(in_spatial.size());
+    int64_t out_total = 1, in_total = 1;
+    for (int64_t s : out_spatial) out_total *= s;
+    for (int64_t s : in_spatial) in_total *= s;
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const T* go = grad_out + ((n * C + c) * out_total);
+            T* gi = grad_in + ((n * C + c) * in_total);
+            for (int64_t out_idx = 0; out_idx < out_total; ++out_idx) {
+                // Decode out_idx into per-dim indices.
+                std::vector<int64_t> dst(spatial_dims);
+                int64_t tmp = out_idx;
+                for (int64_t d = spatial_dims - 1; d >= 0; --d) {
+                    dst[d] = tmp % out_spatial[d];
+                    tmp /= out_spatial[d];
+                }
+                // For each spatial dim, compute the [start, end) input range
+                // that maps to this output cell. PyTorch convention:
+                //   start = floor(d * in/out), end = ceil((d+1) * in/out)
+                std::vector<int64_t> starts(spatial_dims), ends(spatial_dims);
+                int64_t area = 1;
+                for (int64_t d = 0; d < spatial_dims; ++d) {
+                    const float ratio_lo = static_cast<float>(dst[d]) *
+                        static_cast<float>(in_spatial[d]) / static_cast<float>(out_spatial[d]);
+                    const float ratio_hi = static_cast<float>(dst[d] + 1) *
+                        static_cast<float>(in_spatial[d]) / static_cast<float>(out_spatial[d]);
+                    starts[d] = std::max<int64_t>(0,
+                        static_cast<int64_t>(std::floor(ratio_lo)));
+                    ends[d] = std::min<int64_t>(in_spatial[d],
+                        static_cast<int64_t>(std::ceil(ratio_hi)));
+                    area *= std::max<int64_t>(1, ends[d] - starts[d]);
+                }
+                const float g_val = static_cast<float>(go[out_idx]) /
+                                    static_cast<float>(area);
+                // Iterate over the input region and accumulate.
+                std::vector<int64_t> it = starts;
+                while (true) {
+                    int64_t in_idx = 0, in_stride = 1;
+                    for (int64_t d = spatial_dims - 1; d >= 0; --d) {
+                        in_idx += it[d] * in_stride;
+                        in_stride *= in_spatial[d];
+                    }
+                    gi[in_idx] = static_cast<T>(static_cast<float>(gi[in_idx]) + g_val);
+                    // Advance: rightmost iterator first.
+                    int64_t d = spatial_dims - 1;
+                    while (d >= 0) {
+                        ++it[d];
+                        if (it[d] < ends[d]) break;
+                        it[d] = starts[d];
+                        --d;
+                    }
+                    if (d < 0) break;
+                }
+            }
+        }
+    }
+}
+
+}  // anonymous namespace
+
+auto interpolate_backward_kernel(const Tensor& grad_output,
+                                  const std::vector<int64_t>& input_size,
+                                  const std::string& mode,
+                                  bool align_corners) -> Tensor {
+    const auto& shape = grad_output.shape();
+    if (shape.size() < 3 || shape.size() > 5) {
+        throw std::runtime_error(
+            "interpolate_backward_kernel: rank must be 3, 4, or 5 (N,C,...), got " +
+            std::to_string(shape.size()) + "D");
+    }
+    const int64_t spatial_dims = static_cast<int64_t>(shape.size()) - 2;
+    if (static_cast<int64_t>(input_size.size()) != spatial_dims) {
+        throw std::runtime_error(
+            "interpolate_backward_kernel: input_size has " +
+            std::to_string(input_size.size()) +
+            " entries but grad_output rank implies " +
+            std::to_string(spatial_dims) + " spatial dims.");
+    }
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    std::vector<int64_t> out_spatial;
+    out_spatial.reserve(spatial_dims);
+    for (int64_t d = 0; d < spatial_dims; ++d) out_spatial.push_back(shape[2 + d]);
+
+    // Validate (mode, rank) combinations and normalise.
+    const bool is_nearest        = (mode == "nearest");
+    const bool is_nearest_exact  = (mode == "nearest-exact" || mode == "nearest_exact");
+    const bool is_linear         = (mode == "linear");        // 3D only
+    const bool is_bilinear       = (mode == "bilinear");      // 4D only
+    const bool is_bicubic        = (mode == "bicubic");       // 4D only
+    const bool is_trilinear      = (mode == "trilinear");     // 5D only
+    const bool is_area           = (mode == "area");
+    if (!is_nearest && !is_nearest_exact && !is_linear && !is_bilinear &&
+        !is_bicubic && !is_trilinear && !is_area) {
+        throw std::runtime_error(
+            "interpolate_backward_kernel: unsupported mode '" + mode +
+            "'. Supported: nearest, nearest-exact, linear (3D), bilinear (4D), "
+            "bicubic (4D), trilinear (5D), area.");
+    }
+    if (is_linear && spatial_dims != 1) {
+        throw std::runtime_error("interpolate_backward_kernel: mode 'linear' requires 3D input.");
+    }
+    if ((is_bilinear || is_bicubic) && spatial_dims != 2) {
+        throw std::runtime_error("interpolate_backward_kernel: mode '" + mode +
+                                 "' requires 4D input.");
+    }
+    if (is_trilinear && spatial_dims != 3) {
+        throw std::runtime_error("interpolate_backward_kernel: mode 'trilinear' requires 5D input.");
+    }
+
+    std::vector<int64_t> grad_in_shape = {N, C};
+    grad_in_shape.insert(grad_in_shape.end(), input_size.begin(), input_size.end());
+    Tensor grad_input = zeros(grad_in_shape, grad_output.dtype(), grad_output.device());
+
+    auto run = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        const T* go = grad_output.data<T>();
+        T* gi = grad_input.data<T>();
+
+        if (is_nearest || is_nearest_exact) {
+            nearest_backward_axis_scatter<T>(
+                go, gi, N, C, input_size, out_spatial, is_nearest_exact);
+            return;
+        }
+        if (is_area) {
+            area_backward_impl<T>(go, gi, N, C, input_size, out_spatial);
+            return;
+        }
+        if (is_linear) {
+            interpolate_linear_backward_impl<T>(go, gi, N, C,
+                input_size[0], out_spatial[0], align_corners);
+            return;
+        }
+        if (is_bilinear) {
+            interpolate_bilinear_backward_impl<T>(go, gi, N, C,
+                input_size[0], input_size[1], out_spatial[0], out_spatial[1],
+                align_corners);
+            return;
+        }
+        if (is_bicubic) {
+            interpolate_bicubic_backward_impl<T>(go, gi, N, C,
+                input_size[0], input_size[1], out_spatial[0], out_spatial[1],
+                align_corners);
+            return;
+        }
+        if (is_trilinear) {
+            interpolate_trilinear_backward_impl<T>(go, gi, N, C,
+                input_size[0], input_size[1], input_size[2],
+                out_spatial[0], out_spatial[1], out_spatial[2], align_corners);
+            return;
+        }
     };
 
     switch (grad_output.dtype()) {
-        case DType::Float32:  dispatch(static_cast<float*>(nullptr)); break;
-        case DType::Float64:  dispatch(static_cast<double*>(nullptr)); break;
-        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr)); break;
-        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        case DType::Float32:  run(static_cast<float*>(nullptr)); break;
+        case DType::Float64:  run(static_cast<double*>(nullptr)); break;
+        case DType::Float16:  run(static_cast<Float16*>(nullptr)); break;
+        case DType::BFloat16: run(static_cast<BFloat16*>(nullptr)); break;
         default:
             throw std::runtime_error("interpolate_backward_kernel: unsupported dtype");
     }

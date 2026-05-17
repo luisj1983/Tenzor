@@ -19,6 +19,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/transfer_engine.hpp"
 #include "tenzor/core/memory_manager.hpp"
+#include "tenzor/autograd/variable.hpp"
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -293,6 +294,23 @@ private:
     std::unordered_map<Tensor*, TensorInfo> tensor_map_;
     mutable std::mutex tensor_map_mutex_;
 
+    // Per-parameter backward-hook registrations.
+    //
+    // Each entry is (parameter Variable, hook_id) returned by
+    // `Variable::register_hook`. The hook fires when the parameter's
+    // gradient is computed during backward() — that signal is used to
+    // kick off the slow→fast (CPU→GPU) upload of the parameter's data so
+    // the prefetch overlaps with the optimizer step and the next forward.
+    //
+    // Holding a `shared_ptr<Variable>` keeps the Variable alive as long as
+    // OffloadContext owns the hook, so unregister_hook in the destructor
+    // can run without a dangling pointer.
+    struct ParamHook {
+        std::shared_ptr<Variable> param;
+        size_t hook_id;
+    };
+    std::vector<ParamHook> param_grad_hooks_;
+
     // Layer ordering for sequential offload/prefetch
     std::vector<Module*> layer_order_;
     std::unordered_map<Module*, int> layer_indices_;
@@ -320,6 +338,20 @@ private:
      * @brief Recursively register hooks on a module and its submodules
      */
     auto register_hooks_recursive(Module* module) -> void;
+
+    /**
+     * @brief Register per-parameter backward hooks via `Variable::register_hook`.
+     *
+     * For every parameter in the managed model, registers a backward hook
+     * that fires when the parameter's gradient lands during backward(). The
+     * hook issues an async CPU→GPU prefetch for any offloaded copy of the
+     * parameter's data so the upload overlaps with the optimizer step and
+     * the next forward pass.
+     *
+     * This replaces the previous "lazy offload in get_stats()" workaround,
+     * which only ran when the user explicitly queried stats.
+     */
+    auto register_param_grad_hooks() -> void;
 
     /**
      * @brief Build layer ordering for sequential processing

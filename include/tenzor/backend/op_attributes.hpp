@@ -324,8 +324,13 @@ enum class AttrKey : uint16_t {
     DCTType,               // DCT type (1, 2, 3, or 4)
 
     // FlexAttention parameters (per docs/internals/attention-contract.md)
-    ScoreModId,            // Built-in score_mod selector (0=identity, 1=causal, 2=sliding_window)
-    WindowSize,            // Sliding window size for ScoreModId == 2 (full window, not half)
+    ScoreModId,            // Built-in score_mod selector (0=identity, 1=causal, 2=sliding_window, 3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, 7=user_lambda)
+    WindowSize,            // Sliding window size for ScoreModId == 2 / 6 (full window, not half)
+    PrefixLength,          // Prefix length K for ScoreModId == 5 (PrefixLM); first K positions attend bidirectionally
+
+    // CTCLoss parameters
+    Blank,                 // CTC blank class index (default 0)
+    ZeroInfinity,          // CTC: clamp infinite losses (and their grads) to zero (default false)
 
     // Sentinel
     _Count

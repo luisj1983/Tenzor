@@ -12,6 +12,9 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
@@ -166,6 +169,73 @@ for (auto& [name, ptr] : layer.named_parameters()) {
     auto dev_grad = run(device);
     EXPECT_LT(max_abs_diff(cpu_grad, dev_grad), 1e-4f)
         << "EmbeddingBagBackward grad_weight diff on " << backend_name(device);
+}
+
+// ----------------------------------------------------------------------------
+// Direct kernel path — exercises the OpId::EmbeddingBagBackward dispatch with
+// non-trivial indices to prove the kernel scatters to rows selected by
+// `indices` (not flat position `i`). Uses indices = [5,5,5,5] so a correct
+// kernel deposits all of grad into row 5 of grad_weight; the previous broken
+// kernel would have written to rows 0..3.
+// ----------------------------------------------------------------------------
+TEST_P(EmbeddingBagParity, Kernel_ScattersByIndicesNotPosition) {
+    if (!is_op_supported(OpId::EmbeddingBagBackward, device.type)) {
+        GTEST_SKIP() << "EmbeddingBagBackward not supported on " << backend_name(device);
+    }
+
+    constexpr int64_t num_embeddings = 16;
+    constexpr int64_t embedding_dim = 4;
+    constexpr int64_t total_elements = 4;
+    constexpr int64_t target_row = 5;
+
+    // indices = [5,5,5,5]; offsets = [0] (single bag spanning all 4 elements)
+    auto indices_cpu = zeros({total_elements}, DType::Int64, Device::cpu());
+    for (int64_t i = 0; i < total_elements; ++i) {
+        indices_cpu.data<int64_t>()[i] = target_row;
+    }
+    auto offsets_cpu = zeros({1}, DType::Int64, Device::cpu());
+    offsets_cpu.data<int64_t>()[0] = 0;
+
+    // grad_output = ones({1, embedding_dim})
+    auto grad_out_cpu = full({1, embedding_dim}, 1.0, DType::Float32, Device::cpu());
+
+    auto indices = indices_cpu.to(device);
+    auto offsets = offsets_cpu.to(device);
+    auto grad_out = grad_out_cpu.to(device);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::NumEmbeddings, num_embeddings);
+    attrs.set(AttrKey::EmbeddingDim, embedding_dim);
+    attrs.set(AttrKey::Mode, std::string("sum"));
+    attrs.set(AttrKey::IncludeLastOffset, false);
+
+    std::array<Tensor, 3> inputs = {grad_out, indices, offsets};
+    auto grad_weight = dispatch_single<OpId::EmbeddingBagBackward>(inputs, attrs);
+    device.synchronize();
+
+    auto gw_cpu = grad_weight.to(Device::cpu()).contiguous();
+    EXPECT_EQ(gw_cpu.shape()[0], num_embeddings);
+    EXPECT_EQ(gw_cpu.shape()[1], embedding_dim);
+
+    const float* p = gw_cpu.data<float>();
+    // Row `target_row` should hold sum-reduction (mode=sum) of grad_output
+    // distributed to all four positions in the bag — each position contributes
+    // 1.0 per column, so row 5 has the value total_elements.
+    for (int64_t j = 0; j < embedding_dim; ++j) {
+        EXPECT_FLOAT_EQ(p[target_row * embedding_dim + j],
+                        static_cast<float>(total_elements))
+            << "row " << target_row << " col " << j
+            << " on " << backend_name(device);
+    }
+    // All other rows must be exactly zero.
+    for (int64_t r = 0; r < num_embeddings; ++r) {
+        if (r == target_row) continue;
+        for (int64_t j = 0; j < embedding_dim; ++j) {
+            EXPECT_FLOAT_EQ(p[r * embedding_dim + j], 0.0f)
+                << "row " << r << " col " << j
+                << " on " << backend_name(device);
+        }
+    }
 }
 
 INSTANTIATE_BACKEND_TESTS(EmbeddingBagParity);

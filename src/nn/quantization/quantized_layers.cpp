@@ -9,6 +9,7 @@
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
+#include "tenzor/nn/functional.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -1122,13 +1123,20 @@ QuantizedLSTM::QuantizedLSTM(
     bool bias,
     bool batch_first,
     bool bidirectional,
+    float dropout,
     QuantizationParams weight_qparams
 ) : input_size_(input_size),
     hidden_size_(hidden_size),
     num_layers_(num_layers),
     bias_(bias),
     batch_first_(batch_first),
-    bidirectional_(bidirectional) {
+    bidirectional_(bidirectional),
+    dropout_(dropout) {
+
+    if (dropout_ < 0.0f || dropout_ >= 1.0f) {
+        throw std::invalid_argument(
+            "QuantizedLSTM: dropout must be in [0, 1), got " + std::to_string(dropout_));
+    }
 
     int64_t num_directions = bidirectional ? 2 : 1;
     layers_.reserve(num_layers * num_directions);
@@ -1168,75 +1176,140 @@ auto QuantizedLSTM::forward_impl(const Variable& input) -> Variable {
 auto QuantizedLSTM::forward_with_state(const Variable& input,
                                         const Variable& h0, const Variable& c0)
     -> std::tuple<Variable, Variable, Variable> {
-    // Dequantize weights and run standard LSTM computation in FP32
-    // This preserves the gate nonlinearities (sigmoid/tanh) accuracy
-    // while reducing model memory footprint
+    // Multi-layer (optionally bidirectional) quantized LSTM, mirroring
+    // torch.ao.nn.quantized.dynamic.LSTM:
+    //   - INT8 weights for every gate, dequantized per-layer before the
+    //     per-timestep matmuls.
+    //   - Gate non-linearities (sigmoid/tanh) run in FP32 to preserve
+    //     accuracy.
+    //   - Inter-layer dropout is applied to the full sequence output of
+    //     each layer except the last, only when training_ && dropout_ > 0.
+    //   - For bidirectional layers, the forward and reverse per-direction
+    //     outputs are concatenated along the feature axis and fed to the
+    //     next layer.
+    //   - Final per-(layer, direction) (h, c) states are stacked along
+    //     dim 0 in PyTorch ordering.
+
+    if (input.tensor().dtype() != DType::Float32) {
+        throw std::invalid_argument(
+            "QuantizedLSTM: input must be Float32; got dtype " +
+            std::to_string(static_cast<int>(input.tensor().dtype())));
+    }
 
     auto inp = input.tensor();
     if (batch_first_) {
         inp = inp.permute({1, 0, 2});  // -> [seq_len, batch, features]
     }
 
-    auto seq_len = inp.shape()[0];
-    auto batch = inp.shape()[1];
+    int64_t seq_len = inp.shape()[0];
     int64_t num_directions = bidirectional_ ? 2 : 1;
 
-    // Process through layers with dequantized weights
-    Tensor current_input = inp.to(DType::Float32);
+    // Tensor that the next layer consumes. Initial input is the (already
+    // permuted) FP32 sequence. Subsequent layers consume the previous
+    // layer's [seq_len, batch, hidden_size * num_directions] output.
+    Tensor current_input = inp;
 
-    auto h_n = zeros({num_layers_ * num_directions, batch, hidden_size_});
-    auto c_n = zeros({num_layers_ * num_directions, batch, hidden_size_});
+    // Final hidden / cell states per (layer, direction), in PyTorch order:
+    //   index = layer * num_directions + direction
+    std::vector<Tensor> final_h;
+    std::vector<Tensor> final_c;
+    final_h.reserve(static_cast<size_t>(num_layers_ * num_directions));
+    final_c.reserve(static_cast<size_t>(num_layers_ * num_directions));
 
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
+        // Per-direction full-sequence outputs of this layer.
+        std::vector<Tensor> direction_outputs;
+        direction_outputs.reserve(static_cast<size_t>(num_directions));
+
         for (int64_t dir = 0; dir < num_directions; ++dir) {
             int64_t idx = layer * num_directions + dir;
             auto& lw = layers_[idx];
 
-            // Dequantize weights for this layer
+            // Dequantize INT8 weights for this layer/direction once per
+            // forward (amortised across all timesteps).
             Tensor w_ih = lw.weight_ih.dequantize();
             Tensor w_hh = lw.weight_hh.dequantize();
+            Tensor w_ih_t = w_ih.permute({1, 0});
+            Tensor w_hh_t = w_hh.permute({1, 0});
 
-            auto h = h0.tensor().slice(0, idx, idx + 1).squeeze(0);
-            auto c = c0.tensor().slice(0, idx, idx + 1).squeeze(0);
+            // Initial states for this (layer, direction): contiguous() so
+            // we don't alias-mutate the caller's h0 / c0 storage.
+            Tensor h = h0.tensor().slice(0, idx, idx + 1).squeeze(0).contiguous();
+            Tensor c = c0.tensor().slice(0, idx, idx + 1).squeeze(0).contiguous();
 
-            std::vector<Tensor> outputs;
-            outputs.reserve(seq_len);
+            std::vector<Tensor> step_outputs;
+            step_outputs.reserve(static_cast<size_t>(seq_len));
 
             int64_t t_start = (dir == 0) ? 0 : seq_len - 1;
-            int64_t t_end = (dir == 0) ? seq_len : -1;
-            int64_t t_step = (dir == 0) ? 1 : -1;
+            int64_t t_end   = (dir == 0) ? seq_len : -1;
+            int64_t t_step  = (dir == 0) ? 1 : -1;
 
             for (int64_t t = t_start; t != t_end; t += t_step) {
                 auto x_t = current_input.slice(0, t, t + 1).squeeze(0);
 
                 // gates = x_t @ w_ih^T + h @ w_hh^T + bias
-                auto gates = matmul(x_t, w_ih.permute({1, 0}));
-                gates = gates + matmul(h, w_hh.permute({1, 0}));
+                auto gates = matmul(x_t, w_ih_t);
+                gates = gates + matmul(h, w_hh_t);
                 if (lw.bias_ih) gates = gates + *lw.bias_ih;
                 if (lw.bias_hh) gates = gates + *lw.bias_hh;
 
-                // Split gates: [batch, 4*hidden] -> 4x [batch, hidden]
-                auto i_gate = sigmoid(gates.slice(1, 0, hidden_size_));
-                auto f_gate = sigmoid(gates.slice(1, hidden_size_, 2 * hidden_size_));
-                auto g_gate = tanh(gates.slice(1, 2 * hidden_size_, 3 * hidden_size_));
+                // Split gates: [batch, 4*hidden] -> i, f, g, o
+                auto i_gate = sigmoid(gates.slice(1, 0,                 hidden_size_));
+                auto f_gate = sigmoid(gates.slice(1, hidden_size_,     2 * hidden_size_));
+                auto g_gate = tanh   (gates.slice(1, 2 * hidden_size_, 3 * hidden_size_));
                 auto o_gate = sigmoid(gates.slice(1, 3 * hidden_size_, 4 * hidden_size_));
 
                 c = f_gate * c + i_gate * g_gate;
                 h = o_gate * tanh(c);
 
-                outputs.push_back(h.unsqueeze(0));
+                step_outputs.push_back(h.unsqueeze(0));  // [1, batch, hidden]
             }
 
-            // Store final states
-            // (h_n and c_n slice assignment would go here in a full implementation)
-
+            // Reverse-direction outputs were appended in reverse time order;
+            // flip them so dir_output is in forward time order.
             if (dir == 1) {
-                std::reverse(outputs.begin(), outputs.end());
+                std::reverse(step_outputs.begin(), step_outputs.end());
             }
+
+            // [seq_len, batch, hidden]
+            Tensor dir_output = cat(step_outputs, 0);
+            direction_outputs.push_back(std::move(dir_output));
+
+            final_h.push_back(h);
+            final_c.push_back(c);
         }
+
+        // Combine direction outputs for this layer along the feature axis,
+        // producing [seq_len, batch, hidden * num_directions].
+        Tensor layer_output = (num_directions == 1)
+            ? std::move(direction_outputs[0])
+            : cat(direction_outputs, /*dim=*/2);
+
+        // Inter-layer dropout (skip after final layer). Inference-only
+        // module, so we use functional::dropout under the layer's own
+        // training flag — with is_training()=false this is identity,
+        // matching PyTorch's behaviour for AO modules.
+        if (dropout_ > 0.0f && layer < num_layers_ - 1 && is_training()) {
+            Variable v_in(layer_output, /*requires_grad=*/false);
+            Variable v_out = ::tenzor::nn::functional::dropout(
+                v_in, static_cast<double>(dropout_), /*training=*/true);
+            layer_output = v_out.tensor();
+        }
+
+        current_input = std::move(layer_output);
     }
 
-    auto output = current_input;  // Simplified — full impl concatenates layer outputs
+    // Stack final (h, c) per (layer, direction) along dim 0.
+    std::vector<Tensor> h_expanded;
+    std::vector<Tensor> c_expanded;
+    h_expanded.reserve(final_h.size());
+    c_expanded.reserve(final_c.size());
+    for (auto& t : final_h) h_expanded.push_back(t.unsqueeze(0));
+    for (auto& t : final_c) c_expanded.push_back(t.unsqueeze(0));
+    Tensor h_n = cat(h_expanded, 0);
+    Tensor c_n = cat(c_expanded, 0);
+
+    Tensor output = current_input;
     if (batch_first_) {
         output = output.permute({1, 0, 2});
     }
@@ -1328,88 +1401,92 @@ QuantizedConv3d::QuantizedConv3d(
             std::move(weight_qparams)) {}
 
 auto QuantizedConv3d::forward_impl(const Variable& input) -> Variable {
-    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    // Quantized inference contract:
+    //   - Float32 inputs are quantised per-tensor symmetric using the
+    //     observer-derived qparams (matches QuantizedConv2d).
+    //   - Int8 inputs are already in the quantised domain; wrap them in a
+    //     QuantizedTensor with unit scale / zero zp so dequantize() is the
+    //     identity on values and we land back in FP32 for the conv.
+    //   - Any other dtype is a contract violation and we throw.
+    const DType in_dtype = input.tensor().dtype();
+    if (in_dtype != DType::Float32 && in_dtype != DType::Int8) {
+        throw std::invalid_argument(
+            "QuantizedConv3d: input dtype must be Float32 or Int8; got " +
+            std::to_string(static_cast<int>(in_dtype)));
+    }
+
+    QuantizedTensor q_input = (in_dtype == DType::Float32)
+        ? quantize_per_tensor_symmetric(input.tensor())
+        : QuantizedTensor(
+            input.tensor(),
+            QuantizationParams(
+                ones({1}, DType::Float32, input.tensor().device()),
+                zeros({1}, DType::Int32, input.tensor().device()),
+                QuantDType::INT8,
+                QuantizationScheme::PerTensorSymmetric));
+
     Tensor output = forward_quantized(q_input);
-    return Variable(output, false);
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedConv3d::forward_quantized(const QuantizedTensor& input) -> Tensor {
-    // Dequantize and run FP32 conv3d as fallback
-    // A fused INT8 3D convolution kernel would be more efficient
-    Tensor fp_input = input.dequantize();
+    // INT8 quantized 3D convolution.
+    //
+    // Strategy: dequantize activations and weights to FP32, then dispatch
+    // through nn::functional::conv3d. The functional path runs the
+    // backend's production conv3d kernel — cblas_sgemm-on-im2col on CPU
+    // (oneDNN where available), cuDNN implicit-GEMM / Winograd on CUDA,
+    // MIOpen on ROCm, native compute shaders on Vulkan — so there's no
+    // benefit to re-rolling a naive 7-loop nest here.
+    //
+    // Per-channel symmetric quantisation along the output-channel axis is
+    // handled inside QuantizedTensor::dequantize() (the scale vector is
+    // broadcast against the weight tensor), so this path covers both
+    // PerTensorSymmetric and PerChannelSymmetric weight schemes.
+    //
+    // A truly-INT8 path on CUDA (cublasGemmEx with CUDA_R_8I × CUDA_R_8I
+    // → CUDA_R_32I) would dispatch through OpId::QuantizedConv3d if/when
+    // that op id is added to the registry; until then this is the
+    // canonical numerically-correct entry point.
+
+    const auto& w_params = weight_.params();
+    if (w_params.scheme != QuantizationScheme::PerTensorSymmetric &&
+        w_params.scheme != QuantizationScheme::PerChannelSymmetric) {
+        throw std::invalid_argument(
+            "QuantizedConv3d: weight must use symmetric quantisation "
+            "(PerTensorSymmetric or PerChannelSymmetric)");
+    }
+
+    Tensor fp_input  = input.dequantize();
     Tensor fp_weight = weight_.dequantize();
 
-    // Use the standard conv3d operation
-    auto input_shape = fp_input.shape();
-    int64_t batch = input_shape[0];
-    int64_t D_in = input_shape[2], H_in = input_shape[3], W_in = input_shape[4];
+    if (fp_weight.device() != fp_input.device()) {
+        fp_weight = fp_weight.to(fp_input.device());
+    }
 
-    int64_t D_out = (D_in + 2 * padding_[0] - dilation_[0] * (kernel_size_[0] - 1) - 1) / stride_[0] + 1;
-    int64_t H_out = (H_in + 2 * padding_[1] - dilation_[1] * (kernel_size_[1] - 1) - 1) / stride_[1] + 1;
-    int64_t W_out = (W_in + 2 * padding_[2] - dilation_[2] * (kernel_size_[2] - 1) - 1) / stride_[2] + 1;
+    Variable v_input (fp_input,  /*requires_grad=*/false);
+    Variable v_weight(fp_weight, /*requires_grad=*/false);
 
-    Tensor output = zeros({batch, out_channels_, D_out, H_out, W_out},
-                          DType::Float32, fp_input.device());
-
-    // Naive implementation — production would use fused INT8 kernel
-    // For now, delegate to standard conv3d if available or implement naively
-    // This provides correct results; optimization is future work
-    auto fp_input_cpu = (fp_input.device() == Device::cpu()) ? fp_input : fp_input.to(Device::cpu());
-    auto fp_weight_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight : fp_weight.to(Device::cpu());
-    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
-
-    const float* in_data = fp_input_cpu.data<float>();
-    const float* w_data = fp_weight_cpu.data<float>();
-    float* out_data = output_cpu.data<float>();
-
-    int64_t in_c_per_group = in_channels_ / groups_;
-    int64_t out_c_per_group = out_channels_ / groups_;
-
-    for (int64_t n = 0; n < batch; ++n) {
-        for (int64_t g = 0; g < groups_; ++g) {
-            for (int64_t oc = 0; oc < out_c_per_group; ++oc) {
-                int64_t oc_abs = g * out_c_per_group + oc;
-                for (int64_t od = 0; od < D_out; ++od) {
-                    for (int64_t oh = 0; oh < H_out; ++oh) {
-                        for (int64_t ow = 0; ow < W_out; ++ow) {
-                            float sum = 0.0f;
-                            if (bias_) sum = bias_->data<float>()[oc_abs];
-
-                            for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
-                                int64_t ic_abs = g * in_c_per_group + ic;
-                                for (int64_t kd = 0; kd < kernel_size_[0]; ++kd) {
-                                    for (int64_t kh = 0; kh < kernel_size_[1]; ++kh) {
-                                        for (int64_t kw = 0; kw < kernel_size_[2]; ++kw) {
-                                            int64_t id = od * stride_[0] - padding_[0] + kd * dilation_[0];
-                                            int64_t ih = oh * stride_[1] - padding_[1] + kh * dilation_[1];
-                                            int64_t iw = ow * stride_[2] - padding_[2] + kw * dilation_[2];
-
-                                            if (id >= 0 && id < D_in && ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
-                                                int64_t in_idx = ((n * in_channels_ + ic_abs) * D_in + id) * H_in * W_in + ih * W_in + iw;
-                                                int64_t w_idx = ((oc_abs * in_c_per_group + ic) * kernel_size_[0] + kd) * kernel_size_[1] * kernel_size_[2] + kh * kernel_size_[2] + kw;
-                                                sum += in_data[in_idx] * w_data[w_idx];
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * out_channels_ + oc_abs) * D_out + od) * H_out * W_out + oh * W_out + ow;
-                            out_data[out_idx] = sum;
-                        }
-                    }
-                }
-            }
+    std::optional<Variable> v_bias;
+    if (bias_) {
+        Tensor b = *bias_;
+        if (b.dtype() != DType::Float32) {
+            b = b.to(DType::Float32);
         }
+        if (b.device() != fp_input.device()) {
+            b = b.to(fp_input.device());
+        }
+        v_bias = Variable(b, /*requires_grad=*/false);
     }
 
-    if (output.device() != Device::cpu()) {
-        output = output_cpu.to(output.device());
-    } else {
-        output = output_cpu;
-    }
+    Variable v_out = ::tenzor::nn::functional::conv3d(
+        v_input, v_weight, v_bias,
+        std::make_tuple(stride_[0],   stride_[1],   stride_[2]),
+        std::make_tuple(padding_[0],  padding_[1],  padding_[2]),
+        std::make_tuple(dilation_[0], dilation_[1], dilation_[2]),
+        groups_);
 
-    return output;
+    return v_out.tensor();
 }
 
 auto QuantizedConv3d::set_weight(const QuantizedTensor& weights) -> void {

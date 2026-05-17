@@ -452,7 +452,7 @@ namespace cpu {
     auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
     auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
-    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                        const Tensor& offsets, const OpAttributes& attrs) -> Tensor;
 
     // Linear
@@ -681,6 +681,10 @@ namespace cpu {
     auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q, const Tensor& K, const Tensor& V,
                                            const Tensor& attn_out, const Tensor& q_offsets, const Tensor& kv_offsets,
                                            float scale, bool causal) -> std::vector<Tensor>;
+
+    // CTC loss
+    auto ctc_loss_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor>;
 } // namespace cpu
 
 // Forward declarations for quantized kernels (in nn::quantization::kernels namespace)
@@ -2124,8 +2128,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::EmbeddingBagBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            // inputs[0] = grad_output, inputs[1] = embeddings, inputs[2] = offsets
+            // inputs[0] = grad_output, inputs[1] = indices (Int64), inputs[2] = offsets
             return cpu::embedding_bag_backward_kernel(inputs[0], inputs[1], inputs[2], attrs);
+        });
+
+    // CTC loss (audit Phase 3.7): outputs [loss_per_sample, raw_grad].
+    table.register_kernel(OpId::CTCLossForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            return cpu::ctc_loss_forward_kernel(inputs, attrs);
         });
 
     // =========================================================================
@@ -2838,21 +2848,25 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // FlexAttention (built-in score_mod registry — full programmatic score_mod
-    // arrives in M8 across all GPU backends; CPU here covers the common modes)
+    // FlexAttention (built-in score_mod registry, per
+    // docs/internals/attention-contract.md + include/tenzor/ops/attention_contract.hpp)
     // =========================================================================
-    // Per docs/internals/attention-contract.md, ScoreModId encodes a built-in
-    // score modification op:
-    //   0 = identity (no modification — equivalent to FusedAttention)
-    //   1 = causal  (adds upper-triangular -inf mask before softmax)
-    // Other IDs throw on this backend until M8 lands the native programmable
-    // score_mod path (see src/nn/layers/flex_attention.cpp for the existing
-    // host-side reference impl that supports arbitrary score_mod functors).
+    // ScoreModId selects a built-in score modification:
+    //   0 = identity                   (no modification — equivalent to FusedAttention)
+    //   1 = causal                     (upper-triangular -inf mask before softmax)
+    //   2 = sliding_window             (|i-j| > WindowSize/2 → -inf)
+    //   3 = relpos_bias                (additive bias tensor passed as inputs[N+1])
+    //   4 = alibi                      (-slope_h * (q_idx - k_idx); per-head canonical slopes)
+    //   5 = prefix_lm                  (first PrefixLength positions bidi; remainder causal)
+    //   6 = sliding_window_sym         (same as 2; spelled out symmetrically per task 2.21)
+    //   7 = user_lambda                (lookup via find_registered_score_mod)
+    // All mask sentinels MUST be -INFINITY (attention contract: never -1e9/-1e30).
     auto flex_attention_dispatch = [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        // ScoreModId 0 (identity) and 1 (causal) reduce to FusedAttention.
+        // ScoreModId 0 (identity) and 1 (causal) reduce to FusedAttention —
+        // route to the optimised flash kernel directly.
         if (score_mod_id == 0 || score_mod_id == 1) {
             bool causal = (score_mod_id == 1);
             return cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2],
@@ -2860,93 +2874,157 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                                                 /*is_training=*/false, /*seed_in=*/0);
         }
 
-        // ScoreModId 2 (sliding_window) — composed-ops via Tensor API.
-        // Per contract: mask (i, j) where |i - j| > WindowSize/2 with -INFINITY.
-        // The math runs through the standard tenzor:: ops which on this CPU
-        // backend stay local; on a future GPU port (M8) the same composed
-        // path runs entirely on the device since each op dispatches to the
-        // backend that owns the tensor.
-        if (score_mod_id == 2) {
-            int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-            if (window_size <= 0) {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=2 (sliding_window) requires "
-                    "AttrKey::WindowSize > 0.");
-            }
-            const Tensor& Q = inputs[0];
-            const Tensor& K = inputs[1];
-            const Tensor& V = inputs[2];
-            int64_t S_q = Q.shape()[Q.shape().size() - 2];
-            int64_t S_k = K.shape()[K.shape().size() - 2];
+        // -----------------------------------------------------------------
+        // Composed-ops path for IDs 2-7. Same scaffolding for every mode:
+        //   scores = Q @ K^T * scale
+        //   scores += mask_or_bias
+        //   probs  = softmax(scores, dim=-1)
+        //   output = probs @ V
+        // Uses tenzor::matmul (handles 3D/4D batched) instead of bmm.
+        // -----------------------------------------------------------------
+        const Tensor& Q = inputs[0];
+        const Tensor& K = inputs[1];
+        const Tensor& V = inputs[2];
+        const int64_t S_q = Q.shape()[Q.shape().size() - 2];
+        const int64_t S_k = K.shape()[K.shape().size() - 2];
 
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
+        Tensor Kt = tenzor::transpose(K, -1, -2);
+        Tensor scores = tenzor::matmul(Q, Kt);
+        const auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+        Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                       scores.dtype(), scores.device());
+        scores = scores * scale_t;
 
-            // Build sliding window mask: True where |i - j| > window/2.
-            int64_t half = window_size / 2;
-            Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-            Tensor rows_f = rows.to(DType::Float32);
-            Tensor cols_f = cols.to(DType::Float32);
-            Tensor rows_2d = tenzor::reshape(rows_f, std::vector<int64_t>{S_q, 1});
-            Tensor cols_2d = tenzor::reshape(cols_f, std::vector<int64_t>{1, S_k});
-            Tensor diff = tenzor::sub(rows_2d, cols_2d);
-            Tensor abs_diff = tenzor::abs(diff);
-            Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                          abs_diff.dtype(), abs_diff.device());
-            Tensor outside = tenzor::gt(abs_diff, half_t);
+        // Build (S_q, S_k) row/col index grids for any positional mask.
+        auto build_index_grids = [&]() -> std::pair<Tensor, Tensor> {
+            Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device()).to(DType::Float32);
+            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device()).to(DType::Float32);
+            Tensor rows_2d = tenzor::reshape(rows, std::vector<int64_t>{S_q, 1});
+            Tensor cols_2d = tenzor::reshape(cols, std::vector<int64_t>{1, S_k});
+            return {rows_2d, cols_2d};
+        };
+
+        // Apply a positional Bool mask (true → -inf), broadcasted over batch/head.
+        auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
             Tensor neg_inf = tenzor::full(scores_shape,
                 -std::numeric_limits<float>::infinity(),
                 scores.dtype(), scores.device());
-            scores = scores + (outside.to(scores.dtype()) * neg_inf);
+            scores = scores + (mask_2d.to(scores.dtype()) * neg_inf);
+        };
 
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-            Tensor output = tenzor::bmm(probs, V);
-            return {output, Tensor{}};  // LSE not computed in composed path
-        }
-
-        // Audit J12: user-registered score-mod functors for ScoreModId >= 3.
-        // Falls through to throw only if no functor was registered.
-        if (score_mod_id >= 3) {
-            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-            if (user_fn) {
-                // Apply user score-mod over the full (Q, K) score matrix.
-                // We compute scores = Q @ K^T * scale, run the user functor
-                // (which sees b=0, h=0, q_start=0, kv_start=0 — the
-                // whole-grid call signature), softmax, then bmm with V.
-                const Tensor& Q = inputs[0];
-                const Tensor& K = inputs[1];
-                const Tensor& V = inputs[2];
-                Tensor Kt = tenzor::transpose(K, -1, -2);
-                Tensor scores = tenzor::bmm(Q, Kt);
-                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                               scores.dtype(), scores.device());
-                scores = scores * scale_t;
-                scores = user_fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
-
-                NewOpAttributes sm_attrs;
-                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                std::vector<Tensor> sm_in = {scores};
-                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-                Tensor output = tenzor::bmm(probs, V);
-                return {output, Tensor{}};
+        if (score_mod_id == 2 || score_mod_id == 6) {
+            // Sliding window: mask positions where |i - j| > window/2.
+            int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
+            if (window_size <= 0) {
+                throw std::invalid_argument(
+                    "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
+                    " (sliding_window) requires AttrKey::WindowSize > 0.");
             }
+            auto [rows_2d, cols_2d] = build_index_grids();
+            Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
+            Tensor half_t = tenzor::full({1}, static_cast<double>(window_size / 2),
+                                          abs_diff.dtype(), abs_diff.device());
+            Tensor outside = tenzor::gt(abs_diff, half_t);
+            apply_neg_inf_mask(outside);
+        } else if (score_mod_id == 3) {
+            // RelPosBias: additive bias tensor as the last input (after Q,K,V
+            // and an optional block_mask). When only inputs[3] is present we
+            // treat it as the bias; otherwise the bias is the trailing input.
+            Tensor bias;
+            if (inputs.size() == 4) {
+                bias = inputs[3];
+            } else if (inputs.size() >= 5) {
+                bias = inputs.back();
+            } else {
+                throw std::invalid_argument(
+                    "FlexAttention CPU: ScoreModId=3 (relpos_bias) requires a "
+                    "bias tensor as the last input (shape broadcastable to "
+                    "scores [..., S_q, S_k]).");
+            }
+            scores = scores + bias.to(scores.dtype());
+        } else if (score_mod_id == 4) {
+            // ALiBi: -slope_h * (q_idx - k_idx). Canonical slopes from
+            // Press et al. 2022: slope_h = 2^(-8*(h+1)/H). Requires Q to be
+            // [..., H, S_q, D] so we can infer H.
+            const auto& q_shape = Q.shape();
+            if (q_shape.size() < 3) {
+                throw std::invalid_argument(
+                    "FlexAttention CPU: ScoreModId=4 (alibi) requires Q rank >= 3 "
+                    "([..., H, S_q, D]) to infer head count.");
+            }
+            const int64_t H = q_shape[q_shape.size() - 3];
+            std::vector<float> slope_vals(static_cast<std::size_t>(H));
+            for (int64_t h = 0; h < H; ++h) {
+                slope_vals[static_cast<std::size_t>(h)] =
+                    std::pow(2.0f, -8.0f * static_cast<float>(h + 1) / static_cast<float>(H));
+            }
+            Tensor slopes = Tensor::from_blob(slope_vals.data(),
+                std::vector<int64_t>{H}, DType::Float32, Device::cpu()).clone().to(Q.device()).to(scores.dtype());
+            // scores shape is (..., H, S_q, S_k). H sits at axis = -3.
+            std::vector<int64_t> slope_shape(scores_shape.size(), 1);
+            slope_shape[slope_shape.size() - 3] = H;
+            slopes = tenzor::reshape(slopes, slope_shape);
+
+            // Build positional bias (S_q, S_k) = -(q_idx - k_idx) = (k_idx - q_idx).
+            auto [rows_2d, cols_2d] = build_index_grids();
+            Tensor pos_bias = tenzor::sub(cols_2d, rows_2d).to(scores.dtype());
+            std::vector<int64_t> pb_shape(scores_shape.size(), 1);
+            pb_shape[pb_shape.size() - 2] = S_q;
+            pb_shape[pb_shape.size() - 1] = S_k;
+            pos_bias = tenzor::reshape(pos_bias, pb_shape);
+            // alibi_bias = slope * (k - q). Per-head slope broadcasts.
+            scores = scores + (slopes * pos_bias);
+        } else if (score_mod_id == 5) {
+            // PrefixLM: first PrefixLength positions in each row see all PrefixLength
+            // columns bidirectionally; for q >= PrefixLength, mask k > q (causal).
+            // mask[i, j] = (i >= PrefixLength) AND (j > i).
+            int64_t prefix_len = attrs.get_int(AttrKey::PrefixLength, 0);
+            if (prefix_len < 0) {
+                throw std::invalid_argument(
+                    "FlexAttention CPU: ScoreModId=5 (prefix_lm) requires "
+                    "AttrKey::PrefixLength >= 0.");
+            }
+            auto [rows_2d, cols_2d] = build_index_grids();
+            Tensor prefix_t = tenzor::full({1}, static_cast<double>(prefix_len),
+                                            rows_2d.dtype(), rows_2d.device());
+            Tensor q_after_prefix = tenzor::ge(rows_2d, prefix_t).to(DType::Float32);
+            Tensor causal = tenzor::gt(cols_2d, rows_2d).to(DType::Float32);
+            // Logical AND via product on 0/1 floats. Both broadcast to (S_q, S_k).
+            Tensor mask_f = q_after_prefix * causal;
+            apply_neg_inf_mask(mask_f);
+        } else if (score_mod_id == 7) {
+            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+            if (!user_fn) {
+                throw std::invalid_argument(
+                    "FlexAttention CPU: ScoreModId=7 (user_lambda) but no "
+                    "functor is registered. Call "
+                    "tenzor::nn::register_score_mod(7, fn) before dispatch.");
+            }
+            scores = user_fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
+        } else if (score_mod_id >= 8) {
+            // IDs >= 8 are reserved for user functors registered by integer ID.
+            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
+            if (!user_fn) {
+                throw std::runtime_error(
+                    "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
+                    " is not a built-in and no user functor is registered. "
+                    "Built-ins: 0=identity, 1=causal, 2=sliding_window, "
+                    "3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, "
+                    "7=user_lambda. Register custom IDs via "
+                    "tenzor::nn::register_score_mod(id, fn).");
+            }
+            scores = user_fn(scores, 0, 0, 0, 0);
+        } else {
+            throw std::runtime_error(
+                "FlexAttention CPU: unrecognised ScoreModId=" + std::to_string(score_mod_id));
         }
-        throw std::runtime_error(
-            "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
-            " is not yet implemented and no user functor is registered for "
-            "this ID. Built-ins: 0=identity, 1=causal, 2=sliding_window. "
-            "For custom score mods, register via "
-            "`tenzor::register_score_mod(id, fn)` (see "
-            "include/tenzor/nn/layers/flex_attention.hpp).");
+
+        NewOpAttributes sm_attrs;
+        sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+        std::vector<Tensor> sm_in = {scores};
+        Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+        Tensor output = tenzor::matmul(probs, V);
+        return {output, Tensor{}};  // LSE not computed in composed path
     };
     table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
 
@@ -2965,45 +3043,105 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                                                  /*philox_seed=*/0, /*philox_offset=*/0);
         }
 
-        // Wave C: ScoreModId == 2 (sliding window) or >= 3 (user functor) — composed backward.
-        // Replays forward to recover masked scores, applies softmax-attention chain rule.
-        // inputs: [dO, Q, K, V, O, (LSE optional)].
-        if (score_mod_id == 2 || score_mod_id >= 3) {
+        // Composed backward for IDs 2-7+ (replays forward to recover masked
+        // scores, applies softmax-attention chain rule). Uses matmul for
+        // 3D/4D batched safety. inputs: [dO, Q, K, V, O, (LSE optional), (extra...)].
+        if (score_mod_id >= 2) {
             const Tensor& dO = inputs[0];
             const Tensor& Q  = inputs[1];
             const Tensor& K  = inputs[2];
             const Tensor& V  = inputs[3];
+            const int64_t S_q = Q.shape()[Q.shape().size() - 2];
+            const int64_t S_k = K.shape()[K.shape().size() - 2];
+
             Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scores = tenzor::matmul(Q, Kt);
+            const auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
             Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
                                            scores.dtype(), scores.device());
             scores = scores * scale_t;
 
-            if (score_mod_id == 2) {
+            auto build_index_grids = [&]() -> std::pair<Tensor, Tensor> {
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device()).to(DType::Float32);
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device()).to(DType::Float32);
+                Tensor rows_2d = tenzor::reshape(rows, std::vector<int64_t>{S_q, 1});
+                Tensor cols_2d = tenzor::reshape(cols, std::vector<int64_t>{1, S_k});
+                return {rows_2d, cols_2d};
+            };
+            auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
+                // Use -INFINITY per attention-contract; softmax-grad
+                // (attn * (dAttn - sum)) drives `attn` to 0 at masked positions,
+                // so 0 * (anything) = 0 without NaN risk.
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<float>::infinity(),
+                    scores.dtype(), scores.device());
+                scores = scores + (mask_2d.to(scores.dtype()) * neg_inf);
+            };
+
+            if (score_mod_id == 2 || score_mod_id == 6) {
                 int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
                 if (window_size <= 0) {
                     throw std::invalid_argument(
-                        "FlexAttentionBackward CPU: ScoreModId=2 requires AttrKey::WindowSize > 0.");
+                        "FlexAttentionBackward CPU: ScoreModId=" +
+                        std::to_string(score_mod_id) +
+                        " requires AttrKey::WindowSize > 0.");
                 }
-                int64_t S_q = Q.shape()[Q.shape().size() - 2];
-                int64_t S_k = K.shape()[K.shape().size() - 2];
-                int64_t half = window_size / 2;
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
+                auto [rows_2d, cols_2d] = build_index_grids();
                 Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
+                Tensor half_t = tenzor::full({1}, static_cast<double>(window_size / 2),
                                               abs_diff.dtype(), abs_diff.device());
                 Tensor outside = tenzor::gt(abs_diff, half_t);
-                // Use a large finite negative instead of -inf so 0 * mask = 0
-                // (avoids NaN at in-window positions). softmax(-1e30) underflows
-                // to 0 to machine precision — bit-identical effect.
-                Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
-                                                 scores.dtype(), scores.device());
-                scores = scores + (outside.to(scores.dtype()) * large_neg);
-            } else {
+                apply_neg_inf_mask(outside);
+            } else if (score_mod_id == 3) {
+                // Backward replays bias. Inputs layout:
+                // [dO, Q, K, V, O, (LSE)?, (bias)]. Bias is the last input.
+                if (inputs.size() < 6) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward CPU: ScoreModId=3 (relpos_bias) "
+                        "requires the bias tensor saved as the last input.");
+                }
+                const Tensor& bias = inputs.back();
+                scores = scores + bias.to(scores.dtype());
+            } else if (score_mod_id == 4) {
+                const auto& q_shape = Q.shape();
+                if (q_shape.size() < 3) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward CPU: ScoreModId=4 (alibi) requires "
+                        "Q rank >= 3 to infer head count.");
+                }
+                const int64_t H = q_shape[q_shape.size() - 3];
+                std::vector<float> slope_vals(static_cast<std::size_t>(H));
+                for (int64_t h = 0; h < H; ++h) {
+                    slope_vals[static_cast<std::size_t>(h)] =
+                        std::pow(2.0f, -8.0f * static_cast<float>(h + 1) / static_cast<float>(H));
+                }
+                Tensor slopes = Tensor::from_blob(slope_vals.data(),
+                    std::vector<int64_t>{H}, DType::Float32, Device::cpu()).clone().to(Q.device()).to(scores.dtype());
+                std::vector<int64_t> slope_shape(scores_shape.size(), 1);
+                slope_shape[slope_shape.size() - 3] = H;
+                slopes = tenzor::reshape(slopes, slope_shape);
+                auto [rows_2d, cols_2d] = build_index_grids();
+                Tensor pos_bias = tenzor::sub(cols_2d, rows_2d).to(scores.dtype());
+                std::vector<int64_t> pb_shape(scores_shape.size(), 1);
+                pb_shape[pb_shape.size() - 2] = S_q;
+                pb_shape[pb_shape.size() - 1] = S_k;
+                pos_bias = tenzor::reshape(pos_bias, pb_shape);
+                scores = scores + (slopes * pos_bias);
+            } else if (score_mod_id == 5) {
+                int64_t prefix_len = attrs.get_int(AttrKey::PrefixLength, 0);
+                if (prefix_len < 0) {
+                    throw std::invalid_argument(
+                        "FlexAttentionBackward CPU: ScoreModId=5 (prefix_lm) "
+                        "requires AttrKey::PrefixLength >= 0.");
+                }
+                auto [rows_2d, cols_2d] = build_index_grids();
+                Tensor prefix_t = tenzor::full({1}, static_cast<double>(prefix_len),
+                                                rows_2d.dtype(), rows_2d.device());
+                Tensor q_after_prefix = tenzor::ge(rows_2d, prefix_t).to(DType::Float32);
+                Tensor causal = tenzor::gt(cols_2d, rows_2d).to(DType::Float32);
+                Tensor mask_f = q_after_prefix * causal;
+                apply_neg_inf_mask(mask_f);
+            } else if (score_mod_id == 7 || score_mod_id >= 8) {
                 auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
                 if (!fn) {
                     throw std::runtime_error(
@@ -3011,6 +3149,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                         std::to_string(score_mod_id));
                 }
                 scores = fn(scores, 0, 0, 0, 0);
+            } else {
+                throw std::runtime_error(
+                    "FlexAttentionBackward CPU: unrecognised ScoreModId=" +
+                    std::to_string(score_mod_id));
             }
 
             NewOpAttributes sm_attrs;
@@ -3020,11 +3162,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
             // dV = attn^T @ dO
             Tensor attn_t = tenzor::transpose(attn, -1, -2);
-            Tensor dV = tenzor::bmm(attn_t, dO);
+            Tensor dV = tenzor::matmul(attn_t, dO);
 
             // dAttn = dO @ V^T
             Tensor Vt = tenzor::transpose(V, -1, -2);
-            Tensor dAttn = tenzor::bmm(dO, Vt);
+            Tensor dAttn = tenzor::matmul(dO, Vt);
 
             // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
             Tensor ad = tenzor::mul(attn, dAttn);
@@ -3041,9 +3183,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                 static_cast<double>(scale), dScores.dtype(), dScores.device());
             dScores = tenzor::mul(dScores, scale_t2);
 
-            Tensor dQ = tenzor::bmm(dScores, K);
+            Tensor dQ = tenzor::matmul(dScores, K);
             Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-            Tensor dK = tenzor::bmm(dScores_t, Q);
+            Tensor dK = tenzor::matmul(dScores_t, Q);
 
             return {dQ, dK, dV};
         }

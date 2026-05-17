@@ -64,6 +64,17 @@ OffloadContext::~OffloadContext() {
     // Disable hooks first so no new transfers are issued during teardown.
     disable();
 
+    // Unregister per-parameter backward hooks before draining any pending
+    // transfers — otherwise a backward() invoked from a destructor in
+    // user code (rare but possible during shutdown) could re-enter the
+    // hook and queue a transfer after we've already drained.
+    for (auto& ph : param_grad_hooks_) {
+        if (ph.param) {
+            ph.param->unregister_hook(ph.hook_id);
+        }
+    }
+    param_grad_hooks_.clear();
+
     // Drain any in-flight async transfers (per-tensor wait) and restore offloaded
     // tensors to their original device on best-effort basis. Tensor::Storage is
     // IntrusiveRefCounted so the storage referenced by *tensor_ptr survives the
@@ -167,39 +178,12 @@ auto OffloadContext::is_enabled() const -> bool {
 auto OffloadContext::get_stats() -> OffloadStats {
     OffloadStats stats;
 
-    // Perform gradient offloading if enabled
-    // Note: Module backward hooks are not yet connected to autograd, so we do lazy offloading here
-    if (is_enabled() && config_.offload_gradients) {
-        auto all_params = model_.parameters();
-        for (auto& param_ptr : all_params) {
-            if (param_ptr && param_ptr->grad().has_value()) {
-                Tensor* grad_tensor_ptr = &(param_ptr->mutable_grad().value());
-
-                // Track gradient if not already tracked
-                {
-                    std::lock_guard<std::mutex> lock(tensor_map_mutex_);
-                    if (tensor_map_.find(grad_tensor_ptr) == tensor_map_.end()) {
-                        // Initialize gradient tracking
-                        TensorInfo info;
-                        info.tensor = grad_tensor_ptr;
-                        info.is_offloaded = false;
-                        info.is_pinned = false;
-                        info.is_gradient = true;
-                        info.use_count = 0;
-                        info.priority = OffloadPriority::LOW;
-                        info.size_bytes = grad_tensor_ptr->numel() * grad_tensor_ptr->dtype_size();
-                        info.owning_layer = &model_;
-                        tensor_map_[grad_tensor_ptr] = std::move(info);
-                    }
-                }
-
-                // Offload gradient if on GPU
-                if (grad_tensor_ptr->device().type == Device::Type::CUDA) {
-                    offload_tensor(grad_tensor_ptr);
-                }
-            }
-        }
-    }
+    // Gradient offload is now driven by per-parameter backward hooks
+    // (see register_param_grad_hooks()) plus the module-level
+    // backward_post_hook, so get_stats no longer needs to walk parameters
+    // and trigger offloads itself. This makes stats observation pure —
+    // calling get_stats() does not mutate the tensor map or kick off
+    // transfers.
 
     // Update internal statistics first
     update_stats();
@@ -263,6 +247,80 @@ auto OffloadContext::register_hooks() -> void {
     // each module's hooks will fire when its forward() is called,
     // enabling true layer-by-layer offloading.
     register_hooks_recursive(&model_);
+
+    // Subscribe per-parameter backward hooks via Variable::register_hook so
+    // the slow→fast (CPU→GPU) upload of each parameter is kicked off as
+    // soon as its gradient lands during backward(). This replaces the
+    // previous lazy-offload-in-get_stats() workaround.
+    register_param_grad_hooks();
+}
+
+auto OffloadContext::register_param_grad_hooks() -> void {
+    auto all_params = model_.parameters();
+    param_grad_hooks_.reserve(all_params.size());
+
+    for (auto& param_ptr : all_params) {
+        if (!param_ptr || !param_ptr->requires_grad()) {
+            continue;
+        }
+
+        // Capture a raw `this` pointer plus a weak_ptr to the Variable.
+        // The OffloadContext is required (per its design — see hook
+        // contract above) to outlive the model whose modules it has
+        // wired pre/post hooks onto, so `this` is valid for as long as
+        // the hook can fire. The weak_ptr lets us detect a parameter
+        // that was destroyed (rare, but possible if the user mutates
+        // module structure after constructing the OffloadContext).
+        OffloadContext* self = this;
+        std::weak_ptr<Variable> param_weak = param_ptr;
+
+        size_t hook_id = param_ptr->register_hook(
+            [self, param_weak](const Tensor& grad) -> Tensor {
+                if (!self->is_enabled()) {
+                    return grad;
+                }
+
+                auto param = param_weak.lock();
+                if (!param) {
+                    // Parameter was destroyed; nothing to schedule.
+                    return grad;
+                }
+
+                Tensor* param_tensor_ptr = &(param->tensor());
+
+                // Track the parameter's data tensor for offload bookkeeping
+                // if it wasn't already (CPU-start models populate the map
+                // lazily through the forward_pre_hook path; here we ensure
+                // the entry exists so prefetch_tensor() can find it).
+                {
+                    std::lock_guard<std::mutex> lock(self->tensor_map_mutex_);
+                    if (self->tensor_map_.find(param_tensor_ptr) == self->tensor_map_.end()) {
+                        self->initialize_tensor_info(param_tensor_ptr, &self->model_);
+                    }
+                }
+
+                // Issue the slow→fast upload of the parameter data, so the
+                // GPU copy is ready before the next forward. prefetch_tensor
+                // is a no-op when the tensor is already resident on GPU,
+                // which covers the steady-state case where backward kept it
+                // pinned. The first iteration after enable() (when the
+                // param was offloaded) is the case this hook is built for.
+                self->prefetch_tensor(param_tensor_ptr);
+
+                // Note: gradient offload bookkeeping is handled by the
+                // module-level backward_post_hook (see backward_post_hook())
+                // — at this point the gradient has not yet been accumulated
+                // into param->grad(), so we cannot inspect it here.
+
+                // Return the gradient unchanged — this hook is observation
+                // + scheduling only; it must not perturb the gradient values
+                // the optimizer will consume.
+                return grad;
+            }
+        );
+
+        param_grad_hooks_.push_back(ParamHook{param_ptr, hook_id});
+    }
 }
 
 auto OffloadContext::register_hooks_recursive(Module* module) -> void {

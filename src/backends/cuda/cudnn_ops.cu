@@ -875,6 +875,26 @@ auto cudnn_fused_conv2d_activation_forward(
     double activation_coeff,
     cudaStream_t stream
 ) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias,
+        stride, stride,
+        padding, padding,
+        dilation, dilation,
+        groups, activation_mode, activation_coeff, stream);
+}
+
+auto cudnn_fused_conv2d_activation_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudnnActivationMode_t activation_mode,
+    double activation_coeff,
+    cudaStream_t stream
+) -> Tensor {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -887,8 +907,8 @@ auto cudnn_fused_conv2d_activation_forward(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    int64_t out_h = (height + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (width + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
@@ -914,7 +934,7 @@ auto cudnn_fused_conv2d_activation_forward(
     input_desc.set(cudnn_dtype, batch, in_channels, height, width);
     output_desc.set(cudnn_dtype, batch, out_channels, out_h, out_w);
     filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
-    conv_desc.set(padding, padding, stride, stride, dilation, dilation, cudnn_dtype);
+    conv_desc.set(pad_h, pad_w, stride_h, stride_w, dil_h, dil_w, cudnn_dtype);
     act_desc.set(activation_mode, activation_coeff);
 
     if (groups > 1) {
@@ -1011,6 +1031,22 @@ auto cudnn_fused_conv2d_relu_forward(
         CUDNN_ACTIVATION_RELU, 0.0, stream);
 }
 
+auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias,
+        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
+        CUDNN_ACTIVATION_RELU, 0.0, stream);
+}
+
 auto cudnn_fused_conv2d_sigmoid_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -1025,6 +1061,22 @@ auto cudnn_fused_conv2d_sigmoid_forward(
     // GPU/cuDNN combos.  Compose conv2d + sigmoid instead.
     Tensor result = cudnn_conv2d_forward(input, weight, bias, stride, padding,
                                           dilation, groups, stream);
+    return sigmoid_kernel(result, stream);
+}
+
+auto cudnn_fused_conv2d_sigmoid_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    Tensor result = cudnn_conv2d_forward(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                          groups, stream);
     return sigmoid_kernel(result, stream);
 }
 
@@ -1045,6 +1097,22 @@ auto cudnn_fused_conv2d_tanh_forward(
     return tanh_kernel(result, stream);
 }
 
+auto cudnn_fused_conv2d_tanh_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    Tensor result = cudnn_conv2d_forward(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                          groups, stream);
+    return tanh_kernel(result, stream);
+}
+
 auto cudnn_fused_conv2d_swish_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -1059,6 +1127,22 @@ auto cudnn_fused_conv2d_swish_forward(
     // GPU/cuDNN combos.  Compose conv2d + swish instead.
     Tensor result = cudnn_conv2d_forward(input, weight, bias, stride, padding,
                                           dilation, groups, stream);
+    return swish_kernel(result, stream);
+}
+
+auto cudnn_fused_conv2d_swish_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    Tensor result = cudnn_conv2d_forward(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                          groups, stream);
     return swish_kernel(result, stream);
 }
 
@@ -2227,6 +2311,21 @@ auto cudnn_maxpool2d_forward(
     int64_t padding,
     cudaStream_t stream
 ) -> std::pair<Tensor, Tensor> {
+    return cudnn_maxpool2d_forward(
+        input,
+        kernel_size, kernel_size,
+        stride, stride,
+        padding, padding,
+        stream);
+}
+
+auto cudnn_maxpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
@@ -2234,8 +2333,8 @@ auto cudnn_maxpool2d_forward(
     int64_t width = shape[3];
 
     // Calculate output dimensions
-    int64_t out_h = (height + 2 * padding - kernel_size) / stride + 1;
-    int64_t out_w = (width + 2 * padding - kernel_size) / stride + 1;
+    int64_t out_h = (height + 2 * pad_h - kernel_h) / stride_h + 1;
+    int64_t out_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
 
     // Create output tensor
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
@@ -2261,7 +2360,7 @@ auto cudnn_maxpool2d_forward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
+    pool_desc.set_maxpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // cuDNN requires alpha/beta type to match tensor dtype
     if (input.dtype() == DType::Float64) {
@@ -2306,6 +2405,23 @@ auto cudnn_maxpool2d_backward(
     int64_t padding,
     cudaStream_t stream
 ) -> Tensor {
+    return cudnn_maxpool2d_backward(
+        grad_output, input, output,
+        kernel_size, kernel_size,
+        stride, stride,
+        padding, padding,
+        stream);
+}
+
+auto cudnn_maxpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& output,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> Tensor {
     auto in_shape = input.shape();
     int64_t batch = in_shape[0];
     int64_t channels = in_shape[1];
@@ -2336,7 +2452,7 @@ auto cudnn_maxpool2d_backward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
+    pool_desc.set_maxpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // cuDNN requires alpha/beta type to match tensor dtype
     if (input.dtype() == DType::Float64) {
@@ -2387,14 +2503,29 @@ auto cudnn_avgpool2d_forward(
     int64_t padding,
     cudaStream_t stream
 ) -> Tensor {
+    return cudnn_avgpool2d_forward(
+        input,
+        kernel_size, kernel_size,
+        stride, stride,
+        padding, padding,
+        stream);
+}
+
+auto cudnn_avgpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> Tensor {
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
     int64_t width = shape[3];
 
-    int64_t out_h = (height + 2 * padding - kernel_size) / stride + 1;
-    int64_t out_w = (width + 2 * padding - kernel_size) / stride + 1;
+    int64_t out_h = (height + 2 * pad_h - kernel_h) / stride_h + 1;
+    int64_t out_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
 
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
@@ -2416,7 +2547,7 @@ auto cudnn_avgpool2d_forward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
+    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // cuDNN requires alpha/beta type to match tensor dtype
     if (input.dtype() == DType::Float64) {
@@ -2460,6 +2591,22 @@ auto cudnn_avgpool2d_backward(
     int64_t padding,
     cudaStream_t stream
 ) -> Tensor {
+    return cudnn_avgpool2d_backward(
+        grad_output, input,
+        kernel_size, kernel_size,
+        stride, stride,
+        padding, padding,
+        stream);
+}
+
+auto cudnn_avgpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    cudaStream_t stream
+) -> Tensor {
     auto in_shape = input.shape();
     int64_t batch = in_shape[0];
     int64_t channels = in_shape[1];
@@ -2490,7 +2637,7 @@ auto cudnn_avgpool2d_backward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
+    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // AvgPool backward doesn't need original output, but cuDNN API requires all params
     Tensor dummy_output({batch, channels, out_h, out_w}, input.dtype(), input.device());

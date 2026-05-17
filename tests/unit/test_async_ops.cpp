@@ -499,7 +499,7 @@ TEST(AsyncOpsTest, WaitAny) {
 // Performance Benchmark Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, PerformanceBenchmark) {
+TEST(AsyncOpsTest, DISABLED_PerformanceBenchmark) {
     // This test is disabled by default as it's for performance measurement
     // Enable with --gtest_also_run_disabled_tests
 

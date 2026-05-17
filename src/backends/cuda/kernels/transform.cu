@@ -2013,6 +2013,23 @@ __global__ void cast_to_int64_kernel(const SrcT* __restrict__ src,
     }
 }
 
+// Single-thread kernel: computes the inclusive total from an exclusive-prefix
+// array and writes both `prefix[N]` (sentinel consumed by the binary-search
+// kernel) and a 1-element device scalar `d_total`. Replaces a pair of D2H
+// copies + host-side arithmetic + an H2D write-back with one device-side
+// computation.
+__global__ void repeat_interleave_finalize_total_kernel(
+    int64_t* __restrict__ prefix,
+    const int64_t* __restrict__ repeats,
+    int64_t* __restrict__ d_total,
+    int64_t N) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int64_t total = prefix[N - 1] + repeats[N - 1];
+        prefix[N] = total;
+        *d_total = total;
+    }
+}
+
 auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
                                      int64_t dim, cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
@@ -2062,35 +2079,37 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
                                   static_cast<int>(in_dim_size), stream);
     CUDA_CHECK(cudaFreeAsync(d_temp, stream));
 
-    // Compute total: d_prefix[in_dim_size] = d_prefix[in_dim_size-1] + d_repeats[in_dim_size-1]
-    // Read only the total from device (single scalar)
-    int64_t out_dim_size = 0;
-    // We need the last prefix + last repeat value. Use InclusiveSum's last element.
-    // Simpler: just read d_prefix[in_dim_size-1] + d_repeats[in_dim_size-1] = total
-    // But we can also just do inclusive sum and read the last element.
-    // Actually, let's write d_prefix[in_dim_size] on device via a small kernel,
-    // then only read the single total scalar to host.
-    {
-        // d_prefix[N] = d_prefix[N-1] + d_repeats[N-1]
-        // Use a 1-thread kernel for simplicity
-        auto set_last = [] __device__ (int64_t* prefix, const int64_t* repeats, int64_t N) {
-            prefix[N] = prefix[N - 1] + repeats[N - 1];
-        };
-        // Inline single-thread kernel via lambda isn't supported directly.
-        // Instead, just D2H copy the last prefix and last repeat element.
-        int64_t last_prefix = 0, last_repeat = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&last_prefix, d_prefix + in_dim_size - 1,
-                                   sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(&last_repeat, d_repeats_i64 + in_dim_size - 1,
-                                   sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        out_dim_size = last_prefix + last_repeat;
-        // Write total to d_prefix[in_dim_size] for the kernel
-        CUDA_CHECK(cudaMemcpyAsync(d_prefix + in_dim_size, &out_dim_size,
-                                   sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-    }
+    // Compute total = d_prefix[N-1] + d_repeats[N-1] entirely on device,
+    // writing both d_prefix[N] (sentinel for the binary-search consumer kernel)
+    // and a 1-element device scalar `d_total`. Then issue a single async D2H
+    // copy of the scalar into pinned host memory. This replaces 2x D2H copies
+    // + host-side add + 1x H2D write-back (each of which serialised on
+    // `stream`) with 1x tiny device kernel + 1x async D2H of an int64.
+    int64_t* d_total = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_total, sizeof(int64_t), stream));
+    repeat_interleave_finalize_total_kernel<<<1, 1, 0, stream>>>(
+        d_prefix, d_repeats_i64, d_total, in_dim_size);
 
+    // Pinned host scalar so the cudaMemcpyAsync is genuinely asynchronous
+    // w.r.t. the host (pageable D2H would behave synchronously).
+    int64_t* h_total_pinned = nullptr;
+    CUDA_CHECK(cudaMallocHost(&h_total_pinned, sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpyAsync(h_total_pinned, d_total, sizeof(int64_t),
+                               cudaMemcpyDeviceToHost, stream));
+
+    // The on-stream free of these temps is enqueued behind the copy, so the
+    // stream-ordered allocator will recycle their memory after the copy
+    // completes — no host wait required for these.
     CUDA_CHECK(cudaFreeAsync(d_repeats_i64, stream));
+    CUDA_CHECK(cudaFreeAsync(d_total, stream));
+
+    // We MUST have out_dim_size on the host before calling
+    // Tensor::empty_uninitialized (the shape lives on the host). Defer the
+    // single stream sync to the latest possible point so the finalize kernel
+    // + D2H copy can overlap with any unrelated work already on `stream`.
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    int64_t out_dim_size = *h_total_pinned;
+    CUDA_CHECK(cudaFreeHost(h_total_pinned));
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = out_dim_size;

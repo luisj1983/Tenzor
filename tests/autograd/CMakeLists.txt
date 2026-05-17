@@ -139,8 +139,12 @@ add_executable(test_graph_viz test_graph_viz.cpp)
 target_link_libraries(test_graph_viz PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_viz LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
-# Comprehensive gradcheck coverage for all autograd ops
-add_executable(test_gradcheck_comprehensive test_gradcheck_comprehensive.cpp)
+# Comprehensive gradcheck coverage for all autograd ops. Includes the
+# complex-output gradcheck helper used by the FFT/IFFT cases (real input,
+# complex output) — see gradcheck_complex.hpp for the contract.
+add_executable(test_gradcheck_comprehensive
+    test_gradcheck_comprehensive.cpp
+    gradcheck_complex.cpp)
 target_link_libraries(test_gradcheck_comprehensive PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_comprehensive LABELS "autograd" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
 

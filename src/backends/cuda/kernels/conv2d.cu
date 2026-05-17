@@ -2119,9 +2119,36 @@ auto depthwise_conv2d_forward_kernel(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    cudaStream_t stream
+) -> Tensor;
+
+auto depthwise_conv2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
+    cudaStream_t stream
+) -> Tensor {
+    return depthwise_conv2d_forward_kernel(
+        input, weight, bias,
+        stride, stride,
+        padding, padding,
+        dilation, dilation,
+        stream);
+}
+
+auto depthwise_conv2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     cudaStream_t stream
 ) -> Tensor {
     auto input_shape = input.shape();
@@ -2134,8 +2161,8 @@ auto depthwise_conv2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    int64_t out_h = (in_h + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    int64_t out_w = (in_w + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+    int64_t out_h = (in_h + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (in_w + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
@@ -2159,8 +2186,8 @@ auto depthwise_conv2d_forward_kernel(
                 has_bias ? bias->data<float>() : nullptr,
                 output.data<float>(),
                 in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else if (input.dtype() == DType::Float64) {
             size_t smem_bytes = filter_elems * sizeof(double);
             depthwise_conv2d_smem_kernel<double><<<grid, block_size, smem_bytes, stream>>>(
@@ -2168,8 +2195,8 @@ auto depthwise_conv2d_forward_kernel(
                 has_bias ? bias->data<double>() : nullptr,
                 output.data<double>(),
                 in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else if (input.dtype() == DType::Float16) {
             size_t smem_bytes = filter_elems * sizeof(__half);
             depthwise_conv2d_smem_kernel_f16<<<grid, block_size, smem_bytes, stream>>>(
@@ -2178,8 +2205,8 @@ auto depthwise_conv2d_forward_kernel(
                 has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
                 in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else {
             throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
         }
@@ -2195,16 +2222,16 @@ auto depthwise_conv2d_forward_kernel(
                 has_bias ? bias->data<float>() : nullptr,
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else if (input.dtype() == DType::Float64) {
             depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
                 input.data<double>(), weight.data<double>(),
                 has_bias ? bias->data<double>() : nullptr,
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else if (input.dtype() == DType::Float16) {
             depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -2212,8 +2239,8 @@ auto depthwise_conv2d_forward_kernel(
                 has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
                 batch, channels, in_h, in_w, out_h, out_w,
-                kernel_h, kernel_w, stride, stride, padding, padding,
-                dilation, dilation, has_bias);
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                dil_h, dil_w, has_bias);
         } else {
             throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
         }

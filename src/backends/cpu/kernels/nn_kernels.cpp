@@ -1026,9 +1026,19 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
 
 // ============================================================================
 // EmbeddingBag Backward — scatter-add gradients back to embedding weight matrix
+//
+// Inputs:
+//   grad_output: [num_bags, embedding_dim]       — upstream gradient
+//   indices:     [total_elements]  (Int64)       — original vocabulary indices
+//                                                   that produced the bag lookups
+//   offsets:     [num_bags] or [num_bags+1]      — bag boundaries (Int64)
+//
+// Output:
+//   grad_weight: [num_embeddings, embedding_dim] — scatter-add into rows
+//                                                   selected by `indices`
 // ============================================================================
 auto embedding_bag_backward_kernel(const Tensor& grad_output,
-                                   const Tensor& embeddings,
+                                   const Tensor& indices,
                                    const Tensor& offsets,
                                    const OpAttributes& attrs) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -1036,9 +1046,16 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
     bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
 
-    int64_t total_elements = embeddings.shape()[0];
+    if (indices.dtype() != DType::Int64) {
+        throw std::runtime_error(
+            "embedding_bag_backward: indices must be Int64, got " +
+            std::string(dtype_name(indices.dtype())));
+    }
+
+    int64_t total_elements = indices.numel();
     int64_t num_bags = offsets.numel();
     const int64_t* offsets_ptr = offsets.data<int64_t>();
+    const int64_t* indices_ptr = indices.data<int64_t>();
 
     if (include_last_offset && num_bags > 0) {
         num_bags -= 1;
@@ -1051,7 +1068,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
         auto grad_weight = zeros({num_embeddings, embedding_dim},
                                  grad_output.dtype(), grad_output.device());
 
-        auto scatter_add = [&](auto* gw_data, const auto* go_data, [[maybe_unused]] const auto* emb_data) {
+        auto scatter_add = [&](auto* gw_data, const auto* go_data) {
             for (int64_t bag = 0; bag < num_bags; ++bag) {
                 int64_t start = offsets_ptr[bag];
                 int64_t end = (bag + 1 < num_bags + (include_last_offset ? 1 : 0))
@@ -1060,40 +1077,42 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
                 if (bag_size <= 0) continue;
 
                 for (int64_t i = start; i < end; ++i) {
-                    // embeddings are already looked-up rows; we need original indices
-                    // The forward pass produced aggregated output — backward distributes
-                    // grad_output[bag] back to each index in the bag
+                    int64_t row = indices_ptr[i];
+                    if (row < 0 || row >= num_embeddings) {
+                        throw std::runtime_error(
+                            "embedding_bag_backward: index " +
+                            std::to_string(row) +
+                            " out of range [0, " +
+                            std::to_string(num_embeddings) + ")");
+                    }
                     for (int64_t j = 0; j < embedding_dim; ++j) {
                         auto grad_val = go_data[bag * embedding_dim + j];
                         if (mode == "mean") {
                             grad_val /= static_cast<std::remove_const_t<std::remove_pointer_t<decltype(go_data)>>>(bag_size);
                         }
-                        // For the backward, we need the original indices
-                        // Since EmbeddingBag forward already embedded, the autograd layer
-                        // should provide original indices. For now, scatter to row i.
-                        if (i < num_embeddings) {
-                            gw_data[i * embedding_dim + j] += grad_val;
-                        }
+                        gw_data[row * embedding_dim + j] += grad_val;
                     }
                 }
             }
         };
 
         if (grad_output.dtype() == DType::Float32) {
-            scatter_add(grad_weight.data<float>(), grad_output.data<float>(),
-                       embeddings.data<float>());
+            scatter_add(grad_weight.data<float>(), grad_output.data<float>());
         } else {
-            scatter_add(grad_weight.data<double>(), grad_output.data<double>(),
-                       embeddings.data<double>());
+            scatter_add(grad_weight.data<double>(), grad_output.data<double>());
         }
 
         return grad_weight;
-    } else {
-        // Float16/BFloat16: upcast to Float32
+    } else if (grad_output.dtype() == DType::Float16 ||
+               grad_output.dtype() == DType::BFloat16) {
+        // Float16/BFloat16: upcast to Float32 (indices stays Int64)
         auto go_f32 = grad_output.to(DType::Float32);
-        auto emb_f32 = embeddings.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, emb_f32, offsets, attrs);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs);
         return result.to(grad_output.dtype());
+    } else {
+        throw std::runtime_error(
+            "embedding_bag_backward: unsupported grad_output dtype " +
+            std::string(dtype_name(grad_output.dtype())));
     }
 }
 

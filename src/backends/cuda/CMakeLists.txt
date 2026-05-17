@@ -41,9 +41,11 @@ set(CUDA_BACKEND_SOURCES
     kernels/sparse.cu
     kernels/nested.cu
     kernels/amp.cu
+    kernels/ctc.cu
     cublas_ops.cu
     cudnn_ops.cu
     cudnn_batchnorm.cu
+    cudnn_rnn.cu
     cudnn_sdpa.cpp
     cuda_graph.cpp
 )
