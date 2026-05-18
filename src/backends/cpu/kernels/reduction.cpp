@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/utils/config.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -557,8 +558,10 @@ static double parallel_simd_min_f64(const double* data, int64_t n) {
 static float parallel_simd_sum_f32(const float* data, int64_t n) {
     if (n == 0) return 0.0f;
 
-    // For small arrays, use single-threaded SIMD
-    if (n < REDUCTION_OMP_THRESHOLD) {
+    // Deterministic mode: force single-threaded path for bit-identical results
+    // regardless of OMP_NUM_THREADS. Parallel floating-point reductions are
+    // non-associative; different thread partitionings produce different rounding.
+    if (n < REDUCTION_OMP_THRESHOLD || ::tenzor::is_deterministic()) {
 #ifdef TENZOR_REDUCTION_AVX512
         return simd_sum_f32_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)

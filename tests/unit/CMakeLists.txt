@@ -1076,3 +1076,8 @@ tenzor_discover_tests(test_int8_overflow_semantics DISCOVERY_TIMEOUT 60 BACKENDS
 add_executable(test_philox_reproducibility test_philox_reproducibility.cpp)
 target_link_libraries(test_philox_reproducibility PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_philox_reproducibility DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 5 Task 5.5: Deterministic mode forces single-threaded reductions
+add_executable(test_deterministic_mode test_deterministic_mode.cpp)
+target_link_libraries(test_deterministic_mode PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_deterministic_mode DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
