@@ -446,6 +446,15 @@ auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
         throw std::runtime_error("cat requires at least one tensor");
     }
 
+    // Defensive: normalize negative dim. The public op in src/ops/transform.cpp
+    // also normalizes, but the kernel is reachable directly via
+    // dispatch<OpId::Cat>(...) and a future caller must not cause OOB reads.
+    int64_t ndim = static_cast<int64_t>(tensors[0].ndim());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("cat_kernel: dim out of range");
+    }
+
     // Calculate output shape
     auto out_shape = std::vector<int64_t>(tensors[0].shape().begin(), tensors[0].shape().end());
     int64_t cat_dim_size = 0;
@@ -524,6 +533,14 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     auto shape = input.shape();
     auto strides = input.strides();
     int64_t ndim = shape.size();
+
+    // Defensive: normalize negative dim. The public op in src/ops/transform.cpp
+    // also normalizes, but the kernel is reachable directly via
+    // dispatch<OpId::Slice>(...) and a future caller must not cause OOB reads.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("slice_kernel: dim out of range");
+    }
 
     // Handle negative indices
     if (start < 0) start += shape[dim];

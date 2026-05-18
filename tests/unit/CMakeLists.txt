@@ -820,6 +820,11 @@ add_executable(test_scatter_variants test_scatter_variants.cpp)
 target_link_libraries(test_scatter_variants PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_scatter_variants LABELS "unit" DISCOVERY_TIMEOUT 60)
 
+# Audit P0 #7: cat/slice kernel negative-dim normalization (defensive fix)
+add_executable(test_cat_slice_negative_dim test_cat_slice_negative_dim.cpp)
+target_link_libraries(test_cat_slice_negative_dim PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cat_slice_negative_dim LABELS "audit;unit" DISCOVERY_TIMEOUT 60)
+
 # Hardtanh activation
 add_executable(test_hardtanh test_hardtanh.cpp)
 target_link_libraries(test_hardtanh PRIVATE tenzor_core GTest::gtest_main)
