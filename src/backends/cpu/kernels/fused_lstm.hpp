@@ -601,6 +601,25 @@ inline void lstm_forward(
     // Workspace buffers are cached in thread-local storage, no cleanup needed
 }
 
+// RAII guard that sets MKL's per-thread count to `n` for the duration of its
+// lifetime and restores the previous value on destruction. Used to prevent
+// 2*N MKL over-subscription when two lstm_forward calls run concurrently in
+// #pragma omp parallel sections.
+#ifdef TENZOR_USE_MKL
+struct MklLocalThreads {
+    int saved;
+    explicit MklLocalThreads(int n) : saved(mkl_get_max_threads()) {
+        mkl_set_num_threads_local(n);
+    }
+    ~MklLocalThreads() { mkl_set_num_threads_local(saved); }
+};
+#else
+// No-op when MKL is not present
+struct MklLocalThreads {
+    explicit MklLocalThreads(int) {}
+};
+#endif
+
 /**
  * @brief Bidirectional LSTM forward pass
  */
@@ -624,7 +643,14 @@ inline void lstm_forward_bidirectional(
     float* fwd_output = fwd_output_buf.data();
     float* bwd_output = bwd_output_buf.data();
 
-    // Run forward and backward LSTMs in parallel
+    // Run forward and backward LSTMs in parallel.
+    // Each section calls lstm_forward which internally uses MKL GEMM.  Without
+    // throttling, two concurrent sections each use mkl_get_max_threads() worker
+    // threads, creating 2*N oversubscription.  Restrict each MKL call to 1
+    // thread for the duration of the parallel region so total = 2 * 1 = 2 threads
+    // (the two OMP sections) instead of 2 * N.
+    {
+        MklLocalThreads _mkl_guard(1);
     #pragma omp parallel sections if(batch >= 2)
     {
         #pragma omp section
@@ -651,6 +677,7 @@ inline void lstm_forward_bidirectional(
                         seq_len, batch, input_size, hidden);
         }
     }
+    } // end MklLocalThreads scope — restores MKL thread count
 
     // Concatenate forward and backward outputs
     #pragma omp parallel for if(seq_len * batch > 16)
