@@ -449,7 +449,7 @@ namespace cpu {
                                         const Tensor& h0) -> std::vector<Tensor>;
 
     // Embedding
-    auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
+    auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx = -1) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
     auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
@@ -2117,10 +2117,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Embedding Operations
     // =========================================================================
-    TENZOR_REGISTER_BINARY_KERNEL(table, Embedding, cpu::embedding_kernel);
+    // Embedding: reads optional PaddingIdx attr; the kernel zeroes that output row.
+    table.register_single_output_kernel(OpId::Embedding,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                                  ? attrs.get_int(AttrKey::PaddingIdx)
+                                  : -1;
+            return cpu::embedding_kernel(inputs[0], inputs[1], padding_idx);
+        });
 
     // EmbeddingWithBoundsCheck — same as Embedding since CPU already validates indices
-    TENZOR_REGISTER_BINARY_KERNEL(table, EmbeddingWithBoundsCheck, cpu::embedding_kernel);
+    table.register_single_output_kernel(OpId::EmbeddingWithBoundsCheck,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                                  ? attrs.get_int(AttrKey::PaddingIdx)
+                                  : -1;
+            return cpu::embedding_kernel(inputs[0], inputs[1], padding_idx);
+        });
 
     table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);

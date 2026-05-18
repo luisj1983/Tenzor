@@ -763,7 +763,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     return grad_input;
 }
 
-auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
+auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx = -1) -> Tensor {
     // weight: [num_embeddings, embedding_dim]
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
@@ -795,12 +795,20 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     }
 
     auto do_embedding = [&](auto* w_data, auto* out_data) {
+        using elem_t = std::remove_pointer_t<decltype(out_data)>;
         #pragma omp parallel for if(num_indices * embedding_dim > 10000)
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += num_embeddings;
-            for (int64_t j = 0; j < embedding_dim; ++j) {
-                out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+            if (padding_idx >= 0 && idx == padding_idx) {
+                // PaddingIdx: zero the output row (matches PyTorch semantics).
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    out_data[i * embedding_dim + j] = elem_t{};
+                }
+            } else {
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+                }
             }
         }
     };
