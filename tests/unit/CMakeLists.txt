@@ -1010,3 +1010,8 @@ tenzor_discover_tests(test_fused_layer_norm_backward_f64 DISCOVERY_TIMEOUT 60 BA
 add_executable(test_fill_kernel_dtype_coverage test_fill_kernel_dtype_coverage.cpp)
 target_link_libraries(test_fill_kernel_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #4 regression: scatter_add missing UInt16/UInt32/UInt64/Int16 dispatch
+add_executable(test_scatter_add_dtype_coverage test_scatter_add_dtype_coverage.cpp)
+target_link_libraries(test_scatter_add_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
