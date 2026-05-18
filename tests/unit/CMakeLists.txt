@@ -1052,3 +1052,7 @@ tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS
 add_executable(test_math_dtype_coverage test_math_dtype_coverage.cpp)
 target_link_libraries(test_math_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+add_executable(test_reductions_dtype_coverage test_reductions_dtype_coverage.cpp)
+target_link_libraries(test_reductions_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

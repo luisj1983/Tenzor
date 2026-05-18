@@ -1109,9 +1109,45 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto dtype = input.dtype();
     const int64_t ndim = input.ndim();
 
-    // Mean only supports floating point types
+    // Integer and Bool dtypes: widen to Float32, compute mean, return Float32
+    // (PyTorch convention: integer mean returns Float32)
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::Int32 ||
+        dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
+        dtype == DType::UInt32 || dtype == DType::UInt64 || dtype == DType::Bool) {
+        auto f32_input = input.to(DType::Float32);
+        return mean_kernel(f32_input, dim, keepdim);
+    }
+
+    // Complex dtypes: sum then divide by count in complex domain
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        dim = normalize_dim(dim, ndim);
+        auto sum_result = sum_kernel(input, dim, keepdim);
+        int64_t count;
+        if (dim == REDUCE_ALL) {
+            count = input.numel();
+        } else {
+            count = input.shape()[dim];
+        }
+        const int64_t n = sum_result.numel();
+        if (dtype == DType::Complex64) {
+            auto* data = sum_result.data<std::complex<float>>();
+            const float scale = 1.0f / static_cast<float>(count);
+            for (int64_t i = 0; i < n; i++) {
+                data[i] *= scale;
+            }
+        } else {
+            auto* data = sum_result.data<std::complex<double>>();
+            const double scale = 1.0 / static_cast<double>(count);
+            for (int64_t i = 0; i < n; i++) {
+                data[i] *= scale;
+            }
+        }
+        return sum_result;
+    }
+
+    // Float-only path (Float16, BFloat16, Float32, Float64)
     if (dtype != DType::Float16 && dtype != DType::BFloat16 && dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float16, BFloat16, Float32, and Float64 are supported");
+        throw std::runtime_error("mean: unsupported dtype");
     }
 
     // Normalize negative dimension
@@ -1941,6 +1977,72 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::Int8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            // Bool: false < true, so argmax returns index of first true
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<bool>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
         default:
             throw std::runtime_error("argmax: unsupported dtype");
     }
@@ -2253,6 +2355,72 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            // Bool: false < true, so argmin returns index of first false
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<bool>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
                                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
