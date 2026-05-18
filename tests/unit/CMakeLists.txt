@@ -1103,3 +1103,8 @@ tenzor_discover_tests(test_mkl_vml DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu
 add_executable(test_int8_mkl_gemm test_int8_mkl_gemm.cpp)
 target_link_libraries(test_int8_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_int8_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;int8")
+
+# Task 6.4: BF16 matmul via MKL gemm_bf16bf16f32
+add_executable(test_bf16_mkl_gemm test_bf16_mkl_gemm.cpp)
+target_link_libraries(test_bf16_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_bf16_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;bf16")

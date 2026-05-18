@@ -1616,7 +1616,36 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const BFloat16* b_data = b_contig.data<BFloat16>();
             BFloat16* c_data = result.data<BFloat16>();
 
+#if defined(TENZOR_USE_MKL)
+            // Task 6.4: use MKL gemm_bf16bf16f32 (BF16 inputs, FP32 accumulation).
+            // MKL_BF16 is typedef'd as unsigned short, bit-compatible with BFloat16.
+            //
+            // Data is row-major. BLAS is column-major. The standard trick:
+            //   row-major C = A * B   ↔   col-major C^T = B^T * A^T
+            // So pass B as the first matrix and A as the second, both 'N' (no-transpose),
+            // with dimensions m=N, n=M, k=K and leading dims lda=N, ldb=K, ldc=N.
+            {
+                std::vector<float> c_fp32(static_cast<size_t>(M) * N);
+                const char transa = 'N', transb = 'N';
+                MKL_INT im = static_cast<MKL_INT>(M);
+                MKL_INT ik = static_cast<MKL_INT>(K);
+                MKL_INT in = static_cast<MKL_INT>(N);
+                float alpha = 1.0f, beta = 0.0f;
+                // col-major: C^T(N×M) = B^T(N×K) * A^T(K×M)
+                // m_arg=N, n_arg=M, k_arg=K, lda=N (leading dim of B), ldb=K, ldc=N
+                gemm_bf16bf16f32(&transa, &transb,
+                                 &in, &im, &ik,
+                                 &alpha,
+                                 reinterpret_cast<const MKL_BF16*>(b_data), &in,
+                                 reinterpret_cast<const MKL_BF16*>(a_data), &ik,
+                                 &beta, c_fp32.data(), &in);
+                // Narrow F32 → BF16
+                bfloat16_simd::convert_f32_to_bf16_batch(c_fp32.data(), c_data,
+                                                          static_cast<size_t>(M) * N);
+            }
+#else
             matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
+#endif
 
         } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
             const int16_t* a_data = a_contig.data<int16_t>();
@@ -1744,7 +1773,27 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         const BFloat16* b_data = b_contig.data<BFloat16>();
         BFloat16* c_data = result.data<BFloat16>();
 
+#if defined(TENZOR_USE_MKL)
+        {
+            std::vector<float> c_fp32(static_cast<size_t>(M) * N);
+            const char transa = 'N', transb = 'N';
+            MKL_INT im = static_cast<MKL_INT>(M);
+            MKL_INT ik = static_cast<MKL_INT>(K);
+            MKL_INT in = static_cast<MKL_INT>(N);
+            float alpha = 1.0f, beta = 0.0f;
+            // col-major trick: C^T = B^T * A^T
+            gemm_bf16bf16f32(&transa, &transb,
+                             &in, &im, &ik,
+                             &alpha,
+                             reinterpret_cast<const MKL_BF16*>(b_data), &in,
+                             reinterpret_cast<const MKL_BF16*>(a_data), &ik,
+                             &beta, c_fp32.data(), &in);
+            bfloat16_simd::convert_f32_to_bf16_batch(c_fp32.data(), c_data,
+                                                      static_cast<size_t>(M) * N);
+        }
+#else
         matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
+#endif
 
     } else if (a_contig.dtype() == DType::Complex64 && b_contig.dtype() == DType::Complex64) {
 #ifdef TENZOR_USE_MKL
