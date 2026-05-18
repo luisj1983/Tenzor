@@ -1071,3 +1071,8 @@ tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKEN
 add_executable(test_int8_overflow_semantics test_int8_overflow_semantics.cpp)
 target_link_libraries(test_int8_overflow_semantics PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_int8_overflow_semantics DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 5 Task 5.4: Philox RNG thread-count-independent reproducibility
+add_executable(test_philox_reproducibility test_philox_reproducibility.cpp)
+target_link_libraries(test_philox_reproducibility PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_philox_reproducibility DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

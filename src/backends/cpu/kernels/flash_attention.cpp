@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "philox.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -26,75 +27,10 @@
 namespace tenzor::cpu {
 
 // ============================================================================
-// Philox 4x32-10 Counter-Based PRNG for Dropout
+// Philox 4x32-10 Counter-Based PRNG for Dropout — shared from philox.hpp
 // ============================================================================
-// Philox is a counter-based RNG ideal for parallel dropout:
-// - No shared mutable state between threads (each position has a unique counter)
-// - Deterministic: same (seed, counter) always produces the same output
-// - Statistically excellent (passes BigCrush)
-// - Very fast: just a few multiplies and XORs per sample
-
-struct Philox4x32 {
-    uint32_t counter[4];
-    uint32_t key[2];
-
-    /// Single Philox round: multiply-and-xor mixing
-    static void philox_round(uint32_t* ctr, const uint32_t* key) {
-        // Philox constants (from the original paper)
-        constexpr uint64_t M0 = 0xD2511F53ULL;
-        constexpr uint64_t M1 = 0xCD9E8D57ULL;
-
-        uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
-        uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
-
-        uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
-        uint32_t lo0 = static_cast<uint32_t>(prod0);
-        uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
-        uint32_t lo1 = static_cast<uint32_t>(prod1);
-
-        uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
-        uint32_t new1 = lo1;
-        uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
-        uint32_t new3 = lo0;
-
-        ctr[0] = new0;
-        ctr[1] = new1;
-        ctr[2] = new2;
-        ctr[3] = new3;
-    }
-
-    /// Bump the key (Weyl sequence) between rounds
-    static void bump_key(uint32_t* key) {
-        constexpr uint32_t W0 = 0x9E3779B9U;  // golden ratio
-        constexpr uint32_t W1 = 0xBB67AE85U;  // sqrt(3) - 1
-        key[0] += W0;
-        key[1] += W1;
-    }
-
-    /// Generate 4 uniform uint32 values from (seed, counter position)
-    /// Uses 10 rounds (Philox4x32-10) for full statistical quality
-    void generate(uint32_t output[4]) const {
-        uint32_t ctr[4] = {counter[0], counter[1], counter[2], counter[3]};
-        uint32_t k[2] = {key[0], key[1]};
-
-        // 10 rounds of Philox
-        for (int r = 0; r < 10; ++r) {
-            philox_round(ctr, k);
-            bump_key(k);
-        }
-
-        output[0] = ctr[0];
-        output[1] = ctr[1];
-        output[2] = ctr[2];
-        output[3] = ctr[3];
-    }
-
-    /// Convert a uint32 to a uniform float in [0, 1)
-    static float uint32_to_uniform(uint32_t x) {
-        // Use top 24 bits for mantissa (ensures uniform distribution)
-        return static_cast<float>(x >> 8) * (1.0f / 16777216.0f);  // 1 / 2^24
-    }
-};
+// Bring the shared implementation into this scope for existing usages below.
+using Philox4x32 = tenzor::cpu::philox::Philox4x32;
 
 // ============================================================================
 // SIMD Horizontal Reduction Helpers

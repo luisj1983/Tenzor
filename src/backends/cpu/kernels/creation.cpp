@@ -2,6 +2,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/utils/error.hpp"
+#include "philox.hpp"
 #include <random>
 #include <stdexcept>
 #include <algorithm>
@@ -163,56 +164,22 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        // Philox keyed by (seed, element_index) — result is identical regardless
+        // of OMP_NUM_THREADS, satisfying reproducibility requirements.
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = philox::philox_uniform_f32(seed, i);
         }
 
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::uniform_real_distribution<double> dist(0.0, 1.0);
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            std::uniform_real_distribution<double> dist(0.0, 1.0);
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = philox::philox_uniform_f64(seed, i);
         }
 
     } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
@@ -238,56 +205,22 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::normal_distribution<float> dist(0.0f, 1.0f);
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        // Philox keyed by (seed, element_index) — identical output regardless
+        // of OMP_NUM_THREADS, satisfying reproducibility requirements.
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = philox::philox_normal_f32(seed, i);
         }
 
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::normal_distribution<double> dist(0.0, 1.0);
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            std::normal_distribution<double> dist(0.0, 1.0);
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = philox::philox_normal_f64(seed, i);
         }
 
     } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
