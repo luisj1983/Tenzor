@@ -73,13 +73,23 @@ TEST(FillKernelDtypeCoverage, FP8E5M2) {
     auto t = tz::empty({4}, tz::DType::FP8_E5M2);
     EXPECT_NO_THROW(t.fill_(2.0));
 }
-TEST(FillKernelDtypeCoverage, QuantizedThrowsOrFills) {
+TEST(FillKernelDtypeCoverage, QuantizedWithoutParamsThrows) {
     auto t = tz::empty({4}, tz::DType::QInt8);
-    // Either fill works (with default scale/zero_point) or throws loudly -- but never silently no-ops.
-    try {
-        t.fill_(2.0);
-        SUCCEED();
-    } catch (const std::exception&) {
-        SUCCEED();
-    }
+    EXPECT_THROW(t.fill_(2.0), std::runtime_error)
+        << "fill_ on QInt8 with no quantization params must throw — "
+        << "silent no-op would mask audit P0 #3";
+}
+
+TEST(FillKernelDtypeCoverage, QuantizedUIntWithoutParamsThrows) {
+    auto t = tz::empty({4}, tz::DType::QUInt8);
+    EXPECT_THROW(t.fill_(2.0), std::runtime_error)
+        << "fill_ on QUInt8 with no quantization params must throw — "
+        << "silent no-op would mask audit P0 #3";
+}
+
+TEST(FillKernelDtypeCoverage, QuantizedInt4WithoutParamsThrows) {
+    auto t = tz::empty({4}, tz::DType::QInt4x2);
+    EXPECT_THROW(t.fill_(2.0), std::runtime_error)
+        << "fill_ on QInt4x2 with no quantization params must throw — "
+        << "silent no-op would mask audit P0 #3";
 }
