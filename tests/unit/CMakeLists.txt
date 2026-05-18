@@ -1047,3 +1047,8 @@ tenzor_discover_tests(test_norm_eps_cache DISCOVERY_TIMEOUT 60 BACKENDS cpu LABE
 add_executable(test_creation_dtype_coverage test_creation_dtype_coverage.cpp)
 target_link_libraries(test_creation_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 2 Tasks 2.3+2.4+2.5+2.10: math kernels (matmul/bmm/dot/pow/clamp) dtype coverage + F64 precision
+add_executable(test_math_dtype_coverage test_math_dtype_coverage.cpp)
+target_link_libraries(test_math_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

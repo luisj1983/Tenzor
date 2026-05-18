@@ -113,7 +113,7 @@ auto baddbmm(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
 /// @{
 
 /** @brief Element-wise power: input^exponent */
-auto pow(const Tensor& input, float exponent) -> Tensor;
+auto pow(const Tensor& input, double exponent) -> Tensor;
 
 /** @brief Element-wise exponential: e^input */
 auto exp(const Tensor& input) -> Tensor;
@@ -208,13 +208,13 @@ auto round(const Tensor& input) -> Tensor;
  * @param max Maximum value
  * @return Clamped tensor
  */
-auto clamp(const Tensor& input, float min, float max) -> Tensor;
+auto clamp(const Tensor& input, double min, double max) -> Tensor;
 
 /** @brief Clamp values to minimum */
-auto clamp_min(const Tensor& input, float min) -> Tensor;
+auto clamp_min(const Tensor& input, double min) -> Tensor;
 
 /** @brief Clamp values to maximum */
-auto clamp_max(const Tensor& input, float max) -> Tensor;
+auto clamp_max(const Tensor& input, double max) -> Tensor;
 
 /// @}
 /// @name Comparison Operations

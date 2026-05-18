@@ -50,12 +50,12 @@ namespace cpu {
     auto neg_kernel(const Tensor& input) -> Tensor;
     auto abs_kernel(const Tensor& input) -> Tensor;
     auto sign_kernel(const Tensor& input) -> Tensor;
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor;
-    auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor;
-    auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor;
+    auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor;
+    auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor;
     auto log_kernel(const Tensor& input) -> Tensor;
     auto exp_kernel(const Tensor& input) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent) -> Tensor;
     auto reciprocal_kernel(const Tensor& input) -> Tensor;
     auto floor_kernel(const Tensor& input) -> Tensor;
     auto ceil_kernel(const Tensor& input) -> Tensor;
@@ -1116,23 +1116,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+        double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
         return cpu::pow_kernel(inputs[0], exponent);
     });
 
     table.register_single_output_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
+        double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
         return cpu::clamp_kernel(inputs[0], min_val, max_val);
     });
 
     table.register_single_output_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
+        double min_val = attrs.get_float(AttrKey::Min, 0.0);
         return cpu::clamp_min_kernel(inputs[0], min_val);
     });
 
     table.register_single_output_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 0.0));
+        double max_val = attrs.get_float(AttrKey::Max, 0.0);
         return cpu::clamp_max_kernel(inputs[0], max_val);
     });
 

@@ -1608,6 +1608,56 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
             matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
 
+        } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
+            const int16_t* a_data = a_contig.data<int16_t>();
+            const int16_t* b_data = b_contig.data<int16_t>();
+            int16_t* c_data = result.data<int16_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                int32_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<int32_t>(a_data[kk]) * static_cast<int32_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<int16_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::UInt16 && b_contig.dtype() == DType::UInt16) {
+            const uint16_t* a_data = a_contig.data<uint16_t>();
+            const uint16_t* b_data = b_contig.data<uint16_t>();
+            uint16_t* c_data = result.data<uint16_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint32_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<uint32_t>(a_data[kk]) * static_cast<uint32_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<uint16_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::Int64 && b_contig.dtype() == DType::Int64) {
+            const int64_t* a_data = a_contig.data<int64_t>();
+            const int64_t* b_data = b_contig.data<int64_t>();
+            int64_t* c_data = result.data<int64_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                int64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += a_data[kk] * b_data[kk * K + j];
+                c_data[j] = acc;
+            }
+        } else if (a_contig.dtype() == DType::UInt32 && b_contig.dtype() == DType::UInt32) {
+            const uint32_t* a_data = a_contig.data<uint32_t>();
+            const uint32_t* b_data = b_contig.data<uint32_t>();
+            uint32_t* c_data = result.data<uint32_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<uint64_t>(a_data[kk]) * static_cast<uint64_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<uint32_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::UInt64 && b_contig.dtype() == DType::UInt64) {
+            const uint64_t* a_data = a_contig.data<uint64_t>();
+            const uint64_t* b_data = b_contig.data<uint64_t>();
+            uint64_t* c_data = result.data<uint64_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += a_data[kk] * b_data[kk * K + j];
+                c_data[j] = acc;
+            }
         } else {
             throw std::runtime_error(
                 "matmul unsupported dtype combination: " +
@@ -1737,6 +1787,66 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 for (int64_t j = 0; j < N; ++j)
                     c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
 #endif
+
+    } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
+        const int16_t* a_data = a_contig.data<int16_t>();
+        const int16_t* b_data = b_contig.data<int16_t>();
+        int16_t* c_data = result.data<int16_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                int32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<int32_t>(a_data[i * K + k]) * static_cast<int32_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<int16_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::UInt16 && b_contig.dtype() == DType::UInt16) {
+        const uint16_t* a_data = a_contig.data<uint16_t>();
+        const uint16_t* b_data = b_contig.data<uint16_t>();
+        uint16_t* c_data = result.data<uint16_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<uint32_t>(a_data[i * K + k]) * static_cast<uint32_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<uint16_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::Int64 && b_contig.dtype() == DType::Int64) {
+        const int64_t* a_data = a_contig.data<int64_t>();
+        const int64_t* b_data = b_contig.data<int64_t>();
+        int64_t* c_data = result.data<int64_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                int64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += a_data[i * K + k] * b_data[k * N + j];
+                c_data[i * N + j] = acc;
+            }
+
+    } else if (a_contig.dtype() == DType::UInt32 && b_contig.dtype() == DType::UInt32) {
+        const uint32_t* a_data = a_contig.data<uint32_t>();
+        const uint32_t* b_data = b_contig.data<uint32_t>();
+        uint32_t* c_data = result.data<uint32_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<uint64_t>(a_data[i * K + k]) * static_cast<uint64_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<uint32_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::UInt64 && b_contig.dtype() == DType::UInt64) {
+        const uint64_t* a_data = a_contig.data<uint64_t>();
+        const uint64_t* b_data = b_contig.data<uint64_t>();
+        uint64_t* c_data = result.data<uint64_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += a_data[i * K + k] * b_data[k * N + j];
+                c_data[i * N + j] = acc;
+            }
 
     } else {
         throw std::runtime_error(
@@ -1968,10 +2078,22 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             c_data[i] = BFloat16(c_f32[i]);
         }
     } else {
-        throw std::runtime_error(
-            "bmm_kernel unsupported dtype: " +
-            std::string(dtype_name(a.dtype()))
-        );
+        // Generic fallback: loop matmul_kernel over batch dimension.
+        // Handles Complex64, Complex128, Int16, UInt16, Int64, UInt32, UInt64, etc.
+        size_t elem_bytes = output.element_size();
+        size_t slice_bytes = static_cast<size_t>(M * N) * elem_bytes;
+        char* out_base = static_cast<char*>(output.storage()->data());
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            auto a_slice = a_cont.narrow(0, batch, 1).reshape({M, K});
+            auto b_slice = b_cont.narrow(0, batch, 1).reshape({K, N});
+            auto c_slice = matmul_kernel(a_slice, b_slice);  // (M, N) contiguous result
+            // c_slice is a freshly-created contiguous tensor; copy into output batch slot.
+            std::memcpy(
+                out_base + static_cast<ptrdiff_t>(batch) * static_cast<ptrdiff_t>(slice_bytes),
+                c_slice.storage()->data(),
+                slice_bytes
+            );
+        }
     }
 
     return output;
@@ -2402,7 +2524,7 @@ auto abs_kernel(const Tensor& input) -> Tensor {
 }
 
 // Clamp kernel - clamps tensor values to [min_val, max_val]
-auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
+auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2410,13 +2532,15 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
 #ifdef TENZOR_HAS_AVX2
         // SIMD: Process 8 floats at a time with OpenMP
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 min_vec = _mm256_set1_ps(min_val);
-        const __m256 max_vec = _mm256_set1_ps(max_val);
+        const __m256 min_vec = _mm256_set1_ps(min_f);
+        const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2427,13 +2551,13 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         }
         // Handle remainder
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
+            out_data[i] = std::max(std::min(in_data[i], max_f), min_f);
         }
 #else
         // Scalar fallback with OpenMP
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
+            out_data[i] = std::max(std::min(in_data[i], max_f), min_f);
         }
 #endif
 
@@ -2441,8 +2565,8 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
-        double min_val_d = static_cast<double>(min_val);
-        double max_val_d = static_cast<double>(max_val);
+        double min_val_d = min_val;
+        double max_val_d = max_val;
 
 #ifdef TENZOR_HAS_AVX2
         // SIMD: Process 4 doubles at a time
@@ -2470,21 +2594,25 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
         // Convert to float, clamp, then convert back
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(std::min(val, max_val), min_val);
+            val = std::max(std::min(val, max_f), min_f);
             out_data[i] = Float16(val);
         }
 
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(std::min(val, max_val), min_val);
+            val = std::max(std::min(val, max_f), min_f);
             out_data[i] = BFloat16(val);
         }
 
@@ -2496,7 +2624,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
 }
 
 // Clamp min kernel - clamps tensor values to min_val (x >= min_val)
-auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
+auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2504,11 +2632,12 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float min_f = static_cast<float>(min_val);
 
 #ifdef TENZOR_HAS_AVX2
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 min_vec = _mm256_set1_ps(min_val);
+        const __m256 min_vec = _mm256_set1_ps(min_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2517,19 +2646,19 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::max(in_data[i], min_val);
+            out_data[i] = std::max(in_data[i], min_f);
         }
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::max(in_data[i], min_val);
+            out_data[i] = std::max(in_data[i], min_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double min_val_d = static_cast<double>(min_val);
+        double min_val_d = min_val;
 
 #ifdef TENZOR_HAS_AVX2
         size_t simd_end = (n / 4) * 4;
@@ -2552,10 +2681,11 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float min_f = static_cast<float>(min_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(val, min_val);
+            val = std::max(val, min_f);
             out_data[i] = Float16(val);
         }
 
@@ -2567,7 +2697,7 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
 }
 
 // Clamp max kernel - clamps tensor values to max_val (x <= max_val)
-auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
+auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2575,11 +2705,12 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float max_f = static_cast<float>(max_val);
 
 #ifdef TENZOR_HAS_AVX2
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 max_vec = _mm256_set1_ps(max_val);
+        const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2588,19 +2719,19 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::min(in_data[i], max_val);
+            out_data[i] = std::min(in_data[i], max_f);
         }
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::min(in_data[i], max_val);
+            out_data[i] = std::min(in_data[i], max_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double max_val_d = static_cast<double>(max_val);
+        double max_val_d = max_val;
 
 #ifdef TENZOR_HAS_AVX2
         size_t simd_end = (n / 4) * 4;
@@ -2623,10 +2754,11 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float max_f = static_cast<float>(max_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::min(val, max_val);
+            val = std::min(val, max_f);
             out_data[i] = Float16(val);
         }
 
@@ -2914,7 +3046,7 @@ auto exp_kernel(const Tensor& input) -> Tensor {
 }
 
 // Pow kernel - power function (SIMD + OpenMP optimized)
-auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
+auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2922,22 +3054,23 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float exponent_f = static_cast<float>(exponent);
 
 #if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_data, out_data, n, exponent);
+        fast_math::pow_batch_avx512(in_data, out_data, n, exponent_f);
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_data, out_data, n, exponent);
+        fast_math::pow_batch_avx2(in_data, out_data, n, exponent_f);
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::pow(in_data[i], exponent);
+            out_data[i] = std::pow(in_data[i], exponent_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double exp_d = static_cast<double>(exponent);
+        double exp_d = exponent;
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
@@ -2947,6 +3080,7 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float exponent_f = static_cast<float>(exponent);
 
         // Use temporary float buffer for SIMD
         std::vector<float> in_f32(n), out_f32(n);
@@ -2955,12 +3089,12 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
         }
 
 #if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent);
+        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent_f);
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent);
+        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent_f);
 #else
         for (size_t i = 0; i < n; ++i) {
-            out_f32[i] = std::pow(in_f32[i], exponent);
+            out_f32[i] = std::pow(in_f32[i], exponent_f);
         }
 #endif
         for (size_t i = 0; i < n; ++i) {
@@ -3840,13 +3974,77 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             output.data<double>()[0] = sum;
             break;
         }
+        case DType::Float16: {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            float sum = 0.0f;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]);
+            output.data<Float16>()[0] = Float16(sum);
+            break;
+        }
+        case DType::BFloat16: {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            float sum = 0.0f;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]);
+            output.data<BFloat16>()[0] = BFloat16(sum);
+            break;
+        }
+        case DType::Complex64: {
+            const std::complex<float>* a_data = a.data<std::complex<float>>();
+            const std::complex<float>* b_data = b.data<std::complex<float>>();
+            std::complex<float> sum{0.0f, 0.0f};
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<std::complex<float>>()[0] = sum;
+            break;
+        }
+        case DType::Complex128: {
+            const std::complex<double>* a_data = a.data<std::complex<double>>();
+            const std::complex<double>* b_data = b.data<std::complex<double>>();
+            std::complex<double> sum{0.0, 0.0};
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<std::complex<double>>()[0] = sum;
+            break;
+        }
+        case DType::UInt16: {
+            const uint16_t* a_data = a.data<uint16_t>();
+            const uint16_t* b_data = b.data<uint16_t>();
+            uint32_t sum = 0;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<uint32_t>(a_data[i]) * static_cast<uint32_t>(b_data[i]);
+            output.data<uint16_t>()[0] = static_cast<uint16_t>(sum);
+            break;
+        }
+        case DType::UInt32: {
+            const uint32_t* a_data = a.data<uint32_t>();
+            const uint32_t* b_data = b.data<uint32_t>();
+            uint64_t sum = 0;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<uint64_t>(a_data[i]) * static_cast<uint64_t>(b_data[i]);
+            output.data<uint32_t>()[0] = static_cast<uint32_t>(sum);
+            break;
+        }
+        case DType::UInt64: {
+            const uint64_t* a_data = a.data<uint64_t>();
+            const uint64_t* b_data = b.data<uint64_t>();
+            uint64_t sum = 0;
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<uint64_t>()[0] = sum;
+            break;
+        }
         default:
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "dot", [&]() {
+                using acc_t = std::conditional_t<
+                    std::is_same_v<scalar_t, int64_t>, int64_t,
+                    std::conditional_t<std::is_unsigned_v<scalar_t>, uint64_t, int64_t>>;
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                scalar_t sum = 0;
-                for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
-                output.data<scalar_t>()[0] = sum;
+                acc_t sum = 0;
+                for (int64_t i = 0; i < n; i++)
+                    sum += static_cast<acc_t>(a_data[i]) * static_cast<acc_t>(b_data[i]);
+                output.data<scalar_t>()[0] = static_cast<scalar_t>(sum);
             });
             break;
     }
