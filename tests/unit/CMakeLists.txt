@@ -1113,3 +1113,8 @@ tenzor_discover_tests(test_bf16_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABEL
 add_executable(test_onednn_format_any test_onednn_format_any.cpp)
 target_link_libraries(test_onednn_format_any PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;onednn")
+
+# Phase 9: _foreach_* multi-tensor optimizer ops
+add_executable(test_foreach_ops test_foreach_ops.cpp)
+target_link_libraries(test_foreach_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu;foreach")

@@ -32,6 +32,7 @@ set(TENZOR_CORE_SOURCES
     ops/creation.cpp
     ops/philox_dropout.cpp   # F13/F22-followup: Philox-keyed dropout mask
     ops/math.cpp
+    ops/foreach.cpp
     ops/type_promotion.cpp
     ops/fp8_scaling.cpp
     ops/indexing.cpp
