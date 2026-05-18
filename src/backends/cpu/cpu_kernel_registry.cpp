@@ -4118,6 +4118,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMM: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
@@ -4127,6 +4134,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMV: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
