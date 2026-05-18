@@ -1020,3 +1020,8 @@ tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKE
 add_executable(test_complex_matmul_mkl test_complex_matmul_mkl.cpp)
 target_link_libraries(test_complex_matmul_mkl PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_complex_matmul_mkl DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #6 regression: oneDNN LayerNorm/BatchNorm primitive cache keys must include eps
+add_executable(test_norm_eps_cache test_norm_eps_cache.cpp)
+target_link_libraries(test_norm_eps_cache PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_norm_eps_cache DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

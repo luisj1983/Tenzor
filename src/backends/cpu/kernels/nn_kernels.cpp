@@ -6,6 +6,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include <bit>
 #include <random>
 #include <cmath>
 #include <iostream>
@@ -104,16 +105,23 @@ inline dnnl::stream& get_nn_stream() {
 struct LayerNormCacheKey {
     int64_t batch_size;
     int64_t norm_size;
+    uint32_t eps_bits;  // bit-cast of float eps — avoids NaN-equality concerns
+    int32_t  dtype_id;  // static_cast<int>(DType) — future-proofs multi-dtype LN
 
     bool operator==(const LayerNormCacheKey& other) const {
-        return batch_size == other.batch_size && norm_size == other.norm_size;
+        return batch_size == other.batch_size
+            && norm_size  == other.norm_size
+            && eps_bits   == other.eps_bits
+            && dtype_id   == other.dtype_id;
     }
 };
 
 struct LayerNormCacheKeyHash {
     size_t operator()(const LayerNormCacheKey& k) const {
         size_t h = std::hash<int64_t>{}(k.batch_size);
-        h ^= std::hash<int64_t>{}(k.norm_size) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.norm_size)  + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.eps_bits)  + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int32_t>{}(k.dtype_id)   + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -1128,7 +1136,12 @@ static bool layer_norm_onednn(
         auto& stream = get_nn_stream();
 
         // Create cache key
-        LayerNormCacheKey cache_key{batch_size, norm_size};
+        LayerNormCacheKey cache_key{
+            batch_size,
+            norm_size,
+            std::bit_cast<uint32_t>(eps),
+            static_cast<int32_t>(DType::Float32)  // oneDNN LN path is float32-only
+        };
 
         // Try to get cached primitive
         auto cached = g_layernorm_cache.get(cache_key);

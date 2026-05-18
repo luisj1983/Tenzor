@@ -2,6 +2,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
 #include "half_operators.hpp"
+#include <bit>
 #include <cmath>
 #include <vector>
 #include <stdexcept>
@@ -477,21 +478,24 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
 // --------------------------------------------------------------------------
 struct BatchNormCacheKey {
     int64_t N, C, H, W;
-    DType dtype;  // src/dst element type (gamma/beta/mean/var are always F32)
+    DType dtype;    // src/dst element type (gamma/beta/mean/var are always F32)
+    uint32_t eps_bits;  // bit-cast of float epsilon — avoids NaN-equality concerns
 
     bool operator==(const BatchNormCacheKey& other) const {
         return N == other.N && C == other.C && H == other.H && W == other.W
-            && dtype == other.dtype;
+            && dtype    == other.dtype
+            && eps_bits == other.eps_bits;
     }
 };
 
 struct BatchNormCacheKeyHash {
     size_t operator()(const BatchNormCacheKey& k) const {
         size_t h = std::hash<int64_t>{}(k.N);
-        h ^= std::hash<int64_t>{}(k.C) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<int64_t>{}(k.H) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<int64_t>{}(k.W) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<int64_t>{}(static_cast<int64_t>(k.dtype)) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.C)                                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.H)                                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.W)                                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(static_cast<int64_t>(k.dtype))       + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.eps_bits)                         + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -541,7 +545,8 @@ static bool batchnorm2d_forward_affine_onednn(
         auto& stream = get_onednn_stream();
 
         // Cache key includes dtype so F32/F16/BF16 primitives don't collide.
-        BatchNormCacheKey cache_key{N, C, H, W, input.dtype()};
+        BatchNormCacheKey cache_key{N, C, H, W, input.dtype(),
+                                    std::bit_cast<uint32_t>(epsilon)};
 
         // Try to get cached primitive
         auto cached = g_batchnorm_cache.get(cache_key);
