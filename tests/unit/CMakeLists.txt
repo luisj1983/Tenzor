@@ -1118,3 +1118,8 @@ tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu L
 add_executable(test_foreach_ops test_foreach_ops.cpp)
 target_link_libraries(test_foreach_ops PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu;foreach")
+
+# Phase 11: New distribution sampler free functions
+add_executable(test_distributions_samplers test_distributions_samplers.cpp)
+target_link_libraries(test_distributions_samplers PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS cpu LABELS "cpu;distributions")

@@ -1,6 +1,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/generator.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/distributions/distribution.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -1117,6 +1118,58 @@ auto exponential(const Tensor& rate) -> Tensor {
     auto r = rate.contiguous();
     std::array<Tensor, 1> inputs = {r};
     return dispatch<OpId::ExponentialSample>(inputs)[0];
+}
+
+// ============================================================================
+// Phase 11: New distribution samplers — delegate to C++ distribution classes
+// ============================================================================
+
+auto weibull(const Tensor& scale, const Tensor& concentration,
+             std::vector<int64_t> shape) -> Tensor {
+    distributions::Weibull dist(scale.contiguous(), concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto laplace(const Tensor& loc, const Tensor& scale,
+             std::vector<int64_t> shape) -> Tensor {
+    distributions::Laplace dist(loc.contiguous(), scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto dirichlet(const Tensor& concentration,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::Dirichlet dist(concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto half_normal(const Tensor& scale,
+                 std::vector<int64_t> shape) -> Tensor {
+    distributions::HalfNormal dist(scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto von_mises(const Tensor& loc, const Tensor& concentration,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::VonMises dist(loc.contiguous(), concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto student_t(const Tensor& df, const Tensor& loc, const Tensor& scale,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::StudentT dist(df.contiguous(), loc.contiguous(), scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto negative_binomial(const Tensor& total_count, const Tensor& probs,
+                       std::vector<int64_t> shape) -> Tensor {
+    distributions::NegativeBinomial dist(total_count.contiguous(), probs.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto binomial(int64_t total_count, const Tensor& probs,
+              std::vector<int64_t> shape) -> Tensor {
+    distributions::Binomial dist(total_count, probs.contiguous());
+    return dist.sample(std::move(shape));
 }
 
 // ============================================================================
