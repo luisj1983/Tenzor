@@ -1005,3 +1005,8 @@ tenzor_discover_tests(test_softmax_stride_audit DISCOVERY_TIMEOUT 60 BACKENDS cp
 add_executable(test_fused_layer_norm_backward_f64 test_fused_layer_norm_backward_f64.cpp)
 target_link_libraries(test_fused_layer_norm_backward_f64 PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fused_layer_norm_backward_f64 DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #3 regression: fill_kernel uninitialized memory for missing dtypes
+add_executable(test_fill_kernel_dtype_coverage test_fill_kernel_dtype_coverage.cpp)
+target_link_libraries(test_fill_kernel_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

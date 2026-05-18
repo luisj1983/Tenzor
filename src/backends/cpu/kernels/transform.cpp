@@ -70,12 +70,70 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint8_t>(value);
         }
+    } else if (input.dtype() == DType::UInt16) {
+        auto* data = result.data<uint16_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint16_t>(value);
+        }
+    } else if (input.dtype() == DType::UInt32) {
+        auto* data = result.data<uint32_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint32_t>(value);
+        }
+    } else if (input.dtype() == DType::UInt64) {
+        auto* data = result.data<uint64_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint64_t>(value);
+        }
     } else if (input.dtype() == DType::Bool) {
         auto* data = result.data<bool>();
         bool val = (value != 0.0f);
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
+    } else if (input.dtype() == DType::Complex64) {
+        auto* data = result.data<std::complex<float>>();
+        std::complex<float> val(value, 0.0f);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        auto* data = result.data<std::complex<double>>();
+        std::complex<double> val(static_cast<double>(value), 0.0);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::FP8_E4M3) {
+        auto* data = result.data<FP8_E4M3>();
+        FP8_E4M3 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::FP8_E5M2) {
+        auto* data = result.data<FP8_E5M2>();
+        FP8_E5M2 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::QInt8 ||
+               input.dtype() == DType::QUInt8 ||
+               input.dtype() == DType::QInt4x2) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        auto* data = result.data<int8_t>();
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const int8_t qbyte = static_cast<int8_t>(
+            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else {
+        throw std::runtime_error(std::string("fill_kernel: unsupported dtype ") +
+                                 std::string(dtype_name(input.dtype())));
     }
 
     return result;

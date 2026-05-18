@@ -1243,6 +1243,22 @@ auto Tensor::fill_(double value) -> Tensor& {
                 case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
                 case DType::Complex64: *reinterpret_cast<std::complex<float>*>(base + offset) = std::complex<float>(value, 0.0f); break;
                 case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
+                case DType::FP8_E4M3: *reinterpret_cast<FP8_E4M3*>(base + offset) = FP8_E4M3(static_cast<float>(value)); break;
+                case DType::FP8_E5M2: *reinterpret_cast<FP8_E5M2*>(base + offset) = FP8_E5M2(static_cast<float>(value)); break;
+                case DType::QInt8:
+                case DType::QUInt8:
+                case DType::QInt4x2:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        // quantized value = round(value / scale) + zero_point, clamped to storage range
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(
+                            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                    }
+                    break;
                 default: throw std::runtime_error("fill_ not supported for this dtype");
             }
             // Increment indices (row-major order)
@@ -1310,8 +1326,25 @@ auto Tensor::fill_(double value) -> Tensor& {
         case DType::Bool: std::fill_n(data<bool>(), n, value != 0.0f); break;
         case DType::Complex64: std::fill_n(data<std::complex<float>>(), n, std::complex<float>(value, 0.0f)); break;
         case DType::Complex128: std::fill_n(data<std::complex<double>>(), n, std::complex<double>(static_cast<double>(value), 0.0)); break;
+        case DType::FP8_E4M3: std::fill_n(data<FP8_E4M3>(), n, FP8_E4M3(static_cast<float>(value))); break;
+        case DType::FP8_E5M2: std::fill_n(data<FP8_E5M2>(), n, FP8_E5M2(static_cast<float>(value))); break;
+        case DType::QInt8:
+        case DType::QUInt8:
+        case DType::QInt4x2:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // quantized value = round(value / scale) + zero_point, clamped to int8 range
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                std::fill_n(data<int8_t>(), n, static_cast<int8_t>(
+                    std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127))));
+            }
+            break;
         default:
-            throw std::runtime_error("fill_ not supported for this dtype");
+            throw std::runtime_error(std::string("fill_: unsupported dtype ") +
+                                     std::string(dtype_name(impl_->dtype)));
     }
 
     bump_version();
