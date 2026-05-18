@@ -1066,3 +1066,8 @@ tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKEN
 add_executable(test_reduction_numerical_fixes test_reduction_numerical_fixes.cpp)
 target_link_libraries(test_reduction_numerical_fixes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 4 Task 4.2: Int8/UInt8 mul/add/sub wrap-on-overflow consistency
+add_executable(test_int8_overflow_semantics test_int8_overflow_semantics.cpp)
+target_link_libraries(test_int8_overflow_semantics PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_int8_overflow_semantics DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

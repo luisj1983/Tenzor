@@ -272,6 +272,18 @@ template<> struct SimdTrait<SubOp, Float16> {
 
 // --- MulOp specializations ---
 
+template<> struct SimdTrait<MulOp, int8_t> {
+    static void apply(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
+        int_simd::mul_i8(a, b, c, n);
+    }
+};
+
+template<> struct SimdTrait<MulOp, uint8_t> {
+    static void apply(const uint8_t* a, const uint8_t* b, uint8_t* c, size_t n) {
+        int_simd::mul_u8(a, b, c, n);
+    }
+};
+
 template<> struct SimdTrait<MulOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
 #ifdef TENZOR_HAS_AVX512
