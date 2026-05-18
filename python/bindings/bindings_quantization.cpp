@@ -268,10 +268,11 @@ void register_quantization(py::module_& m) {
 
     py::class_<QuantizedLSTM, Module,
                std::shared_ptr<QuantizedLSTM>>(quant, "QuantizedLSTM")
-        .def(py::init<int64_t, int64_t, int64_t, bool, bool, bool, QuantizationParams>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, bool, float, QuantizationParams>(),
              py::arg("input_size"), py::arg("hidden_size"),
              py::arg("num_layers") = 1, py::arg("bias") = true,
              py::arg("batch_first") = true, py::arg("bidirectional") = false,
+             py::arg("dropout") = 0.0f,
              py::arg("weight_qparams") = QuantizationParams(
                  Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
              "INT8 quantized LSTM")
