@@ -53,25 +53,19 @@ inline void configure_threads() {
 }
 
 #ifdef TENZOR_USE_ONEDNN
-// Thread-local oneDNN engine and stream with proper thread configuration
+// Engine/stream accessors — delegate to single per-thread instance in onednn_cache.hpp.
 inline dnnl::engine& get_nn_engine() {
-    static thread_local std::unique_ptr<dnnl::engine> engine;
-
-    // Ensure threads are configured before using oneDNN
-    configure_threads();
-
-    if (!engine) {
-        engine = std::make_unique<dnnl::engine>(dnnl::engine::kind::cpu, 0);
+    // Ensure OMP thread count is configured before first use.
+    static thread_local bool threads_configured = false;
+    if (!threads_configured) {
+        threads_configured = true;
+        configure_threads();
     }
-    return *engine;
+    return tenzor::cpu::get_onednn_engine();
 }
 
 inline dnnl::stream& get_nn_stream() {
-    static thread_local std::unique_ptr<dnnl::stream> stream;
-    if (!stream) {
-        stream = std::make_unique<dnnl::stream>(get_nn_engine());
-    }
-    return *stream;
+    return tenzor::cpu::get_onednn_stream();
 }
 
 // --------------------------------------------------------------------------

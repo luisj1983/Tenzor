@@ -62,21 +62,12 @@ using gemm_int = MKL_INT;
 // No MKL - check for oneDNN or fall back to generic CBLAS
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #define TENZOR_LSTM_USE_ONEDNN_GEMM 1
 
-// Thread-local oneDNN engine and stream for LSTM GEMM operations.
-// Safe: LSTM sequence processing is single-threaded (OMP parallelism is at batch
-// dimension in the caller, not inside these GEMM calls).
+// Use shared per-thread oneDNN engine/stream from onednn_cache.hpp
+// (eliminates a duplicate engine per thread).
 namespace {
-static thread_local dnnl::engine* g_lstm_engine = nullptr;
-static thread_local dnnl::stream* g_lstm_stream = nullptr;
-
-inline void ensure_lstm_dnnl_engine() {
-    if (!g_lstm_engine) {
-        g_lstm_engine = new dnnl::engine(dnnl::engine::kind::cpu, 0);
-        g_lstm_stream = new dnnl::stream(*g_lstm_engine);
-    }
-}
 
 inline void onednn_sgemm_nt(
     int64_t M, int64_t N, int64_t K,
@@ -85,9 +76,8 @@ inline void onednn_sgemm_nt(
     float beta, float* C, int64_t ldc
 ) {
     (void)alpha; (void)beta;
-    ensure_lstm_dnnl_engine();
-    auto& engine = *g_lstm_engine;
-    auto& stream = *g_lstm_stream;
+    auto& engine = tenzor::cpu::get_onednn_engine();
+    auto& stream = tenzor::cpu::get_onednn_stream();
 
     try {
         dnnl::memory::dims a_dims = {M, K};
