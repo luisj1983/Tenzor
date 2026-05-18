@@ -1,0 +1,280 @@
+#include <gtest/gtest.h>
+#include "tenzor/tenzor.hpp"
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"
+
+namespace tenzor { void initialize(); }
+
+namespace tz = ::tenzor;
+
+// Audit Phase 2 Tasks 2.1+2.2: creation kernels (zeros/ones/full/arange/linspace)
+// must support every advertised dtype without throwing.
+
+class CreationDtypeCoverageEnv : public ::testing::Environment {
+public:
+    void SetUp() override { tenzor::initialize(); }
+};
+static ::testing::Environment* const g_env =
+    ::testing::AddGlobalTestEnvironment(new CreationDtypeCoverageEnv);
+
+namespace {
+
+tz::Tensor as_f64(const tz::Tensor& t) { return t.cpu().to(tz::DType::Float64); }
+
+void expect_all_equal(const tz::Tensor& t, double expected, double atol = 1e-6) {
+    auto f = as_f64(t);
+    const double* p = f.data<double>();
+    for (int64_t i = 0; i < f.numel(); ++i) {
+        EXPECT_NEAR(p[i], expected, atol)
+            << "i=" << i << " dtype=" << static_cast<int>(t.dtype());
+    }
+}
+
+}  // namespace
+
+// ============================================================================
+// zeros — all dtypes
+// ============================================================================
+TEST(CreationDtypeCoverage, ZerosFloat16)  { expect_all_equal(tz::zeros({16}, tz::DType::Float16),  0.0); }
+TEST(CreationDtypeCoverage, ZerosBFloat16) { expect_all_equal(tz::zeros({16}, tz::DType::BFloat16), 0.0); }
+TEST(CreationDtypeCoverage, ZerosInt8)     { expect_all_equal(tz::zeros({16}, tz::DType::Int8),     0.0); }
+TEST(CreationDtypeCoverage, ZerosInt16)    { expect_all_equal(tz::zeros({16}, tz::DType::Int16),    0.0); }
+TEST(CreationDtypeCoverage, ZerosUInt8)    { expect_all_equal(tz::zeros({16}, tz::DType::UInt8),    0.0); }
+TEST(CreationDtypeCoverage, ZerosUInt16)   { expect_all_equal(tz::zeros({16}, tz::DType::UInt16),   0.0); }
+TEST(CreationDtypeCoverage, ZerosUInt32)   { expect_all_equal(tz::zeros({16}, tz::DType::UInt32),   0.0); }
+TEST(CreationDtypeCoverage, ZerosUInt64)   { expect_all_equal(tz::zeros({16}, tz::DType::UInt64),   0.0); }
+TEST(CreationDtypeCoverage, ZerosBool)     { expect_all_equal(tz::zeros({16}, tz::DType::Bool),     0.0); }
+TEST(CreationDtypeCoverage, ZerosComplex64) {
+    auto t = tz::zeros({4}, tz::DType::Complex64);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 0.0, 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+TEST(CreationDtypeCoverage, ZerosComplex128) {
+    auto t = tz::zeros({4}, tz::DType::Complex128);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 0.0, 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+
+// ============================================================================
+// ones — all standard dtypes
+// ============================================================================
+TEST(CreationDtypeCoverage, OnesFloat16)   { expect_all_equal(tz::ones({16}, tz::DType::Float16),  1.0); }
+TEST(CreationDtypeCoverage, OnesBFloat16)  { expect_all_equal(tz::ones({16}, tz::DType::BFloat16), 1.0); }
+TEST(CreationDtypeCoverage, OnesInt8)      { expect_all_equal(tz::ones({16}, tz::DType::Int8),     1.0); }
+TEST(CreationDtypeCoverage, OnesInt16)     { expect_all_equal(tz::ones({16}, tz::DType::Int16),    1.0); }
+TEST(CreationDtypeCoverage, OnesUInt8)     { expect_all_equal(tz::ones({16}, tz::DType::UInt8),    1.0); }
+TEST(CreationDtypeCoverage, OnesUInt16)    { expect_all_equal(tz::ones({16}, tz::DType::UInt16),   1.0); }
+TEST(CreationDtypeCoverage, OnesUInt32)    { expect_all_equal(tz::ones({16}, tz::DType::UInt32),   1.0); }
+TEST(CreationDtypeCoverage, OnesUInt64)    { expect_all_equal(tz::ones({16}, tz::DType::UInt64),   1.0); }
+TEST(CreationDtypeCoverage, OnesBool)      { expect_all_equal(tz::ones({16}, tz::DType::Bool),     1.0); }
+TEST(CreationDtypeCoverage, OnesComplex64) {
+    auto t = tz::ones({4}, tz::DType::Complex64);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 1.0, 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+TEST(CreationDtypeCoverage, OnesComplex128) {
+    auto t = tz::ones({4}, tz::DType::Complex128);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 1.0, 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+
+// ============================================================================
+// full — precision and new dtypes
+// ============================================================================
+TEST(CreationDtypeCoverage, FullFloat64Precision) {
+    // Pre-fix, full took `float` in the kernel. Float64 caller lost precision.
+    double v = 1.234567890123456;  // 16 significant digits
+    auto t = tz::full({4}, v, tz::DType::Float64);
+    const double* p = t.cpu().data<double>();
+    for (int i = 0; i < 4; ++i)
+        EXPECT_DOUBLE_EQ(p[i], v) << "full() lost precision at i=" << i;
+}
+TEST(CreationDtypeCoverage, FullInt64NoTruncation) {
+    // Pre-fix, arange/full took float start — big Int64 would truncate.
+    int64_t v = (1LL << 50) + 7;  // > 2^32, won't fit in float
+    auto t = tz::full({4}, static_cast<double>(v), tz::DType::Int64);
+    const int64_t* p = t.cpu().data<int64_t>();
+    for (int i = 0; i < 4; ++i)
+        EXPECT_EQ(p[i], v) << "full() Int64 truncation at i=" << i;
+}
+TEST(CreationDtypeCoverage, FullFloat16)  { expect_all_equal(tz::full({16}, 2.0, tz::DType::Float16),  2.0, 1e-3); }
+TEST(CreationDtypeCoverage, FullBFloat16) { expect_all_equal(tz::full({16}, 2.0, tz::DType::BFloat16), 2.0, 1e-2); }
+TEST(CreationDtypeCoverage, FullInt8)     { expect_all_equal(tz::full({16}, 7.0, tz::DType::Int8),     7.0); }
+TEST(CreationDtypeCoverage, FullInt16)    { expect_all_equal(tz::full({16}, 7.0, tz::DType::Int16),    7.0); }
+TEST(CreationDtypeCoverage, FullUInt8)    { expect_all_equal(tz::full({16}, 7.0, tz::DType::UInt8),    7.0); }
+TEST(CreationDtypeCoverage, FullUInt16)   { expect_all_equal(tz::full({16}, 7.0, tz::DType::UInt16),   7.0); }
+TEST(CreationDtypeCoverage, FullUInt32)   { expect_all_equal(tz::full({16}, 7.0, tz::DType::UInt32),   7.0); }
+TEST(CreationDtypeCoverage, FullUInt64)   { expect_all_equal(tz::full({16}, 7.0, tz::DType::UInt64),   7.0); }
+TEST(CreationDtypeCoverage, FullBool)     { expect_all_equal(tz::full({16}, 1.0, tz::DType::Bool),     1.0); }
+TEST(CreationDtypeCoverage, FullComplex64) {
+    auto t = tz::full({4}, 3.5, tz::DType::Complex64);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 3.5, 1e-6) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+TEST(CreationDtypeCoverage, FullComplex128) {
+    auto t = tz::full({4}, 3.5, tz::DType::Complex128);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], 3.5, 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+
+// ============================================================================
+// arange — new dtypes and precision
+// ============================================================================
+TEST(CreationDtypeCoverage, ArangeFloat16) {
+    auto t = tz::arange(0.0, 4.0, 1.0, tz::DType::Float16);
+    ASSERT_EQ(t.numel(), 4);
+    auto f = as_f64(t);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_NEAR(f.data<double>()[i], static_cast<double>(i), 1e-3) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeBFloat16) {
+    auto t = tz::arange(0.0, 4.0, 1.0, tz::DType::BFloat16);
+    ASSERT_EQ(t.numel(), 4);
+    auto f = as_f64(t);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_NEAR(f.data<double>()[i], static_cast<double>(i), 1e-2) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeInt8) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::Int8);
+    ASSERT_EQ(t.numel(), 8);
+    const int8_t* p = t.cpu().data<int8_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<int8_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeInt16) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::Int16);
+    ASSERT_EQ(t.numel(), 8);
+    const int16_t* p = t.cpu().data<int16_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<int16_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeUInt8) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::UInt8);
+    ASSERT_EQ(t.numel(), 8);
+    const uint8_t* p = t.cpu().data<uint8_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<uint8_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeUInt16) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::UInt16);
+    ASSERT_EQ(t.numel(), 8);
+    const uint16_t* p = t.cpu().data<uint16_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<uint16_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeUInt32) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::UInt32);
+    ASSERT_EQ(t.numel(), 8);
+    const uint32_t* p = t.cpu().data<uint32_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<uint32_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeUInt64) {
+    auto t = tz::arange(0.0, 8.0, 1.0, tz::DType::UInt64);
+    ASSERT_EQ(t.numel(), 8);
+    const uint64_t* p = t.cpu().data<uint64_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(p[i], static_cast<uint64_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeInt64Precision) {
+    // > 2^32 so float start/step would truncate.
+    int64_t base = (1LL << 40);
+    auto t = tz::arange(static_cast<double>(base),
+                        static_cast<double>(base + 4), 1.0,
+                        tz::DType::Int64);
+    ASSERT_EQ(t.numel(), 4);
+    const int64_t* p = t.cpu().data<int64_t>();
+    for (int i = 0; i < 4; ++i)
+        EXPECT_EQ(p[i], base + i) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, ArangeComplex64) {
+    auto t = tz::arange(0.0, 4.0, 1.0, tz::DType::Complex64);
+    ASSERT_EQ(t.numel(), 4);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], static_cast<double>(i), 1e-6) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+TEST(CreationDtypeCoverage, ArangeComplex128) {
+    auto t = tz::arange(0.0, 4.0, 1.0, tz::DType::Complex128);
+    ASSERT_EQ(t.numel(), 4);
+    auto re = tz::real(t).cpu().to(tz::DType::Float64);
+    auto im = tz::imag(t).cpu().to(tz::DType::Float64);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(re.data<double>()[i], static_cast<double>(i), 1e-9) << "re i=" << i;
+        EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-9) << "im i=" << i;
+    }
+}
+
+// ============================================================================
+// linspace — new dtypes
+// ============================================================================
+TEST(CreationDtypeCoverage, LinspaceFloat16) {
+    auto t = tz::linspace(0.0f, 1.0f, 5, tz::DType::Float16);
+    ASSERT_EQ(t.numel(), 5);
+    auto f = as_f64(t);
+    EXPECT_NEAR(f.data<double>()[0], 0.0, 1e-3);
+    EXPECT_NEAR(f.data<double>()[4], 1.0, 1e-3);
+}
+TEST(CreationDtypeCoverage, LinspaceBFloat16) {
+    auto t = tz::linspace(0.0f, 1.0f, 5, tz::DType::BFloat16);
+    ASSERT_EQ(t.numel(), 5);
+    auto f = as_f64(t);
+    EXPECT_NEAR(f.data<double>()[0], 0.0, 1e-2);
+    EXPECT_NEAR(f.data<double>()[4], 1.0, 1e-2);
+}
+TEST(CreationDtypeCoverage, LinspaceInt32) {
+    auto t = tz::linspace(0.0f, 4.0f, 5, tz::DType::Int32);
+    ASSERT_EQ(t.numel(), 5);
+    const int32_t* p = t.cpu().data<int32_t>();
+    for (int i = 0; i < 5; ++i)
+        EXPECT_EQ(p[i], i) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, LinspaceInt64) {
+    auto t = tz::linspace(0.0f, 4.0f, 5, tz::DType::Int64);
+    ASSERT_EQ(t.numel(), 5);
+    const int64_t* p = t.cpu().data<int64_t>();
+    for (int i = 0; i < 5; ++i)
+        EXPECT_EQ(p[i], static_cast<int64_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, LinspaceInt8) {
+    auto t = tz::linspace(0.0f, 4.0f, 5, tz::DType::Int8);
+    ASSERT_EQ(t.numel(), 5);
+    const int8_t* p = t.cpu().data<int8_t>();
+    for (int i = 0; i < 5; ++i)
+        EXPECT_EQ(p[i], static_cast<int8_t>(i)) << "i=" << i;
+}
+TEST(CreationDtypeCoverage, LinspaceInt16) {
+    auto t = tz::linspace(0.0f, 4.0f, 5, tz::DType::Int16);
+    ASSERT_EQ(t.numel(), 5);
+    const int16_t* p = t.cpu().data<int16_t>();
+    for (int i = 0; i < 5; ++i)
+        EXPECT_EQ(p[i], static_cast<int16_t>(i)) << "i=" << i;
+}

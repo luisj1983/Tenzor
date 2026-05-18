@@ -398,12 +398,12 @@ namespace cpu {
     // Creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, const Device& device) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, const Device& device) -> Tensor;
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto arange_kernel(float start, float end, float step, DType dtype, const Device& device) -> Tensor;
-    auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
+    auto arange_kernel(double start, double end, double step, DType dtype, const Device& device) -> Tensor;
+    auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const Device& device) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
 
     // RNN - Cell operations
@@ -3377,7 +3377,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Full, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
@@ -3411,9 +3411,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Arange, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
-        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 0.0);
+        double step = attrs.get_float(AttrKey::Step, 1.0);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
@@ -3421,8 +3421,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Linspace, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 1.0);
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);

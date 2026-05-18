@@ -36,22 +36,11 @@ namespace cpu {
 
 auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
-
-    // IEEE 754 float/double zero and integer zero are all-bits-zero,
-    // so memset is correct and fastest for all supported dtypes.
-    if (dtype == DType::Float32) {
-        std::memset(result.data<float>(), 0, n * sizeof(float));
-    } else if (dtype == DType::Float64) {
-        std::memset(result.data<double>(), 0, n * sizeof(double));
-    } else if (dtype == DType::Int32) {
-        std::memset(result.data<int32_t>(), 0, n * sizeof(int32_t));
-    } else if (dtype == DType::Int64) {
-        std::memset(result.data<int64_t>(), 0, n * sizeof(int64_t));
-    } else {
-        throw std::runtime_error("zeros operation: unsupported dtype");
-    }
-
+    // IEEE 754 float/double zero, all integer zeros, bool false, complex zero,
+    // FP8 zero, and quantized raw-zero are all represented as all-bits-zero.
+    // A single memset covers every advertised dtype correctly.
+    size_t nbytes = static_cast<size_t>(result.numel()) * dtype_size(dtype);
+    std::memset(result.data_ptr(), 0, nbytes);
     return result;
 }
 
@@ -63,32 +52,95 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
 
-    if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = 1.0f;
+    switch (dtype) {
+        case DType::Float16: {
+            Float16* data = result.data<Float16>();
+            std::fill_n(data, n, Float16(1.0f));
+            break;
         }
-    } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = 1.0;
+        case DType::BFloat16: {
+            BFloat16* data = result.data<BFloat16>();
+            std::fill_n(data, n, BFloat16(1.0f));
+            break;
         }
-    } else if (dtype == DType::Int32) {
-        int32_t* data = result.data<int32_t>();
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = 1;
+        case DType::Float32: {
+            float* data = result.data<float>();
+            std::fill_n(data, n, 1.0f);
+            break;
         }
-    } else if (dtype == DType::Int64) {
-        int64_t* data = result.data<int64_t>();
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = 1;
+        case DType::Float64: {
+            double* data = result.data<double>();
+            std::fill_n(data, n, 1.0);
+            break;
         }
-    } else {
-        throw std::runtime_error("ones operation: unsupported dtype");
+        case DType::Int8: {
+            int8_t* data = result.data<int8_t>();
+            std::fill_n(data, n, static_cast<int8_t>(1));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* data = result.data<int16_t>();
+            std::fill_n(data, n, static_cast<int16_t>(1));
+            break;
+        }
+        case DType::Int32: {
+            int32_t* data = result.data<int32_t>();
+            std::fill_n(data, n, static_cast<int32_t>(1));
+            break;
+        }
+        case DType::Int64: {
+            int64_t* data = result.data<int64_t>();
+            std::fill_n(data, n, static_cast<int64_t>(1));
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* data = result.data<uint8_t>();
+            std::fill_n(data, n, static_cast<uint8_t>(1));
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* data = result.data<uint16_t>();
+            std::fill_n(data, n, static_cast<uint16_t>(1));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* data = result.data<uint32_t>();
+            std::fill_n(data, n, static_cast<uint32_t>(1));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* data = result.data<uint64_t>();
+            std::fill_n(data, n, static_cast<uint64_t>(1));
+            break;
+        }
+        case DType::Bool: {
+            bool* data = result.data<bool>();
+            std::fill_n(data, n, true);
+            break;
+        }
+        case DType::Complex64: {
+            auto* data = result.data<std::complex<float>>();
+            std::fill_n(data, n, std::complex<float>(1.0f, 0.0f));
+            break;
+        }
+        case DType::Complex128: {
+            auto* data = result.data<std::complex<double>>();
+            std::fill_n(data, n, std::complex<double>(1.0, 0.0));
+            break;
+        }
+        case DType::FP8_E4M3: {
+            FP8_E4M3* data = result.data<FP8_E4M3>();
+            std::fill_n(data, n, FP8_E4M3(1.0f));
+            break;
+        }
+        case DType::FP8_E5M2: {
+            FP8_E5M2* data = result.data<FP8_E5M2>();
+            std::fill_n(data, n, FP8_E5M2(1.0f));
+            break;
+        }
+        default:
+            throw std::runtime_error("ones operation: unsupported dtype " +
+                std::to_string(static_cast<int>(dtype)));
     }
 
     return result;
@@ -337,39 +389,99 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
 // Full Kernel - Create tensor filled with a specific value
 // ============================================================================
 
-auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, const Device& device) -> Tensor {
+auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
 
-    if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = value;
+    switch (dtype) {
+        case DType::Float16: {
+            Float16* data = result.data<Float16>();
+            std::fill_n(data, n, Float16(static_cast<float>(value)));
+            break;
         }
-    } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-        double dval = static_cast<double>(value);
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = dval;
+        case DType::BFloat16: {
+            BFloat16* data = result.data<BFloat16>();
+            std::fill_n(data, n, BFloat16(static_cast<float>(value)));
+            break;
         }
-    } else if (dtype == DType::Int32) {
-        int32_t* data = result.data<int32_t>();
-        int32_t ival = static_cast<int32_t>(value);
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = ival;
+        case DType::Float32: {
+            float* data = result.data<float>();
+            std::fill_n(data, n, static_cast<float>(value));
+            break;
         }
-    } else if (dtype == DType::Int64) {
-        int64_t* data = result.data<int64_t>();
-        int64_t ival = static_cast<int64_t>(value);
-        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = ival;
+        case DType::Float64: {
+            double* data = result.data<double>();
+            std::fill_n(data, n, value);
+            break;
         }
-    } else {
-        throw std::runtime_error("full operation: unsupported dtype");
+        case DType::Int8: {
+            int8_t* data = result.data<int8_t>();
+            std::fill_n(data, n, static_cast<int8_t>(value));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* data = result.data<int16_t>();
+            std::fill_n(data, n, static_cast<int16_t>(value));
+            break;
+        }
+        case DType::Int32: {
+            int32_t* data = result.data<int32_t>();
+            std::fill_n(data, n, static_cast<int32_t>(value));
+            break;
+        }
+        case DType::Int64: {
+            int64_t* data = result.data<int64_t>();
+            std::fill_n(data, n, static_cast<int64_t>(value));
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* data = result.data<uint8_t>();
+            std::fill_n(data, n, static_cast<uint8_t>(value));
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* data = result.data<uint16_t>();
+            std::fill_n(data, n, static_cast<uint16_t>(value));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* data = result.data<uint32_t>();
+            std::fill_n(data, n, static_cast<uint32_t>(value));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* data = result.data<uint64_t>();
+            std::fill_n(data, n, static_cast<uint64_t>(value));
+            break;
+        }
+        case DType::Bool: {
+            bool* data = result.data<bool>();
+            std::fill_n(data, n, value != 0.0);
+            break;
+        }
+        case DType::Complex64: {
+            auto* data = result.data<std::complex<float>>();
+            std::fill_n(data, n, std::complex<float>(static_cast<float>(value), 0.0f));
+            break;
+        }
+        case DType::Complex128: {
+            auto* data = result.data<std::complex<double>>();
+            std::fill_n(data, n, std::complex<double>(value, 0.0));
+            break;
+        }
+        case DType::FP8_E4M3: {
+            FP8_E4M3* data = result.data<FP8_E4M3>();
+            std::fill_n(data, n, FP8_E4M3(static_cast<float>(value)));
+            break;
+        }
+        case DType::FP8_E5M2: {
+            FP8_E5M2* data = result.data<FP8_E5M2>();
+            std::fill_n(data, n, FP8_E5M2(static_cast<float>(value)));
+            break;
+        }
+        default:
+            throw std::runtime_error("full operation: unsupported dtype " +
+                std::to_string(static_cast<int>(dtype)));
     }
 
     return result;
@@ -379,40 +491,112 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, co
 // Arange Kernel - Create tensor with evenly spaced values
 // ============================================================================
 
-auto arange_kernel(float start, float end, float step, DType dtype, const Device& device) -> Tensor {
-    if (step == 0.0f) {
+auto arange_kernel(double start, double end, double step, DType dtype, const Device& device) -> Tensor {
+    if (step == 0.0) {
         throw std::runtime_error("arange: step must be non-zero");
     }
     if ((step > 0 && start >= end) || (step < 0 && start <= end)) {
-        // Return empty tensor
         return Tensor({0}, dtype, device);
     }
 
     int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    if (numel < 0) numel = 0;
     Tensor result({numel}, dtype, device);
 
-    if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = start + static_cast<float>(i) * step;
+    switch (dtype) {
+        case DType::Float16: {
+            Float16* data = result.data<Float16>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = Float16(static_cast<float>(start + i * step));
+            break;
         }
-    } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = static_cast<double>(start) + static_cast<double>(i) * static_cast<double>(step);
+        case DType::BFloat16: {
+            BFloat16* data = result.data<BFloat16>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = BFloat16(static_cast<float>(start + i * step));
+            break;
         }
-    } else if (dtype == DType::Int32) {
-        int32_t* data = result.data<int32_t>();
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = static_cast<int32_t>(start + static_cast<float>(i) * step);
+        case DType::Float32: {
+            float* data = result.data<float>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<float>(start + i * step);
+            break;
         }
-    } else if (dtype == DType::Int64) {
-        int64_t* data = result.data<int64_t>();
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = static_cast<int64_t>(start + static_cast<float>(i) * step);
+        case DType::Float64: {
+            double* data = result.data<double>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = start + i * step;
+            break;
         }
-    } else {
-        throw std::runtime_error("arange operation: unsupported dtype");
+        case DType::Int8: {
+            int8_t* data = result.data<int8_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<int8_t>(start + i * step);
+            break;
+        }
+        case DType::Int16: {
+            int16_t* data = result.data<int16_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<int16_t>(start + i * step);
+            break;
+        }
+        case DType::Int32: {
+            int32_t* data = result.data<int32_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<int32_t>(start + i * step);
+            break;
+        }
+        case DType::Int64: {
+            int64_t* data = result.data<int64_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<int64_t>(start + i * step);
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* data = result.data<uint8_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<uint8_t>(start + i * step);
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* data = result.data<uint16_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<uint16_t>(start + i * step);
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* data = result.data<uint32_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<uint32_t>(start + i * step);
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* data = result.data<uint64_t>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = static_cast<uint64_t>(start + i * step);
+            break;
+        }
+        case DType::Bool: {
+            bool* data = result.data<bool>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = (start + i * step) != 0.0;
+            break;
+        }
+        case DType::Complex64: {
+            auto* data = result.data<std::complex<float>>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = std::complex<float>(static_cast<float>(start + i * step), 0.0f);
+            break;
+        }
+        case DType::Complex128: {
+            auto* data = result.data<std::complex<double>>();
+            for (int64_t i = 0; i < numel; ++i)
+                data[i] = std::complex<double>(start + i * step, 0.0);
+            break;
+        }
+        default:
+            throw std::runtime_error("arange operation: unsupported dtype " +
+                std::to_string(static_cast<int>(dtype)));
     }
 
     return result;
@@ -422,7 +606,7 @@ auto arange_kernel(float start, float end, float step, DType dtype, const Device
 // Linspace Kernel - Create tensor with linearly spaced values
 // ============================================================================
 
-auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor {
+auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const Device& device) -> Tensor {
     if (steps < 0) {
         throw std::runtime_error("linspace: number of steps must be non-negative");
     }
@@ -432,36 +616,51 @@ auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const D
 
     Tensor result({steps}, dtype, device);
 
-    // Compute step in F64 to preserve precision across all output dtypes,
-    // exactly mirroring the public src/ops/creation.cpp::linspace path.
     double step_size = (steps > 1)
-        ? (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1)
+        ? (end - start) / static_cast<double>(steps - 1)
         : 0.0;
 
     auto fill = [&](auto* ptr, auto cast) {
         if (steps == 1) {
-            ptr[0] = cast(static_cast<double>(start));
+            ptr[0] = cast(start);
             return;
         }
         for (int64_t i = 0; i < steps; ++i) {
-            ptr[i] = cast(static_cast<double>(start) + static_cast<double>(i) * step_size);
+            ptr[i] = cast(start + static_cast<double>(i) * step_size);
         }
-        // Exact endpoint to avoid floating-point drift.
-        ptr[steps - 1] = cast(static_cast<double>(end));
+        ptr[steps - 1] = cast(end);
     };
 
-    if (dtype == DType::Float32) {
-        fill(result.data<float>(), [](double v) { return static_cast<float>(v); });
-    } else if (dtype == DType::Float64) {
-        fill(result.data<double>(), [](double v) { return v; });
-    } else if (dtype == DType::Float16) {
-        fill(result.data<Float16>(),
-             [](double v) { return Float16(static_cast<float>(v)); });
-    } else if (dtype == DType::BFloat16) {
-        fill(result.data<BFloat16>(),
-             [](double v) { return BFloat16(static_cast<float>(v)); });
-    } else {
-        throw std::runtime_error("linspace operation: dtype not supported (expected Float32/64/16/BFloat16)");
+    switch (dtype) {
+        case DType::Float32:
+            fill(result.data<float>(), [](double v) { return static_cast<float>(v); });
+            break;
+        case DType::Float64:
+            fill(result.data<double>(), [](double v) { return v; });
+            break;
+        case DType::Float16:
+            fill(result.data<Float16>(),
+                 [](double v) { return Float16(static_cast<float>(v)); });
+            break;
+        case DType::BFloat16:
+            fill(result.data<BFloat16>(),
+                 [](double v) { return BFloat16(static_cast<float>(v)); });
+            break;
+        case DType::Int8:
+            fill(result.data<int8_t>(), [](double v) { return static_cast<int8_t>(v); });
+            break;
+        case DType::Int16:
+            fill(result.data<int16_t>(), [](double v) { return static_cast<int16_t>(v); });
+            break;
+        case DType::Int32:
+            fill(result.data<int32_t>(), [](double v) { return static_cast<int32_t>(v); });
+            break;
+        case DType::Int64:
+            fill(result.data<int64_t>(), [](double v) { return static_cast<int64_t>(v); });
+            break;
+        default:
+            throw std::runtime_error("linspace operation: dtype not supported " +
+                std::to_string(static_cast<int>(dtype)));
     }
 
     return result;

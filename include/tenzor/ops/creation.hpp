@@ -84,8 +84,8 @@ auto full(std::vector<int64_t> shape,
  */
 auto full(std::vector<int64_t> shape,
          double value,
-         DType dtype,
-         Device device) -> Tensor;
+         DType dtype = DType::Float64,
+         Device device = Device::cpu()) -> Tensor;
 
 /**
  * @brief Create uninitialized tensor.

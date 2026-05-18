@@ -1042,3 +1042,8 @@ tenzor_discover_tests(test_complex_matmul_mkl DISCOVERY_TIMEOUT 60 BACKENDS cpu 
 add_executable(test_norm_eps_cache test_norm_eps_cache.cpp)
 target_link_libraries(test_norm_eps_cache PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_norm_eps_cache DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 2 Tasks 2.1+2.2: creation kernels (zeros/ones/full/arange/linspace) dtype coverage
+add_executable(test_creation_dtype_coverage test_creation_dtype_coverage.cpp)
+target_link_libraries(test_creation_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

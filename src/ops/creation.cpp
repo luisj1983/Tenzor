@@ -154,12 +154,32 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         }
         case DType::UInt8: {
             uint8_t* ptr = static_cast<uint8_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            std::fill(ptr, ptr + numel, static_cast<uint8_t>(1));
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint16_t>(1));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint32_t>(1));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint64_t>(1));
             break;
         }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            std::fill(ptr, ptr + numel, static_cast<int8_t>(1));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int16_t>(1));
             break;
         }
         case DType::Bool: {
@@ -239,9 +259,29 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
             std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
             break;
         }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint16_t>(value));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint32_t>(value));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint64_t>(value));
+            break;
+        }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
             std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int16_t>(value));
             break;
         }
         case DType::Bool: {
@@ -321,9 +361,29 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
             std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
             break;
         }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint16_t>(value));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint32_t>(value));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint64_t>(value));
+            break;
+        }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
             std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int16_t>(value));
             break;
         }
         case DType::Bool: {
@@ -656,6 +716,27 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
             }
             break;
         }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint16_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint32_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint64_t>(start + i * step);
+            }
+            break;
+        }
         case DType::Bool: {
             bool* ptr = static_cast<bool*>(data);
             for (int64_t i = 0; i < numel; ++i) {
@@ -761,6 +842,38 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
                 // Ensure the last element is exactly 'end' to avoid floating point errors
                 ptr[steps - 1] = BFloat16(end);
             }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int8_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int8_t>(end);
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int16_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int16_t>(end);
+            break;
+        }
+        case DType::Int32: {
+            int32_t* ptr = static_cast<int32_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int32_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int32_t>(end);
+            break;
+        }
+        case DType::Int64: {
+            int64_t* ptr = static_cast<int64_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int64_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int64_t>(end);
             break;
         }
         default:
