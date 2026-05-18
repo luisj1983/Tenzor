@@ -1521,20 +1521,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{running_mean, running_var};
     });
 
-    // Register both multi-output and single-output versions for LayerNorm
-    // Multi-output returns {output, mean, rstd} to match CUDA backend (needed for backward pass)
+    // Multi-output LayerNorm: returns {output, mean, rstd} for backward pass compatibility.
+    // The single-output variant was dropped (audit 8.1) — it caused a duplicate-registration
+    // warning and the backward pass always needs {mean, rstd}.
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, rstd] = cpu::layer_norm_kernel_with_stats(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
         return std::vector<Tensor>{output, mean, rstd};
-    });
-
-    // Single-output version for optimized dispatch (no vector allocation)
-    table.register_single_output_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
