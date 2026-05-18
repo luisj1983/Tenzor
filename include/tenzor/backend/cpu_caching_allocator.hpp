@@ -22,6 +22,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <thread>
+#include <vector>
 
 namespace tenzor {
 namespace cpu {
@@ -128,14 +130,31 @@ public:
     void reset_stats();
 
     /**
+     * @brief Per-thread local pool statistics
+     */
+    struct LocalStats {
+        size_t allocated_bytes{0};  ///< Bytes currently allocated by this thread
+        size_t cached_bytes{0};     ///< Bytes cached in this thread's free pool
+    };
+
+    /**
+     * @brief Get statistics for the calling thread's local pool.
+     *
+     * Drains any pending cross-thread decrements before returning so the
+     * value is accurate immediately after a cross-thread deallocate.
+     */
+    auto get_local_stats() -> LocalStats;
+
+    /**
      * @brief Block metadata (public for thread_local storage)
      */
     struct Block {
-        void* ptr{nullptr};         ///< Memory pointer
-        size_t size{0};             ///< Usable size
-        size_t allocated_size{0};   ///< Original allocation size (before split)
-        void* root_ptr{nullptr};    ///< Original allocation pointer (for free)
-        bool is_split{false};       ///< True if this block was created by splitting
+        void* ptr{nullptr};                         ///< Memory pointer
+        size_t size{0};                             ///< Usable size
+        size_t allocated_size{0};                   ///< Original allocation size (before split)
+        void* root_ptr{nullptr};                    ///< Original allocation pointer (for free)
+        bool is_split{false};                       ///< True if this block was created by splitting
+        std::thread::id originating_tid{};          ///< Thread that allocated this block
     };
 
     /**
@@ -236,11 +255,29 @@ private:
      */
     bool is_fully_coalesced(const RootAllocation& root) const;
 
+    /**
+     * @brief Drain cross-thread pending decrements for the calling thread.
+     *
+     * When a block allocated by thread A is freed by thread B, the
+     * cross-thread free path cannot safely touch thread A's thread_local
+     * state.  Instead it records the freed pointer into
+     * per_thread_pending_frees_ (keyed by originating tid) under
+     * global_mutex_.  The next time thread A enters the allocator it calls
+     * this function to remove those stale entries from its local pool and
+     * reconcile local.allocated_bytes.
+     */
+    void drain_pending_decrements(ThreadLocalPool& local);
+
     // Global pool (accessed with mutex)
     std::multimap<size_t, Block> global_free_blocks_;
     std::unordered_map<void*, Block> global_allocated_blocks_;
     std::unordered_map<void*, RootAllocation> global_root_allocations_;
     mutable std::mutex global_mutex_;
+
+    // Cross-thread dealloc reconciliation: maps originating tid → list of
+    // pointers freed by a different thread.  Entries are drained by the
+    // originating thread on its next allocator call.  Protected by global_mutex_.
+    std::unordered_map<std::thread::id, std::vector<void*>> per_thread_pending_frees_;
 
     // Configuration
     std::atomic<size_t> max_cached_bytes_{1ULL << 30};        // 1GB

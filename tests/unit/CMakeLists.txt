@@ -825,6 +825,12 @@ add_executable(test_cat_slice_negative_dim test_cat_slice_negative_dim.cpp)
 target_link_libraries(test_cat_slice_negative_dim PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_cat_slice_negative_dim LABELS "audit;unit" DISCOVERY_TIMEOUT 60)
 
+# Audit P0 #8: caching allocator cross-thread dealloc bookkeeping drift
+add_executable(test_caching_allocator_cross_thread test_caching_allocator_cross_thread.cpp)
+target_include_directories(test_caching_allocator_cross_thread PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_caching_allocator_cross_thread PRIVATE tenzor_backend_cpu GTest::gtest_main)
+tenzor_discover_tests(test_caching_allocator_cross_thread DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
 # Hardtanh activation
 add_executable(test_hardtanh test_hardtanh.cpp)
 target_link_libraries(test_hardtanh PRIVATE tenzor_core GTest::gtest_main)

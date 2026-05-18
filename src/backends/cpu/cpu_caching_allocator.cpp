@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_set>
+#include <thread>
 
 #ifdef _WIN32
 #include <malloc.h>
@@ -71,6 +72,11 @@ auto CPUCachingAllocator::allocate(size_t bytes) -> void* {
         return nullptr;
     }
 
+    // Drain any cross-thread pending decrements before touching local state.
+    if (tl_pool_wrapper_.valid) {
+        drain_pending_decrements(get_local_pool());
+    }
+
     // Round up to alignment
     bytes = (bytes + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 
@@ -106,6 +112,7 @@ auto CPUCachingAllocator::allocate(size_t bytes) -> void* {
     block.allocated_size = bytes;
     block.root_ptr = ptr;
     block.is_split = false;
+    block.originating_tid = std::this_thread::get_id();
 
     {
         std::lock_guard<std::mutex> lock(global_mutex_);
@@ -156,6 +163,9 @@ void CPUCachingAllocator::deallocate(void* ptr) {
 
     auto& local = get_local_pool();
 
+    // Drain any cross-thread pending decrements before touching local state.
+    drain_pending_decrements(local);
+
     // Check thread-local allocated blocks first
     auto it = local.allocated_blocks.find(ptr);
     if (it != local.allocated_blocks.end()) {
@@ -195,7 +205,7 @@ void CPUCachingAllocator::deallocate(void* ptr) {
         return;
     }
 
-    // Check global allocated blocks
+    // Check global allocated blocks (cross-thread dealloc path)
     {
         std::lock_guard<std::mutex> lock(global_mutex_);
         auto git = global_allocated_blocks_.find(ptr);
@@ -217,6 +227,14 @@ void CPUCachingAllocator::deallocate(void* ptr) {
                 std::lock_guard<std::mutex> slock(stats_mutex_);
                 global_stats_.allocated_bytes -= block.size;
                 global_stats_.cached_bytes += block.size;
+            }
+
+            // Audit P0 #8: queue a pending decrement for the originating
+            // thread so its local.allocated_bytes and local.allocated_blocks
+            // stay in sync.  The originating thread drains this on its next
+            // allocator call via drain_pending_decrements().
+            if (block.originating_tid != std::thread::id{}) {
+                per_thread_pending_frees_[block.originating_tid].push_back(ptr);
             }
 
             return;
@@ -366,6 +384,7 @@ auto CPUCachingAllocator::try_allocate_local(size_t bytes) -> void* {
     }
 
     // Track as allocated - BOTH globally (for cross-thread dealloc) and locally (fast path)
+    block.originating_tid = std::this_thread::get_id();
     {
         std::lock_guard<std::mutex> glock(global_mutex_);
         global_allocated_blocks_[block.ptr] = block;
@@ -439,6 +458,7 @@ auto CPUCachingAllocator::try_allocate_global(size_t bytes) -> void* {
 
     // Track as allocated - BOTH globally (for cross-thread dealloc) and locally (fast path)
     // Note: already holding global_mutex_
+    block.originating_tid = std::this_thread::get_id();
     global_allocated_blocks_[block.ptr] = block;
 
     auto& local = get_local_pool();
@@ -737,6 +757,44 @@ void CPUCachingAllocator::free_to_system(void* ptr) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         global_stats_.num_backend_frees++;
     }
+}
+
+void CPUCachingAllocator::drain_pending_decrements(ThreadLocalPool& local) {
+    auto tid = std::this_thread::get_id();
+
+    // Steal the pending-frees vector under the lock, then process it without
+    // holding the lock (thread-local state must not be modified under
+    // global_mutex_ because allocate/deallocate acquire global_mutex_ while
+    // local state is active, and taking the lock a second time would deadlock
+    // on a non-recursive mutex).
+    std::vector<void*> pending;
+    {
+        std::lock_guard<std::mutex> lock(global_mutex_);
+        auto it = per_thread_pending_frees_.find(tid);
+        if (it == per_thread_pending_frees_.end() || it->second.empty()) {
+            return;
+        }
+        pending = std::move(it->second);
+        per_thread_pending_frees_.erase(it);
+    } // global_mutex_ released here
+
+    // Reconcile local state: remove stale entries left by cross-thread frees.
+    for (void* p : pending) {
+        auto local_it = local.allocated_blocks.find(p);
+        if (local_it != local.allocated_blocks.end()) {
+            local.allocated_bytes -= local_it->second.size;
+            local.allocated_blocks.erase(local_it);
+        }
+    }
+}
+
+auto CPUCachingAllocator::get_local_stats() -> LocalStats {
+    if (!tl_pool_wrapper_.valid) {
+        return {};
+    }
+    auto& local = get_local_pool();
+    drain_pending_decrements(local);
+    return {local.allocated_bytes, local.cached_bytes};
 }
 
 bool CPUCachingAllocator::try_coalesce_and_free(Block& block, ThreadLocalPool& /* local */) {
