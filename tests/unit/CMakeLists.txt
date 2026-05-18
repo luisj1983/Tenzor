@@ -1061,3 +1061,8 @@ tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu
 add_executable(test_reductions_dtype_coverage test_reductions_dtype_coverage.cpp)
 target_link_libraries(test_reductions_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 3 Tasks 3.1+3.2+3.3: norm F64 native, NaN propagation, F64 Kahan
+add_executable(test_reduction_numerical_fixes test_reduction_numerical_fixes.cpp)
+target_link_libraries(test_reduction_numerical_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")

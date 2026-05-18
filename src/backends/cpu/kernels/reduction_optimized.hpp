@@ -432,21 +432,28 @@ void sum_along_dim_optimized(
                 output[out_idx] = sum_full_simd(input + base_idx, reduce_size);
             } else {
                 // Strided access with Kahan summation
-                float sum = 0.0f;
-                float c = 0.0f;
+                T sum = T(0);
+                T c = T(0);
                 for (int64_t i = 0; i < reduce_size; ++i) {
-                    float y = input[base_idx + i * reduce_stride] - c;
-                    float t = sum + y;
+                    T y = input[base_idx + i * reduce_stride] - c;
+                    T t = sum + y;
                     c = (t - sum) - y;
                     sum = t;
                 }
                 output[out_idx] = sum;
             }
         } else {
-            // Generic path
+            // Kahan-compensated sum for all other scalar types (Float64 etc.).
+            // Applying compensation here is cheap relative to the compute and
+            // avoids the counter-intuitive situation where the higher-precision
+            // dtype lacks error compensation.
             T sum = T(0);
+            T c = T(0);
             for (int64_t i = 0; i < reduce_size; ++i) {
-                sum += input[base_idx + i * reduce_stride];
+                T y = input[base_idx + i * reduce_stride] - c;
+                T t = sum + y;
+                c = (t - sum) - y;
+                sum = t;
             }
             output[out_idx] = sum;
         }
