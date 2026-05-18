@@ -3503,17 +3503,68 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             }
             auto* ptr = base + byte_offset;
             switch (dtype) {
-                case DType::Float32:  *reinterpret_cast<float*>(ptr) = static_cast<float>(value); break;
-                case DType::Float64:  *reinterpret_cast<double*>(ptr) = value; break;
-                case DType::Int32:    *reinterpret_cast<int32_t*>(ptr) = static_cast<int32_t>(value); break;
-                case DType::Int64:    *reinterpret_cast<int64_t*>(ptr) = static_cast<int64_t>(value); break;
-                case DType::Int16:    *reinterpret_cast<int16_t*>(ptr) = static_cast<int16_t>(value); break;
-                case DType::Int8:     *reinterpret_cast<int8_t*>(ptr) = static_cast<int8_t>(value); break;
-                case DType::UInt8:    *reinterpret_cast<uint8_t*>(ptr) = static_cast<uint8_t>(value); break;
-                case DType::Float16:  *reinterpret_cast<Float16*>(ptr) = Float16(static_cast<float>(value)); break;
-                case DType::BFloat16: *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
-                case DType::Bool:     *reinterpret_cast<bool*>(ptr) = (value != 0.0); break;
-                default: break;
+                case DType::Float32:   *reinterpret_cast<float*>(ptr)    = static_cast<float>(value); break;
+                case DType::Float64:   *reinterpret_cast<double*>(ptr)   = value; break;
+                case DType::Int32:     *reinterpret_cast<int32_t*>(ptr)  = static_cast<int32_t>(value); break;
+                case DType::Int64:     *reinterpret_cast<int64_t*>(ptr)  = static_cast<int64_t>(value); break;
+                case DType::Int16:     *reinterpret_cast<int16_t*>(ptr)  = static_cast<int16_t>(value); break;
+                case DType::Int8:      *reinterpret_cast<int8_t*>(ptr)   = static_cast<int8_t>(value); break;
+                case DType::UInt8:     *reinterpret_cast<uint8_t*>(ptr)  = static_cast<uint8_t>(value); break;
+                case DType::UInt16:    *reinterpret_cast<uint16_t*>(ptr) = static_cast<uint16_t>(value); break;
+                case DType::UInt32:    *reinterpret_cast<uint32_t*>(ptr) = static_cast<uint32_t>(value); break;
+                case DType::UInt64:    *reinterpret_cast<uint64_t*>(ptr) = static_cast<uint64_t>(value); break;
+                case DType::Float16:   *reinterpret_cast<Float16*>(ptr)  = Float16(static_cast<float>(value)); break;
+                case DType::BFloat16:  *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
+                case DType::Bool:      *reinterpret_cast<bool*>(ptr)     = (value != 0.0); break;
+                case DType::Complex64:
+                    *reinterpret_cast<std::complex<float>*>(ptr) =
+                        std::complex<float>(static_cast<float>(value), 0.0f);
+                    break;
+                case DType::Complex128:
+                    *reinterpret_cast<std::complex<double>*>(ptr) =
+                        std::complex<double>(value, 0.0);
+                    break;
+                case DType::FP8_E4M3:
+                    *reinterpret_cast<FP8_E4M3*>(ptr) = FP8_E4M3(static_cast<float>(value));
+                    break;
+                case DType::FP8_E5M2:
+                    *reinterpret_cast<FP8_E5M2*>(ptr) = FP8_E5M2(static_cast<float>(value));
+                    break;
+                case DType::QInt8: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    *reinterpret_cast<int8_t*>(ptr) = static_cast<int8_t>(
+                        std::clamp(qv, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                    break;
+                }
+                case DType::QUInt8: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    *reinterpret_cast<uint8_t*>(ptr) = static_cast<uint8_t>(
+                        std::clamp(qv, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+                    break;
+                }
+                case DType::QInt4x2: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    const int64_t clamped = std::clamp(qv, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                    *reinterpret_cast<uint8_t*>(ptr) =
+                        static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                    break;
+                }
+                default:
+                    throw std::runtime_error(
+                        std::string("StridedFill: unsupported dtype ") +
+                        std::string(dtype_name(dtype)));
             }
         }
         return self;

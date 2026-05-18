@@ -1022,6 +1022,12 @@ add_executable(test_fill_kernel_dtype_coverage test_fill_kernel_dtype_coverage.c
 target_link_libraries(test_fill_kernel_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
 
+# Audit P0 #9 regression: StridedFill switch default: break silently no-ops for
+# Complex64/128, UInt16/32/64, FP8, and quantized dtypes on non-contiguous views
+add_executable(test_strided_fill_dtype_coverage test_strided_fill_dtype_coverage.cpp)
+target_link_libraries(test_strided_fill_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_strided_fill_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
 # Audit P0 #4 regression: scatter_add missing UInt16/UInt32/UInt64/Int16 dispatch
 add_executable(test_scatter_add_dtype_coverage test_scatter_add_dtype_coverage.cpp)
 target_link_libraries(test_scatter_add_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
