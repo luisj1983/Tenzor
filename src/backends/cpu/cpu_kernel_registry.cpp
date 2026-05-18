@@ -3260,8 +3260,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         // inputs: [input, running_mean, running_var, gamma, beta]
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+        // Shallow-copy: these must share storage with the caller's tensors so
+        // in-place running-stat updates propagate back.  If Tensor copy ever
+        // becomes deep, the mutation silently disappears — assert here to catch it.
         Tensor running_mean = inputs[1];
-        Tensor running_var = inputs[2];
+        Tensor running_var  = inputs[2];
+        if (running_mean.data_ptr() != inputs[1].data_ptr())
+            throw std::runtime_error(
+                "BatchNorm2dFusedTraining: running_mean copy does not share storage "
+                "with caller tensor — Tensor copy semantics changed to deep-copy?");
+        if (running_var.data_ptr() != inputs[2].data_ptr())
+            throw std::runtime_error(
+                "BatchNorm2dFusedTraining: running_var copy does not share storage "
+                "with caller tensor — Tensor copy semantics changed to deep-copy?");
         return cpu::batchnorm2d_fused_training_kernel(inputs[0], running_mean, running_var,
                                                        inputs[3], inputs[4], momentum, epsilon);
     });
