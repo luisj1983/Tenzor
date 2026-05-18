@@ -61,6 +61,20 @@ if 'OMP_NUM_THREADS' not in _os.environ:
 # NOTE: This will also register tenzor.nn in sys.modules pointing to C++ nn
 from .tenzor_core import *
 
+# _foreach_* names start with '_' so are not pulled in by import *; import explicitly.
+from .tenzor_core import (
+    _foreach_add, _foreach_add_,
+    _foreach_sub, _foreach_sub_,
+    _foreach_mul, _foreach_mul_,
+    _foreach_div, _foreach_div_,
+    _foreach_neg, _foreach_neg_,
+    _foreach_abs, _foreach_abs_,
+    _foreach_sqrt, _foreach_sqrt_,
+    _foreach_zero_, _foreach_copy,
+    _foreach_addcdiv_, _foreach_addcmul_,
+    _foreach_lerp_, _foreach_norm,
+)
+
 # Import the nn submodule from C++ (keep reference for internal use)
 from .tenzor_core import nn as _cpp_nn
 
@@ -506,6 +520,13 @@ __all__ = [
     "vstack",
     "vulkan_device_count",
     "vulkan_is_available",
+
+    # Multi-tensor foreach optimizer primitives (Phase 9-W2)
+    "_foreach_add", "_foreach_add_", "_foreach_sub", "_foreach_sub_",
+    "_foreach_mul", "_foreach_mul_", "_foreach_div", "_foreach_div_",
+    "_foreach_neg", "_foreach_neg_", "_foreach_abs", "_foreach_abs_",
+    "_foreach_sqrt", "_foreach_sqrt_", "_foreach_zero_", "_foreach_copy",
+    "_foreach_addcdiv_", "_foreach_addcmul_", "_foreach_lerp_", "_foreach_norm",
 ]
 
 # Quantized dtype aliases (PyTorch-compatible names)
