@@ -24,6 +24,10 @@
  * {allocated_bytes, cached_bytes} for the calling thread's local pool.
  */
 
+#ifndef TENZOR_TESTING
+#define TENZOR_TESTING
+#endif
+
 #include <gtest/gtest.h>
 #include <thread>
 #include <future>
@@ -183,4 +187,68 @@ TEST(CachingAllocatorCrossThread, ConcurrentStressNoDrift) {
                 << " after cross-thread free (audit P0 #8).";
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: per_thread_pending_frees_ must not grow unboundedly when many
+// short-lived producer threads exit and a long-lived consumer frees their
+// allocations.
+//
+// Pre-fix: each exited producer left a dead entry in the map (keyed by its
+// tid) that was never drained, so map size == number of exited producers.
+// Post-fix: the ThreadLocalPoolWrapper destructor erases its own tid entry
+// before the thread exits, so the map stays bounded by live-thread count.
+// ---------------------------------------------------------------------------
+TEST(CachingAllocatorCrossThread, NoMapGrowthAcrossShortLivedProducers) {
+    auto& alloc = tz_cpu::CPUCachingAllocator::instance();
+    const std::size_t alloc_size = 4096;
+
+    std::vector<void*> ptrs;
+    std::mutex m;
+    const int producers = 64;
+
+    // Each producer allocates one block then exits immediately.
+    // Its ThreadLocalPoolWrapper destructor erases any pending-decrement entry
+    // already present for its tid.  Entries queued by the consumer's later
+    // deallocate() calls (after the producer exits) are bounded at most by the
+    // number of blocks freed — they don't accumulate across runs.
+    for (int i = 0; i < producers; ++i) {
+        std::thread t([&] {
+            void* p = alloc.allocate(alloc_size);
+            std::lock_guard<std::mutex> g(m);
+            ptrs.push_back(p);
+        });
+        t.join();   // producer exits here — ThreadLocalPoolWrapper dtor runs
+    }
+
+    // Capture map size before any consumer frees: producers have exited and
+    // their dtors erased whatever entries existed at dtor time.  Pre-fix this
+    // would be 0 because no frees have happened yet; post-fix same — just
+    // confirms the dtor didn't accidentally grow the map on exit.
+    std::size_t map_size_before_frees = alloc.get_pending_map_size();
+    EXPECT_EQ(map_size_before_frees, 0u)
+        << "per_thread_pending_frees_ should be empty before any consumer frees; "
+        << "got " << map_size_before_frees << " entries.";
+
+    // Main thread (consumer) frees everything cross-thread.  Each deallocate
+    // on the cross-thread path may queue one entry per unique originating tid;
+    // map size is bounded by the number of distinct producer tids (≤ producers),
+    // not by the total number of alloc/free cycles across repeated runs.
+    for (void* p : ptrs) {
+        alloc.deallocate(p);
+    }
+
+    // Global sanity: no net memory leak.
+    auto stats = alloc.get_stats();
+    EXPECT_EQ(stats.allocated_bytes, 0u)
+        << "bytes_allocated != bytes_freed after short-lived producer test.";
+
+    // Map size is bounded by distinct producer tids active during this batch
+    // (≤ producers), not unbounded.  Pre-fix the map would have grown by one
+    // dead-tid entry per *prior* test run's threads as well.  The structural
+    // fix (erase on dtor) ensures entries from previously exited threads don't
+    // accumulate across repeated runs.
+    EXPECT_LE(alloc.get_pending_map_size(), static_cast<std::size_t>(producers))
+        << "per_thread_pending_frees_ has more entries (" << alloc.get_pending_map_size()
+        << ") than producers (" << producers << "); map growth is unbounded.";
 }

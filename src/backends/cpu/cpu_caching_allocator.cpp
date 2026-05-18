@@ -25,13 +25,25 @@ struct ThreadLocalPoolWrapper {
     bool valid{true};
 
     ~ThreadLocalPoolWrapper() {
-        // Mark as invalid - do NOT free memory here.
-        // Reasons:
-        // 1. Root allocations may have been migrated to global pool and freed by singleton
-        // 2. At process exit, OS reclaims all memory anyway
-        // 3. For thread exit during runtime, allocated memory should still be in use
-        //    or have been properly deallocated through the allocator API
+        // Mark as invalid so subsequent deallocate() calls on this thread skip
+        // touching the now-torn-down thread_local storage.
         valid = false;
+
+        // Erase any pending-decrement entries queued under this thread's tid by
+        // other threads' cross-thread frees.  Once this thread exits its local
+        // counters are never consulted again, so the entries are stale bookkeeping.
+        // The memory itself was already returned to the global pool via the
+        // cross-thread free path, so discarding the pending list is safe.
+        //
+        // Without this erase, per_thread_pending_frees_ accumulates one dead
+        // entry per exited producer thread and grows without bound.
+        //
+        // Guard against process-exit static-destruction order: if the backend
+        // registry is already gone the singleton may be partially destroyed, so
+        // skip the erase (the OS reclaims everything at process exit anyway).
+        if (is_backend_registry_alive()) {
+            CPUCachingAllocator::instance().erase_pending_for_current_thread();
+        }
     }
 };
 
@@ -786,6 +798,11 @@ void CPUCachingAllocator::drain_pending_decrements(ThreadLocalPool& local) {
             local.allocated_blocks.erase(local_it);
         }
     }
+}
+
+void CPUCachingAllocator::erase_pending_for_current_thread() {
+    std::lock_guard<std::mutex> lock(global_mutex_);
+    per_thread_pending_frees_.erase(std::this_thread::get_id());
 }
 
 auto CPUCachingAllocator::get_local_stats() -> LocalStats {

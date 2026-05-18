@@ -125,6 +125,30 @@ public:
     auto get_stats() const -> Stats;
 
     /**
+     * @brief Erase the calling thread's entry from per_thread_pending_frees_.
+     *
+     * Called from ThreadLocalPoolWrapper's destructor when a thread exits.
+     * Any pending-decrement entries for a dead thread's tid are stale (the
+     * memory was already returned globally); discarding them is safe and
+     * prevents the map from growing without bound under short-lived producer
+     * thread churn.
+     */
+    void erase_pending_for_current_thread();
+
+#ifdef TENZOR_TESTING
+    /**
+     * @brief Return the number of entries in per_thread_pending_frees_.
+     *
+     * Diagnostic accessor for unit tests only.  Allows tests to assert that
+     * the map does not grow unboundedly when short-lived producer threads exit.
+     */
+    auto get_pending_map_size() const -> std::size_t {
+        std::lock_guard<std::mutex> lock(global_mutex_);
+        return per_thread_pending_frees_.size();
+    }
+#endif
+
+    /**
      * @brief Reset statistics counters
      */
     void reset_stats();
