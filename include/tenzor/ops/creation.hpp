@@ -278,6 +278,23 @@ auto linspace(float start, float end, int64_t steps,
              Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Create 1D tensor with linearly spaced values (double-precision endpoints).
+ *
+ * Matches the full(double, ...) pattern: accepts double endpoints so callers
+ * using Float64 or Int64 dtypes don't lose precision at the API boundary.
+ *
+ * @param start Start value (inclusive) — double precision
+ * @param end End value (inclusive) — double precision
+ * @param steps Number of values to generate
+ * @param dtype Element data type (default: Float64)
+ * @param device Target device (default: CPU)
+ * @return 1D tensor with linearly spaced values
+ */
+auto linspace(double start, double end, int64_t steps,
+              DType dtype = DType::Float64,
+              Device device = Device::cpu()) -> Tensor;
+
+/**
  * @brief Create a 1-D tensor of logarithmically spaced values.
  *
  * Generates `steps` values logarithmically spaced between base^start and base^end.

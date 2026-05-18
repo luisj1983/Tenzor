@@ -278,3 +278,85 @@ TEST(CreationDtypeCoverage, LinspaceInt16) {
     for (int i = 0; i < 5; ++i)
         EXPECT_EQ(p[i], static_cast<int16_t>(i)) << "i=" << i;
 }
+
+// ============================================================================
+// Audit Phase 2A follow-up: FP8 and quantized coverage tests.
+// ============================================================================
+
+TEST(CreationDtypeCoverage, ZerosFP8_E4M3) {
+    auto t = tz::zeros({16}, tz::DType::FP8_E4M3);
+    // Memset zero is correctly all-bits-zero for FP8 (the encoded zero).
+    auto as_f64 = t.cpu().to(tz::DType::Float64);
+    const double* p = as_f64.data<double>();
+    for (int64_t i = 0; i < 16; ++i)
+        EXPECT_NEAR(p[i], 0.0, 1e-9) << "FP8_E4M3 zeros at i=" << i;
+}
+
+TEST(CreationDtypeCoverage, ZerosFP8_E5M2) {
+    auto t = tz::zeros({16}, tz::DType::FP8_E5M2);
+    auto as_f64 = t.cpu().to(tz::DType::Float64);
+    const double* p = as_f64.data<double>();
+    for (int64_t i = 0; i < 16; ++i)
+        EXPECT_NEAR(p[i], 0.0, 1e-9);
+}
+
+TEST(CreationDtypeCoverage, ZerosQInt8) {
+    // zeros writes raw all-bits-zero. For QInt8 with zero_point=0 this dequantizes
+    // to 0; for nonzero zero_point a separately-set-up test would be appropriate.
+    auto t = tz::zeros({16}, tz::DType::QInt8);
+    // Just confirm the call succeeds and produces a properly-sized buffer.
+    EXPECT_EQ(t.numel(), 16);
+    EXPECT_EQ(t.dtype(), tz::DType::QInt8);
+}
+TEST(CreationDtypeCoverage, ZerosQUInt8)  { auto t = tz::zeros({16}, tz::DType::QUInt8); EXPECT_EQ(t.numel(), 16); }
+TEST(CreationDtypeCoverage, ZerosQInt4x2) { auto t = tz::zeros({8}, tz::DType::QInt4x2); EXPECT_EQ(t.numel(), 8); }
+
+TEST(CreationDtypeCoverage, OnesFP8_E4M3) {
+    auto t = tz::ones({16}, tz::DType::FP8_E4M3);
+    auto as_f64 = t.cpu().to(tz::DType::Float64);
+    const double* p = as_f64.data<double>();
+    for (int64_t i = 0; i < 16; ++i) EXPECT_NEAR(p[i], 1.0, 1e-3) << "FP8_E4M3 ones at i=" << i;
+}
+
+TEST(CreationDtypeCoverage, OnesFP8_E5M2) {
+    auto t = tz::ones({16}, tz::DType::FP8_E5M2);
+    auto as_f64 = t.cpu().to(tz::DType::Float64);
+    const double* p = as_f64.data<double>();
+    // E5M2 mantissa is wider; 1.0 should be exact.
+    for (int64_t i = 0; i < 16; ++i) EXPECT_NEAR(p[i], 1.0, 1e-3) << "FP8_E5M2 ones at i=" << i;
+}
+
+TEST(CreationDtypeCoverage, OnesQInt8ThrowsWithoutParams) {
+    // ones on a fresh quantized dtype with no quant params attached should throw.
+    EXPECT_THROW(tz::ones({4}, tz::DType::QInt8), std::runtime_error);
+}
+TEST(CreationDtypeCoverage, OnesQUInt8ThrowsWithoutParams) {
+    EXPECT_THROW(tz::ones({4}, tz::DType::QUInt8), std::runtime_error);
+}
+
+// ============================================================================
+// linspace double-precision overload tests.
+// ============================================================================
+
+TEST(CreationDtypeCoverage, LinspaceFloat64Precision) {
+    double start = 1.234567890123456;
+    double end   = 9.876543210987654;
+    auto t = tz::linspace(start, end, /*steps=*/4, tz::DType::Float64);
+    const double* p = t.cpu().data<double>();
+    EXPECT_DOUBLE_EQ(p[0], start) << "linspace lost double precision at start";
+    EXPECT_DOUBLE_EQ(p[3], end)   << "linspace lost double precision at end";
+}
+
+TEST(CreationDtypeCoverage, LinspaceInt64LargeEndpoints) {
+    int64_t start = (1LL << 50);
+    int64_t end   = (1LL << 50) + 6;
+    auto t = tz::linspace(static_cast<double>(start),
+                          static_cast<double>(end),
+                          /*steps=*/4, tz::DType::Int64);
+    const int64_t* p = t.cpu().data<int64_t>();
+    EXPECT_EQ(p[0], start);
+    EXPECT_EQ(p[3], end);
+    // Middle values: (1L<<50)+2 and (1L<<50)+4 expected.
+    EXPECT_EQ(p[1], start + 2);
+    EXPECT_EQ(p[2], start + 4);
+}

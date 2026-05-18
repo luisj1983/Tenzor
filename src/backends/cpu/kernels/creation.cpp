@@ -44,6 +44,17 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
     return result;
 }
 
+// Helper: fill n elements in parallel if n >= OMP_THRESHOLD, else serial.
+template <typename T>
+static inline void parallel_fill_n(T* dst, int64_t n, T value) {
+    if (n < static_cast<int64_t>(OMP_THRESHOLD)) {
+        std::fill_n(dst, static_cast<size_t>(n), value);
+    } else {
+#pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) dst[i] = value;
+    }
+}
+
 // ============================================================================
 // Ones Kernel - Create tensor filled with ones
 // ============================================================================
@@ -54,88 +65,73 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 
     switch (dtype) {
         case DType::Float16: {
-            Float16* data = result.data<Float16>();
-            std::fill_n(data, n, Float16(1.0f));
+            parallel_fill_n(result.data<Float16>(), n, Float16(1.0f));
             break;
         }
         case DType::BFloat16: {
-            BFloat16* data = result.data<BFloat16>();
-            std::fill_n(data, n, BFloat16(1.0f));
+            parallel_fill_n(result.data<BFloat16>(), n, BFloat16(1.0f));
             break;
         }
         case DType::Float32: {
-            float* data = result.data<float>();
-            std::fill_n(data, n, 1.0f);
+            parallel_fill_n(result.data<float>(), n, 1.0f);
             break;
         }
         case DType::Float64: {
-            double* data = result.data<double>();
-            std::fill_n(data, n, 1.0);
+            parallel_fill_n(result.data<double>(), n, 1.0);
             break;
         }
         case DType::Int8: {
-            int8_t* data = result.data<int8_t>();
-            std::fill_n(data, n, static_cast<int8_t>(1));
+            parallel_fill_n(result.data<int8_t>(), n, static_cast<int8_t>(1));
             break;
         }
         case DType::Int16: {
-            int16_t* data = result.data<int16_t>();
-            std::fill_n(data, n, static_cast<int16_t>(1));
+            parallel_fill_n(result.data<int16_t>(), n, static_cast<int16_t>(1));
             break;
         }
         case DType::Int32: {
-            int32_t* data = result.data<int32_t>();
-            std::fill_n(data, n, static_cast<int32_t>(1));
+            parallel_fill_n(result.data<int32_t>(), n, static_cast<int32_t>(1));
             break;
         }
         case DType::Int64: {
-            int64_t* data = result.data<int64_t>();
-            std::fill_n(data, n, static_cast<int64_t>(1));
+            parallel_fill_n(result.data<int64_t>(), n, static_cast<int64_t>(1));
             break;
         }
         case DType::UInt8: {
-            uint8_t* data = result.data<uint8_t>();
-            std::fill_n(data, n, static_cast<uint8_t>(1));
+            parallel_fill_n(result.data<uint8_t>(), n, static_cast<uint8_t>(1));
             break;
         }
         case DType::UInt16: {
-            uint16_t* data = result.data<uint16_t>();
-            std::fill_n(data, n, static_cast<uint16_t>(1));
+            parallel_fill_n(result.data<uint16_t>(), n, static_cast<uint16_t>(1));
             break;
         }
         case DType::UInt32: {
-            uint32_t* data = result.data<uint32_t>();
-            std::fill_n(data, n, static_cast<uint32_t>(1));
+            parallel_fill_n(result.data<uint32_t>(), n, static_cast<uint32_t>(1));
             break;
         }
         case DType::UInt64: {
-            uint64_t* data = result.data<uint64_t>();
-            std::fill_n(data, n, static_cast<uint64_t>(1));
+            parallel_fill_n(result.data<uint64_t>(), n, static_cast<uint64_t>(1));
             break;
         }
         case DType::Bool: {
-            bool* data = result.data<bool>();
-            std::fill_n(data, n, true);
+            parallel_fill_n(result.data<bool>(), n, true);
             break;
         }
         case DType::Complex64: {
-            auto* data = result.data<std::complex<float>>();
-            std::fill_n(data, n, std::complex<float>(1.0f, 0.0f));
+            parallel_fill_n(result.data<std::complex<float>>(), n,
+                            std::complex<float>(1.0f, 0.0f));
             break;
         }
         case DType::Complex128: {
-            auto* data = result.data<std::complex<double>>();
-            std::fill_n(data, n, std::complex<double>(1.0, 0.0));
+            parallel_fill_n(result.data<std::complex<double>>(), n,
+                            std::complex<double>(1.0, 0.0));
             break;
         }
         case DType::FP8_E4M3: {
-            FP8_E4M3* data = result.data<FP8_E4M3>();
-            std::fill_n(data, n, FP8_E4M3(1.0f));
+            parallel_fill_n(result.data<FP8_E4M3>(), n, FP8_E4M3(1.0f));
             break;
         }
         case DType::FP8_E5M2: {
-            FP8_E5M2* data = result.data<FP8_E5M2>();
-            std::fill_n(data, n, FP8_E5M2(1.0f));
+            parallel_fill_n(result.data<FP8_E5M2>(), n, FP8_E5M2(1.0f));
             break;
         }
         default:
