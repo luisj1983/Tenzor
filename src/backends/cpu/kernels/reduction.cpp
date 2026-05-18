@@ -579,7 +579,11 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 #ifdef _OPENMP
     max_threads = omp_get_max_threads();
 #endif
-    std::vector<float> partial_sums(max_threads, 0.0f);
+    // Pad each slot to a full cache line (64 bytes) to prevent false sharing:
+    // without padding 16 adjacent float slots share one 64-byte cache line and
+    // every store from one thread invalidates every other thread's line.
+    struct alignas(64) PaddedFloat { float v = 0.0f; char _pad[60]; };
+    std::vector<PaddedFloat> partial_sums(max_threads);
 
     #pragma omp parallel
     {
@@ -593,9 +597,9 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 
         if (start < end) {
 #ifdef TENZOR_REDUCTION_AVX512
-            partial_sums[tid] = simd_sum_f32_avx512(data + start, end - start);
+            partial_sums[tid].v = simd_sum_f32_avx512(data + start, end - start);
 #elif defined(TENZOR_REDUCTION_AVX2)
-            partial_sums[tid] = simd_sum_f32_avx2(data + start, end - start);
+            partial_sums[tid].v = simd_sum_f32_avx2(data + start, end - start);
 #else
             float local_sum = 0.0f;
             float local_comp = 0.0f;
@@ -605,7 +609,7 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
                 local_comp = (t - local_sum) - y;
                 local_sum = t;
             }
-            partial_sums[tid] = local_sum;
+            partial_sums[tid].v = local_sum;
 #endif
         }
     }
@@ -614,7 +618,7 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
     float total_sum = 0.0f;
     float comp = 0.0f;
     for (int i = 0; i < max_threads; ++i) {
-        float y = partial_sums[i] - comp;
+        float y = partial_sums[i].v - comp;
         float t = total_sum + y;
         comp = (t - total_sum) - y;
         total_sum = t;
