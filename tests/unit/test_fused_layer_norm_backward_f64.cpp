@@ -238,7 +238,50 @@ TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
                                     std::span<const Tensor>{inputs_arr, 5}, attrs);
     ASSERT_GE(results.size(), 3u);
 
-    EXPECT_EQ(results[0].dtype(), DType::Float32) << "grad_input dtype mismatch";
-    EXPECT_EQ(results[1].dtype(), DType::Float32) << "grad_weight dtype mismatch";
-    EXPECT_EQ(results[2].dtype(), DType::Float32) << "grad_bias dtype mismatch";
+    const Tensor& gi = results[0];  // grad_input
+    const Tensor& gw = results[1];  // grad_weight
+    const Tensor& gb = results[2];  // grad_bias
+
+    // --- dtype checks ---
+    EXPECT_EQ(gi.dtype(), DType::Float32) << "grad_input dtype mismatch";
+    EXPECT_EQ(gw.dtype(), DType::Float32) << "grad_weight dtype mismatch";
+    EXPECT_EQ(gb.dtype(), DType::Float32) << "grad_bias dtype mismatch";
+
+    // --- value-sanity: grad_weight non-zero ---
+    // grad_weight[c] = sum_n grad_out[n,c] * normalized[n,c]; with grad_out=ones
+    // and non-trivial normalized values (mean=0, inv_std=1 => normalized=input),
+    // the per-channel sums will be non-zero for random input.
+    {
+        Tensor gw_c = gw.contiguous();
+        const float* p = gw_c.data<float>();
+        float max_abs = 0.0f;
+        for (int64_t i = 0; i < gw_c.numel(); ++i)
+            max_abs = std::max(max_abs, std::abs(p[i]));
+        EXPECT_GT(max_abs, 1e-6f)
+            << "grad_weight is effectively zero — regression may have zeroed it";
+    }
+
+    // --- value-sanity: grad_bias non-zero ---
+    // grad_bias[c] = sum_n grad_out[n,c]; with grad_out=ones and N=4 this equals 4.
+    {
+        Tensor gb_c = gb.contiguous();
+        const float* p = gb_c.data<float>();
+        float max_abs = 0.0f;
+        for (int64_t i = 0; i < gb_c.numel(); ++i)
+            max_abs = std::max(max_abs, std::abs(p[i]));
+        EXPECT_GT(max_abs, 1e-6f)
+            << "grad_bias is effectively zero — grad_out=ones*N should sum to N per channel";
+    }
+
+    // --- value-sanity: grad_input finite (no NaN/Inf) ---
+    {
+        Tensor gi_c = gi.contiguous();
+        const float* p = gi_c.data<float>();
+        bool any_bad = false;
+        for (int64_t i = 0; i < gi_c.numel(); ++i) {
+            if (std::isnan(p[i]) || std::isinf(p[i])) { any_bad = true; break; }
+        }
+        EXPECT_FALSE(any_bad)
+            << "grad_input contains NaN/Inf in the Float32 path";
+    }
 }
