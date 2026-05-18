@@ -1092,3 +1092,8 @@ set_tests_properties(cpu_test_simd_elementwise_half PROPERTIES TIMEOUT 120 LABEL
 add_executable(test_mkl_vml test_mkl_vml.cpp)
 target_link_libraries(test_mkl_vml PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_mkl_vml DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;vml")
+
+# Task 6.3: Int8 matmul via cblas_gemm_s8u8s32
+add_executable(test_int8_mkl_gemm test_int8_mkl_gemm.cpp)
+target_link_libraries(test_int8_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_int8_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;int8")

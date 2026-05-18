@@ -576,6 +576,65 @@ static void matmul_microkernel_int8(
 #endif
 }
 
+#if defined(TENZOR_USE_MKL)
+// MKL cblas_gemm_s8u8s32-based Int8 matmul.
+// cblas_gemm_s8u8s32 computes: C = alpha * A_s8 * B_u8 + beta * C_i32 + offset
+// For S8×S8: flip sign of B (+128 per element → treat as u8), adjust zero-offset
+// Then saturate int32 result back to int8.
+static void matmul_mkl_int8(
+    const int8_t* A, const int8_t* B, int8_t* C,
+    int64_t M, int64_t N, int64_t K) {
+
+    // Convert B from s8 to u8 by XOR-ing the sign bit (equivalent to +128)
+    // This maps s8 range [-128,127] → u8 range [0,255]
+    // The dot product error per element = 128 * sum_k(A_row), which is corrected
+    // by the CBLAS_OFFSET parameter (CblasFixOffset or per-row/col offset).
+    // We use CblasFixOffset with co = 0 and absorb the shift via a column
+    // offset vector approach.  Simplest correct approach: use oa=0, ob=128
+    // (B zero-point = -128 which maps to ob=128), then add correction afterward.
+    //
+    // Correction: each output element C[i,j] += 128 * sum_k(A[i,k])
+    // (because B_actual[k,j] = B_u8[k,j] - 128)
+
+    std::vector<uint8_t> B_u8(static_cast<size_t>(K * N));
+    for (int64_t i = 0; i < K * N; ++i) {
+        B_u8[i] = static_cast<uint8_t>(static_cast<int32_t>(B[i]) + 128);
+    }
+
+    std::vector<int32_t> C_i32(static_cast<size_t>(M * N), 0);
+    int32_t co = 0;  // fixed offset (zero — we handle correction manually)
+
+    cblas_gemm_s8u8s32(
+        CblasRowMajor, CblasNoTrans, CblasNoTrans,
+        CblasFixOffset,
+        static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+        1.0f,
+        A, static_cast<MKL_INT>(K), 0,           // A is s8, zero-point oa=0
+        B_u8.data(), static_cast<MKL_INT>(N), 0, // B is u8 (shifted), zero-point ob=0
+        0.0f,
+        C_i32.data(), static_cast<MKL_INT>(N), &co
+    );
+
+    // Subtract correction: sum_k(A[i,k]) * 128 per output row i
+    for (int64_t i = 0; i < M; ++i) {
+        int32_t row_sum = 0;
+        for (int64_t k = 0; k < K; ++k) row_sum += static_cast<int32_t>(A[i * K + k]);
+        int32_t correction = row_sum * 128;
+        for (int64_t j = 0; j < N; ++j) {
+            C_i32[i * N + j] -= correction;
+        }
+    }
+
+    // Saturate int32 → int8
+    for (int64_t i = 0; i < M * N; ++i) {
+        int32_t val = C_i32[i];
+        if (val > 127) val = 127;
+        else if (val < -128) val = -128;
+        C[i] = static_cast<int8_t>(val);
+    }
+}
+#endif // TENZOR_USE_MKL
+
 // Cache-blocked matrix multiplication (Int8) with OpenMP parallelization
 // Accumulates in int32 to avoid overflow, then saturates back to int8
 static void matmul_blocked_int8(
@@ -1593,7 +1652,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int8_t* b_data = b_contig.data<int8_t>();
             int8_t* c_data = result.data<int8_t>();
 
+#if defined(TENZOR_USE_MKL)
+            matmul_mkl_int8(a_data, b_data, c_data, M, K, N);
+#else
             matmul_blocked_int8(a_data, b_data, c_data, M, K, N);
+#endif
 
         } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
             const Float16* a_data = a_contig.data<Float16>();
@@ -1721,7 +1784,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         const int8_t* b_data = b_contig.data<int8_t>();
         int8_t* c_data = result.data<int8_t>();
 
+#if defined(TENZOR_USE_MKL)
+        matmul_mkl_int8(a_data, b_data, c_data, M, N, K);
+#else
         matmul_blocked_int8(a_data, b_data, c_data, M, N, K);
+#endif
 
     } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
         const Float16* a_data = a_contig.data<Float16>();
