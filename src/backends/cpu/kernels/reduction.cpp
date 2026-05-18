@@ -1772,16 +1772,67 @@ template<typename T>
 auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
     if (n == 0) throw std::runtime_error("argmax: input tensor is empty");
 
-    int64_t max_idx = 0;
-    T max_val = input_data[0];
-
-    for (int64_t i = 1; i < n; i++) {
-        if (input_data[i] > max_val) {
-            max_val = input_data[i];
-            max_idx = i;
+    // Small arrays: stay single-threaded (OMP overhead not worth it).
+    if (n < REDUCTION_OMP_THRESHOLD) {
+        int64_t max_idx = 0;
+        T max_val = input_data[0];
+        for (int64_t i = 1; i < n; i++) {
+            if (input_data[i] > max_val) {
+                max_val = input_data[i];
+                max_idx = i;
+            }
         }
+        return max_idx;
     }
 
+    // Large arrays: parallel per-thread argmax, then single-threaded reduce.
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+#endif
+    // Pad to cache line to avoid false sharing.
+    struct alignas(64) LocalMax {
+        T   val;
+        int64_t idx;
+        char _pad[64 - sizeof(T) - sizeof(int64_t) < 0 ? 0
+                                                        : 64 - sizeof(T) - sizeof(int64_t)];
+    };
+    std::vector<LocalMax> thread_max(max_threads, {input_data[0], 0, {}});
+
+    #pragma omp parallel
+    {
+        int tid = 0;
+        int nthreads = 1;
+#ifdef _OPENMP
+        tid      = omp_get_thread_num();
+        nthreads = omp_get_num_threads();
+#endif
+        int64_t chunk = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk;
+        int64_t end   = std::min(start + chunk, n);
+
+        T   local_val = (start < end) ? input_data[start] : input_data[0];
+        int64_t local_idx = (start < end) ? start : 0;
+
+        for (int64_t i = start + 1; i < end; i++) {
+            if (input_data[i] > local_val) {
+                local_val = input_data[i];
+                local_idx = i;
+            }
+        }
+        thread_max[tid].val = local_val;
+        thread_max[tid].idx = local_idx;
+    }
+
+    // Reduce across threads (sequential — tiny, ≤ max_threads iterations).
+    int64_t max_idx = thread_max[0].idx;
+    T       max_val = thread_max[0].val;
+    for (int t = 1; t < max_threads; t++) {
+        if (thread_max[t].val > max_val) {
+            max_val = thread_max[t].val;
+            max_idx = thread_max[t].idx;
+        }
+    }
     return max_idx;
 }
 
