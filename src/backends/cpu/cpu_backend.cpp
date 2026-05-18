@@ -81,10 +81,10 @@ namespace cpu {
     auto neg_kernel(const Tensor& input) -> Tensor;
     auto abs_kernel(const Tensor& input) -> Tensor;
     auto sign_kernel(const Tensor& input) -> Tensor;
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor;
     auto log_kernel(const Tensor& input) -> Tensor;
     auto exp_kernel(const Tensor& input) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent) -> Tensor;
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -492,23 +492,23 @@ public:
                 throw std::invalid_argument("clamp operation requires exactly 1 input");
             }
             // Parse min and max from attributes
-            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
+            double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+            double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
             return {cpu::clamp_kernel(inputs[0], min_val, max_val)};
         }
         else if (op_name == "clamp_min") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_min operation requires exactly 1 input");
             }
-            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-            return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity())};
+            double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+            return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<double>::infinity())};
         }
         else if (op_name == "clamp_max") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_max operation requires exactly 1 input");
             }
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
-            return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val)};
+            double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
+            return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<double>::infinity(), max_val)};
         }
         else if (op_name == "log") {
             if (inputs.size() != 1) {
@@ -526,7 +526,7 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("pow operation requires exactly 1 input");
             }
-            float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+            double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
             return {cpu::pow_kernel(inputs[0], exponent)};
         }
         else if (op_name == "relu") {

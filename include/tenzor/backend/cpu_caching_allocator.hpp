@@ -154,6 +154,18 @@ public:
     void reset_stats();
 
     /**
+     * @brief PyTorch-style memory summary string.
+     *
+     * Returns a human-readable report with:
+     * - Current allocated / cached bytes
+     * - Peak allocated bytes
+     * - Total allocations, cache hits, backend allocs/frees
+     * - Number of splits and free-block coalesces
+     * - Per-thread local pool stats (allocated + cached)
+     */
+    auto memory_summary() -> std::string;
+
+    /**
      * @brief Per-thread local pool statistics
      */
     struct LocalStats {

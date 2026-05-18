@@ -836,6 +836,12 @@ target_include_directories(test_caching_allocator_cross_thread PRIVATE ${CMAKE_S
 target_link_libraries(test_caching_allocator_cross_thread PRIVATE tenzor_backend_cpu GTest::gtest_main)
 tenzor_discover_tests(test_caching_allocator_cross_thread DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
 
+# Task 7.1+7.2: split-sibling coalescing + memory_summary() introspection
+add_executable(test_caching_allocator_coalesce test_caching_allocator_coalesce.cpp)
+target_include_directories(test_caching_allocator_coalesce PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_caching_allocator_coalesce PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_caching_allocator_coalesce DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
+
 # Hardtanh activation
 add_executable(test_hardtanh test_hardtanh.cpp)
 target_link_libraries(test_hardtanh PRIVATE tenzor_core GTest::gtest_main)

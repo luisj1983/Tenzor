@@ -11,6 +11,8 @@
 #include <vector>
 #include <unordered_set>
 #include <thread>
+#include <sstream>
+#include <iomanip>
 
 #ifdef _WIN32
 #include <malloc.h>
@@ -48,6 +50,117 @@ struct ThreadLocalPoolWrapper {
 };
 
 static thread_local ThreadLocalPoolWrapper tl_pool_wrapper_;
+
+// ---------------------------------------------------------------------------
+// Split-sibling coalescing helpers (Task 7.1)
+// Defined before deallocate() which calls them.
+// ---------------------------------------------------------------------------
+
+static void merge_adjacent_in_map(
+    std::multimap<size_t, CPUCachingAllocator::Block>& free_map,
+    CPUCachingAllocator::Block& block,
+    CPUCachingAllocator::RootAllocation& root,
+    size_t& /*stats_cached_delta*/  // no net change in cached bytes during merging
+) {
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (auto it = free_map.begin(); it != free_map.end(); ++it) {
+            auto& candidate = it->second;
+            if (candidate.root_ptr != block.root_ptr) {
+                continue;
+            }
+            char* cand_start = static_cast<char*>(candidate.ptr);
+            char* cand_end   = cand_start + candidate.size;
+            char* blk_start  = static_cast<char*>(block.ptr);
+            char* blk_end    = blk_start  + block.size;
+
+            bool left_adjacent  = (cand_end  == blk_start);
+            bool right_adjacent = (blk_end   == cand_start);
+            if (!left_adjacent && !right_adjacent) {
+                continue;
+            }
+
+            size_t new_size = block.size + candidate.size;
+            if (left_adjacent) {
+                block.ptr = candidate.ptr;
+            }
+            block.size        = new_size;
+            block.allocated_size = root.size;
+            block.is_split    = (new_size < root.size);
+
+            free_map.erase(it);
+            root.fragment_count = std::max(1, root.fragment_count - 1);
+            merged = true;
+            break;
+        }
+    }
+}
+
+// Called from deallocate() after the block has been placed in the local free
+// pool.  Merges adjacent siblings; if the root is fully coalesced, moves the
+// merged block to the global pool so check_memory_pressure() can return it.
+// Must NOT hold global_mutex_ on entry.
+static void coalesce_local_block(
+    CPUCachingAllocator::Block& block,
+    CPUCachingAllocator::ThreadLocalPool& local,
+    std::multimap<size_t, CPUCachingAllocator::Block>& global_free,
+    std::unordered_map<void*, CPUCachingAllocator::RootAllocation>& root_map,
+    std::mutex& global_mutex
+) {
+    // Remove freshly-freed block from local pool so we can work on it.
+    bool found = false;
+    for (auto it = local.free_blocks.begin(); it != local.free_blocks.end(); ++it) {
+        if (it->second.ptr == block.ptr) {
+            local.free_blocks.erase(it);
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return;
+    }
+
+    // Merge adjacent siblings in the local pool.
+    {
+        std::lock_guard<std::mutex> lock(global_mutex);
+        auto root_it = root_map.find(block.root_ptr);
+        if (root_it == root_map.end()) {
+            local.free_blocks.insert({block.size, block});
+            return;
+        }
+        size_t delta = 0;
+        merge_adjacent_in_map(local.free_blocks, block, root_it->second, delta);
+
+        // If fully coalesced, migrate to global pool for OS-return under pressure.
+        if (block.size == root_it->second.size &&
+            root_it->second.freed_size == root_it->second.size) {
+            local.cached_bytes -= block.size;
+            global_free.insert({block.size, block});
+            return;
+        }
+    }
+
+    // Not fully coalesced: put the (possibly enlarged) block back.
+    local.free_blocks.insert({block.size, block});
+}
+
+// ---------------------------------------------------------------------------
+// fmt_bytes helper for memory_summary()
+// ---------------------------------------------------------------------------
+static std::string fmt_bytes(size_t bytes) {
+    std::ostringstream oss;
+    if (bytes >= (1ULL << 30)) {
+        oss << std::fixed << std::setprecision(2) << (double)bytes / (1ULL << 30) << " GiB";
+    } else if (bytes >= (1ULL << 20)) {
+        oss << std::fixed << std::setprecision(2) << (double)bytes / (1ULL << 20) << " MiB";
+    } else if (bytes >= (1ULL << 10)) {
+        oss << std::fixed << std::setprecision(2) << (double)bytes / (1ULL << 10) << " KiB";
+    } else {
+        oss << bytes << " B";
+    }
+    return oss.str();
+}
 
 auto CPUCachingAllocator::instance() -> CPUCachingAllocator& {
     static CPUCachingAllocator instance;
@@ -207,6 +320,16 @@ void CPUCachingAllocator::deallocate(void* ptr) {
             global_stats_.cached_bytes += block.size;
         }
 
+        // Attempt split-sibling coalescing (Task 7.1).
+        // Only bother when the block originated from a split — unsplit blocks
+        // have no siblings to merge with.
+        if (block.is_split) {
+            coalesce_local_block(block, local,
+                                 global_free_blocks_,
+                                 global_root_allocations_,
+                                 global_mutex_);
+        }
+
         // Check if local pool is too large
         if (local.cached_bytes > max_local_cached_bytes_.load()) {
             migrate_to_global(local);
@@ -231,7 +354,14 @@ void CPUCachingAllocator::deallocate(void* ptr) {
                 root_it->second.freed_size += block.size;
             }
 
-            // Add to global free pool
+            // Add to global free pool, then attempt sibling coalescing.
+            if (block.is_split) {
+                auto root_it2 = global_root_allocations_.find(block.root_ptr);
+                if (root_it2 != global_root_allocations_.end()) {
+                    size_t delta = 0;
+                    merge_adjacent_in_map(global_free_blocks_, block, root_it2->second, delta);
+                }
+            }
             global_free_blocks_.insert({block.size, block});
 
             // Update stats
@@ -822,6 +952,31 @@ bool CPUCachingAllocator::try_coalesce_and_free(Block& block, ThreadLocalPool& /
     }
 
     return is_fully_coalesced(root_it->second);
+}
+
+// ---------------------------------------------------------------------------
+// memory_summary() — Task 7.2
+// ---------------------------------------------------------------------------
+
+auto CPUCachingAllocator::memory_summary() -> std::string {
+    Stats s = get_stats();
+    LocalStats ls = get_local_stats();
+
+    std::ostringstream out;
+    out << "=== CPUCachingAllocator memory summary ===\n";
+    out << "  allocated:        " << fmt_bytes(s.allocated_bytes)
+        << "  (peak: " << fmt_bytes(s.peak_allocated_bytes) << ")\n";
+    out << "  cached:           " << fmt_bytes(s.cached_bytes) << "\n";
+    out << "  total allocations:" << std::setw(10) << s.total_allocations << "\n";
+    out << "  cache hits:       " << std::setw(10) << s.cache_hits << "\n";
+    out << "  backend allocs:   " << std::setw(10) << s.num_backend_allocs << "\n";
+    out << "  backend frees:    " << std::setw(10) << s.num_backend_frees << "\n";
+    out << "  splits:           " << std::setw(10) << s.num_splits << "\n";
+    out << "--- calling thread (local pool) ---\n";
+    out << "  thread allocated: " << fmt_bytes(ls.allocated_bytes) << "\n";
+    out << "  thread cached:    " << fmt_bytes(ls.cached_bytes) << "\n";
+    out << "==========================================\n";
+    return out.str();
 }
 
 } // namespace cpu
