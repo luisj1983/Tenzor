@@ -38,10 +38,11 @@
 #include <omp.h>
 #endif
 
-// Intel MKL for optimized BLAS (5-10x faster GEMM)
+// Intel MKL for optimized BLAS (5-10x faster GEMM) and VML transcendentals
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #include <mkl_service.h>
+#include <mkl_vml.h>
 #endif
 
 // Intel oneDNN for optimized matrix operations (alternative to MKL)
@@ -2779,6 +2780,10 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+#if defined(TENZOR_USE_MKL)
+        // MKL VML vsLn: IEEE log, internally vectorized + threaded
+        vsLn(static_cast<int>(n), in_data, out_data);
+#else
         // For small arrays, use single-threaded SIMD
         if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
@@ -2814,15 +2819,20 @@ auto log_kernel(const Tensor& input) -> Tensor {
                 }
             }
         }
+#endif // TENZOR_USE_MKL
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+#if defined(TENZOR_USE_MKL)
+        vdLn(static_cast<int>(n), in_data, out_data);
+#else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -2907,6 +2917,10 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+#if defined(TENZOR_USE_MKL)
+        // MKL VML vsExp: internally vectorized + threaded, beats AVX2 polynomial
+        vsExp(static_cast<int>(n), in_data, out_data);
+#else
         // For small arrays, use single-threaded SIMD
         if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
@@ -2942,15 +2956,20 @@ auto exp_kernel(const Tensor& input) -> Tensor {
                 }
             }
         }
+#endif // TENZOR_USE_MKL
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+#if defined(TENZOR_USE_MKL)
+        vdExp(static_cast<int>(n), in_data, out_data);
+#else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -4068,7 +4087,9 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+#if defined(TENZOR_USE_MKL)
+            vsSin(static_cast<int>(n), in_data, out_data);
+#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
             fast_math::sin_batch_avx512(in_data, out_data, static_cast<size_t>(n));
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::sin_batch_avx2(in_data, out_data, static_cast<size_t>(n));
@@ -4083,10 +4104,14 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Float64: {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
+#if defined(TENZOR_USE_MKL)
+            vdSin(static_cast<int>(n), in_data, out_data);
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Complex64: {
@@ -4124,7 +4149,9 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+#if defined(TENZOR_USE_MKL)
+            vsCos(static_cast<int>(n), in_data, out_data);
+#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
             fast_math::cos_batch_avx512(in_data, out_data, static_cast<size_t>(n));
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::cos_batch_avx2(in_data, out_data, static_cast<size_t>(n));
@@ -4139,10 +4166,14 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Float64: {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
+#if defined(TENZOR_USE_MKL)
+            vdCos(static_cast<int>(n), in_data, out_data);
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Complex64: {
@@ -4847,6 +4878,69 @@ auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
     return result;
 }
 
+// Helper: apply a unary function via MKL VML (Float32/Float64) with scalar
+// fallback for Float16/BFloat16 and non-MKL builds.
+// VmlF32Fn: void(*)(int, const float*, float*)  — e.g. vsExp
+// VmlF64Fn: void(*)(int, const double*, double*) — e.g. vdExp
+// ScalarF32/ScalarF64: scalar fallbacks for tail/half types
+template<typename VmlF32Fn, typename VmlF64Fn, typename ScalarF32, typename ScalarF64>
+auto unary_vml_kernel(const Tensor& input,
+                      VmlF32Fn vml_f32, VmlF64Fn vml_f64,
+                      [[maybe_unused]] ScalarF32 scalar_f32, [[maybe_unused]] ScalarF64 scalar_f64,
+                      const char* op_name) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+#if defined(TENZOR_USE_MKL)
+        vml_f32(static_cast<int>(n), in_data, out_data);
+#else
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
+#endif
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+#if defined(TENZOR_USE_MKL)
+        vml_f64(static_cast<int>(n), in_data, out_data);
+#else
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
+#endif
+    } else if (input.dtype() == DType::Float16) {
+        // Widen to Float32, apply scalar op, narrow back
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+#if defined(TENZOR_USE_MKL)
+        std::vector<float> tmp_in(n), tmp_out(n);
+        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(tmp_out[i]);
+#else
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = Float16(scalar_f32(static_cast<float>(in_data[i])));
+#endif
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+#if defined(TENZOR_USE_MKL)
+        std::vector<float> tmp_in(n), tmp_out(n);
+        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(tmp_out[i]);
+#else
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = BFloat16(scalar_f32(static_cast<float>(in_data[i])));
+#endif
+    } else {
+        throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
+    }
+    return result;
+}
+
 // Helper: apply a unary function returning Bool tensor
 template<typename F32Fn, typename F64Fn>
 auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
@@ -4959,45 +5053,87 @@ auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f6
 } // anonymous namespace
 
 auto log2_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog2, vdLog2,
+        [](float x) { return std::log2(x); },
+        [](double x) { return std::log2(x); }, "log2");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log2(x); },
         [](double x) { return std::log2(x); }, "log2");
+#endif
 }
 
 auto log10_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog10, vdLog10,
+        [](float x) { return std::log10(x); },
+        [](double x) { return std::log10(x); }, "log10");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log10(x); },
         [](double x) { return std::log10(x); }, "log10");
+#endif
 }
 
 auto log1p_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog1p, vdLog1p,
+        [](float x) { return std::log1p(x); },
+        [](double x) { return std::log1p(x); }, "log1p");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log1p(x); },
         [](double x) { return std::log1p(x); }, "log1p");
+#endif
 }
 
 auto exp2_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsExp2, vdExp2,
+        [](float x) { return std::exp2(x); },
+        [](double x) { return std::exp2(x); }, "exp2");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::exp2(x); },
         [](double x) { return std::exp2(x); }, "exp2");
+#endif
 }
 
 auto expm1_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsExpm1, vdExpm1,
+        [](float x) { return std::expm1(x); },
+        [](double x) { return std::expm1(x); }, "expm1");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::expm1(x); },
         [](double x) { return std::expm1(x); }, "expm1");
+#endif
 }
 
 auto erf_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsErf, vdErf,
+        [](float x) { return std::erf(x); },
+        [](double x) { return std::erf(x); }, "erf");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::erf(x); },
         [](double x) { return std::erf(x); }, "erf");
+#endif
 }
 
 auto erfc_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsErfc, vdErfc,
+        [](float x) { return std::erfc(x); },
+        [](double x) { return std::erfc(x); }, "erfc");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::erfc(x); },
         [](double x) { return std::erfc(x); }, "erfc");
+#endif
 }
 
 auto isnan_kernel(const Tensor& input) -> Tensor {
@@ -7217,9 +7353,15 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
 // --- Unary ops ---
 
 auto rsqrt_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsInvSqrt, vdInvSqrt,
+        [](float x) { return 1.0f / std::sqrt(x); },
+        [](double x) { return 1.0 / std::sqrt(x); }, "rsqrt");
+#else
     return unary_math_kernel(input,
         [](float x) { return 1.0f / std::sqrt(x); },
         [](double x) { return 1.0 / std::sqrt(x); }, "rsqrt");
+#endif
 }
 
 auto square_kernel(const Tensor& input) -> Tensor {
@@ -7229,21 +7371,39 @@ auto square_kernel(const Tensor& input) -> Tensor {
 }
 
 auto asinh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAsinh, vdAsinh,
+        [](float x) { return std::asinh(x); },
+        [](double x) { return std::asinh(x); }, "asinh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::asinh(x); },
         [](double x) { return std::asinh(x); }, "asinh");
+#endif
 }
 
 auto acosh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAcosh, vdAcosh,
+        [](float x) { return std::acosh(x); },
+        [](double x) { return std::acosh(x); }, "acosh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::acosh(x); },
         [](double x) { return std::acosh(x); }, "acosh");
+#endif
 }
 
 auto atanh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAtanh, vdAtanh,
+        [](float x) { return std::atanh(x); },
+        [](double x) { return std::atanh(x); }, "atanh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::atanh(x); },
         [](double x) { return std::atanh(x); }, "atanh");
+#endif
 }
 
 // --- Binary floating-point ops ---

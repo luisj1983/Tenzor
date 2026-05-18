@@ -1087,3 +1087,8 @@ add_executable(test_simd_elementwise_half test_simd_elementwise_half.cpp)
 target_link_libraries(test_simd_elementwise_half PRIVATE tenzor_core GTest::gtest_main)
 add_test(NAME cpu_test_simd_elementwise_half COMMAND test_simd_elementwise_half)
 set_tests_properties(cpu_test_simd_elementwise_half PROPERTIES TIMEOUT 120 LABELS "cpu;simd;half")
+
+# Task 6.1: MKL VML transcendental routing
+add_executable(test_mkl_vml test_mkl_vml.cpp)
+target_link_libraries(test_mkl_vml PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mkl_vml DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;vml")
