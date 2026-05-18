@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
+#include <complex>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -59,8 +60,8 @@ bool needs_upcast(DType dt) {
 }
 #endif
 
-// Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy.
-// Float16 and BFloat16 inputs are upcast to Float32.
+// Ensure tensor is contiguous Float32/Float64/Complex64/Complex128 on CPU,
+// return a working copy. Float16 and BFloat16 are upcast to Float32.
 // Only called for CPU tensors — GPU tensors are handled by try_gpu_dispatch.
 auto prepare_matrix(const Tensor& A) -> Tensor {
     if (A.device().type != Device::Type::CPU) {
@@ -69,8 +70,10 @@ auto prepare_matrix(const Tensor& A) -> Tensor {
     }
     auto dt = A.dtype();
     if (dt != DType::Float32 && dt != DType::Float64 &&
-        dt != DType::Float16 && dt != DType::BFloat16) {
-        throw std::runtime_error("linalg: only Float32, Float64, Float16, and BFloat16 supported");
+        dt != DType::Float16 && dt != DType::BFloat16 &&
+        dt != DType::Complex64 && dt != DType::Complex128) {
+        throw std::runtime_error("linalg: only Float32, Float64, Float16, BFloat16, "
+                                 "Complex64, and Complex128 are supported");
     }
     // Upcast low-precision floats to Float32 for LAPACK compatibility
     auto cpu_tensor = A;
@@ -87,6 +90,22 @@ auto maybe_downcast(const Tensor& result, DType original_dtype) -> Tensor {
     }
     return result;
 }
+
+#if defined(TENZOR_USE_MKL) || defined(TENZOR_USE_LAPACKE)
+// MKL_Complex8/MKL_Complex16 have the same binary layout as
+// std::complex<float>/std::complex<double> (two consecutive floats/doubles).
+// These helpers let us obtain a lapack_complex_float* from a Complex64 tensor
+// without copying.
+inline lapack_complex_float* c64_ptr(Tensor& t) {
+    return reinterpret_cast<lapack_complex_float*>(t.data<std::complex<float>>());
+}
+inline const lapack_complex_float* c64_cptr(const Tensor& t) {
+    return reinterpret_cast<const lapack_complex_float*>(t.data<std::complex<float>>());
+}
+inline lapack_complex_double* c128_ptr(Tensor& t) {
+    return reinterpret_cast<lapack_complex_double*>(t.data<std::complex<double>>());
+}
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 
 auto check_square(const Tensor& A) -> std::pair<int64_t, int64_t> {
     auto shape = A.shape();
@@ -164,6 +183,45 @@ auto det(const Tensor& A) -> Tensor {
             }
             res_data[b] = d;
         }
+    } else if (work.dtype() == DType::Complex64) {
+        auto result_c = zeros(out_shape, DType::Complex64, Device::cpu());
+        auto* rd = result_c.data<std::complex<float>>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_cgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv.data());
+            if (info < 0) throw std::runtime_error("linalg::det: invalid argument (complex64)");
+
+            std::complex<float> d{1.f, 0.f};
+            for (int64_t i = 0; i < n; ++i) {
+                // mat is lapack_complex_float* but same layout as std::complex<float>
+                const auto* row = reinterpret_cast<const std::complex<float>*>(mat);
+                d *= row[i * n + i];
+                if (ipiv[i] != static_cast<lapack_int>(i + 1)) d = -d;
+            }
+            rd[b] = d;
+        }
+        return result_c;
+    } else if (work.dtype() == DType::Complex128) {
+        auto result_c = zeros(out_shape, DType::Complex128, Device::cpu());
+        auto* rd = result_c.data<std::complex<double>>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_zgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv.data());
+            if (info < 0) throw std::runtime_error("linalg::det: invalid argument (complex128)");
+
+            std::complex<double> d{1., 0.};
+            for (int64_t i = 0; i < n; ++i) {
+                const auto* row = reinterpret_cast<const std::complex<double>*>(mat);
+                d *= row[i * n + i];
+                if (ipiv[i] != static_cast<lapack_int>(i + 1)) d = -d;
+            }
+            rd[b] = d;
+        }
+        return result_c;
     } else {
         double* data = work.data<double>();
         double* res_data = result.data<double>();
@@ -219,6 +277,24 @@ auto inv(const Tensor& A) -> Tensor {
 
             info = LAPACKE_sgetri(LAPACK_ROW_MAJOR, ln, mat, ln, ipiv.data());
             if (info != 0) throw std::runtime_error("linalg::inv: inversion failed");
+        }
+    } else if (work.dtype() == DType::Complex64) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_cgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv.data());
+            if (info != 0) throw std::runtime_error("linalg::inv: LU factorization failed (complex64, singular?)");
+            info = LAPACKE_cgetri(LAPACK_ROW_MAJOR, ln, mat, ln, ipiv.data());
+            if (info != 0) throw std::runtime_error("linalg::inv: inversion failed (complex64)");
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_zgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv.data());
+            if (info != 0) throw std::runtime_error("linalg::inv: LU factorization failed (complex128, singular?)");
+            info = LAPACKE_zgetri(LAPACK_ROW_MAJOR, ln, mat, ln, ipiv.data());
+            if (info != 0) throw std::runtime_error("linalg::inv: inversion failed (complex128)");
         }
     } else {
         double* data = work.data<double>();
@@ -277,6 +353,26 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
             lapack_int info = LAPACKE_sgesv(LAPACK_ROW_MAJOR, ln, lnrhs,
                 a_mat, ln, ipiv.data(), b_mat, lnrhs);
             if (info != 0) throw std::runtime_error("linalg::solve: solution failed");
+        }
+    } else if (work_a.dtype() == DType::Complex64) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* a_mat = c64_ptr(work_a) + b * n * n;
+            lapack_complex_float* b_mat = c64_ptr(work_b) + b * n * nrhs;
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_cgesv(LAPACK_ROW_MAJOR, ln, lnrhs,
+                a_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0) throw std::runtime_error("linalg::solve: solution failed (complex64)");
+        }
+    } else if (work_a.dtype() == DType::Complex128) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* a_mat = c128_ptr(work_a) + b * n * n;
+            lapack_complex_double* b_mat = c128_ptr(work_b) + b * n * nrhs;
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_zgesv(LAPACK_ROW_MAJOR, ln, lnrhs,
+                a_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0) throw std::runtime_error("linalg::solve: solution failed (complex128)");
         }
     } else {
         double* a_data = work_a.data<double>();
@@ -458,6 +554,31 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
                     }
                 }
             }
+        }
+    } else if (work.dtype() == DType::Complex64) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_cpotrf(LAPACK_ROW_MAJOR, uplo, ln, mat, ln);
+            if (info != 0) throw std::runtime_error("linalg::cholesky: factorization failed (complex64, not HPD)");
+            // Zero out the other triangle
+            auto* cmat = reinterpret_cast<std::complex<float>*>(mat);
+            for (int64_t i = 0; i < n; ++i)
+                for (int64_t j = 0; j < n; ++j)
+                    if (upper ? (i > j) : (i < j))
+                        cmat[i * n + j] = {0.f, 0.f};
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_zpotrf(LAPACK_ROW_MAJOR, uplo, ln, mat, ln);
+            if (info != 0) throw std::runtime_error("linalg::cholesky: factorization failed (complex128, not HPD)");
+            auto* cmat = reinterpret_cast<std::complex<double>*>(mat);
+            for (int64_t i = 0; i < n; ++i)
+                for (int64_t j = 0; j < n; ++j)
+                    if (upper ? (i > j) : (i < j))
+                        cmat[i * n + j] = {0., 0.};
         }
     } else {
         double* data = work.data<double>();
@@ -641,8 +762,14 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         vt_shape.push_back(k); vt_shape.push_back(n_cols);
     }
 
-    auto U = zeros(u_shape, work.dtype(), Device::cpu());
-    auto S = zeros(s_shape, work.dtype(), Device::cpu());
+    // For complex inputs: U and Vt stay complex, S is real (Float32 or Float64)
+    bool is_complex = (work.dtype() == DType::Complex64 || work.dtype() == DType::Complex128);
+    DType s_dtype = work.dtype();
+    if (work.dtype() == DType::Complex64)  s_dtype = DType::Float32;
+    if (work.dtype() == DType::Complex128) s_dtype = DType::Float64;
+
+    auto U  = zeros(u_shape,  work.dtype(), Device::cpu());
+    auto S  = zeros(s_shape,  s_dtype,      Device::cpu());
     auto Vt = zeros(vt_shape, work.dtype(), Device::cpu());
 
     char jobz = full_matrices ? 'A' : 'S';
@@ -676,6 +803,44 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
                 lm, ln, a_mat, ln, s_vec, u_mat, ldu, vt_mat, ldvt, superb.data());
             if (info != 0) throw std::runtime_error("linalg::svd: computation failed (info=" + std::to_string(info) + ")");
         }
+    } else if (work.dtype() == DType::Complex64) {
+        float* s_data = S.data<float>();
+        std::vector<float> superb(superb_size);
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto ldu  = full_matrices ? lm : static_cast<lapack_int>(k);
+        auto ldvt = full_matrices ? ln : ln;
+        int64_t u_stride  = full_matrices ? m * m : m * k;
+        int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* a_mat = c64_ptr(work) + b * m * n_cols;
+            lapack_complex_float* u_mat = c64_ptr(U)    + b * u_stride;
+            lapack_complex_float* vt_mat= c64_ptr(Vt)   + b * vt_stride;
+            float* s_vec = s_data + b * k;
+            lapack_int info = LAPACKE_cgesvd(LAPACK_ROW_MAJOR, jobz, jobz,
+                lm, ln, a_mat, ln, s_vec, u_mat, ldu, vt_mat, ldvt, superb.data());
+            if (info != 0) throw std::runtime_error("linalg::svd: cgesvd failed (info=" + std::to_string(info) + ")");
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        double* s_data = S.data<double>();
+        std::vector<double> superb(superb_size);
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto ldu  = full_matrices ? lm : static_cast<lapack_int>(k);
+        auto ldvt = full_matrices ? ln : ln;
+        int64_t u_stride  = full_matrices ? m * m : m * k;
+        int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* a_mat = c128_ptr(work) + b * m * n_cols;
+            lapack_complex_double* u_mat = c128_ptr(U)    + b * u_stride;
+            lapack_complex_double* vt_mat= c128_ptr(Vt)   + b * vt_stride;
+            double* s_vec = s_data + b * k;
+            lapack_int info = LAPACKE_zgesvd(LAPACK_ROW_MAJOR, jobz, jobz,
+                lm, ln, a_mat, ln, s_vec, u_mat, ldu, vt_mat, ldvt, superb.data());
+            if (info != 0) throw std::runtime_error("linalg::svd: zgesvd failed (info=" + std::to_string(info) + ")");
+        }
     } else {
         double* a_data = work.data<double>();
         double* u_data = U.data<double>();
@@ -702,6 +867,10 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         }
     }
 
+    if (is_complex) {
+        // S is already real (Float32 or Float64); U and Vt keep complex dtype
+        return {U, S, Vt};
+    }
     return {maybe_downcast(U, original_dtype),
             maybe_downcast(S, original_dtype),
             maybe_downcast(Vt, original_dtype)};
@@ -781,6 +950,65 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
                 }
             }
         }
+    } else if (work.dtype() == DType::Complex64) {
+        std::vector<lapack_complex_float> tau(k);
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto lk = static_cast<lapack_int>(k);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* a_mat = c64_ptr(work) + b * m * n_cols;
+            lapack_complex_float* q_mat = c64_ptr(Q)    + b * m * k;
+            auto* r_mat = reinterpret_cast<std::complex<float>*>(c64_ptr(R) + b * k * n_cols);
+            auto* a_std = reinterpret_cast<const std::complex<float>*>(a_mat);
+
+            lapack_int info = LAPACKE_cgeqrf(LAPACK_ROW_MAJOR, lm, ln, a_mat, ln, tau.data());
+            if (info != 0) throw std::runtime_error("linalg::qr: cgeqrf failed");
+
+            // Extract R (upper triangle)
+            for (int64_t i = 0; i < k; ++i)
+                for (int64_t j = 0; j < n_cols; ++j)
+                    r_mat[i * n_cols + j] = (j >= i) ? a_std[i * n_cols + j] : std::complex<float>{0.f, 0.f};
+
+            // Generate unitary Q via cungqr
+            info = LAPACKE_cungqr(LAPACK_ROW_MAJOR, lm, lk, lk, a_mat, ln, tau.data());
+            if (info != 0) throw std::runtime_error("linalg::qr: cungqr failed");
+
+            // Copy Q columns
+            auto* a_std2 = reinterpret_cast<const std::complex<float>*>(a_mat);
+            auto* q_std  = reinterpret_cast<std::complex<float>*>(q_mat);
+            for (int64_t i = 0; i < m; ++i)
+                for (int64_t j = 0; j < k; ++j)
+                    q_std[i * k + j] = a_std2[i * n_cols + j];
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        std::vector<lapack_complex_double> tau(k);
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto lk = static_cast<lapack_int>(k);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* a_mat = c128_ptr(work) + b * m * n_cols;
+            lapack_complex_double* q_mat = c128_ptr(Q)    + b * m * k;
+            auto* r_mat = reinterpret_cast<std::complex<double>*>(c128_ptr(R) + b * k * n_cols);
+            auto* a_std = reinterpret_cast<const std::complex<double>*>(a_mat);
+
+            lapack_int info = LAPACKE_zgeqrf(LAPACK_ROW_MAJOR, lm, ln, a_mat, ln, tau.data());
+            if (info != 0) throw std::runtime_error("linalg::qr: zgeqrf failed");
+
+            for (int64_t i = 0; i < k; ++i)
+                for (int64_t j = 0; j < n_cols; ++j)
+                    r_mat[i * n_cols + j] = (j >= i) ? a_std[i * n_cols + j] : std::complex<double>{0., 0.};
+
+            info = LAPACKE_zungqr(LAPACK_ROW_MAJOR, lm, lk, lk, a_mat, ln, tau.data());
+            if (info != 0) throw std::runtime_error("linalg::qr: zungqr failed");
+
+            auto* a_std2 = reinterpret_cast<const std::complex<double>*>(a_mat);
+            auto* q_std  = reinterpret_cast<std::complex<double>*>(q_mat);
+            for (int64_t i = 0; i < m; ++i)
+                for (int64_t j = 0; j < k; ++j)
+                    q_std[i * k + j] = a_std2[i * n_cols + j];
+        }
     } else {
         double* a_data = work.data<double>();
         double* q_data = Q.data<double>();
@@ -816,6 +1044,9 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
+    if (original_dtype == DType::Complex64 || original_dtype == DType::Complex128) {
+        return {Q, R};  // already the correct complex dtype
+    }
     return {maybe_downcast(Q, original_dtype), maybe_downcast(R, original_dtype)};
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
@@ -843,11 +1074,16 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     for (size_t i = 0; i + 2 < shape.size(); ++i) batch_dims.push_back(shape[i]);
 
     // Eigenvalues shape: (..., N)
+    // For complex Hermitian input the eigenvalues are real: Float32 for Complex64,
+    // Float64 for Complex128. For real symmetric input the dtype matches input.
     std::vector<int64_t> w_shape = batch_dims;
     w_shape.push_back(n);
-    auto W = zeros(w_shape, work.dtype(), Device::cpu());
+    DType w_dtype = work.dtype();
+    if (w_dtype == DType::Complex64)  w_dtype = DType::Float32;
+    if (w_dtype == DType::Complex128) w_dtype = DType::Float64;
+    auto W = zeros(w_shape, w_dtype, Device::cpu());
 
-    // Eigenvectors are stored in work (overwritten by dsyev/ssyev)
+    // Eigenvectors are stored in work (overwritten by dsyev/ssyev/cheev/zheev)
 
     if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -860,6 +1096,25 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 
             lapack_int info = LAPACKE_ssyev(LAPACK_ROW_MAJOR, 'V', 'U', ln, mat, ln, w_vec);
             if (info != 0) throw std::runtime_error("linalg::eigh: computation failed (info=" + std::to_string(info) + ")");
+        }
+    } else if (work.dtype() == DType::Complex64) {
+        // cheev overwrites work with eigenvectors (columns, complex); eigenvalues are real floats
+        float* w_data = W.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+            float* w_vec = w_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_cheev(LAPACK_ROW_MAJOR, 'V', 'U', ln, mat, ln, w_vec);
+            if (info != 0) throw std::runtime_error("linalg::eigh: cheev failed (info=" + std::to_string(info) + ")");
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        double* w_data = W.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+            double* w_vec = w_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_zheev(LAPACK_ROW_MAJOR, 'V', 'U', ln, mat, ln, w_vec);
+            if (info != 0) throw std::runtime_error("linalg::eigh: zheev failed (info=" + std::to_string(info) + ")");
         }
     } else {
         double* a_data = work.data<double>();
@@ -875,7 +1130,11 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    // work now contains eigenvectors (columns of orthogonal matrix)
+    // work now contains eigenvectors (columns of orthogonal/unitary matrix)
+    // For complex input, work still has the correct complex dtype; no downcast needed.
+    if (original_dtype == DType::Complex64 || original_dtype == DType::Complex128) {
+        return {W, work};  // W is already the correct real dtype; work is complex eigenvectors
+    }
     return {maybe_downcast(W, original_dtype), maybe_downcast(work, original_dtype)};
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
