@@ -3557,6 +3557,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                     const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
                                        + self.q_zero_point();
                     const int64_t clamped = std::clamp(qv, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                    // QInt4x2 packs two 4-bit signed values per byte. Strides are at
+                    // byte granularity (the packed shape halves the last dimension), so
+                    // each element visited by this stride loop IS a whole byte. Writing
+                    // both nibbles is correct: both logical values in a visited byte
+                    // belong to the view. Sub-byte strides are not supported by the
+                    // framework, so adjacent-nibble corruption is structurally impossible.
                     *reinterpret_cast<uint8_t*>(ptr) =
                         static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
                     break;

@@ -1273,8 +1273,13 @@ auto Tensor::fill_(double value) -> Tensor& {
                             "fill_ on quantized tensor requires quantization params: "
                             "call set_quantization_params(scale, zero_point) first");
                     } else {
-                        // Pack two 4-bit signed values per byte; for a scalar element
-                        // both nibbles are the same clamped qval.
+                        // QInt4x2 packs two 4-bit signed values per byte. Strides are at
+                        // byte granularity (the packed shape halves the last dimension),
+                        // so each element visited by this stride loop IS a whole byte.
+                        // Writing both nibbles is correct: both logical values in a
+                        // visited byte belong to the view. Sub-byte strides are not
+                        // supported, so adjacent-nibble corruption is structurally
+                        // impossible via the public API.
                         const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
                         const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
                         *reinterpret_cast<uint8_t*>(base + offset) =
