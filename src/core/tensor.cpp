@@ -1246,17 +1246,39 @@ auto Tensor::fill_(double value) -> Tensor& {
                 case DType::FP8_E4M3: *reinterpret_cast<FP8_E4M3*>(base + offset) = FP8_E4M3(static_cast<float>(value)); break;
                 case DType::FP8_E5M2: *reinterpret_cast<FP8_E5M2*>(base + offset) = FP8_E5M2(static_cast<float>(value)); break;
                 case DType::QInt8:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(
+                            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                    }
+                    break;
                 case DType::QUInt8:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        *reinterpret_cast<uint8_t*>(base + offset) = static_cast<uint8_t>(
+                            std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+                    }
+                    break;
                 case DType::QInt4x2:
                     if (q_scale() == 0.0) {
                         throw std::runtime_error(
                             "fill_ on quantized tensor requires quantization params: "
                             "call set_quantization_params(scale, zero_point) first");
                     } else {
-                        // quantized value = round(value / scale) + zero_point, clamped to storage range
+                        // Pack two 4-bit signed values per byte; for a scalar element
+                        // both nibbles are the same clamped qval.
                         const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
-                        *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(
-                            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                        const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                        *reinterpret_cast<uint8_t*>(base + offset) =
+                            static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
                     }
                     break;
                 default: throw std::runtime_error("fill_ not supported for this dtype");
@@ -1329,8 +1351,6 @@ auto Tensor::fill_(double value) -> Tensor& {
         case DType::FP8_E4M3: std::fill_n(data<FP8_E4M3>(), n, FP8_E4M3(static_cast<float>(value))); break;
         case DType::FP8_E5M2: std::fill_n(data<FP8_E5M2>(), n, FP8_E5M2(static_cast<float>(value))); break;
         case DType::QInt8:
-        case DType::QUInt8:
-        case DType::QInt4x2:
             if (q_scale() == 0.0) {
                 throw std::runtime_error(
                     "fill_ on quantized tensor requires quantization params: "
@@ -1340,6 +1360,33 @@ auto Tensor::fill_(double value) -> Tensor& {
                 const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
                 std::fill_n(data<int8_t>(), n, static_cast<int8_t>(
                     std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127))));
+            }
+            break;
+        case DType::QUInt8:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // quantized value = round(value / scale) + zero_point, clamped to uint8 range [0, 255]
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                std::fill_n(data<uint8_t>(), n, static_cast<uint8_t>(
+                    std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255))));
+            }
+            break;
+        case DType::QInt4x2:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // Two 4-bit signed values per byte; clamp to [-8, 7] and pack nibbles.
+                // For a uniform fill both nibbles equal qval:
+                //   byte = (qval & 0xF) | ((qval & 0xF) << 4)
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                const uint8_t qbyte = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                std::fill_n(reinterpret_cast<uint8_t*>(data<int8_t>()), n, qbyte);
             }
             break;
         default:

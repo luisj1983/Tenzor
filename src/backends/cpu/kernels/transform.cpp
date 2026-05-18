@@ -115,9 +115,7 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
-    } else if (input.dtype() == DType::QInt8 ||
-               input.dtype() == DType::QUInt8 ||
-               input.dtype() == DType::QInt4x2) {
+    } else if (input.dtype() == DType::QInt8) {
         if (input.q_scale() == 0.0) {
             throw std::runtime_error(
                 "fill_kernel: fill on quantized tensor requires quantization params: "
@@ -128,6 +126,37 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
                              + input.q_zero_point();
         const int8_t qbyte = static_cast<int8_t>(
             std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else if (input.dtype() == DType::QUInt8) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        auto* data = result.data<uint8_t>();
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const uint8_t qbyte = static_cast<uint8_t>(
+            std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else if (input.dtype() == DType::QInt4x2) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        // Two 4-bit signed values per byte; clamp to [-8, 7] then pack nibbles.
+        // For a uniform fill both nibbles equal qval, so:
+        //   byte = (qval & 0xF) | ((qval & 0xF) << 4)
+        auto* data = reinterpret_cast<uint8_t*>(result.data<int8_t>());
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+        const uint8_t qbyte = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = qbyte;
         }
