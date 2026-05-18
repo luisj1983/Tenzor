@@ -1000,3 +1000,8 @@ tenzor_discover_tests(test_ddp_unused_params_multidtype LABELS "unit" DISCOVERY_
 add_executable(test_softmax_stride_audit test_softmax_stride_audit.cpp)
 target_link_libraries(test_softmax_stride_audit PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_softmax_stride_audit DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #2 regression: fused LayerNorm backward Float64 dtype bug
+add_executable(test_fused_layer_norm_backward_f64 test_fused_layer_norm_backward_f64.cpp)
+target_link_libraries(test_fused_layer_norm_backward_f64 PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_layer_norm_backward_f64 DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
