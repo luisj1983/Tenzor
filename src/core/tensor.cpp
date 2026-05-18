@@ -1299,8 +1299,10 @@ auto Tensor::fill_(double value) -> Tensor& {
     if (device().type != Device::Type::CPU) {
         auto* backend = backend_registry().get_backend(device().type);
         const size_t size_bytes = static_cast<size_t>(n) * dtype_size();
-        if (value == 0.0f) {
-            // Fast path: memset to zero directly on device
+        if (value == 0.0f && (!is_quantized() || q_zero_point() == 0)) {
+            // Fast path: memset to zero directly on device.
+            // Guard: quantized tensors with non-zero zero_point encode 0.0 as
+            // q_zero_point bytes, not 0x00, so we must NOT memset in that case.
             backend->memset(data_ptr(), 0, size_bytes, device().index);
         } else {
             // Use in-place StridedFill to preserve tensor identity (version tracking, views)
@@ -1324,8 +1326,10 @@ auto Tensor::fill_(double value) -> Tensor& {
         return *this;
     }
 
-    // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00)
-    if (value == 0.0f) {
+    // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00).
+    // Guard: quantized tensors with non-zero zero_point encode 0.0 as the zero_point
+    // byte value, NOT 0x00, so the memset would silently produce the wrong result.
+    if (value == 0.0f && (!is_quantized() || q_zero_point() == 0)) {
         std::memset(data_ptr(), 0, static_cast<size_t>(n) * dtype_size());
         bump_version();
         return *this;

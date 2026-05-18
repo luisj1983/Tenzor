@@ -108,27 +108,29 @@ TEST(FillKernelDtypeCoverage, QInt8RoundTrip) {
     }
 }
 
-// QUInt8 with scale=1, zero_point=0: fill_(200.0) → qval=200, stored as uint8=200.
-// Key regression check: the old bug used int8_t* and clamped to [−128,127],
-// so qval=200 would have been clamped to 127, not 200.
+// QUInt8 with scale=1, zero_point=128: fill_(0.0) → qval = round(0.0/1.0)+128 = 128,
+// stored as uint8=128.  This is the standard PyTorch asymmetric quantization convention.
+// The old memset fast-path in Tensor::fill_ ran before the quantized switch, so
+// fill_(0.0) on a QUInt8 tensor with zero_point=128 wrote raw zeros — dequantizing
+// to (0-128)*1.0 = -128.0, not 0.0.  This test pins that the fix is correct.
 TEST(FillKernelDtypeCoverage, QUInt8RoundTrip) {
     auto t = tz::empty({4}, tz::DType::QUInt8);
-    t.set_quantization_params(1.0, 0);
-    t.fill_(200.0);
+    t.set_quantization_params(1.0, 128);  // standard asymmetric: zero_point=128
+    t.fill_(0.0);  // encodes 0.0 as byte value 128 (= q_zero_point), not 0x00
     auto repr = t.int_repr();  // zero-copy view as UInt8
     EXPECT_EQ(repr.dtype(), tz::DType::UInt8);
     const uint8_t* p = repr.data<uint8_t>();
     for (int i = 0; i < 4; ++i) {
-        EXPECT_EQ(p[i], static_cast<uint8_t>(200))
-            << "QUInt8 fill_(200.0) storage mismatch at i=" << i
-            << " (old bug: int8 branch clamped to 127, uint8 branch gives 200)";
+        EXPECT_EQ(p[i], static_cast<uint8_t>(128))
+            << "QUInt8 fill_(0.0) raw byte mismatch at i=" << i
+            << " — must equal q_zero_point()=128, not 0x00 (old memset fast-path bug)";
     }
-    // Verify dequantize round-trip: (200 - 0) * 1.0 = 200.0
+    // Verify dequantize round-trip: (128 - 128) * 1.0 = 0.0
     auto deq = t.dequantize();
     const float* fp = deq.data<float>();
     for (int i = 0; i < 4; ++i) {
-        EXPECT_NEAR(fp[i], 200.0f, 1e-4f)
-            << "QUInt8 dequantize after fill_(200.0) mismatch at i=" << i;
+        EXPECT_NEAR(fp[i], 0.0f, 1e-4f)
+            << "QUInt8 dequantize after fill_(0.0) mismatch at i=" << i;
     }
 }
 
