@@ -65,3 +65,4 @@ crash-*
 
 # Local git worktrees
 .worktrees/
+.superpowers/
