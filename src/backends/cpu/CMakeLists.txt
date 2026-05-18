@@ -37,6 +37,7 @@ set(CPU_BACKEND_SOURCES
     kernels/conv3d.cpp
     kernels/fused_ops.cpp
     kernels/simd_dispatch.cpp
+    kernels/simd_kernels_avx512_f64.cpp
     kernels/pooling.cpp
     kernels/pooling_avx512.cpp
     kernels/nn_kernels.cpp
@@ -126,6 +127,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             kernels/activations_simd_avx512.cpp
             kernels/batchnorm_avx512.cpp
             kernels/pooling_avx512.cpp
+            kernels/simd_kernels_avx512_f64.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512dq;-mavx2;-mfma;-mf16c"
         )
 
@@ -137,6 +139,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             kernels/simd_dispatch.cpp
             kernels/math_simd_avx512.cpp
             kernels/activations_simd_avx512.cpp
+            kernels/simd_kernels_avx512_f64.cpp
             PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
         )
 
@@ -165,6 +168,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             kernels/activations_simd_avx512.cpp
             kernels/batchnorm_avx512.cpp
             kernels/pooling_avx512.cpp
+            kernels/simd_kernels_avx512_f64.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f"
         )
 

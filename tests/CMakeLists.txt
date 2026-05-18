@@ -271,6 +271,7 @@ add_executable(tenzor_unit_tests
     unit/test_graph_optimizer.cpp
     unit/test_simd_dispatch.cpp
     unit/test_simd.cpp
+    unit/test_simd_runtime_dispatch.cpp
     unit/test_oneapi_backend_loading.cpp
     unit/test_oneapi_operations.cpp
 )
@@ -279,6 +280,14 @@ target_link_libraries(tenzor_unit_tests PRIVATE
     tenzor_core
     tenzor_backend_cpu
     GTest::gtest_main
+)
+
+# test_simd_runtime_dispatch.cpp accesses internal kernel headers
+# (simd_dispatch.hpp and simd_traits.hpp from the CPU backend source tree).
+target_include_directories(tenzor_unit_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu/kernels
+    ${PROJECT_SOURCE_DIR}/include
 )
 foreach(backend cuda rocm oneapi vulkan)
     if(TARGET tenzor_backend_${backend})
@@ -289,6 +298,23 @@ endforeach()
 # gtest_discover_tests enables individual test case discovery for better sharding
 # (Previously used add_test due to static destruction crash — now resolved)
 tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 120 LABELS "unit")
+
+# Runtime SIMD dispatch test — standalone executable for targeted runs.
+# Also included in tenzor_unit_tests above.
+add_executable(test_simd_runtime_dispatch
+    unit/test_simd_runtime_dispatch.cpp
+)
+target_link_libraries(test_simd_runtime_dispatch PRIVATE
+    tenzor_core
+    tenzor_backend_cpu
+    GTest::gtest_main
+)
+target_include_directories(test_simd_runtime_dispatch PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu/kernels
+    ${PROJECT_SOURCE_DIR}/include
+)
+tenzor_discover_tests(test_simd_runtime_dispatch DISCOVERY_TIMEOUT 60 LABELS "unit")
 
 # SIMD Benchmark tests (separate executable for benchmarking)
 add_executable(tenzor_simd_benchmark
