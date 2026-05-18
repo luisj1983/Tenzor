@@ -1081,3 +1081,9 @@ tenzor_discover_tests(test_philox_reproducibility DISCOVERY_TIMEOUT 60 BACKENDS 
 add_executable(test_deterministic_mode test_deterministic_mode.cpp)
 target_link_libraries(test_deterministic_mode PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_deterministic_mode DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Task 4.3: F16/BF16 SIMD widen-convert-narrow in simd_elementwise.hpp
+add_executable(test_simd_elementwise_half test_simd_elementwise_half.cpp)
+target_link_libraries(test_simd_elementwise_half PRIVATE tenzor_core GTest::gtest_main)
+add_test(NAME cpu_test_simd_elementwise_half COMMAND test_simd_elementwise_half)
+set_tests_properties(cpu_test_simd_elementwise_half PROPERTIES TIMEOUT 120 LABELS "cpu;simd;half")
