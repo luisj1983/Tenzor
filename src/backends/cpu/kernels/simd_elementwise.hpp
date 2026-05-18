@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <omp.h>
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #ifdef __AVX512F__
 #define TENZOR_HAS_AVX512 1
@@ -41,8 +42,9 @@
 
 namespace tenzor::cpu {
 
-/// Threshold for OpenMP parallelization of elementwise ops
-inline constexpr size_t ELEMENTWISE_OMP_THRESHOLD = 65536;
+/// Threshold for OpenMP parallelization of elementwise ops.
+/// Driven by tenzor::OmpThresholds::simple() (see tenzor/backend/omp_thresholds.hpp).
+#define ELEMENTWISE_OMP_THRESHOLD (::tenzor::OmpThresholds::simple())
 
 /**
  * @brief Apply a unary scalar operation elementwise with SIMD acceleration.

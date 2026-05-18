@@ -20,6 +20,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
@@ -418,8 +419,9 @@ inline void microkernel_scalar(
 // High-level GEMM Interface
 // ============================================================================
 
-// Adaptive OpenMP thresholds based on operation type
-constexpr int64_t OMP_THRESHOLD_GEMM = 4096;  // M*N threshold for parallelization
+// Adaptive OpenMP thresholds based on operation type.
+// Driven by tenzor::OmpThresholds::matmul() (see tenzor/backend/omp_thresholds.hpp).
+#define OMP_THRESHOLD_GEMM (::tenzor::OmpThresholds::matmul())
 
 /**
  * @brief Optimized GEMM: C = alpha * A * B + beta * C
