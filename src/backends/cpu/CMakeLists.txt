@@ -18,6 +18,7 @@ option(TENZOR_PORTABLE "Build portable binaries with runtime SIMD dispatch inste
 set(CPU_BACKEND_SOURCES
     cpu_backend.cpp
     cpu_caching_allocator.cpp
+    cpu_thread_config.cpp
     cpu_kernel_registry.cpp
     simd.cpp
     kernels/math.cpp

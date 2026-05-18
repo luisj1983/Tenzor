@@ -11,6 +11,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "cpu_thread_config.hpp"
 #endif
 
 #ifndef _WIN32
@@ -1174,25 +1175,8 @@ void register_cpu_kernels(BackendDispatchTable& table);
 // Export factory function
 extern "C" {
     Backend* create_backend() {
-        // Configure OpenMP to use all available hardware threads by default
-        // Users can override with OMP_NUM_THREADS environment variable
-#ifdef _OPENMP
-        if (std::getenv("OMP_NUM_THREADS") == nullptr) {
-            int num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-            omp_set_num_threads(num_threads);
-        }
-
-        // Warn if OpenMP is limited to 1 thread on a multi-core system.
-        // This can happen when another library (e.g., PyTorch, MKL) initializes
-        // the OpenMP runtime first with a different thread count.
-        if (omp_get_max_threads() == 1 && std::thread::hardware_concurrency() > 1) {
-            std::fprintf(stderr,
-                "[tenzor] Warning: OpenMP is limited to 1 thread on a %u-core system. "
-                "Set OMP_NUM_THREADS=%u before importing other libraries for full parallelism.\n",
-                std::thread::hardware_concurrency(),
-                std::thread::hardware_concurrency());
-        }
-#endif
+        // Single source of truth for OMP thread count: idempotent, once_flag guarded.
+        tenzor::backends::cpu::configure_omp_threads();
         return new CPUBackend();
     }
 

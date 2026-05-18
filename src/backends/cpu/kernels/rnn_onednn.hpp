@@ -23,6 +23,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include "../cpu_thread_config.hpp"
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -45,30 +46,8 @@ inline dnnl::engine& get_engine() {
 
     if (!threads_configured) {
         threads_configured = true;
-#ifdef _OPENMP
-        // Configure optimal thread count for oneDNN
-        // Use physical cores (not hyperthreaded) to avoid contention
-        unsigned int logical_cores = std::thread::hardware_concurrency();
-        unsigned int physical_cores = logical_cores;
-
-        // Detect physical cores via Linux sysfs
-        std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
-        if (siblings.good()) {
-            std::string line;
-            if (std::getline(siblings, line)) {
-                int threads_per_core = 1;
-                for (char c : line) {
-                    if (c == ',') threads_per_core++;
-                }
-                if (threads_per_core > 1) {
-                    physical_cores = logical_cores / threads_per_core;
-                }
-            }
-        }
-
-        int num_threads = std::max(1u, physical_cores);
-        omp_set_num_threads(num_threads);
-#endif
+        // Single source of truth for OMP thread count.
+        tenzor::backends::cpu::configure_omp_threads();
     }
 
     if (!engine) {
