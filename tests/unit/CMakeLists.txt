@@ -1108,3 +1108,8 @@ tenzor_discover_tests(test_int8_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABEL
 add_executable(test_bf16_mkl_gemm test_bf16_mkl_gemm.cpp)
 target_link_libraries(test_bf16_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_bf16_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;bf16")
+
+# Task 6.6: format_tag::any for oneDNN MatMul + Pooling primitives
+add_executable(test_onednn_format_any test_onednn_format_any.cpp)
+target_link_libraries(test_onednn_format_any PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;onednn")

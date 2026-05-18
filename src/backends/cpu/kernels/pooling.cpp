@@ -79,7 +79,13 @@ struct PoolingCacheKeyHash {
 
 struct PoolingCachedPrimitive {
     dnnl::pooling_forward prim;
+    // User-facing format (always nchw for CPU float tensors)
+    dnnl::memory::desc src_user_md, dst_user_md;
+    // Optimal format chosen by oneDNN via format_tag::any
     dnnl::memory::desc src_md, dst_md;
+    // True when oneDNN chose a different layout and reorder is needed
+    bool need_src_reorder{false};
+    bool need_dst_reorder{false};
 };
 
 static constexpr size_t POOLING_CACHE_SIZE = 32;
@@ -122,28 +128,65 @@ static bool onednn_avgpool2d_forward(
             dnnl::memory::dims padding_l = {padding, padding};
             dnnl::memory::dims padding_r = {padding, padding};
 
-            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
-            cached->dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+            // Task 6.6: use format_tag::any so oneDNN selects the optimal
+            // blocked layout (e.g. nChw8c on AVX2 machines).  We cache the
+            // resulting optimal descriptors and whether a reorder is needed.
+            cached->src_user_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                                      dnnl::memory::format_tag::nchw);
+            cached->dst_user_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
+                                                      dnnl::memory::format_tag::nchw);
+
+            auto src_any_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+            auto dst_any_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
 
             auto pool_pd = dnnl::pooling_forward::primitive_desc(
                 engine,
                 dnnl::prop_kind::forward_inference,
                 dnnl::algorithm::pooling_avg_exclude_padding,
-                cached->src_md, cached->dst_md,
+                src_any_md, dst_any_md,
                 stride_dims, kernel_dims,
                 dilation_dims, padding_l, padding_r);
+
+            cached->src_md = pool_pd.src_desc();
+            cached->dst_md = pool_pd.dst_desc();
+            cached->need_src_reorder = (cached->src_md != cached->src_user_md);
+            cached->need_dst_reorder = (cached->dst_md != cached->dst_user_md);
             cached->prim = dnnl::pooling_forward(pool_pd);
 
             g_pooling_cache.put(cache_key, cached);
         }
 
-        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(cached->dst_md, engine, output);
+        // Create user-format memory objects (always nchw).
+        auto src_user_mem = dnnl::memory(cached->src_user_md, engine, const_cast<float*>(input));
+        auto dst_user_mem = dnnl::memory(cached->dst_user_md, engine, output);
+
+        // If oneDNN selected a different layout, reorder src to optimal format.
+        dnnl::memory src_prim_mem = src_user_mem;
+        if (cached->need_src_reorder) {
+            src_prim_mem = dnnl::memory(cached->src_md, engine);
+            dnnl::reorder(src_user_mem, src_prim_mem)
+                .execute(stream, src_user_mem, src_prim_mem);
+        }
+
+        // Allocate optimal dst memory.
+        dnnl::memory dst_prim_mem = dst_user_mem;
+        if (cached->need_dst_reorder) {
+            dst_prim_mem = dnnl::memory(cached->dst_md, engine);
+        }
 
         cached->prim.execute(stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_DST, dst_mem}
+            {DNNL_ARG_SRC, src_prim_mem},
+            {DNNL_ARG_DST, dst_prim_mem}
         });
+
+        // Reorder dst back to user nchw format if needed.
+        if (cached->need_dst_reorder) {
+            dnnl::reorder(dst_prim_mem, dst_user_mem)
+                .execute(stream, dst_prim_mem, dst_user_mem);
+        }
+
         stream.wait();
 
         return true;

@@ -118,19 +118,27 @@ static bool linear_onednn(
         auto& engine = get_nn_engine();
         auto& stream = get_nn_stream();
 
-        // Create memory descriptors
-        dnnl::memory::dims src_dims = {batch_size, in_features};
+        // Task 6.6: user-facing (plain) memory descriptors for src, weights, dst.
+        dnnl::memory::dims src_dims     = {batch_size, in_features};
         dnnl::memory::dims weights_dims = {out_features, in_features};
-        dnnl::memory::dims dst_dims = {batch_size, out_features};
+        dnnl::memory::dims dst_dims     = {batch_size, out_features};
 
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
-        auto weights_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
-                                              dnnl::memory::format_tag::oi);
-        auto dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
+        auto src_user_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::nc);
+        auto weights_user_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
+                                                   dnnl::memory::format_tag::oi);
+        auto dst_user_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::nc);
 
-        // Create inner product primitive descriptor
+        // Use format_tag::any so oneDNN picks the optimal weight layout.
+        auto src_any_md     = dnnl::memory::desc(src_dims,     dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+        auto weights_any_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+        auto dst_any_md     = dnnl::memory::desc(dst_dims,     dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+
+        // Create inner product primitive descriptor.
         dnnl::inner_product_forward::primitive_desc ip_pd;
 
         if (bias != nullptr) {
@@ -138,44 +146,67 @@ static bool linear_onednn(
             auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
                                                dnnl::memory::format_tag::a);
             ip_pd = dnnl::inner_product_forward::primitive_desc(
-                engine,
-                dnnl::prop_kind::forward_inference,
-                src_md, weights_md, bias_md, dst_md
-            );
+                engine, dnnl::prop_kind::forward_inference,
+                src_any_md, weights_any_md, bias_md, dst_any_md);
         } else {
             ip_pd = dnnl::inner_product_forward::primitive_desc(
-                engine,
-                dnnl::prop_kind::forward_inference,
-                src_md, weights_md, dst_md
-            );
+                engine, dnnl::prop_kind::forward_inference,
+                src_any_md, weights_any_md, dst_any_md);
         }
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input));
-        auto weights_mem = dnnl::memory(weights_md, engine, const_cast<float*>(weight));
-        auto dst_mem = dnnl::memory(dst_md, engine, output);
+        // Retrieve the optimal descriptors chosen by oneDNN.
+        auto src_opt_md     = ip_pd.src_desc();
+        auto weights_opt_md = ip_pd.weights_desc();
+        auto dst_opt_md     = ip_pd.dst_desc();
 
-        // Create and execute primitive
+        // Create user-format memory and reorder to optimal format if needed.
+        auto src_user_mem = dnnl::memory(src_user_md, engine, const_cast<float*>(input));
+        dnnl::memory src_mem = src_user_mem;
+        if (src_opt_md != src_user_md) {
+            src_mem = dnnl::memory(src_opt_md, engine);
+            dnnl::reorder(src_user_mem, src_mem).execute(stream, src_user_mem, src_mem);
+        }
+
+        auto weights_user_mem = dnnl::memory(weights_user_md, engine, const_cast<float*>(weight));
+        dnnl::memory weights_mem = weights_user_mem;
+        if (weights_opt_md != weights_user_md) {
+            weights_mem = dnnl::memory(weights_opt_md, engine);
+            dnnl::reorder(weights_user_mem, weights_mem).execute(stream, weights_user_mem, weights_mem);
+        }
+
+        auto dst_user_mem = dnnl::memory(dst_user_md, engine, output);
+        dnnl::memory dst_mem = dst_user_mem;
+        if (dst_opt_md != dst_user_md) {
+            dst_mem = dnnl::memory(dst_opt_md, engine);
+        }
+
+        // Create and execute primitive.
         auto ip_prim = dnnl::inner_product_forward(ip_pd);
 
         if (bias != nullptr) {
             dnnl::memory::dims bias_dims = {out_features};
-            auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
-                                               dnnl::memory::format_tag::a);
+            auto bias_md  = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
+                                                dnnl::memory::format_tag::a);
             auto bias_mem = dnnl::memory(bias_md, engine, const_cast<float*>(bias));
             ip_prim.execute(stream, {
-                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_SRC,     src_mem},
                 {DNNL_ARG_WEIGHTS, weights_mem},
-                {DNNL_ARG_BIAS, bias_mem},
-                {DNNL_ARG_DST, dst_mem}
+                {DNNL_ARG_BIAS,    bias_mem},
+                {DNNL_ARG_DST,     dst_mem}
             });
         } else {
             ip_prim.execute(stream, {
-                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_SRC,     src_mem},
                 {DNNL_ARG_WEIGHTS, weights_mem},
-                {DNNL_ARG_DST, dst_mem}
+                {DNNL_ARG_DST,     dst_mem}
             });
         }
+
+        // Reorder dst back to user format if needed.
+        if (dst_opt_md != dst_user_md) {
+            dnnl::reorder(dst_mem, dst_user_mem).execute(stream, dst_mem, dst_user_mem);
+        }
+
         stream.wait();
         return true;
     } catch (...) {
