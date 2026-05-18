@@ -125,6 +125,10 @@ _sys.modules['tenzor.linalg'] = linalg
 from . import special as special
 _sys.modules['tenzor.special'] = special
 
+# Load distributions submodule (pure Python — numpy/scipy backend)
+from . import distributions as distributions
+_sys.modules['tenzor.distributions'] = distributions
+
 # ----------------------------------------------------------------
 # Phase 2.6 — __tensor_function__ subclass override protocol.
 #
@@ -400,6 +404,9 @@ __all__ = [
 
     # Special functions submodule
     "special",
+
+    # Probability distributions submodule
+    "distributions",
 
     # Special functions (also accessible via tz.special.*)
     "erf",
