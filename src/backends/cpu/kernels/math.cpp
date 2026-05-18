@@ -1687,7 +1687,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
 
     } else if (a_contig.dtype() == DType::Complex64 && b_contig.dtype() == DType::Complex64) {
-#ifdef TENZOR_HAS_MKL
+#ifdef TENZOR_USE_MKL
         MKL_Complex8 alpha = {1.0f, 0.0f};
         MKL_Complex8 beta = {0.0f, 0.0f};
         cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -1713,7 +1713,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #endif
 
     } else if (a_contig.dtype() == DType::Complex128 && b_contig.dtype() == DType::Complex128) {
-#ifdef TENZOR_HAS_MKL
+#ifdef TENZOR_USE_MKL
         MKL_Complex16 alpha = {1.0, 0.0};
         MKL_Complex16 beta = {0.0, 0.0};
         cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,

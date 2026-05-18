@@ -1015,3 +1015,8 @@ tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKE
 add_executable(test_scatter_add_dtype_coverage test_scatter_add_dtype_coverage.cpp)
 target_link_libraries(test_scatter_add_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #5 regression: complex matmul TENZOR_HAS_MKL → TENZOR_USE_MKL guard fix
+add_executable(test_complex_matmul_mkl test_complex_matmul_mkl.cpp)
+target_link_libraries(test_complex_matmul_mkl PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_complex_matmul_mkl DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
