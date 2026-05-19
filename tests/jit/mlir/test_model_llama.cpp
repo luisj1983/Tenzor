@@ -24,7 +24,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -54,6 +56,46 @@ auto target_hw_present(const std::string& target) -> bool {
     if (target == "rocm")         return backend_present("rocm");
     if (target == "vulkan-spirv") return backend_present("vulkan");
     return false;
+}
+
+/// Probe whether the locally installed iree-compile knows about a given
+/// HAL target backend. The iree-dist shipped here may be CPU-only or
+/// CPU+Vulkan; calling it for an unsupported target throws a
+/// "target backend 'X' not registered" deep inside the compiler.
+auto iree_target_supported(const std::string& target) -> bool {
+    static const std::set<std::string> registered = [] {
+        std::set<std::string> out;
+        // Use `iree-compile --iree-hal-list-target-backends` as the
+        // ground truth — it prints one backend per line under a header
+        // "Registered target backends:".
+        FILE* pipe = ::popen(
+            "iree-compile --iree-hal-list-target-backends 2>/dev/null",
+            "r");
+        if (pipe == nullptr) return out;
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+            std::string line(buf);
+            // Trim trailing newline / whitespace.
+            while (!line.empty() &&
+                   (line.back() == '\n' || line.back() == '\r' ||
+                    line.back() == ' ' || line.back() == '\t')) {
+                line.pop_back();
+            }
+            // Trim leading whitespace.
+            std::size_t start = 0;
+            while (start < line.size() &&
+                   (line[start] == ' ' || line[start] == '\t')) {
+                ++start;
+            }
+            line = line.substr(start);
+            if (line.empty()) continue;
+            if (line.find("Registered") != std::string::npos) continue;
+            out.insert(line);
+        }
+        ::pclose(pipe);
+        return out;
+    }();
+    return registered.count(target) > 0;
 }
 
 auto device_for_target(const std::string& target) -> ::tenzor::Device {
@@ -125,9 +167,42 @@ public:
         build_rope_tables();
     }
 
+    /// Move every parameter and pre-computed table to `dev`. Used by the
+    /// GPU JIT tests, where the tokens / activations live on the device
+    /// but the modules were constructed CPU-side.
+    auto to(::tenzor::Device dev) -> void {
+        embedding_->to(dev);
+        for (auto& layer : layers_) {
+            layer.attn_norm->to(dev);
+            layer.q_proj->to(dev);
+            layer.k_proj->to(dev);
+            layer.v_proj->to(dev);
+            layer.o_proj->to(dev);
+            layer.mlp_norm->to(dev);
+            layer.gate_proj->to(dev);
+            layer.up_proj->to(dev);
+            layer.down_proj->to(dev);
+        }
+        final_norm_->to(dev);
+        lm_head_->to(dev);
+        cos_table_ = ::tenzor::Variable(cos_table_.tensor().to(dev), false);
+        sin_table_ = ::tenzor::Variable(sin_table_.tensor().to(dev), false);
+    }
+
     /// Forward pass. `tokens` is a [B, S] int64 tensor of token ids.
     /// Returns logits [B, S, vocab_size].
     auto forward(const ::tenzor::Variable& tokens) -> ::tenzor::Variable {
+        // Mirror the RoPE tables onto the input's device (and dtype) the
+        // first time we see them — they live as plain CPU constants
+        // otherwise and the eager forward refuses to mix devices.
+        const auto target_dev = tokens.tensor().device();
+        if (cos_table_.tensor().device() != target_dev) {
+            cos_table_ = ::tenzor::Variable(
+                cos_table_.tensor().to(target_dev), false);
+            sin_table_ = ::tenzor::Variable(
+                sin_table_.tensor().to(target_dev), false);
+        }
+
         auto x = embedding_->forward(tokens);  // [B, S, D]
         const auto shape_in = x.shape();
         if (shape_in.size() != 3) {
@@ -281,7 +356,10 @@ private:
             }
         }
         auto mask_t = ::tenzor::Tensor::from_blob(mask_data.data(), {S_q, S_k},
-                                          scores.tensor().dtype()).clone();
+                                          ::tenzor::DType::Float32).clone();
+        if (scores.tensor().dtype() != ::tenzor::DType::Float32) {
+            mask_t = mask_t.to(scores.tensor().dtype());
+        }
         if (mask_t.device() != scores.tensor().device()) {
             mask_t = mask_t.to(scores.tensor().device());
         }
@@ -304,9 +382,17 @@ void run_jit_match(const std::string& target) {
     if (!target_hw_present(target)) {
         GTEST_SKIP() << "no hardware for target=" << target;
     }
+    if (!iree_target_supported(target)) {
+        GTEST_SKIP() << "iree-compile does not have HAL target backend "
+                     << "'" << target << "' registered (rebuild iree-dist "
+                     << "with -DIREE_HAL_DRIVER_" << target << "=ON)";
+    }
 
     MiniLlama m(MiniLlamaConfig{});
     const auto dev = device_for_target(target);
+    if (dev.type != ::tenzor::Device::Type::CPU) {
+        m.to(dev);
+    }
     auto tokens_t = ::tenzor::randint(0, 256, {1, 8},
                                       ::tenzor::DType::Int64, dev);
     ::tenzor::Variable tokens(tokens_t, /*requires_grad=*/false);
@@ -328,8 +414,12 @@ void run_jit_match(const std::string& target) {
               std::vector<int64_t>(e_shape.begin(), e_shape.end()))
         << "shape mismatch on target=" << target;
 
-    const auto e_f64 = eager.tensor().to(::tenzor::DType::Float64);
-    const auto j_f64 = jit_out.tensor().to(::tenzor::DType::Float64);
+    // iree-run-module returns its output on CPU; pull the eager tensor
+    // back to CPU before the f64 subtract so we don't mix device types.
+    const auto e_f64 = eager.tensor().to(::tenzor::Device::cpu())
+                           .to(::tenzor::DType::Float64);
+    const auto j_f64 = jit_out.tensor().to(::tenzor::Device::cpu())
+                           .to(::tenzor::DType::Float64);
     const auto diff  = ::tenzor::max(::tenzor::abs(e_f64 - j_f64))
                            .template item<double>();
     EXPECT_LT(diff, 1e-3)
