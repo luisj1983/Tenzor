@@ -316,11 +316,56 @@ auto emit_custom_call(std::ostream& os, const std::string& callee,
     write_tensor_type(os, result_shape, result_dtype);
 }
 
+auto emit_plugin_call(
+    std::ostream& os, const std::string& callee, const std::string& result,
+    const std::vector<std::string>& tensor_operand_names,
+    const std::vector<std::vector<int64_t>>& tensor_operand_shapes,
+    const std::vector<::tenzor::DType>& tensor_operand_dtypes,
+    const std::vector<std::pair<std::string, std::string>>& scalar_args,
+    const std::vector<int64_t>& result_shape,
+    ::tenzor::DType result_dtype) -> void {
+    if (tensor_operand_names.size() != tensor_operand_shapes.size() ||
+        tensor_operand_names.size() != tensor_operand_dtypes.size()) {
+        throw std::invalid_argument(
+            "emit_plugin_call: tensor_operand_{names,shapes,dtypes} must have "
+            "equal length");
+    }
+
+    os << '%' << result << " = call @" << callee << '(';
+    bool first = true;
+    for (std::size_t i = 0; i < tensor_operand_names.size(); ++i) {
+        if (!first) os << ", ";
+        os << '%' << tensor_operand_names[i];
+        first = false;
+    }
+    for (const auto& [name, _ty] : scalar_args) {
+        if (!first) os << ", ";
+        os << '%' << name;
+        first = false;
+    }
+    os << ") : (";
+    first = true;
+    for (std::size_t i = 0; i < tensor_operand_names.size(); ++i) {
+        if (!first) os << ", ";
+        write_tensor_type(os, tensor_operand_shapes[i],
+                          tensor_operand_dtypes[i]);
+        first = false;
+    }
+    for (const auto& [_name, ty] : scalar_args) {
+        if (!first) os << ", ";
+        os << ty;
+        first = false;
+    }
+    os << ") -> ";
+    write_tensor_type(os, result_shape, result_dtype);
+}
+
 auto emit_module_wrapper(
     std::ostream& body_os,
     const std::vector<std::pair<std::vector<int64_t>, ::tenzor::DType>>& inputs,
     const std::vector<std::pair<std::vector<int64_t>, ::tenzor::DType>>& outputs,
-    const std::vector<std::string>& return_names) -> std::string {
+    const std::vector<std::string>& return_names,
+    const std::vector<std::string>& extern_decls) -> std::string {
     if (outputs.size() != return_names.size()) {
         throw std::invalid_argument(
             "emit_module_wrapper: outputs and return_names must have equal "
@@ -342,6 +387,17 @@ auto emit_module_wrapper(
 
     std::ostringstream out;
     out << "module {\n";
+
+    // External `func.func private @<name>(...) -> ...` declarations the
+    // plugin path uses to declare tenzor_plugin.<op> imports. Emitted
+    // before @main so the call sites in the body resolve against them.
+    for (const auto& decl : extern_decls) {
+        out << "  " << decl;
+        if (decl.empty() || decl.back() != '\n') {
+            out << '\n';
+        }
+    }
+
     out << "  func.func @main(";
     for (std::size_t i = 0; i < inputs.size(); ++i) {
         if (i != 0) {
@@ -359,9 +415,6 @@ auto emit_module_wrapper(
     }
     out << ") {\n";
 
-    // Indent the body two spaces per line if any text is present. Body_text
-    // may already be a multi-line block; we just append it verbatim, then
-    // ensure a trailing newline so the return sits on its own line.
     out << body_text;
     if (!body_text.empty() && body_text.back() != '\n') {
         out << '\n';

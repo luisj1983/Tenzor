@@ -1,13 +1,16 @@
-// Phase 13 / Group D.1.1 — FlashAttention lowers to stablehlo.custom_call
-// @tenzor_flash_attention.
+// Phase 13 / Group D.1.1 — FlashAttention lowers to a plugin call.
 //
-// The Tenzor dialect op FlashAttention is emitted as a single
-// `stablehlo.custom_call @tenzor_flash_attention(%q, %k, %v) {backend_config
-// = "causal=<b>,scale=<f>"}` line. iree-compile rejects an unregistered
-// custom_call target (see test_iree_customcall_smoke.cpp), so this test
-// validates the emitted MLIR *text* only — the runtime side is exercised by
-// the IR-only smoke test in Group A.9. The expand-to-stablehlo decomposition
-// for deploy targets without the Tenzor plugin lives in Group D.1.3.
+// Per the 2026-05-19 amendment / Path A, the Tenzor dialect op
+// FlashAttention is now emitted as a `call @tenzor_plugin.flash_attention(...)`
+// against a `func.func private @tenzor_plugin.flash_attention(...) -> ...`
+// declaration in the same module. The scalar attrs (causal, scale) travel
+// as i32 args (causal as 0/1, scale as the bit pattern of the f32). At
+// runtime the in-process IreeInvoker registers a VM native module that
+// exports these symbols and routes them to the existing tensor kernels
+// (see src/jit/mlir/iree_customcalls.cpp).
+//
+// This test validates the emitted MLIR *text* only — the runtime side is
+// exercised by the end-to-end plugin-path callback tests.
 
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
@@ -33,7 +36,7 @@ auto ensure_core_init() -> void {
 
 }  // namespace
 
-TEST(OpFlashAttention, EmitsCustomCallText) {
+TEST(OpFlashAttention, EmitsPluginCallText) {
     ensure_core_init();
     // Q, K, V: (B=2, H=4, S=16, D=64)
     tzj::Graph g;
@@ -61,16 +64,20 @@ TEST(OpFlashAttention, EmitsCustomCallText) {
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
 
-    EXPECT_NE(mlir.find("stablehlo.custom_call @tenzor_flash_attention"),
+    // External declaration appears alongside @main.
+    EXPECT_NE(mlir.find("func.func private @tenzor_plugin.flash_attention"),
               std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("causal=true"), std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("scale="),      std::string::npos) << mlir;
-    // 3 operands carrying the (B,H,S,D)=(2,4,16,64) shape must appear as
-    // tensor<2x4x16x64xf32> in the call's operand-type list.
+    // The call site invokes the plugin function (not a stablehlo.custom_call).
+    EXPECT_NE(mlir.find("call @tenzor_plugin.flash_attention"),
+              std::string::npos) << mlir;
+    // The 3 tensor operands carrying (B,H,S,D)=(2,4,16,64) must appear in
+    // the call's operand-type list.
     EXPECT_NE(mlir.find("tensor<2x4x16x64xf32>"), std::string::npos) << mlir;
+    // i32 scalars for (scale_bits, causal) must appear in the type list.
+    EXPECT_NE(mlir.find("i32, i32"), std::string::npos) << mlir;
 }
 
-TEST(OpFlashAttention, NonCausalDefaultEmitsCausalFalse) {
+TEST(OpFlashAttention, NonCausalDefaultEmitsCausalZero) {
     ensure_core_init();
     tzj::Graph g;
     const std::vector<int64_t> shape{1, 2, 8, 32};
@@ -88,12 +95,17 @@ TEST(OpFlashAttention, NonCausalDefaultEmitsCausalFalse) {
     auto out = g.create_value("o", shape, ::tenzor::DType::Float32,
                               ::tenzor::Device::cpu());
     node->add_output(out);
-    // No causal / scale attrs set: defaults must be causal=false, scale=0.
+    // No causal / scale attrs set: defaults must be causal=false (0),
+    // scale defaults to 1/sqrt(D).
     g.add_node(node);
     g.set_outputs({out});
 
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
-    EXPECT_NE(mlir.find("@tenzor_flash_attention"), std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("causal=false"), std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("call @tenzor_plugin.flash_attention"),
+              std::string::npos) << mlir;
+    // The causal=false scalar argument is the i32 constant `0` — two arith.
+    // constants live in the body (scale_bits + causal); the second one
+    // (causal) ends in ` 0 : i32`.
+    EXPECT_NE(mlir.find("arith.constant 0 : i32"), std::string::npos) << mlir;
 }

@@ -93,9 +93,9 @@ TEST(OpRoPEExpand, EmitsDistinctTextFromCustomCall) {
     expand_lower.set_plugin_enabled(false);
     const std::string expand_mlir = expand_lower.lower(g);
 
-    EXPECT_NE(plugin_mlir.find("@tenzor_rope_apply"),
+    EXPECT_NE(plugin_mlir.find("@tenzor_plugin.rope_apply"),
               std::string::npos) << plugin_mlir;
-    EXPECT_EQ(expand_mlir.find("@tenzor_rope_apply"),
+    EXPECT_EQ(expand_mlir.find("@tenzor_plugin.rope_apply"),
               std::string::npos) << expand_mlir;
     // Expand path must contain the rotate-half pattern: slice + negate
     // + concatenate.

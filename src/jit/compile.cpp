@@ -345,14 +345,38 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     }
 
     mj::GraphToMLIR lowerer;
+    // Plugin path is the default — the lowering emits call @tenzor_plugin.<op>
+    // for the 4 dialect ops and the in-process IreeInvoker registers a VM
+    // native module that resolves them. Graphs that contain none of those ops
+    // are equally compatible (no extern decls are produced).
+    lowerer.set_plugin_enabled(true);
     const std::string mlir_text = lowerer.lower(*graph);
 
     mj::CompileOptions opts;
     opts.target          = resolve_target(config_.target, input.tensor().device());
-    opts.plugin_enabled  = false;  // No tenzor_* custom_calls in B.2.
+    opts.plugin_enabled  = true;
 
     auto artifact = mj::compile_mlir(mlir_text, opts);
-    auto invoker  = mj::IreeInvoker::load(artifact);
+    // Mode::InProcess registers the tenzor_plugin VM module before loading
+    // the bytecode — required whenever the compiled .vmfb references any
+    // tenzor_plugin.<op> import. For targets where the linked runtime lacks
+    // the HAL driver (e.g. distributions without cuda/vulkan compiled in)
+    // we fall back to the subprocess driver, which carries its own driver
+    // set; this preserves the GPU end-to-end path without a CPU fallback.
+    std::unique_ptr<mj::IreeInvoker> invoker;
+    try {
+        invoker = mj::IreeInvoker::load(artifact,
+                                        mj::IreeInvoker::Mode::InProcess);
+    } catch (const mj::JitInvokeError& e) {
+        const std::string what = e.what();
+        if (what.find("NOT_FOUND") != std::string::npos &&
+            what.find("driver") != std::string::npos) {
+            invoker = mj::IreeInvoker::load(artifact,
+                                            mj::IreeInvoker::Mode::Subprocess);
+        } else {
+            throw;
+        }
+    }
 
     // Optional artifact dumping: when TENZOR_JIT_DUMP=<dir> is set, write the
     // full pipeline (graph text + MLIR + expanded StableHLO + iree-compile

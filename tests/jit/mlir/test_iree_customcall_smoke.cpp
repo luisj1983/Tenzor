@@ -73,12 +73,12 @@ TEST(IreeCustomCallSmoke, PlaceholderMessages_AllPresent) {
     const std::string rope = rope_apply();
     const std::string rms = rms_norm();
 
-    // Each must mention Group D as the resolution path, matching the
-    // structure spec'd for tenzor_*_callback in iree_customcalls.cpp.
-    EXPECT_NE(fa.find("Group D"), std::string::npos);
-    EXPECT_NE(gqa_msg.find("Group D"), std::string::npos);
-    EXPECT_NE(rope.find("Group D"), std::string::npos);
-    EXPECT_NE(rms.find("Group D"), std::string::npos);
+    // After Path A's in-process plugin lit up, each message reports the
+    // plugin module that now satisfies these calls.
+    EXPECT_NE(fa.find("tenzor_plugin"), std::string::npos);
+    EXPECT_NE(gqa_msg.find("tenzor_plugin"), std::string::npos);
+    EXPECT_NE(rope.find("tenzor_plugin"), std::string::npos);
+    EXPECT_NE(rms.find("tenzor_plugin"), std::string::npos);
 
     EXPECT_NE(fa.find("flash_attention"), std::string::npos);
     EXPECT_NE(gqa_msg.find("gqa"), std::string::npos);

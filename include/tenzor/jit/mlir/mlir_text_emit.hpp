@@ -199,6 +199,28 @@ auto emit_custom_call(std::ostream& os, const std::string& callee,
                       ::tenzor::DType result_dtype,
                       const std::string& backend_config) -> void;
 
+/// Emit a `func.call @<callee>(...)` invocation against an external plugin
+/// function. Used by the Tenzor IREE plugin path (Group D) for the 4
+/// dialect ops. The caller is also responsible for emitting a matching
+/// `func.func private @<callee>(...) -> ...` declaration at the module
+/// level via `emit_module_wrapper`'s `extern_decls` parameter.
+///
+/// `scalar_args` is an optional ordered list of `(ssa_name, mlir_type)`
+/// pairs appended after the tensor operands (e.g. `("c0", "i32")`). The
+/// caller must have emitted the corresponding `arith.constant` ops first.
+///
+/// Generated form (with one scalar arg):
+///   `%r = call @tenzor_plugin.flash_attention(%q, %k, %v, %s, %c)
+///       : (tensor<...>, tensor<...>, tensor<...>, i32, i32) -> tensor<...>`
+auto emit_plugin_call(
+    std::ostream& os, const std::string& callee, const std::string& result,
+    const std::vector<std::string>& tensor_operand_names,
+    const std::vector<std::vector<int64_t>>& tensor_operand_shapes,
+    const std::vector<::tenzor::DType>& tensor_operand_dtypes,
+    const std::vector<std::pair<std::string, std::string>>& scalar_args,
+    const std::vector<int64_t>& result_shape,
+    ::tenzor::DType result_dtype) -> void;
+
 /// Wrap a function body into a `module { func.func @main(...) -> ... { <body>
 /// return %... : ... } }` shell.
 ///
@@ -207,11 +229,18 @@ auto emit_custom_call(std::ostream& os, const std::string& callee,
 /// from the body. `body_os.str()` is consumed as-is; callers are expected to
 /// have populated it with one statement per line.
 ///
+/// `extern_decls` is a list of `func.func private @<name>(...) -> ...`
+/// declaration lines emitted alongside @main inside the module (used by
+/// the plugin path to declare `@tenzor_plugin.<op>`). Each entry is
+/// emitted verbatim with leading indentation; pass an empty string-list
+/// when no externs are needed.
+///
 /// Returns the complete module text.
 auto emit_module_wrapper(
     std::ostream& body_os,
     const std::vector<std::pair<std::vector<int64_t>, ::tenzor::DType>>& inputs,
     const std::vector<std::pair<std::vector<int64_t>, ::tenzor::DType>>& outputs,
-    const std::vector<std::string>& return_names) -> std::string;
+    const std::vector<std::string>& return_names,
+    const std::vector<std::string>& extern_decls = {}) -> std::string;
 
 }  // namespace tenzor::jit::mlir_jit

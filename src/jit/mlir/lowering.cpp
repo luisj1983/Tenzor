@@ -90,6 +90,13 @@ struct LoweringContext {
     std::unordered_map<std::string, std::string> value_name;
     int next_id = 0;
 
+    /// External `func.func private @<callee>(...) -> ...` declarations
+    /// required by plugin-path `call @tenzor_plugin.<op>` sites. Emitted
+    /// alongside @main in the module wrapper. Order is insertion order; a
+    /// set guards against duplicate declarations within one lower call.
+    std::vector<std::string> extern_decls;
+    std::unordered_set<std::string> extern_decl_keys;
+
     auto fresh_name() -> std::string {
         return "v" + std::to_string(next_id++);
     }
@@ -106,7 +113,16 @@ struct LoweringContext {
         }
         return it->second;
     }
-};
+
+    /// Register a `func.func private @<callee>(types...) -> result_type`
+    /// declaration. Idempotent — repeated calls with the same key are
+    /// no-ops. The full declaration text (sans trailing newline) is stored.
+    auto add_extern_decl(const std::string& key, std::string decl) -> void {
+        if (extern_decl_keys.insert(key).second) {
+            extern_decls.push_back(std::move(decl));
+        }
+    }
+};;
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -2058,22 +2074,58 @@ auto handle_flash_attention_custom_call(LoweringContext& ctx,
     const auto& v_val   = node.inputs()[2];
     const auto& out_val = node.outputs()[0];
 
-    const bool  causal = get_attr_bool (node, {"causal"},      false);
-    const float scale  = get_attr_float(node, {"scale"},       0.0f);
+    const bool  causal = get_attr_bool (node, {"causal"}, false);
+    const float scale_in = get_attr_float(node, {"scale"},  0.0f);
+    // Bake the implicit-default 1/sqrt(D) into the constant we pass to the
+    // plugin so the VM-side dispatcher receives a non-zero scale and skips
+    // its own default-pick branch (which depends on Q's last dim).
+    float scale = scale_in;
+    if (scale == 0.0f) {
+        const auto q_rank = q_val->shape().size();
+        if (q_rank >= 1) {
+            const auto D = q_val->shape()[q_rank - 1];
+            scale = 1.0f / std::sqrt(static_cast<float>(D));
+        }
+    }
+    int32_t scale_bits;
+    std::memcpy(&scale_bits, &scale, sizeof(scale_bits));
 
-    std::ostringstream cfg;
-    cfg << "causal=" << (causal ? "true" : "false")
-        << ",scale=" << std::setprecision(9) << scale;
+    // Emit the i32 scalar args.
+    auto scale_name  = ctx.fresh_name();
+    auto causal_name = ctx.fresh_name();
+    body << "    %" << scale_name  << " = arith.constant "
+         << static_cast<int64_t>(scale_bits)  << " : i32\n";
+    body << "    %" << causal_name << " = arith.constant "
+         << (causal ? 1 : 0) << " : i32\n";
+
+    // Register `func.func private @tenzor_plugin.flash_attention(...) -> ...`.
+    auto type_str = [](const std::vector<int64_t>& shape,
+                       ::tenzor::DType d) -> std::string {
+        std::ostringstream s;
+        s << "tensor<";
+        for (auto dim : shape) s << dim << 'x';
+        s << mlir_type_name(d) << '>';
+        return s.str();
+    };
+    std::ostringstream decl;
+    decl << "func.func private @tenzor_plugin.flash_attention("
+         << type_str(q_val->shape(), q_val->dtype()) << ", "
+         << type_str(k_val->shape(), k_val->dtype()) << ", "
+         << type_str(v_val->shape(), v_val->dtype()) << ", i32, i32) -> "
+         << type_str(out_val->shape(), out_val->dtype());
+    ctx.add_extern_decl(decl.str(), decl.str());
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_custom_call(body, "tenzor_flash_attention", out_name,
+    body << "    ";
+    emit_plugin_call(body, "tenzor_plugin.flash_attention", out_name,
                      {ctx.name_for(q_val->id()),
                       ctx.name_for(k_val->id()),
                       ctx.name_for(v_val->id())},
                      {q_val->shape(), k_val->shape(), v_val->shape()},
                      {q_val->dtype(), k_val->dtype(), v_val->dtype()},
-                     out_val->shape(), out_val->dtype(), cfg.str());
+                     {{scale_name, "i32"}, {causal_name, "i32"}},
+                     out_val->shape(), out_val->dtype());
     body << '\n';
 }
 
@@ -2094,21 +2146,52 @@ auto handle_gqa_custom_call(LoweringContext& ctx,
     const auto& out_val = node.outputs()[0];
 
     const bool  causal = get_attr_bool (node, {"causal"}, false);
-    const float scale  = get_attr_float(node, {"scale"},  0.0f);
+    const float scale_in = get_attr_float(node, {"scale"},  0.0f);
+    float scale = scale_in;
+    if (scale == 0.0f) {
+        const auto q_rank = q_val->shape().size();
+        if (q_rank >= 1) {
+            const auto D = q_val->shape()[q_rank - 1];
+            scale = 1.0f / std::sqrt(static_cast<float>(D));
+        }
+    }
+    int32_t scale_bits;
+    std::memcpy(&scale_bits, &scale, sizeof(scale_bits));
 
-    std::ostringstream cfg;
-    cfg << "causal=" << (causal ? "true" : "false")
-        << ",scale=" << std::setprecision(9) << scale;
+    auto scale_name  = ctx.fresh_name();
+    auto causal_name = ctx.fresh_name();
+    body << "    %" << scale_name  << " = arith.constant "
+         << static_cast<int64_t>(scale_bits)  << " : i32\n";
+    body << "    %" << causal_name << " = arith.constant "
+         << (causal ? 1 : 0) << " : i32\n";
+
+    auto type_str = [](const std::vector<int64_t>& shape,
+                       ::tenzor::DType d) -> std::string {
+        std::ostringstream s;
+        s << "tensor<";
+        for (auto dim : shape) s << dim << 'x';
+        s << mlir_type_name(d) << '>';
+        return s.str();
+    };
+    std::ostringstream decl;
+    decl << "func.func private @tenzor_plugin.gqa("
+         << type_str(q_val->shape(), q_val->dtype()) << ", "
+         << type_str(k_val->shape(), k_val->dtype()) << ", "
+         << type_str(v_val->shape(), v_val->dtype()) << ", i32, i32) -> "
+         << type_str(out_val->shape(), out_val->dtype());
+    ctx.add_extern_decl(decl.str(), decl.str());
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_custom_call(body, "tenzor_gqa", out_name,
+    body << "    ";
+    emit_plugin_call(body, "tenzor_plugin.gqa", out_name,
                      {ctx.name_for(q_val->id()),
                       ctx.name_for(k_val->id()),
                       ctx.name_for(v_val->id())},
                      {q_val->shape(), k_val->shape(), v_val->shape()},
                      {q_val->dtype(), k_val->dtype(), v_val->dtype()},
-                     out_val->shape(), out_val->dtype(), cfg.str());
+                     {{scale_name, "i32"}, {causal_name, "i32"}},
+                     out_val->shape(), out_val->dtype());
     body << '\n';
 }
 
@@ -2130,21 +2213,37 @@ auto handle_rope_apply_custom_call(LoweringContext& ctx,
     const auto& sin_val = node.inputs()[2];
     const auto& out_val = node.outputs()[0];
 
-    int64_t offset = 0;
-    if (node.has_attr("offset")) offset = node.get_int_attr("offset");
+    // RoPE has no compile-time-known scalars on the calling path (offset
+    // is baked into the cos/sin tables by the caller, per the dispatcher's
+    // contract). No extra arith.constant emissions needed.
 
-    std::ostringstream cfg;
-    cfg << "offset=" << offset;
+    auto type_str = [](const std::vector<int64_t>& shape,
+                       ::tenzor::DType d) -> std::string {
+        std::ostringstream s;
+        s << "tensor<";
+        for (auto dim : shape) s << dim << 'x';
+        s << mlir_type_name(d) << '>';
+        return s.str();
+    };
+    std::ostringstream decl;
+    decl << "func.func private @tenzor_plugin.rope_apply("
+         << type_str(x_val->shape(),   x_val->dtype())   << ", "
+         << type_str(cos_val->shape(), cos_val->dtype()) << ", "
+         << type_str(sin_val->shape(), sin_val->dtype()) << ") -> "
+         << type_str(out_val->shape(), out_val->dtype());
+    ctx.add_extern_decl(decl.str(), decl.str());
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_custom_call(body, "tenzor_rope_apply", out_name,
+    body << "    ";
+    emit_plugin_call(body, "tenzor_plugin.rope_apply", out_name,
                      {ctx.name_for(x_val->id()),
                       ctx.name_for(cos_val->id()),
                       ctx.name_for(sin_val->id())},
                      {x_val->shape(), cos_val->shape(), sin_val->shape()},
                      {x_val->dtype(), cos_val->dtype(), sin_val->dtype()},
-                     out_val->shape(), out_val->dtype(), cfg.str());
+                     {},  // no scalar args
+                     out_val->shape(), out_val->dtype());
     body << '\n';
 }
 
@@ -2164,28 +2263,66 @@ auto handle_rms_norm_custom_call(LoweringContext& ctx,
     const auto& out_val = node.outputs()[0];
 
     const float eps = get_attr_float(node, {"eps"}, 1e-6f);
+    int32_t eps_bits;
+    std::memcpy(&eps_bits, &eps, sizeof(eps_bits));
 
-    std::ostringstream cfg;
-    cfg << "eps=" << std::scientific << std::setprecision(9) << eps;
+    auto eps_name = ctx.fresh_name();
+    body << "    %" << eps_name << " = arith.constant "
+         << static_cast<int64_t>(eps_bits) << " : i32\n";
 
-    std::vector<std::string>                 names;
-    std::vector<std::vector<int64_t>>        shapes;
-    std::vector<::tenzor::DType>             dtypes;
-    names.push_back (ctx.name_for(x_val->id()));
-    shapes.push_back(x_val->shape());
-    dtypes.push_back(x_val->dtype());
+    // Resolve / synthesize the weight tensor name. The dispatcher mirror in
+    // iree_customcalls.cpp expects (x, weight); when no weight is provided,
+    // synthesize a stablehlo.constant of ones with shape (D,) where D is
+    // x's last dim. This matches the eager affine-free RMSNorm behavior.
+    std::string weight_name;
+    std::vector<int64_t> weight_shape;
+    ::tenzor::DType weight_dtype;
     if (node.inputs().size() >= 2) {
         const auto& w_val = node.inputs()[1];
-        names.push_back (ctx.name_for(w_val->id()));
-        shapes.push_back(w_val->shape());
-        dtypes.push_back(w_val->dtype());
+        weight_name  = ctx.name_for(w_val->id());
+        weight_shape = w_val->shape();
+        weight_dtype = w_val->dtype();
+    } else {
+        if (x_val->shape().empty()) {
+            throw std::runtime_error(
+                "GraphToMLIR: RMSNorm requires x to have rank >= 1");
+        }
+        const int64_t D = x_val->shape().back();
+        weight_shape = {D};
+        weight_dtype = x_val->dtype();
+        weight_name  = ctx.fresh_name();
+        // Emit a stablehlo.constant dense<1.0> for the synthesized weight.
+        body << "    %" << weight_name
+             << " = stablehlo.constant dense<1.0";
+        if (weight_dtype == ::tenzor::DType::Float64) body << "00";
+        body << "> : tensor<" << D << 'x' << mlir_type_name(weight_dtype)
+             << ">\n";
     }
+
+    auto type_str = [](const std::vector<int64_t>& shape,
+                       ::tenzor::DType d) -> std::string {
+        std::ostringstream s;
+        s << "tensor<";
+        for (auto dim : shape) s << dim << 'x';
+        s << mlir_type_name(d) << '>';
+        return s.str();
+    };
+    std::ostringstream decl;
+    decl << "func.func private @tenzor_plugin.rms_norm("
+         << type_str(x_val->shape(), x_val->dtype()) << ", "
+         << type_str(weight_shape,   weight_dtype)   << ", i32) -> "
+         << type_str(out_val->shape(), out_val->dtype());
+    ctx.add_extern_decl(decl.str(), decl.str());
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_custom_call(body, "tenzor_rms_norm", out_name,
-                     names, shapes, dtypes,
-                     out_val->shape(), out_val->dtype(), cfg.str());
+    body << "    ";
+    emit_plugin_call(body, "tenzor_plugin.rms_norm", out_name,
+                     {ctx.name_for(x_val->id()), weight_name},
+                     {x_val->shape(), weight_shape},
+                     {x_val->dtype(), weight_dtype},
+                     {{eps_name, "i32"}},
+                     out_val->shape(), out_val->dtype());
     body << '\n';
 }
 
@@ -2938,7 +3075,8 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
         return_names.push_back(ctx.name_for(out_val->id()));
     }
 
-    return emit_module_wrapper(body, inputs, outputs, return_names);
+    return emit_module_wrapper(body, inputs, outputs, return_names,
+                               ctx.extern_decls);
 }
 
 }  // namespace tenzor::jit::mlir_jit

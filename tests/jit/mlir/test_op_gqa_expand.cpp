@@ -89,9 +89,9 @@ TEST(OpGQAExpand, EmitsDistinctTextFromCustomCall) {
     expand_lower.set_plugin_enabled(false);
     const std::string expand_mlir = expand_lower.lower(g);
 
-    EXPECT_NE(plugin_mlir.find("@tenzor_gqa"),
+    EXPECT_NE(plugin_mlir.find("@tenzor_plugin.gqa"),
               std::string::npos) << plugin_mlir;
-    EXPECT_EQ(expand_mlir.find("@tenzor_gqa"),
+    EXPECT_EQ(expand_mlir.find("@tenzor_plugin.gqa"),
               std::string::npos) << expand_mlir;
     // Expand path must contain reshape (KV broadcast prep), broadcast_in_dim
     // and dot_general (attention math).

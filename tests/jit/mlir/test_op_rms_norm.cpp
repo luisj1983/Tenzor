@@ -1,5 +1,5 @@
 // Phase 13 / Group D.4.1 — RMSNorm lowers to stablehlo.custom_call
-// @tenzor_rms_norm.
+// @tenzor_plugin.rms_norm.
 //
 // Two operands (x, weight) and a single float attribute `eps`. The
 // backend_config string carries `eps=<f>` in scientific notation so the
@@ -54,9 +54,10 @@ TEST(OpRMSNorm, EmitsCustomCallText) {
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
 
-    EXPECT_NE(mlir.find("stablehlo.custom_call @tenzor_rms_norm"),
+    EXPECT_NE(mlir.find("call @tenzor_plugin.rms_norm"),
               std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("eps="),                  std::string::npos) << mlir;
+    // Eps travels as an i32 bit-pattern of f32, not a backend_config string.
+    EXPECT_NE(mlir.find("i32"),                   std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<2x16x768xf32>"),  std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<768xf32>"),       std::string::npos) << mlir;
 }
@@ -80,6 +81,6 @@ TEST(OpRMSNorm, NoWeightInputAllowed) {
     g.set_outputs({out});
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
-    EXPECT_NE(mlir.find("@tenzor_rms_norm"),       std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("@tenzor_plugin.rms_norm"),       std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<1x8x64xf32>"),     std::string::npos) << mlir;
 }

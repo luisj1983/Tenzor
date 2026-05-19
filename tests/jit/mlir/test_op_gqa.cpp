@@ -1,5 +1,5 @@
-// Phase 13 / Group D.2.1 — GQA (Grouped-Query Attention) lowers to
-// stablehlo.custom_call @tenzor_gqa.
+// Phase 13 / Group D.2.1 — GQA (Grouped-Query Attention) lowers to a
+// plugin call.
 //
 // Differs from FlashAttention in that K and V may have fewer heads than Q
 // (the kernel broadcasts KV heads to Q heads). The lowering itself is
@@ -61,10 +61,10 @@ TEST(OpGQA, EmitsCustomCallText) {
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
 
-    EXPECT_NE(mlir.find("stablehlo.custom_call @tenzor_gqa"),
+    EXPECT_NE(mlir.find("func.func private @tenzor_plugin.gqa"),
               std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("causal=true"),         std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("scale="),              std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("call @tenzor_plugin.gqa"),
+              std::string::npos) << mlir;
     // Distinct Q vs KV head dims preserved in the call's operand types.
     EXPECT_NE(mlir.find("tensor<2x8x16x64xf32>"), std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<2x2x16x64xf32>"), std::string::npos) << mlir;
@@ -95,6 +95,6 @@ TEST(OpGQA, MQAOneKVHeadEmitsValid) {
 
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
-    EXPECT_NE(mlir.find("@tenzor_gqa"),            std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("tensor<1x1x32x64xf32>"),  std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("call @tenzor_plugin.gqa"), std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("tensor<1x1x32x64xf32>"),   std::string::npos) << mlir;
 }

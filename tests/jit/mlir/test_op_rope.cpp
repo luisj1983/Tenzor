@@ -1,5 +1,5 @@
 // Phase 13 / Group D.3.1 — RoPE (Rotary Position Embedding) lowers to
-// stablehlo.custom_call @tenzor_rope_apply.
+// call @tenzor_plugin.rope_apply.
 //
 // Three operands: input tensor x and two precomputed sinusoid tables
 // (cos, sin). The integer attr `offset` carries the starting sequence
@@ -57,9 +57,10 @@ TEST(OpRoPE, EmitsCustomCallText) {
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
 
-    EXPECT_NE(mlir.find("stablehlo.custom_call @tenzor_rope_apply"),
+    EXPECT_NE(mlir.find("call @tenzor_plugin.rope_apply"),
               std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("offset=64"),               std::string::npos) << mlir;
+    // Offset is baked into the precomputed cos/sin tables — the plugin
+    // path no longer carries it as a backend_config string.
     EXPECT_NE(mlir.find("tensor<2x4x16x64xf32>"),   std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<16x64xf32>"),       std::string::npos) << mlir;
 }
@@ -87,6 +88,5 @@ TEST(OpRoPE, NoOffsetDefaultsToZero) {
     g.set_outputs({out});
     tzm::GraphToMLIR lowerer;
     const std::string mlir = lowerer.lower(g);
-    EXPECT_NE(mlir.find("@tenzor_rope_apply"), std::string::npos) << mlir;
-    EXPECT_NE(mlir.find("offset=0"),           std::string::npos) << mlir;
+    EXPECT_NE(mlir.find("@tenzor_plugin.rope_apply"), std::string::npos) << mlir;
 }

@@ -89,9 +89,9 @@ TEST(OpRMSNormExpand, EmitsDistinctTextFromCustomCall) {
     expand_lower.set_plugin_enabled(false);
     const std::string expand_mlir = expand_lower.lower(g);
 
-    EXPECT_NE(plugin_mlir.find("@tenzor_rms_norm"),
+    EXPECT_NE(plugin_mlir.find("@tenzor_plugin.rms_norm"),
               std::string::npos) << plugin_mlir;
-    EXPECT_EQ(expand_mlir.find("@tenzor_rms_norm"),
+    EXPECT_EQ(expand_mlir.find("@tenzor_plugin.rms_norm"),
               std::string::npos) << expand_mlir;
     EXPECT_NE(expand_mlir.find("stablehlo.reduce"),
               std::string::npos) << expand_mlir;

@@ -1,7 +1,7 @@
 // Phase 13 / Group D.1.3 — FlashAttention expand-to-stablehlo + roundtrip.
 //
 // Two lowering modes for OpType::FlashAttention:
-//   plugin_enabled=true  -> stablehlo.custom_call @tenzor_flash_attention
+//   plugin_enabled=true  -> call @tenzor_plugin.flash_attention
 //   plugin_enabled=false -> pure StableHLO primitives (dot_general → scale →
 //                           [+ causal mask] → softmax → dot_general)
 //
@@ -101,9 +101,9 @@ TEST(OpFlashAttentionExpand, EmitsDistinctTextFromCustomCall) {
     expand_lower.set_plugin_enabled(false);
     const std::string expand_mlir = expand_lower.lower(g);
 
-    EXPECT_NE(plugin_mlir.find("@tenzor_flash_attention"),
+    EXPECT_NE(plugin_mlir.find("@tenzor_plugin.flash_attention"),
               std::string::npos) << plugin_mlir;
-    EXPECT_EQ(expand_mlir.find("@tenzor_flash_attention"),
+    EXPECT_EQ(expand_mlir.find("@tenzor_plugin.flash_attention"),
               std::string::npos) << expand_mlir;
     // The expand path must contain the canonical attention primitives.
     EXPECT_NE(expand_mlir.find("stablehlo.dot_general"),
