@@ -71,6 +71,179 @@ auto emit_stablehlo_unary(std::ostream& os, const std::string& mnemonic,
     write_tensor_type(os, shape, d);
 }
 
+auto emit_stablehlo_ternary(std::ostream& os, const std::string& mnemonic,
+                            const std::string& result, const std::string& a,
+                            const std::string& b, const std::string& c,
+                            const std::vector<int64_t>& shape,
+                            ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo." << mnemonic << " %" << a << ", %"
+       << b << ", %" << c << " : ";
+    write_tensor_type(os, shape, d);
+}
+
+auto emit_stablehlo_splat_constant(std::ostream& os,
+                                   const std::string& result,
+                                   const std::string& value_literal,
+                                   const std::vector<int64_t>& shape,
+                                   ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.constant dense<" << value_literal
+       << "> : ";
+    write_tensor_type(os, shape, d);
+}
+
+namespace {
+
+auto write_dims_list(std::ostream& os, const std::vector<int64_t>& dims)
+    -> void {
+    os << '[';
+    for (std::size_t i = 0; i < dims.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << dims[i];
+    }
+    os << ']';
+}
+
+}  // namespace
+
+auto emit_stablehlo_reduce(std::ostream& os, const std::string& result,
+                           const std::string& operand,
+                           const std::string& init_name,
+                           const std::string& reducer,
+                           const std::vector<int64_t>& dims,
+                           const std::vector<int64_t>& operand_shape,
+                           const std::vector<int64_t>& result_shape,
+                           ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.reduce(%" << operand << " init: %"
+       << init_name << ") applies stablehlo." << reducer
+       << " across dimensions = ";
+    write_dims_list(os, dims);
+    os << " : (";
+    write_tensor_type(os, operand_shape, d);
+    os << ", ";
+    write_tensor_type(os, {}, d);
+    os << ") -> ";
+    write_tensor_type(os, result_shape, d);
+}
+
+auto emit_stablehlo_reshape(std::ostream& os, const std::string& result,
+                            const std::string& a,
+                            const std::vector<int64_t>& src_shape,
+                            const std::vector<int64_t>& dst_shape,
+                            ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.reshape %" << a << " : (";
+    write_tensor_type(os, src_shape, d);
+    os << ") -> ";
+    write_tensor_type(os, dst_shape, d);
+}
+
+auto emit_stablehlo_transpose(std::ostream& os, const std::string& result,
+                              const std::string& a,
+                              const std::vector<int64_t>& perm,
+                              const std::vector<int64_t>& src_shape,
+                              const std::vector<int64_t>& dst_shape,
+                              ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.transpose %" << a << ", dims = ";
+    write_dims_list(os, perm);
+    os << " : (";
+    write_tensor_type(os, src_shape, d);
+    os << ") -> ";
+    write_tensor_type(os, dst_shape, d);
+}
+
+auto emit_stablehlo_broadcast_in_dim(std::ostream& os,
+                                     const std::string& result,
+                                     const std::string& a,
+                                     const std::vector<int64_t>& bcast_dims,
+                                     const std::vector<int64_t>& src_shape,
+                                     const std::vector<int64_t>& dst_shape,
+                                     ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.broadcast_in_dim %" << a
+       << ", dims = ";
+    write_dims_list(os, bcast_dims);
+    os << " : (";
+    write_tensor_type(os, src_shape, d);
+    os << ") -> ";
+    write_tensor_type(os, dst_shape, d);
+}
+
+auto emit_stablehlo_convert(std::ostream& os, const std::string& result,
+                            const std::string& a,
+                            const std::vector<int64_t>& shape,
+                            ::tenzor::DType src_dtype,
+                            ::tenzor::DType dst_dtype) -> void {
+    os << '%' << result << " = stablehlo.convert %" << a << " : (";
+    write_tensor_type(os, shape, src_dtype);
+    os << ") -> ";
+    write_tensor_type(os, shape, dst_dtype);
+}
+
+auto emit_stablehlo_concatenate(
+    std::ostream& os, const std::string& result,
+    const std::vector<std::string>& operand_names,
+    const std::vector<std::vector<int64_t>>& operand_shapes,
+    int64_t dim, const std::vector<int64_t>& result_shape,
+    ::tenzor::DType d) -> void {
+    if (operand_names.size() != operand_shapes.size()) {
+        throw std::invalid_argument(
+            "emit_stablehlo_concatenate: operand_names and operand_shapes "
+            "must have equal length");
+    }
+    os << '%' << result << " = stablehlo.concatenate";
+    for (std::size_t i = 0; i < operand_names.size(); ++i) {
+        os << (i == 0 ? " %" : ", %") << operand_names[i];
+    }
+    os << ", dim = " << dim << " : (";
+    for (std::size_t i = 0; i < operand_shapes.size(); ++i) {
+        if (i != 0) os << ", ";
+        write_tensor_type(os, operand_shapes[i], d);
+    }
+    os << ") -> ";
+    write_tensor_type(os, result_shape, d);
+}
+
+auto emit_stablehlo_slice(std::ostream& os, const std::string& result,
+                          const std::string& a,
+                          const std::vector<int64_t>& starts,
+                          const std::vector<int64_t>& limits,
+                          const std::vector<int64_t>& strides,
+                          const std::vector<int64_t>& src_shape,
+                          const std::vector<int64_t>& dst_shape,
+                          ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.slice %" << a;
+    os << " [";
+    for (std::size_t i = 0; i < starts.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << starts[i] << ':' << limits[i] << ':' << strides[i];
+    }
+    os << "] : (";
+    write_tensor_type(os, src_shape, d);
+    os << ") -> ";
+    write_tensor_type(os, dst_shape, d);
+}
+
+auto emit_stablehlo_pad(std::ostream& os, const std::string& result,
+                        const std::string& a, const std::string& padval,
+                        const std::vector<int64_t>& low,
+                        const std::vector<int64_t>& high,
+                        const std::vector<int64_t>& interior,
+                        const std::vector<int64_t>& src_shape,
+                        const std::vector<int64_t>& dst_shape,
+                        ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.pad %" << a << ", %" << padval
+       << ", low = ";
+    write_dims_list(os, low);
+    os << ", high = ";
+    write_dims_list(os, high);
+    os << ", interior = ";
+    write_dims_list(os, interior);
+    os << " : (";
+    write_tensor_type(os, src_shape, d);
+    os << ", ";
+    write_tensor_type(os, {}, d);
+    os << ") -> ";
+    write_tensor_type(os, dst_shape, d);
+}
+
 auto emit_custom_call(std::ostream& os, const std::string& callee,
                       const std::string& result,
                       const std::vector<std::string>& operand_names,

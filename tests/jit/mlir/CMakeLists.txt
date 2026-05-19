@@ -48,4 +48,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_end_to_end_add
         DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.1 — Elementwise ops lower to StableHLO primitives.
+    add_executable(test_op_elementwise test_op_elementwise.cpp)
+    target_link_libraries(test_op_elementwise
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_elementwise
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()

@@ -63,6 +63,110 @@ auto emit_stablehlo_unary(std::ostream& os, const std::string& mnemonic,
                           const std::vector<int64_t>& shape,
                           ::tenzor::DType d) -> void;
 
+/// Emit `%result = stablehlo.<mnemonic> %a, %b, %c : tensor<...>` to `os`.
+/// Used for ternary ops like `select` (cond, on_true, on_false) and
+/// `clamp` (min, x, max). All three operands and the result share the
+/// same tensor type for the simple element-wise case.
+auto emit_stablehlo_ternary(std::ostream& os, const std::string& mnemonic,
+                            const std::string& result, const std::string& a,
+                            const std::string& b, const std::string& c,
+                            const std::vector<int64_t>& shape,
+                            ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.constant dense<value> : tensor<...>`.
+/// `value_literal` is the textual MLIR attribute payload (e.g. "0.0",
+/// "1.0", "0xFFC00000"). For full-tensor splats StableHLO accepts the
+/// shorthand `dense<scalar>` and broadcasts to the result type.
+auto emit_stablehlo_splat_constant(std::ostream& os,
+                                   const std::string& result,
+                                   const std::string& value_literal,
+                                   const std::vector<int64_t>& shape,
+                                   ::tenzor::DType d) -> void;
+
+/// Emit a `stablehlo.reduce` block.
+///
+/// Generated form:
+///   `%result = stablehlo.reduce(%a init: %init) applies stablehlo.<reducer>
+///       across dimensions = [d0, d1, ...] : (tensor<...>, tensor<T>) ->
+///       tensor<...>`
+///
+/// `reducer` is one of `add`, `multiply`, `maximum`, `minimum`.
+/// `dims` are the input axes being reduced over.
+/// `init_name` is the SSA name of the init constant.
+auto emit_stablehlo_reduce(std::ostream& os, const std::string& result,
+                           const std::string& operand,
+                           const std::string& init_name,
+                           const std::string& reducer,
+                           const std::vector<int64_t>& dims,
+                           const std::vector<int64_t>& operand_shape,
+                           const std::vector<int64_t>& result_shape,
+                           ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.reshape %a : tensor<src> -> tensor<dst>`.
+auto emit_stablehlo_reshape(std::ostream& os, const std::string& result,
+                            const std::string& a,
+                            const std::vector<int64_t>& src_shape,
+                            const std::vector<int64_t>& dst_shape,
+                            ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.transpose %a, dims = [...] : tensor<src> ->
+/// tensor<dst>`.
+auto emit_stablehlo_transpose(std::ostream& os, const std::string& result,
+                              const std::string& a,
+                              const std::vector<int64_t>& perm,
+                              const std::vector<int64_t>& src_shape,
+                              const std::vector<int64_t>& dst_shape,
+                              ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.broadcast_in_dim %a, dims = [...]
+///   : tensor<src> -> tensor<dst>`.
+auto emit_stablehlo_broadcast_in_dim(std::ostream& os,
+                                     const std::string& result,
+                                     const std::string& a,
+                                     const std::vector<int64_t>& bcast_dims,
+                                     const std::vector<int64_t>& src_shape,
+                                     const std::vector<int64_t>& dst_shape,
+                                     ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.convert %a : tensor<src_dtype> ->
+/// tensor<dst_dtype>`.
+auto emit_stablehlo_convert(std::ostream& os, const std::string& result,
+                            const std::string& a,
+                            const std::vector<int64_t>& shape,
+                            ::tenzor::DType src_dtype,
+                            ::tenzor::DType dst_dtype) -> void;
+
+/// Emit `%result = stablehlo.concatenate %a, %b, ... dim = N
+///   : (tensor<...>, ...) -> tensor<...>`.
+auto emit_stablehlo_concatenate(
+    std::ostream& os, const std::string& result,
+    const std::vector<std::string>& operand_names,
+    const std::vector<std::vector<int64_t>>& operand_shapes,
+    int64_t dim, const std::vector<int64_t>& result_shape,
+    ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.slice %a [start:limit:stride, ...]
+///   : tensor<src> -> tensor<dst>`.
+auto emit_stablehlo_slice(std::ostream& os, const std::string& result,
+                          const std::string& a,
+                          const std::vector<int64_t>& starts,
+                          const std::vector<int64_t>& limits,
+                          const std::vector<int64_t>& strides,
+                          const std::vector<int64_t>& src_shape,
+                          const std::vector<int64_t>& dst_shape,
+                          ::tenzor::DType d) -> void;
+
+/// Emit `%result = stablehlo.pad %a, %padval, low = [...], high = [...],
+///   interior = [...] : (tensor<src>, tensor<>) -> tensor<dst>`.
+auto emit_stablehlo_pad(std::ostream& os, const std::string& result,
+                        const std::string& a, const std::string& padval,
+                        const std::vector<int64_t>& low,
+                        const std::vector<int64_t>& high,
+                        const std::vector<int64_t>& interior,
+                        const std::vector<int64_t>& src_shape,
+                        const std::vector<int64_t>& dst_shape,
+                        ::tenzor::DType d) -> void;
+
 /// Emit a `stablehlo.custom_call @<callee>(...)` invocation.
 ///
 /// Generated form:

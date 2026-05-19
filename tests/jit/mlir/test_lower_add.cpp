@@ -86,8 +86,12 @@ TEST(LowerAdd, UnsupportedOpThrowsWithName) {
     auto x = g.create_value("x", {4}, ::tenzor::DType::Float32,
                             ::tenzor::Device::cpu());
     g.set_inputs({x});
-    auto node = g.create_node(tzj::OpType::Mul, "mul");
-    node->add_input(x);
+    // Use Tanh as the "not yet supported" canary. The Phase-13 plan does
+    // not include Tanh in either the StableHLO-primitive set (Group C) or
+    // the Tenzor-dialect set (Group D), so it remains a stable sentinel
+    // for verifying the unsupported-op error path. (Earlier revisions of
+    // this test used Mul, which is now lowered via Group C.1.)
+    auto node = g.create_node(tzj::OpType::Tanh, "tanh");
     node->add_input(x);
     auto z = g.create_value("z", {4}, ::tenzor::DType::Float32,
                             ::tenzor::Device::cpu());
@@ -101,7 +105,7 @@ TEST(LowerAdd, UnsupportedOpThrowsWithName) {
         FAIL() << "expected std::runtime_error for unsupported OpType";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("Mul"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("Tanh"), std::string::npos) << msg;
         EXPECT_NE(msg.find("not yet supported"), std::string::npos) << msg;
     }
 }
