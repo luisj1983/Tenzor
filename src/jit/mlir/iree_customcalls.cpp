@@ -25,6 +25,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/transform.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -156,14 +157,46 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
     return outs[0];
 }
 
-// The remaining 3 dispatchers (gqa, rope_apply, rms_norm) are filled in by
-// Group D.2.2 / D.3.2 / D.4.2. Until then they throw a clear error so
-// callers (and the IREE-side glue) get an informative failure.
-auto dispatch_gqa(const std::vector<::tenzor::Tensor>& /*inputs*/,
-                  const std::string& /*backend_config*/)
+auto dispatch_gqa(const std::vector<::tenzor::Tensor>& inputs,
+                  const std::string& backend_config)
     -> ::tenzor::Tensor {
-    throw std::runtime_error(
-        "tenzor_gqa: dispatcher not yet implemented (Group D.2.2)");
+    if (inputs.size() != 3) {
+        throw std::runtime_error(
+            "tenzor_gqa: expected 3 inputs (Q, K, V), got " +
+            std::to_string(inputs.size()));
+    }
+    const auto& q = inputs[0];
+    const auto& k = inputs[1];
+    const auto& v = inputs[2];
+    if (q.shape().size() != 4 || k.shape().size() != 4 ||
+        v.shape().size() != 4) {
+        throw std::runtime_error("tenzor_gqa: requires 4-D Q/K/V (B,H,S,D)");
+    }
+    const int64_t B   = q.shape()[0];
+    const int64_t Hq  = q.shape()[1];
+    const int64_t Hkv = k.shape()[1];
+    const int64_t Sk  = k.shape()[2];
+    const int64_t D   = q.shape()[3];
+    if (Hkv == 0 || Hq % Hkv != 0) {
+        throw std::runtime_error("tenzor_gqa: requires H_kv | H_q");
+    }
+    const int64_t G = Hq / Hkv;
+
+    // Replicate KV heads from H_kv -> H_q via unsqueeze + expand + reshape,
+    // matching the GroupedQueryAttention::repeat_kv pattern in
+    // src/nn/layers/gqa_attention.cpp. This is the runtime equivalent of
+    // the StableHLO expand-path KV broadcast in lowering.cpp::handle_gqa_expand.
+    auto repeat_kv = [&](const ::tenzor::Tensor& x) -> ::tenzor::Tensor {
+        if (Hq == Hkv) return x;  // MHA degenerate case
+        auto u   = ::tenzor::unsqueeze(x, 2);          // (B,Hkv,1,Sk,D)
+        auto e   = ::tenzor::expand(u, {B, Hkv, G, Sk, D});
+        return ::tenzor::reshape(e, {B, Hq, Sk, D});
+    };
+    auto k_full = repeat_kv(k);
+    auto v_full = repeat_kv(v);
+
+    // Reuse the FlashAttention dispatcher with the broadcasted KV.
+    return dispatch_flash_attention({q, k_full, v_full}, backend_config);
 }
 
 auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& /*inputs*/,
@@ -190,8 +223,8 @@ constexpr const char* kMessage_FlashAttention =
     "tenzor_flash_attention: dispatcher wired (Group D.1.2); IREE-side "
     "runtime binding pending iree/runtime/api.h restoration in the dist";
 constexpr const char* kMessage_GQA =
-    "tenzor_gqa: dispatcher pending (Group D.2.2); placeholder text emitted "
-    "while the iree/runtime/api.h headers remain incomplete";
+    "tenzor_gqa: dispatcher wired (Group D.2.2); IREE-side runtime binding "
+    "pending iree/runtime/api.h restoration in the dist";
 constexpr const char* kMessage_RopeApply =
     "tenzor_rope_apply: dispatcher pending (Group D.3.2); placeholder text "
     "emitted while the iree/runtime/api.h headers remain incomplete";
