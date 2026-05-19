@@ -196,4 +196,13 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_rms_norm_expand
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task E.1 / E.2 / E.3 — Mini-Llama eager + @tz.jit forward across
+    # IREE targets. CPU runs eagerly + JIT-compiled; cuda / vulkan-spirv
+    # / rocm skip when the corresponding tenzor backend is absent.
+    add_executable(test_model_llama test_model_llama.cpp)
+    target_link_libraries(test_model_llama
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_model_llama
+        DISCOVERY_TIMEOUT 600 BACKENDS none LABELS "jit;mlir;iree")
 endif()
