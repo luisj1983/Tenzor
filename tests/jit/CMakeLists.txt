@@ -75,3 +75,7 @@ tenzor_discover_tests(test_jit_backend_parity LABELS "jit" DISCOVERY_TIMEOUT 60 
 add_executable(test_graph_viz_schema test_graph_viz_schema.cpp)
 target_link_libraries(test_graph_viz_schema PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_viz_schema LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# Phase 13 MLIR JIT tests (subdirectory; test_optype_roundtrip always built;
+# dialect/runtime tests gated on TENZOR_USE_MLIR_JIT inside the subdir)
+add_subdirectory(mlir)

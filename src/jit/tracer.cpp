@@ -87,6 +87,17 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Loop: return "Loop";
         case OpType::LayoutConvert: return "LayoutConvert";
         case OpType::Cast: return "Cast";
+        // Phase 13 / MVP-1 additions
+        case OpType::SiLU: return "SiLU";
+        case OpType::Where: return "Where";
+        case OpType::Stack: return "Stack";
+        case OpType::Broadcast: return "Broadcast";
+        case OpType::IndexSelect: return "IndexSelect";
+        case OpType::RMSNorm: return "RMSNorm";
+        case OpType::GQA: return "GQA";
+        case OpType::RoPE: return "RoPE";
+        case OpType::Padding: return "Padding";
+        case OpType::Interpolate: return "Interpolate";
         default: return "Unknown";
     }
 }
@@ -155,7 +166,18 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"If", OpType::If},
         {"Loop", OpType::Loop},
         {"LayoutConvert", OpType::LayoutConvert},
-        {"Cast", OpType::Cast}
+        {"Cast", OpType::Cast},
+        // Phase 13 / MVP-1 additions
+        {"SiLU", OpType::SiLU},
+        {"Where", OpType::Where},
+        {"Stack", OpType::Stack},
+        {"Broadcast", OpType::Broadcast},
+        {"IndexSelect", OpType::IndexSelect},
+        {"RMSNorm", OpType::RMSNorm},
+        {"GQA", OpType::GQA},
+        {"RoPE", OpType::RoPE},
+        {"Padding", OpType::Padding},
+        {"Interpolate", OpType::Interpolate},
     };
 
     auto it = string_to_type.find(str);

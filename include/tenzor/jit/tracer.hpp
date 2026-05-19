@@ -139,7 +139,19 @@ enum class OpType {
 
     // Layout and type conversion (inserted by optimization passes)
     LayoutConvert, ///< Convert memory format (e.g., NCHW -> NHWC)
-    Cast           ///< Convert dtype (e.g., Float32 -> Float16)
+    Cast,          ///< Convert dtype (e.g., Float32 -> Float16)
+
+    // ── Phase 13 / MVP-1 additions ──
+    SiLU,             ///< x * sigmoid(x)
+    Where,            ///< Elementwise select: where(cond, a, b)
+    Stack,            ///< Cat along a new dim
+    Broadcast,        ///< Explicit broadcast (shape-only)
+    IndexSelect,      ///< Select along a dim by index tensor
+    RMSNorm,          ///< Tenzor dialect op
+    GQA,              ///< Grouped-Query Attention — Tenzor dialect op
+    RoPE,             ///< Rotary positional embedding — Tenzor dialect op
+    Padding,          ///< Constant/reflect/replicate padding
+    Interpolate       ///< Bilinear/nearest spatial resize
 };
 
 /**
