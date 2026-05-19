@@ -111,6 +111,20 @@ option(TENZOR_BUILD_LITE "Build lightweight mobile/embedded inference runtime" O
 option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
+# MLIR/StableHLO/IREE JIT pipeline (Phase 13)
+option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" OFF)
+option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
+
+# Pinned versions — version skew at runtime invalidates compile cache, never silent.
+set(TENZOR_MLIR_VERSION       18.0  CACHE STRING "Required MLIR version")
+set(TENZOR_STABLEHLO_VERSION  1.5.0 CACHE STRING "Required StableHLO version")
+set(TENZOR_IREE_VERSION       3.0   CACHE STRING "Required IREE version")
+
+if(TENZOR_USE_MLIR_JIT)
+    message(STATUS "Tenzor: MLIR JIT enabled (Phase 13)")
+    message(STATUS "  MLIR ${TENZOR_MLIR_VERSION}, StableHLO ${TENZOR_STABLEHLO_VERSION}, IREE ${TENZOR_IREE_VERSION}")
+endif()
+
 # Link-Time Optimization
 option(TENZOR_ENABLE_LTO "Enable Link-Time Optimization" OFF)
 if(TENZOR_ENABLE_LTO)
