@@ -941,6 +941,256 @@ auto handle_linear(LoweringContext& ctx,
     }
 }
 
+// ── Shape ops ───────────────────────────────────────────────────────────────
+
+auto handle_reshape(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Reshape expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_reshape(body, out_name, ctx.name_for(in_val->id()),
+                           in_val->shape(), out_val->shape(),
+                           out_val->dtype());
+    body << '\n';
+}
+
+/// Compute a permutation `perm` such that `dst_shape[i] = src_shape[perm[i]]`.
+/// When dims have unique extents this is unambiguous. For duplicates we
+/// fall back to "dims" attribute (Permute) or "dim0/dim1" attributes
+/// (Transpose). Callers can pass the explicit perm to skip inference.
+auto infer_permutation(const std::vector<int64_t>& src_shape,
+                       const std::vector<int64_t>& dst_shape)
+    -> std::vector<int64_t> {
+    if (src_shape.size() != dst_shape.size()) {
+        throw std::runtime_error(
+            "GraphToMLIR: permutation must preserve rank");
+    }
+    const int64_t r = static_cast<int64_t>(src_shape.size());
+    std::vector<int64_t> perm(r);
+    std::vector<bool> used(r, false);
+    for (int64_t i = 0; i < r; ++i) {
+        bool found = false;
+        for (int64_t j = 0; j < r; ++j) {
+            if (!used[j] && src_shape[j] == dst_shape[i]) {
+                perm[i] = j;
+                used[j] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error(
+                "GraphToMLIR: cannot infer permutation; duplicate dims "
+                "without explicit perm attr");
+        }
+    }
+    return perm;
+}
+
+auto handle_permute(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Permute expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    std::vector<int64_t> perm;
+    if (node.has_attr("dims")) {
+        perm = node.get_vec_attr("dims");
+        const auto rank = static_cast<int64_t>(in_val->shape().size());
+        for (auto& p : perm) p = normalize_dim(p, rank);
+    } else {
+        perm = infer_permutation(in_val->shape(), out_val->shape());
+    }
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_transpose(body, out_name, ctx.name_for(in_val->id()),
+                             perm, in_val->shape(), out_val->shape(),
+                             out_val->dtype());
+    body << '\n';
+}
+
+auto handle_transpose(LoweringContext& ctx,
+                      const ::tenzor::jit::Node& node,
+                      std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Transpose expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto rank = static_cast<int64_t>(in_val->shape().size());
+    // Default 2D transpose: swap last two dims. If we have explicit dim0/
+    // dim1 attrs (uncommon in traces but legal for manual graphs), use
+    // them.
+    int64_t d0 = rank >= 2 ? rank - 2 : 0;
+    int64_t d1 = rank >= 2 ? rank - 1 : 0;
+    if (node.has_attr("dim0")) d0 = normalize_dim(node.get_int_attr("dim0"), rank);
+    if (node.has_attr("dim1")) d1 = normalize_dim(node.get_int_attr("dim1"), rank);
+    std::vector<int64_t> perm(rank);
+    for (int64_t i = 0; i < rank; ++i) perm[i] = i;
+    std::swap(perm[d0], perm[d1]);
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_transpose(body, out_name, ctx.name_for(in_val->id()),
+                             perm, in_val->shape(), out_val->shape(),
+                             out_val->dtype());
+    body << '\n';
+}
+
+auto handle_slice(LoweringContext& ctx,
+                  const ::tenzor::jit::Node& node,
+                  std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Slice expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto in_shape  = in_val->shape();
+    const auto out_shape = out_val->shape();
+    const int64_t rank = static_cast<int64_t>(in_shape.size());
+
+    std::vector<int64_t> starts(rank, 0), limits = in_shape, strides(rank, 1);
+    if (node.has_attr("starts") && node.has_attr("ends")) {
+        auto sv = node.get_vec_attr("starts");
+        auto ev = node.get_vec_attr("ends");
+        if (static_cast<int64_t>(sv.size()) != rank ||
+            static_cast<int64_t>(ev.size()) != rank) {
+            throw std::runtime_error(
+                "GraphToMLIR: Slice starts/ends must have rank entries");
+        }
+        for (int64_t i = 0; i < rank; ++i) {
+            starts[i]  = sv[i];
+            limits[i]  = ev[i];
+        }
+    } else if (node.has_attr("dim")) {
+        // Per-dim slice form: dim + start + end (+ optional step).
+        const int64_t dim = normalize_dim(node.get_int_attr("dim"), rank);
+        starts[dim] = get_attr_int(node, {"start"}, 0);
+        limits[dim] = get_attr_int(node, {"end"},   in_shape[dim]);
+        strides[dim] = get_attr_int(node, {"step"}, 1);
+    } else {
+        // Fall back to inferring from output shape — start=0, stride=1.
+        for (int64_t i = 0; i < rank; ++i) limits[i] = out_shape[i];
+    }
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_slice(body, out_name, ctx.name_for(in_val->id()), starts,
+                         limits, strides, in_shape, out_shape,
+                         out_val->dtype());
+    body << '\n';
+}
+
+auto handle_cat(LoweringContext& ctx,
+                const ::tenzor::jit::Node& node,
+                std::ostream& body) -> void {
+    if (node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Cat expects 1 output");
+    }
+    const auto& out_val = node.outputs()[0];
+    const auto rank = static_cast<int64_t>(out_val->shape().size());
+    const int64_t dim = node.has_attr("dim")
+                            ? normalize_dim(node.get_int_attr("dim"), rank)
+                            : 0;
+    std::vector<std::string> names;
+    std::vector<std::vector<int64_t>> shapes;
+    names.reserve(node.inputs().size());
+    shapes.reserve(node.inputs().size());
+    for (const auto& v : node.inputs()) {
+        names.push_back(ctx.name_for(v->id()));
+        shapes.push_back(v->shape());
+    }
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_concatenate(body, out_name, names, shapes, dim,
+                               out_val->shape(), out_val->dtype());
+    body << '\n';
+}
+
+/// Stack: insert a new dim of size 1 in each input, then concatenate.
+auto handle_stack(LoweringContext& ctx,
+                  const ::tenzor::jit::Node& node,
+                  std::ostream& body) -> void {
+    if (node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Stack expects 1 output");
+    }
+    const auto& out_val = node.outputs()[0];
+    const auto rank = static_cast<int64_t>(out_val->shape().size());
+    const int64_t dim = node.has_attr("dim")
+                            ? normalize_dim(node.get_int_attr("dim"), rank)
+                            : 0;
+    const auto d = out_val->dtype();
+
+    std::vector<std::string> reshaped_names;
+    std::vector<std::vector<int64_t>> reshaped_shapes;
+    reshaped_names.reserve(node.inputs().size());
+    reshaped_shapes.reserve(node.inputs().size());
+    for (const auto& v : node.inputs()) {
+        auto in_shape = v->shape();
+        auto new_shape = in_shape;
+        new_shape.insert(new_shape.begin() + dim, 1);
+        auto r_name = ctx.fresh_name();
+        emit_stablehlo_reshape(body, r_name, ctx.name_for(v->id()), in_shape,
+                               new_shape, d);
+        body << '\n';
+        reshaped_names.push_back(r_name);
+        reshaped_shapes.push_back(new_shape);
+    }
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_concatenate(body, out_name, reshaped_names,
+                               reshaped_shapes, dim, out_val->shape(), d);
+    body << '\n';
+}
+
+auto handle_squeeze(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    // Squeeze is shape-only; reshape from in_shape → out_shape suffices.
+    handle_reshape(ctx, node, body);
+}
+
+auto handle_unsqueeze(LoweringContext& ctx,
+                      const ::tenzor::jit::Node& node,
+                      std::ostream& body) -> void {
+    handle_reshape(ctx, node, body);
+}
+
+auto handle_flatten(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    handle_reshape(ctx, node, body);
+}
+
+auto handle_broadcast(LoweringContext& ctx,
+                      const ::tenzor::jit::Node& node,
+                      std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Broadcast expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto dims = right_align_bcast_dims(in_val->shape(), out_val->shape());
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_broadcast_in_dim(body, out_name, ctx.name_for(in_val->id()),
+                                    dims, in_val->shape(), out_val->shape(),
+                                    out_val->dtype());
+    body << '\n';
+}
+
 auto handle_pow(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -1061,6 +1311,18 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::MatMul:       handle_matmul(ctx, *node, body); break;
             case OpType::Bmm:          handle_bmm(ctx, *node, body);    break;
             case OpType::Linear:       handle_linear(ctx, *node, body); break;
+
+            // ── Shape ──
+            case OpType::Reshape:      handle_reshape(ctx, *node, body);   break;
+            case OpType::Permute:      handle_permute(ctx, *node, body);   break;
+            case OpType::Transpose:    handle_transpose(ctx, *node, body); break;
+            case OpType::Slice:        handle_slice(ctx, *node, body);     break;
+            case OpType::Cat:          handle_cat(ctx, *node, body);       break;
+            case OpType::Stack:        handle_stack(ctx, *node, body);     break;
+            case OpType::Squeeze:      handle_squeeze(ctx, *node, body);   break;
+            case OpType::Unsqueeze:    handle_unsqueeze(ctx, *node, body); break;
+            case OpType::Flatten:      handle_flatten(ctx, *node, body);   break;
+            case OpType::Broadcast:    handle_broadcast(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;

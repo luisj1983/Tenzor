@@ -76,4 +76,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_op_linalg
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.5 — Shape ops (Reshape, Permute, Transpose, Slice, Cat,
+    # Stack, Squeeze, Unsqueeze, Flatten, Broadcast).
+    add_executable(test_op_shape test_op_shape.cpp)
+    target_link_libraries(test_op_shape
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_shape
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()

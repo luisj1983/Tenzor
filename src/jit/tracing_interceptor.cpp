@@ -167,6 +167,24 @@ auto make_tracing_interceptor(
             if (attrs.has(k)) traced.bool_attrs[name] = attrs.get_bool(k, false);
         };
         copy_bool(AttrKey::Keepdim, "keepdim");
+        // Slice indices: Start/End/Step are scalar ints used by Slice and
+        // a handful of indexing ops. The MLIR lowerer needs them to
+        // emit stablehlo.slice.
+        copy_int(AttrKey::Start, "start");
+        copy_int(AttrKey::End,   "end");
+        copy_int(AttrKey::Step,  "step");
+        // Reshape stores its target shape as a comma-separated string under
+        // AttrKey::Shape; parse to an int-list so consumers don't have to.
+        auto copy_int_list_to_vec = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) {
+                auto v = attrs.get_int_list(k);
+                if (!v.empty()) traced.vec_attrs[name] = std::move(v);
+            }
+        };
+        copy_int_list_to_vec(AttrKey::Shape, "shape");
+        copy_int_list_to_vec(AttrKey::Dims,  "dims");
+        copy_int_list_to_vec(AttrKey::Starts, "starts");
+        copy_int_list_to_vec(AttrKey::Ends,   "ends");
         copy_int(AttrKey::KernelSize,  "kernel_size");
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");
