@@ -88,8 +88,13 @@ void run_add_on_target(const std::string& target) {
 
     ASSERT_EQ(jitted.tensor().numel(), eager.tensor().numel())
         << "numel mismatch on target=" << target;
+    // iree-run-module always returns its output on CPU. Pull the eager
+    // tensor back to CPU before the subtract so we don't trip the
+    // dispatch's same-device-type guard for GPU targets.
+    auto eager_cpu  = eager.tensor().to(::tenzor::Device::cpu());
+    auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
     auto diff_t =
-        ::tenzor::max(::tenzor::abs(eager.tensor() - jitted.tensor()));
+        ::tenzor::max(::tenzor::abs(eager_cpu - jitted_cpu));
     auto diff = diff_t.item<float>();
     EXPECT_LT(diff, 1e-6F) << "target=" << target;
 }
