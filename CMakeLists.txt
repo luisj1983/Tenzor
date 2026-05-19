@@ -144,7 +144,6 @@ if(TENZOR_USE_MLIR_JIT)
         HINTS
             $ENV{TENZOR_IREE_COMPILE}
             /home/lee/.venvs/tenzor-jit/bin
-            /home/lee/venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
@@ -177,7 +176,6 @@ if(TENZOR_USE_MLIR_JIT)
         HINTS
             $ENV{TENZOR_IREE_RUN_MODULE}
             /home/lee/.venvs/tenzor-jit/bin
-            /home/lee/venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")

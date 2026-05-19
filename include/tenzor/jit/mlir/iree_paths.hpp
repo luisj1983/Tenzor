@@ -6,9 +6,8 @@
 //
 //   1. $TENZOR_IREE_COMPILE / $TENZOR_IREE_RUN_MODULE   (explicit user override)
 //   2. /home/lee/.venvs/tenzor-jit/bin/<binary>          (pip venv with full GPU)
-//   3. /home/lee/venv-iree/bin/<binary>                  (alt pip venv with full GPU)
-//   4. ${IREE_COMPILE_EXECUTABLE} / its sibling          (CMake-found build dist)
-//   5. `<binary>` on $PATH                                (last resort)
+//   3. ${IREE_COMPILE_EXECUTABLE} / its sibling          (CMake-found build dist)
+//   4. `<binary>` on $PATH                                (last resort)
 //
 // The first binary the chain finds is cached for the process lifetime and
 // probed once with `--iree-hal-list-target-backends` (compiler) /

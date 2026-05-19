@@ -60,14 +60,10 @@ auto resolve_iree_binary(const char* env_var,
                                  env + "' but it is not an executable file.");
     }
 
-    // 2-3. Known full-GPU pip-installed IREE venvs, preferred over the
+    // 2. Known full-GPU pip-installed IREE venv, preferred over the
     // CMake-found dist when both are present.
-    const std::array<std::string, 2> pip_venvs{
-        "/home/lee/.venvs/tenzor-jit/bin/",
-        "/home/lee/venv-iree/bin/",
-    };
-    for (const auto& dir : pip_venvs) {
-        const std::string cand = dir + binary;
+    {
+        const std::string cand = "/home/lee/.venvs/tenzor-jit/bin/" + binary;
         if (is_executable(cand)) {
             return cand;
         }
