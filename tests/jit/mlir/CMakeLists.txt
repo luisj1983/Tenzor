@@ -26,4 +26,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_iree_invoke
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task A.9 — Custom_call registrar + placeholder callbacks.
+    add_executable(test_iree_customcall_smoke test_iree_customcall_smoke.cpp)
+    target_link_libraries(test_iree_customcall_smoke
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_iree_customcall_smoke
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
 endif()
