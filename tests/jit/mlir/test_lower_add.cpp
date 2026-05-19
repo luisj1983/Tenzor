@@ -9,6 +9,7 @@
 
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -128,10 +129,8 @@ TEST(LowerAdd, EmittedMLIRParsesWithIreeCompile) {
     }
 
     // Resolve iree-compile path: env override → PATH.
-    std::string iree_compile = "iree-compile";
-    if (const char* env = std::getenv("TENZOR_IREE_COMPILE"); env && *env) {
-        iree_compile = env;
-    }
+    const std::string& iree_compile =
+        ::tenzor::jit::mlir_jit::resolve_iree_compile();
 
     std::ostringstream cmd;
     cmd << iree_compile

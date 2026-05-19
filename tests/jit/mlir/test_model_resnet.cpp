@@ -17,6 +17,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/models/resnet.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -70,34 +71,10 @@ auto device_for_target(const std::string& target) -> ::tenzor::Device {
 /// registered. Skips the test cleanly when the iree-dist isn't built
 /// with support for cuda / rocm / etc.
 auto iree_target_supported(const std::string& target) -> bool {
-    static const std::set<std::string> registered = [] {
-        std::set<std::string> out;
-        FILE* pipe = ::popen(
-            "iree-compile --iree-hal-list-target-backends 2>/dev/null",
-            "r");
-        if (pipe == nullptr) return out;
-        char buf[256];
-        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
-            std::string line(buf);
-            while (!line.empty() &&
-                   (line.back() == '\n' || line.back() == '\r' ||
-                    line.back() == ' ' || line.back() == '\t')) {
-                line.pop_back();
-            }
-            std::size_t start = 0;
-            while (start < line.size() &&
-                   (line[start] == ' ' || line[start] == '\t')) {
-                ++start;
-            }
-            line = line.substr(start);
-            if (line.empty()) continue;
-            if (line.find("Registered") != std::string::npos) continue;
-            out.insert(line);
-        }
-        ::pclose(pipe);
-        return out;
-    }();
-    return registered.count(target) > 0;
+    if (target == "llvm-cpu") return true;
+    // Defer to the shared discovery + probe so test SKIP/RUN decisions
+    // stay consistent with what compile_mlir() does at runtime.
+    return ::tenzor::jit::mlir_jit::iree_compile_supports(target);
 }
 
 /// Build a ResNet18 in eval mode so BatchNorm uses running stats and the

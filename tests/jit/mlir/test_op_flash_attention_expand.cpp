@@ -15,6 +15,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
 #include "tenzor/jit/tracer.hpp"
@@ -51,10 +52,8 @@ void assert_iree_compile_accepts(const std::string& mlir_text,
     auto in_path  = tmp / "mod.mlir";
     auto out_path = tmp / "mod.vmfb";
     { std::ofstream of(in_path); of << mlir_text; }
-    std::string iree_compile = "iree-compile";
-    if (const char* env = std::getenv("TENZOR_IREE_COMPILE"); env && *env) {
-        iree_compile = env;
-    }
+    const std::string& iree_compile =
+        ::tenzor::jit::mlir_jit::resolve_iree_compile();
     std::string cmd = iree_compile +
         " --iree-hal-target-backends=llvm-cpu \"" + in_path.string() +
         "\" -o \"" + out_path.string() + "\" 2>&1";

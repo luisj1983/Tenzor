@@ -9,6 +9,7 @@
 
 #ifdef TENZOR_HAS_MLIR_JIT
 #include "tenzor/jit/mlir/iree_compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
 #endif
@@ -387,11 +388,10 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
                 // Best-effort iree-compile pipeline dump. Shares the same
                 // logic as dump_iree() but inlined so a single compile
                 // produces the complete dump set without an extra trace.
-                std::string iree_compile = "iree-compile";
-                if (const char* env = std::getenv("IREE_BIN_DIR");
-                    env && *env) {
-                    iree_compile = std::string(env) + "/iree-compile";
-                }
+                // Use the same discovery chain compile_mlir() uses so the
+                // dump always lines up with what actually ran.
+                const std::string& iree_compile =
+                    ::tenzor::jit::mlir_jit::resolve_iree_compile();
                 const fs::path tmp_in =
                     fs::temp_directory_path() /
                     ("tz_jit_dump_iree_" +
@@ -521,12 +521,12 @@ auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
                 static_cast<std::streamsize>(mlir_text.size()));
     }
 
-    // Locate the iree-compile binary. The build pins it via PATH; honor an
-    // explicit IREE_BIN_DIR override for non-standard install layouts.
-    std::string iree_compile = "iree-compile";
-    if (const char* env = std::getenv("IREE_BIN_DIR"); env && *env) {
-        iree_compile = std::string(env) + "/iree-compile";
-    }
+    // Use the same discovery chain compile_mlir() uses (env override → pip
+    // venv → CMake-found dist → $PATH). show_iree must dump the IR for the
+    // exact compiler that actually ran during compile_mlir(), so any
+    // divergence here would be a bug.
+    const std::string& iree_compile =
+        ::tenzor::jit::mlir_jit::resolve_iree_compile();
 
     const std::string cmd =
         iree_compile + " --iree-input-type=stablehlo" +

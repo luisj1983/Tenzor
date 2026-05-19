@@ -13,6 +13,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
@@ -63,39 +64,8 @@ auto target_hw_present(const std::string& target) -> bool {
 /// CPU+Vulkan; calling it for an unsupported target throws a
 /// "target backend 'X' not registered" deep inside the compiler.
 auto iree_target_supported(const std::string& target) -> bool {
-    static const std::set<std::string> registered = [] {
-        std::set<std::string> out;
-        // Use `iree-compile --iree-hal-list-target-backends` as the
-        // ground truth — it prints one backend per line under a header
-        // "Registered target backends:".
-        FILE* pipe = ::popen(
-            "iree-compile --iree-hal-list-target-backends 2>/dev/null",
-            "r");
-        if (pipe == nullptr) return out;
-        char buf[256];
-        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
-            std::string line(buf);
-            // Trim trailing newline / whitespace.
-            while (!line.empty() &&
-                   (line.back() == '\n' || line.back() == '\r' ||
-                    line.back() == ' ' || line.back() == '\t')) {
-                line.pop_back();
-            }
-            // Trim leading whitespace.
-            std::size_t start = 0;
-            while (start < line.size() &&
-                   (line[start] == ' ' || line[start] == '\t')) {
-                ++start;
-            }
-            line = line.substr(start);
-            if (line.empty()) continue;
-            if (line.find("Registered") != std::string::npos) continue;
-            out.insert(line);
-        }
-        ::pclose(pipe);
-        return out;
-    }();
-    return registered.count(target) > 0;
+    if (target == "llvm-cpu") return true;
+    return ::tenzor::jit::mlir_jit::iree_compile_supports(target);
 }
 
 auto device_for_target(const std::string& target) -> ::tenzor::Device {
