@@ -146,6 +146,13 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_rope
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 
+    # Task D.3.3 — RoPE expand-to-stablehlo + roundtrip.
+    add_executable(test_op_rope_expand test_op_rope_expand.cpp)
+    target_link_libraries(test_op_rope_expand
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_rope_expand
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task D.4.1 — RMSNorm dialect op lowers to stablehlo.custom_call
     # @tenzor_rms_norm.
     add_executable(test_op_rms_norm test_op_rms_norm.cpp)

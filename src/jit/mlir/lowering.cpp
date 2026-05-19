@@ -2479,6 +2479,151 @@ auto handle_gqa_expand(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// RoPE expand-to-stablehlo. Inputs: (x, cos, sin) with x:(B,H,S,D),
+/// cos/sin:(S,D). Output: x * cos_b + rotate_half(x) * sin_b where
+/// rotate_half splits x along the last dim into x1,x2 (each D/2 wide),
+/// concatenates [-x2, x1] along that dim.
+///
+/// The `offset` int attr is encoded in the table itself by the eager
+/// API (precomputed sin/cos for the relevant positions), so the expand
+/// path doesn't need to handle offset directly — the cos/sin operands
+/// already cover the resumed range.
+auto handle_rope_apply_expand(LoweringContext& ctx,
+                              const ::tenzor::jit::Node& node,
+                              std::ostream& body) -> void {
+    if (node.inputs().size() != 3 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: RoPE (expand) expects 3 inputs (x,cos,sin)");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& cos_val = node.inputs()[1];
+    const auto& sin_val = node.inputs()[2];
+    const auto& out_val = node.outputs()[0];
+    const auto x_shape  = x_val->shape();
+    const auto d        = out_val->dtype();
+    const int64_t rank  = static_cast<int64_t>(x_shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("GraphToMLIR: RoPE expand requires rank >= 1");
+    }
+    const int64_t D = x_shape[rank - 1];
+    if (D % 2 != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: RoPE expand requires even last dim");
+    }
+    const int64_t H = D / 2;
+
+    // Half-shape: same as x_shape but with last dim = H.
+    std::vector<int64_t> half_shape = x_shape;
+    half_shape.back() = H;
+
+    auto dtype_suffix = [](::tenzor::DType dt) -> const char* {
+        switch (dt) {
+            case ::tenzor::DType::Float32:  return "f32";
+            case ::tenzor::DType::Float64:  return "f64";
+            case ::tenzor::DType::Float16:  return "f16";
+            case ::tenzor::DType::BFloat16: return "bf16";
+            default: return "f32";
+        }
+    };
+    auto render_dims = [&](const std::vector<int64_t>& v) {
+        std::ostringstream os;
+        for (auto x : v) os << x << ',';
+        std::string s = os.str();
+        if (!s.empty()) s.pop_back();
+        return s;
+    };
+
+    const auto& x = ctx.name_for(x_val->id());
+
+    // Slice x into x1 = x[..., :H], x2 = x[..., H:].
+    // stablehlo.slice uses start_indices/limit_indices/strides per dim.
+    std::vector<int64_t> start_lo(rank, 0);
+    std::vector<int64_t> start_hi(rank, 0);  start_hi.back() = H;
+    std::vector<int64_t> limit_lo = x_shape; limit_lo.back() = H;
+    std::vector<int64_t> limit_hi = x_shape;
+    std::vector<int64_t> strides(rank, 1);
+
+    auto x1 = ctx.fresh_name();
+    body << '%' << x1 << " = \"stablehlo.slice\"(%" << x
+         << ") <{start_indices = array<i64: " << render_dims(start_lo)
+         << ">, limit_indices = array<i64: " << render_dims(limit_lo)
+         << ">, strides = array<i64: " << render_dims(strides)
+         << ">}> : (";
+    write_tensor_type_for_emit(body, x_shape, d);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, half_shape, d);
+    body << '\n';
+
+    auto x2 = ctx.fresh_name();
+    body << '%' << x2 << " = \"stablehlo.slice\"(%" << x
+         << ") <{start_indices = array<i64: " << render_dims(start_hi)
+         << ">, limit_indices = array<i64: " << render_dims(limit_hi)
+         << ">, strides = array<i64: " << render_dims(strides)
+         << ">}> : (";
+    write_tensor_type_for_emit(body, x_shape, d);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, half_shape, d);
+    body << '\n';
+
+    // -x2
+    auto neg_x2 = ctx.fresh_name();
+    emit_stablehlo_unary(body, "negate", neg_x2, x2, half_shape, d);
+    body << '\n';
+
+    // rotated = concat([-x2, x1], dim=last).
+    auto rotated = ctx.fresh_name();
+    body << '%' << rotated << " = \"stablehlo.concatenate\"(%" << neg_x2
+         << ", %" << x1 << ") <{dimension = " << (rank - 1) << " : i64}> : ("
+         << "tensor<";
+    for (auto v : half_shape) body << v << 'x';
+    body << dtype_suffix(d) << ">, tensor<";
+    for (auto v : half_shape) body << v << 'x';
+    body << dtype_suffix(d) << ">) -> ";
+    write_tensor_type_for_emit(body, x_shape, d);
+    body << '\n';
+
+    // Broadcast cos/sin from their actual shapes to x_shape. The table
+    // shapes are typically (S, D) when x is (B, H, S, D); the broadcast
+    // dims align them to the last two axes. We compute bcast_dims by
+    // assuming the table dims correspond to the trailing N dims of x.
+    auto broadcast_table = [&](const std::string& tab_name,
+                               const std::vector<int64_t>& tab_shape)
+        -> std::string {
+        if (tab_shape == x_shape) return tab_name;
+        std::vector<int64_t> bcast_dims;
+        const int64_t n_tab = static_cast<int64_t>(tab_shape.size());
+        const int64_t off   = rank - n_tab;
+        for (int64_t i = 0; i < n_tab; ++i) bcast_dims.push_back(off + i);
+        auto b = ctx.fresh_name();
+        emit_stablehlo_broadcast_in_dim(body, b, tab_name, bcast_dims,
+                                        tab_shape, x_shape, d);
+        body << '\n';
+        return b;
+    };
+
+    auto cos_b = broadcast_table(ctx.name_for(cos_val->id()),
+                                 cos_val->shape());
+    auto sin_b = broadcast_table(ctx.name_for(sin_val->id()),
+                                 sin_val->shape());
+
+    // x_mul_cos = x * cos
+    auto x_mul_cos = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", x_mul_cos, x, cos_b, x_shape, d);
+    body << '\n';
+    // rot_mul_sin = rotated * sin
+    auto rot_mul_sin = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", rot_mul_sin, rotated, sin_b,
+                          x_shape, d);
+    body << '\n';
+    // out = x_mul_cos + rot_mul_sin
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_binary(body, "add", out_name, x_mul_cos, rot_mul_sin,
+                          x_shape, d);
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2618,7 +2763,12 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
                 }
                 break;
             case OpType::RoPE:
-                handle_rope_apply_custom_call(ctx, *node, body); break;
+                if (plugin_enabled_) {
+                    handle_rope_apply_custom_call(ctx, *node, body);
+                } else {
+                    handle_rope_apply_expand(ctx, *node, body);
+                }
+                break;
             case OpType::RMSNorm:
                 handle_rms_norm_custom_call(ctx, *node, body); break;
 
