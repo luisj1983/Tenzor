@@ -24,6 +24,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -262,11 +263,46 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
     return x * cos_b + rotated * sin_b;
 }
 
-auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& /*inputs*/,
-                       const std::string& /*backend_config*/)
+auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,
+                       const std::string& backend_config)
     -> ::tenzor::Tensor {
-    throw std::runtime_error(
-        "tenzor_rms_norm: dispatcher not yet implemented (Group D.4.2)");
+    if (inputs.empty()) {
+        throw std::runtime_error(
+            "tenzor_rms_norm: expected 1+ inputs (x[, weight])");
+    }
+    const auto kv  = parse_backend_config(backend_config);
+    const float eps = parse_float(kv.count("eps") ? kv.at("eps") : "", 1e-6f);
+
+    // The CPU/GPU OpId::RMSNorm kernels expect (x, weight). When the
+    // caller did not provide a weight, materialize an all-ones tensor with
+    // the same dtype/device as x and the last-dim shape — the affine-free
+    // RMSNorm case.
+    std::vector<::tenzor::Tensor> in_with_weight;
+    in_with_weight.reserve(2);
+    in_with_weight.push_back(inputs[0]);
+    if (inputs.size() >= 2) {
+        in_with_weight.push_back(inputs[1]);
+    } else {
+        const auto x_shape = inputs[0].shape();
+        if (x_shape.empty()) {
+            throw std::runtime_error(
+                "tenzor_rms_norm: x must have rank >= 1");
+        }
+        const int64_t D = x_shape.back();
+        in_with_weight.push_back(::tenzor::full({D}, 1.0f, inputs[0].dtype(),
+                                                inputs[0].device()));
+    }
+
+    ::tenzor::OpAttributes attrs;
+    attrs.set(::tenzor::AttrKey::Eps, static_cast<double>(eps));
+
+    auto outs = ::tenzor::dispatch<::tenzor::OpId::RMSNorm>(in_with_weight,
+                                                            attrs);
+    if (outs.empty()) {
+        throw std::runtime_error(
+            "tenzor_rms_norm: dispatch returned no outputs");
+    }
+    return outs[0];
 }
 
 }  // namespace tenzor::jit::mlir_jit::customcalls
@@ -285,8 +321,8 @@ constexpr const char* kMessage_RopeApply =
     "tenzor_rope_apply: dispatcher wired (Group D.3.2); IREE-side runtime "
     "binding pending iree/runtime/api.h restoration in the dist";
 constexpr const char* kMessage_RmsNorm =
-    "tenzor_rms_norm: dispatcher pending (Group D.4.2); placeholder text "
-    "emitted while the iree/runtime/api.h headers remain incomplete";
+    "tenzor_rms_norm: dispatcher wired (Group D.4.2); IREE-side runtime "
+    "binding pending iree/runtime/api.h restoration in the dist";
 
 // Marker so iree_register_custom_calls returns an error-producing
 // status_t pointer rather than nullptr when called without the real headers.

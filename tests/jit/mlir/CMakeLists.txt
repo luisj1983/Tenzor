@@ -183,6 +183,13 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_rms_norm
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 
+    # Task D.4.2 — tenzor_rms_norm custom_call dispatcher.
+    add_executable(test_op_rms_norm_callback test_op_rms_norm_callback.cpp)
+    target_link_libraries(test_op_rms_norm_callback
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_rms_norm_callback
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
+
     # Task D.4.3 — RMSNorm expand-to-stablehlo + roundtrip.
     add_executable(test_op_rms_norm_expand test_op_rms_norm_expand.cpp)
     target_link_libraries(test_op_rms_norm_expand
