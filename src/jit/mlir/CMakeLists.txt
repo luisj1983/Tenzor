@@ -20,6 +20,15 @@ target_link_libraries(tenzor_jit_mlir PUBLIC
 target_include_directories(tenzor_jit_mlir PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
+# Path A (2026-05-19 amendment): authentic IREE 3.11.0 base/hal/vm/runtime
+# headers are staged in third_party/iree_compat. They are listed BEFORE the
+# IREE-dist include path so they win when both exist — the dist-bundled
+# header set is incomplete on this host (missing iree/base/* siblings). The
+# .a libraries shipped in the dist remain ABI-compatible with these headers
+# since both originate from the upstream 3.11.0 release.
+target_include_directories(tenzor_jit_mlir BEFORE PUBLIC
+    ${CMAKE_SOURCE_DIR}/third_party/iree_compat
+)
 target_compile_features(tenzor_jit_mlir PUBLIC cxx_std_23)
 
 # Propagate the CMake-found IREE binary paths into the source so the
