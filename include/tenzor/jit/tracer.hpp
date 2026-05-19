@@ -296,6 +296,23 @@ public:
     auto register_tensor(const Variable& var) -> std::string;
 
     /**
+     * @brief Force-register a tensor under a fresh unique ID.
+     *
+     * Unlike `register_tensor`, this does NOT dedup on `data_ptr()` — it
+     * always allocates a new ID and stores fresh `TensorInfo` and a
+     * (shallow) copy of the tensor. This is the right primitive for
+     * recording the OUTPUT of view-creating ops (reshape, transpose,
+     * permute, slice, cat) where the output shares `data_ptr()` with
+     * an input but has a different logical shape/strides; without it
+     * the tracer would alias the output to its input and lose the
+     * shape change.
+     *
+     * @param tensor Tensor to register
+     * @return Newly-allocated unique tensor ID
+     */
+    auto register_new_tensor(const Tensor& tensor) -> std::string;
+
+    /**
      * @brief Get metadata for a tensor ID.
      *
      * @param tensor_id Tensor identifier

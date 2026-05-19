@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <initializer_list>
 #include <iomanip>
@@ -221,11 +222,38 @@ auto extract_scalar_value(const ::tenzor::Tensor& t) -> double {
 }
 
 /// Render a per-element MLIR float/int literal at full precision.
+///
+/// MLIR's dense<> elements-attribute parser doesn't accept `inf`/`-inf`/
+/// `nan` keywords for float payloads — those have to be encoded as
+/// hexadecimal bit patterns (`0xNNNNNNNN` for f32, `0xNNNNNNNNNNNNNNNN`
+/// for f64). std::scientific emits the keywords, which silently produce
+/// "expected integer or floating point literal" parse errors deep
+/// inside iree-compile. Fall through to the hex form for non-finite
+/// values; round-trip for finite ones unchanged.
 template <typename T>
 auto render_one(std::ostream& os, T v) -> void {
     if constexpr (std::is_floating_point_v<T>) {
-        os << std::scientific << std::setprecision(9)
-           << static_cast<double>(v);
+        const double d = static_cast<double>(v);
+        if (!std::isfinite(d)) {
+            // Encode the bit pattern as 0x...  T's natural width is what
+            // the surrounding type annotation requires, so use T's size.
+            if constexpr (sizeof(T) == 4) {
+                std::uint32_t bits;
+                std::memcpy(&bits, &v, sizeof(bits));
+                os << "0x" << std::hex << std::uppercase
+                   << std::setfill('0') << std::setw(8) << bits
+                   << std::dec << std::nouppercase << std::setfill(' ');
+            } else {
+                std::uint64_t bits;
+                double dv = d;
+                std::memcpy(&bits, &dv, sizeof(bits));
+                os << "0x" << std::hex << std::uppercase
+                   << std::setfill('0') << std::setw(16) << bits
+                   << std::dec << std::nouppercase << std::setfill(' ');
+            }
+            return;
+        }
+        os << std::scientific << std::setprecision(9) << d;
     } else {
         os << static_cast<long long>(v);
     }

@@ -269,10 +269,15 @@ private:
         const int64_t S_q = shape[shape.size() - 2];
         const int64_t S_k = shape[shape.size() - 1];
         std::vector<float> mask_data(static_cast<size_t>(S_q * S_k), 0.0F);
-        const float ninf = -std::numeric_limits<float>::infinity();
+        // Use a large finite negative value rather than -inf: the MLIR
+        // text dense<> attribute parser doesn't accept `-inf` literals
+        // and we don't have hex-float emission yet. -1e9 is far enough
+        // below the softmax dynamic range to be numerically equivalent
+        // for f32 attention.
+        const float large_neg = -1.0e9F;
         for (int64_t i = 0; i < S_q; ++i) {
             for (int64_t j = i + 1; j < S_k; ++j) {
-                mask_data[static_cast<size_t>(i * S_k + j)] = ninf;
+                mask_data[static_cast<size_t>(i * S_k + j)] = large_neg;
             }
         }
         auto mask_t = ::tenzor::Tensor::from_blob(mask_data.data(), {S_q, S_k},

@@ -13,6 +13,30 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/jit/tracer.hpp"
+
+namespace {
+
+/// Record an `Embedding` op into the active JIT trace, if any. The CPU
+/// fast path of Embedding::forward_impl rewrites memory directly
+/// instead of dispatching through `OpId::Embedding`, so the dispatch
+/// interceptor never sees it. Calling this from inside the CPU forward
+/// gives the tracer the (weight, indices) -> output edge it needs to
+/// reproduce the lookup in lowered MLIR.
+inline auto jit_record_embedding(const ::tenzor::Tensor& weight,
+                                 const ::tenzor::Tensor& indices,
+                                 const ::tenzor::Tensor& output) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto w_id = tracer.register_tensor(weight);
+    auto i_id = tracer.register_tensor(indices);
+    auto o_id = tracer.register_new_tensor(output);
+    ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::Embedding,
+                               {w_id, i_id}, {o_id});
+    tracer.record_op(std::move(op));
+}
+
+}  // namespace
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -860,6 +884,7 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                                      std::to_string(static_cast<int>(weight_dtype)));
         }
 
+        jit_record_embedding(weight_cpu, input_tensor, output);
         return Variable(output, false);
     }
 
@@ -874,6 +899,9 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
     }
 
     auto& result = outputs[0];
+
+    jit_record_embedding(parameters_["weight"]->tensor(), input_tensor,
+                         result.tensor());
 
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;

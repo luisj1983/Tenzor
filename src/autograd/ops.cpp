@@ -14,10 +14,62 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <optional>
 #include <tuple>
 
 namespace tenzor {
+
+// ─────────────────────────────────────────────────────────────────────
+// JIT tracing helpers for autograd-level shape ops.
+//
+// Most shape-only operations (reshape, transpose, permute, slice, cat)
+// do NOT dispatch through the backend kernel registry on CPU — they
+// rewrite strides directly in `Tensor::reshape` / `Tensor::permute` /
+// etc. As a result the dispatch-level tracing interceptor never sees
+// them and the resulting graph is missing the shape transitions
+// (causing later ops to see wrong rank/shape and the lowering to fail
+// with "use of value expects different type than prior uses").
+//
+// To close that gap, the Variable-level autograd wrappers below
+// explicitly post a `TracedOp` to `Tracer::get_instance()` when
+// tracing is active. We use `register_new_tensor` for the output so
+// view-style aliasing (output shares `data_ptr()` with input) doesn't
+// collapse them into the same graph value.
+// ─────────────────────────────────────────────────────────────────────
+namespace {
+
+inline auto jit_tracing_active() -> bool {
+    return ::tenzor::jit::Tracer::get_instance().is_tracing();
+}
+
+inline auto jit_record_shape_op(
+    ::tenzor::jit::OpType op_type,
+    const std::vector<const Variable*>& inputs,
+    const Tensor& output,
+    const std::vector<std::pair<const char*, int64_t>>& int_attrs = {},
+    const std::vector<std::pair<const char*,
+                               std::vector<int64_t>>>& vec_attrs = {})
+    -> std::string {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    std::vector<std::string> input_ids;
+    input_ids.reserve(inputs.size());
+    for (auto* v : inputs) {
+        input_ids.push_back(tracer.register_tensor(v->tensor()));
+    }
+    auto out_id = tracer.register_new_tensor(output);
+    ::tenzor::jit::TracedOp op(op_type, std::move(input_ids), {out_id});
+    for (const auto& [name, val] : int_attrs) {
+        op.int_attrs[name] = val;
+    }
+    for (const auto& [name, val] : vec_attrs) {
+        op.vec_attrs[name] = val;
+    }
+    tracer.record_op(std::move(op));
+    return out_id;
+}
+
+}  // namespace
 
 // Optimized forward linear computation via backend dispatch
 // Uses dispatch_single to avoid output vector allocation
@@ -436,9 +488,20 @@ auto mode(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
 }
 
 auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variable {
+    auto compute = [&]() {
+        return tenzor::reshape(input.tensor(), shape);
+    };
+
     if (!input.requires_grad() || !is_grad_enabled()) {
-        // No gradient needed, just compute
-        return Variable(tenzor::reshape(input.tensor(), shape), false);
+        // No gradient needed, just compute (and possibly record a trace).
+        auto out_t = compute();
+        if (jit_tracing_active()) {
+            jit_record_shape_op(::tenzor::jit::OpType::Reshape, {&input},
+                                out_t,
+                                {},
+                                {{"shape", shape}});
+        }
+        return Variable(out_t, false);
     }
 
     // Save original input shape for backward pass
@@ -461,7 +524,13 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
     grad_fn->set_input_variables(input_vars);
 
     // Compute result
-    auto result_tensor = tenzor::reshape(input.tensor(), shape);
+    auto result_tensor = compute();
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::Reshape, {&input},
+                            result_tensor,
+                            {},
+                            {{"shape", shape}});
+    }
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -471,7 +540,14 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         // No gradient needed, just compute
-        return Variable(tenzor::permute(input.tensor(), dims), false);
+        auto out_t = tenzor::permute(input.tensor(), dims);
+        if (jit_tracing_active()) {
+            jit_record_shape_op(::tenzor::jit::OpType::Permute, {&input},
+                                out_t,
+                                {},
+                                {{"dims", dims}});
+        }
+        return Variable(out_t, false);
     }
 
     auto grad_fn = std::make_shared<PermuteBackward>(dims);
@@ -493,6 +569,12 @@ auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variabl
 
     // Compute result
     auto result_tensor = tenzor::permute(input.tensor(), dims);
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::Permute, {&input},
+                            result_tensor,
+                            {},
+                            {{"dims", dims}});
+    }
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -500,8 +582,30 @@ auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variabl
 }
 
 auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable {
+    // Normalise negative dims for the trace; the lowering expects [0, rank).
+    int64_t recorded_dim0 = dim0;
+    int64_t recorded_dim1 = dim1;
+    {
+        auto rank = static_cast<int64_t>(input.shape().size());
+        if (recorded_dim0 < 0) recorded_dim0 += rank;
+        if (recorded_dim1 < 0) recorded_dim1 += rank;
+    }
+
+    auto compute = [&]() {
+        return tenzor::transpose(input.tensor(), dim0, dim1);
+    };
+    auto record = [&](const Tensor& t) {
+        if (jit_tracing_active()) {
+            jit_record_shape_op(::tenzor::jit::OpType::Transpose, {&input}, t,
+                                {{"dim0", recorded_dim0},
+                                 {"dim1", recorded_dim1}});
+        }
+    };
+
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::transpose(input.tensor(), dim0, dim1), false);
+        auto out_t = compute();
+        record(out_t);
+        return Variable(out_t, false);
     }
 
     auto grad_fn = std::make_shared<TransposeBackward>(dim0, dim1);
@@ -515,7 +619,8 @@ auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable {
     }
     grad_fn->set_input_variables(input_vars);
 
-    auto result_tensor = tenzor::transpose(input.tensor(), dim0, dim1);
+    auto result_tensor = compute();
+    record(result_tensor);
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -569,6 +674,28 @@ auto roll(const Variable& input, int64_t shifts, int64_t dim) -> Variable {
 }
 
 auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
+    // Normalise negative dim for the trace.
+    int64_t recorded_dim = dim;
+    if (!inputs.empty()) {
+        auto ndim = static_cast<int64_t>(inputs[0].shape().size());
+        if (recorded_dim < 0) recorded_dim += ndim;
+    }
+
+    auto record = [&](const Tensor& t) {
+        if (!jit_tracing_active()) return;
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        std::vector<std::string> input_ids;
+        input_ids.reserve(inputs.size());
+        for (const auto& v : inputs) {
+            input_ids.push_back(tracer.register_tensor(v.tensor()));
+        }
+        auto out_id = tracer.register_new_tensor(t);
+        ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::Cat,
+                                   std::move(input_ids), {out_id});
+        op.int_attrs["dim"] = recorded_dim;
+        tracer.record_op(std::move(op));
+    };
+
     // Check if any input requires grad
     bool any_requires_grad = false;
     for (const auto& input : inputs) {
@@ -585,7 +712,9 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
         for (const auto& var : inputs) {
             tensors.push_back(var.tensor());
         }
-        return Variable(tenzor::cat(tensors, dim), false);
+        auto result = tenzor::cat(tensors, dim);
+        record(result);
+        return Variable(result, false);
     }
 
     // Normalize negative dimension index
@@ -626,6 +755,7 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
         tensors.push_back(var.tensor());
     }
     auto result_tensor = tenzor::cat(tensors, dim);
+    record(result_tensor);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -634,9 +764,28 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
 }
 
 auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Variable {
+    // Normalise dim for the trace so the lowering doesn't have to.
+    int64_t recorded_dim = dim;
+    if (recorded_dim < 0) {
+        recorded_dim += static_cast<int64_t>(input.shape().size());
+    }
+
+    auto compute = [&]() {
+        return input.tensor().slice(dim, start, end, step);
+    };
+    auto record = [&](const Tensor& t) {
+        if (jit_tracing_active()) {
+            jit_record_shape_op(::tenzor::jit::OpType::Slice, {&input}, t,
+                                {{"dim", recorded_dim},
+                                 {"start", start},
+                                 {"end", end},
+                                 {"step", step}});
+        }
+    };
+
     if (!input.requires_grad() || !is_grad_enabled()) {
-        // No gradient needed, just compute using Tensor::slice() method
-        auto result = input.tensor().slice(dim, start, end, step);
+        auto result = compute();
+        record(result);
         return Variable(result, false);
     }
 
@@ -658,7 +807,8 @@ auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64
     grad_fn->set_input_variables(input_vars);
 
     // Compute result using Tensor::slice() method directly
-    auto result_tensor = input.tensor().slice(dim, start, end, step);
+    auto result_tensor = compute();
+    record(result_tensor);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);

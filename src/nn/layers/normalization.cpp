@@ -8,6 +8,34 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/jit/tracer.hpp"
+
+namespace {
+
+/// Record an `RMSNorm` op into the active JIT trace, if any. The CPU and
+/// SIMD fast paths in `RMSNorm::forward_impl` bypass the kernel
+/// dispatcher entirely (they write straight into a pre-allocated output
+/// buffer), so the tracing interceptor never sees the op. Calling this
+/// from inside the forward gives the JIT lowering the (x, weight) ->
+/// output edge it needs to emit the StableHLO `rms_norm` expansion.
+inline auto jit_record_rms_norm(const ::tenzor::Tensor& x,
+                                const ::tenzor::Tensor& weight,
+                                const ::tenzor::Tensor& output,
+                                double eps,
+                                int64_t normalized_shape) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto x_id = tracer.register_tensor(x);
+    auto w_id = tracer.register_tensor(weight);
+    auto o_id = tracer.register_new_tensor(output);
+    ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::RMSNorm,
+                               {x_id, w_id}, {o_id});
+    op.attrs["eps"] = static_cast<float>(eps);
+    op.vec_attrs["normalized_shape"] = {normalized_shape};
+    tracer.record_op(std::move(op));
+}
+
+}  // namespace
 #include <cmath>
 #include <stdexcept>
 
@@ -2817,6 +2845,7 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
         std::vector<Tensor> inputs_vec = {x, weight_cuda};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        jit_record_rms_norm(x, weight_cuda, results[0], eps_, normalized_shape_);
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
     }
 
@@ -2838,6 +2867,7 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
         std::vector<Tensor> inputs_vec = {x, weight_vk};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        jit_record_rms_norm(x, weight_vk, results[0], eps_, normalized_shape_);
         return Variable(results[0], false);
     }
 
@@ -2889,6 +2919,8 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
             delete[] rrms_scratch;
         }
 
+        jit_record_rms_norm(input.tensor(), weight_tensor, output, eps_,
+                            normalized_shape_);
         return Variable(output, false);
     }
 
@@ -2922,6 +2954,7 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
         Tensor output = results[0];
         Tensor saved_rrms = results.size() > 1 ? results[1] : Tensor();
+        jit_record_rms_norm(x, weight_dev, output, eps_, normalized_shape_);
 
         if (needs_grad) {
             auto result = Variable(output, true);
