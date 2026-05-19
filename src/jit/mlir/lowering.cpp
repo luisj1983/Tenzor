@@ -98,6 +98,23 @@ struct LoweringContext {
     }
 };
 
+/// ShapeGuard is a runtime shape-check pseudo-op inserted by the default
+/// fusion pipeline (see `ShapeGuardInsertionPass`). For the MLIR backend we
+/// don't need a runtime check — the artifact is keyed by shape via
+/// `shape_key()` and any shape change forces a recompile. Lower it as an
+/// identity: bind the (single) output value to the same SSA name as the
+/// (single) input.
+auto handle_shape_guard(LoweringContext& ctx,
+                        const ::tenzor::jit::Node& node,
+                        std::ostream& /*body*/) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: ShapeGuard expects 1 input and 1 output");
+    }
+    const auto& in_name = ctx.name_for(node.inputs()[0]->id());
+    ctx.bind(node.outputs()[0]->id(), in_name);
+}
+
 auto handle_add(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -146,6 +163,9 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
         switch (node->op_type()) {
             case ::tenzor::jit::OpType::Add:
                 handle_add(ctx, *node, body);
+                break;
+            case ::tenzor::jit::OpType::ShapeGuard:
+                handle_shape_guard(ctx, *node, body);
                 break;
             default:
                 throw std::runtime_error(

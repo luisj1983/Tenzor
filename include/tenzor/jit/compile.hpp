@@ -43,6 +43,13 @@ namespace jit {
 // Forward declaration
 class CompiledModule;
 
+namespace mlir_detail {
+/// Pimpl holder for the MLIR backend's per-shape cache of IreeInvoker
+/// instances. Defined in compile.cpp so that compile.hpp does not pull
+/// in `iree_runtime.hpp` (which transitively requires the IREE headers).
+struct MlirInvokerCache;
+}  // namespace mlir_detail
+
 /**
  * @brief A segment of a compiled graph, split at graph breaks.
  */
@@ -65,6 +72,16 @@ struct CompileConfig {
     int max_retraces{8};         ///< Maximum number of shape specializations to cache
     bool enable_fusion{true};    ///< Run fusion passes on compiled graph
     std::string mode{"default"}; ///< Compilation mode: "default", "reduce-overhead", "max-autotune"
+
+    /// Compiler backend selection.
+    ///   "nvrtc" (default, legacy CUDA C++ codegen via NVRTC),
+    ///   "mlir"  (Phase 13: Graph → StableHLO text → iree-compile → IreeInvoker).
+    std::string backend{"nvrtc"};
+
+    /// Target for the MLIR backend. Ignored when backend != "mlir".
+    /// One of: "auto" (pick from input device), "llvm-cpu", "cuda",
+    /// "vulkan-spirv", "rocm".
+    std::string target{"auto"};
 };
 
 /**
@@ -84,6 +101,15 @@ public:
      * @param config Compilation configuration
      */
     CompiledFunction(FnType fn, CompileConfig config = {});
+
+    /// Destructor declared out-of-line because `mlir_cache_` holds a
+    /// std::unique_ptr to an incomplete type.
+    ~CompiledFunction();
+
+    // Move / copy are implicitly deleted by the std::mutex member; callers
+    // construct via guaranteed-RVO from `jit::compile(...)`. Keep
+    // implicit-delete in place rather than declaring defaults that would
+    // be ill-formed.
 
     /**
      * @brief Execute the compiled function.
@@ -131,11 +157,22 @@ private:
     /// Cache key: shape signature (e.g., "4x3x224x224_f32_cpu")
     std::unordered_map<std::string, std::shared_ptr<CompiledModule>> cache_;
 
+    /// Per-shape cache of IreeInvoker instances for the MLIR backend.
+    /// Pimpl-owned so that this header does not pull in the IREE headers.
+    /// Empty/null when `config_.backend != "mlir"`.
+    std::unique_ptr<mlir_detail::MlirInvokerCache> mlir_cache_;
+
     /// Compute cache key from input tensor properties.
     static auto shape_key(const Variable& input) -> std::string;
 
     /// Trace and compile the function for the given input.
     auto trace_and_compile(const Variable& input) -> std::shared_ptr<CompiledModule>;
+
+    /// MLIR backend invoke path. Routes input → trace → lower → iree-compile →
+    /// IreeInvoker. Cached on a shape-key basis the same way the NVRTC path
+    /// is. Falls back to eager when the input is not on a device the MLIR
+    /// pipeline supports yet.
+    auto mlir_invoke(const Variable& input) -> Variable;
 };
 
 /**

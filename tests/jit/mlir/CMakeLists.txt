@@ -40,4 +40,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_lower_add
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task B.2–B.6 — End-to-end x+x via the MLIR backend across IREE
+    # targets (llvm-cpu, cuda, vulkan-spirv, rocm), plus cache-hit check.
+    add_executable(test_end_to_end_add test_end_to_end_add.cpp)
+    target_link_libraries(test_end_to_end_add
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_end_to_end_add
+        DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
 endif()

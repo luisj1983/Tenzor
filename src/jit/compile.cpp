@@ -6,11 +6,37 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/compiler.hpp"
 #include "tenzor/backend/dispatch_interceptor.hpp"
+
+#ifdef TENZOR_HAS_MLIR_JIT
+#include "tenzor/jit/mlir/iree_compile.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
+#include "tenzor/jit/mlir/lowering.hpp"
+#endif
+
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace tenzor {
 namespace jit {
+
+// ============================================================================
+// MLIR backend cache (Pimpl)
+// ============================================================================
+
+namespace mlir_detail {
+
+#ifdef TENZOR_HAS_MLIR_JIT
+struct MlirInvokerCache {
+    std::unordered_map<std::string,
+                       std::unique_ptr<::tenzor::jit::mlir_jit::IreeInvoker>>
+        invokers;
+};
+#else
+struct MlirInvokerCache {};
+#endif
+
+}  // namespace mlir_detail
 
 // ============================================================================
 // CompiledFunction
@@ -22,9 +48,29 @@ CompiledFunction::CompiledFunction(FnType fn, CompileConfig config)
         throw std::invalid_argument("Unknown compilation mode: " + config_.mode +
             ". Valid modes: \"default\", \"reduce-overhead\", \"max-autotune\"");
     }
+    if (config_.backend != "nvrtc" && config_.backend != "mlir") {
+        throw std::invalid_argument(
+            "Unknown compile backend: " + config_.backend +
+            R"_(. Valid backends: "nvrtc", "mlir")_");
+    }
+    if (config_.backend == "mlir") {
+#ifndef TENZOR_HAS_MLIR_JIT
+        throw std::runtime_error(
+            "CompiledFunction: backend=\"mlir\" requested but Tenzor was "
+            "built without TENZOR_USE_MLIR_JIT=ON");
+#else
+        mlir_cache_ = std::make_unique<mlir_detail::MlirInvokerCache>();
+#endif
+    }
 }
 
+CompiledFunction::~CompiledFunction() = default;
+
 auto CompiledFunction::operator()(const Variable& input) -> Variable {
+    if (config_.backend == "mlir") {
+        return mlir_invoke(input);
+    }
+
     auto key = shape_key(input);
 
     // Fast path: check cache without lock
@@ -175,6 +221,132 @@ auto CompiledFunction::trace_and_compile(const Variable& input)
 
     return compiled;
 }
+
+// ============================================================================
+// MLIR backend invoke
+// ============================================================================
+
+#ifdef TENZOR_HAS_MLIR_JIT
+namespace {
+
+/// Resolve `cfg.target == "auto"` based on the input tensor's device.
+auto resolve_target(const std::string& cfg_target,
+                    const ::tenzor::Device& dev) -> std::string {
+    if (cfg_target != "auto") return cfg_target;
+    switch (dev.type) {
+        case ::tenzor::Device::Type::CPU:    return "llvm-cpu";
+        case ::tenzor::Device::Type::CUDA:   return "cuda";
+        case ::tenzor::Device::Type::ROCm:   return "rocm";
+        case ::tenzor::Device::Type::Vulkan: return "vulkan-spirv";
+        default:
+            throw std::runtime_error(
+                "MLIR backend: no IREE target mapped for device type " +
+                std::to_string(static_cast<int>(dev.type)));
+    }
+}
+
+/// Build the Graph for a single-input function by running the tracer.
+/// Mirrors `CompiledFunction::trace_and_compile` (the NVRTC path): pushes
+/// a tracing interceptor onto the dispatch stack so every backend dispatch
+/// is recorded as a TracedOp. Without the interceptor, the tracer sees no
+/// ops and `end_trace` returns an empty graph.
+auto trace_single_input_graph(CompiledFunction::FnType& fn,
+                              const Variable& input) -> std::shared_ptr<Graph> {
+    auto& tracer = Tracer::get_instance();
+    tracer.start_trace();
+    auto interceptor = make_tracing_interceptor(tracer, [](OpId /*op*/) {
+        // No graph-break handling here — the MLIR path treats any
+        // break as "fall back to eager" by returning a partial/empty
+        // graph from mlir_invoke().
+    });
+    DispatchInterceptorStack::push(std::move(interceptor));
+
+    Variable output;
+    try {
+        output = fn(input);
+    } catch (...) {
+        DispatchInterceptorStack::pop();
+        tracer.clear();
+        throw;
+    }
+    DispatchInterceptorStack::pop();
+    return tracer.end_trace({input}, {output});
+}
+
+}  // namespace
+
+auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
+    namespace mj = ::tenzor::jit::mlir_jit;
+
+    const auto key = shape_key(input);
+
+    // Cache-hit fast path.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = mlir_cache_->invokers.find(key);
+        if (it != mlir_cache_->invokers.end()) {
+            auto outs = it->second->invoke({input.tensor()});
+            if (outs.size() != 1) {
+                throw std::runtime_error(
+                    "MLIR backend: expected exactly 1 output tensor from "
+                    "@main, got " +
+                    std::to_string(outs.size()));
+            }
+            return Variable(std::move(outs[0]), input.requires_grad());
+        }
+    }
+
+    // Cache miss: trace → lower → compile → load invoker → cache.
+    auto graph = trace_single_input_graph(fn_, input);
+    if (!graph || graph->num_nodes() == 0) {
+        // Trace failed or produced nothing: fall back to eager so the
+        // caller still gets a result for this invocation. Subsequent
+        // calls will retry.
+        return fn_(input);
+    }
+
+    if (config_.enable_fusion) {
+        Compiler compiler(true);
+        compiler.optimize(*graph);
+    }
+
+    mj::GraphToMLIR lowerer;
+    const std::string mlir_text = lowerer.lower(*graph);
+
+    mj::CompileOptions opts;
+    opts.target          = resolve_target(config_.target, input.tensor().device());
+    opts.plugin_enabled  = false;  // No tenzor_* custom_calls in B.2.
+
+    auto artifact = mj::compile_mlir(mlir_text, opts);
+    auto invoker  = mj::IreeInvoker::load(artifact);
+
+    auto outs = invoker->invoke({input.tensor()});
+    if (outs.size() != 1) {
+        throw std::runtime_error(
+            "MLIR backend: expected exactly 1 output tensor from @main, got " +
+            std::to_string(outs.size()));
+    }
+    Variable result(std::move(outs[0]), input.requires_grad());
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (mlir_cache_->invokers.size() <
+            static_cast<size_t>(config_.max_retraces)) {
+            mlir_cache_->invokers.emplace(key, std::move(invoker));
+        }
+    }
+    return result;
+}
+
+#else  // TENZOR_HAS_MLIR_JIT
+
+auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error(
+        "CompiledFunction::mlir_invoke: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
+#endif  // TENZOR_HAS_MLIR_JIT
 
 // ============================================================================
 // Free function

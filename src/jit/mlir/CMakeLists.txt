@@ -20,3 +20,6 @@ target_include_directories(tenzor_jit_mlir PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
 target_compile_features(tenzor_jit_mlir PUBLIC cxx_std_23)
+
+# OBJECT library is spliced into the shared tenzor_core; PIC required.
+set_target_properties(tenzor_jit_mlir PROPERTIES POSITION_INDEPENDENT_CODE ON)
