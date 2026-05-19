@@ -2624,6 +2624,118 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// RMSNorm expand-to-stablehlo. Inputs: (x[, weight]). Output:
+///   rms  = sqrt(mean(x^2, dim=-1) + eps)
+///   xhat = x / broadcast(rms)
+///   out  = xhat * broadcast(weight)  (if weight provided)
+///
+/// The "normalized_shape" attr is honored if present (multi-trailing-
+/// dims), otherwise only the last dim is reduced.
+auto handle_rms_norm_expand(LoweringContext& ctx,
+                            const ::tenzor::jit::Node& node,
+                            std::ostream& body) -> void {
+    if (node.inputs().empty() || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: RMSNorm (expand) expects 1+ inputs and 1+ outputs");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto shape    = x_val->shape();
+    const auto d        = out_val->dtype();
+    const float eps     = get_attr_float(node, {"eps"}, 1e-6f);
+    const int64_t rank  = static_cast<int64_t>(shape.size());
+
+    // Resolve norm_dims. If `normalized_shape` is set, the trailing dims of
+    // x whose extents match form the reduction axis set; otherwise the
+    // last dim only.
+    std::vector<int64_t> norm_dims;
+    if (node.has_attr("normalized_shape")) {
+        auto ns = node.get_vec_attr("normalized_shape");
+        const int64_t off = rank - static_cast<int64_t>(ns.size());
+        for (int64_t i = off; i < rank; ++i) norm_dims.push_back(i);
+    } else {
+        norm_dims.push_back(rank - 1);
+    }
+    std::vector<int64_t> reduced_shape;
+    {
+        std::unordered_set<int64_t> drop(norm_dims.begin(), norm_dims.end());
+        for (std::size_t i = 0; i < shape.size(); ++i) {
+            if (!drop.count(static_cast<int64_t>(i))) {
+                reduced_shape.push_back(shape[i]);
+            }
+        }
+    }
+    std::vector<int64_t> bcast_dims;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (std::find(norm_dims.begin(), norm_dims.end(), i) ==
+            norm_dims.end()) {
+            bcast_dims.push_back(i);
+        }
+    }
+    int64_t N = 1;
+    for (auto k : norm_dims) N *= shape[k];
+
+    const auto& x = ctx.name_for(x_val->id());
+
+    // sq = x * x
+    auto sq = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", sq, x, x, shape, d); body << '\n';
+    // sum_sq = reduce_sum(sq, norm_dims)
+    auto init0 = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto sum_sq = ctx.fresh_name();
+    emit_stablehlo_reduce(body, sum_sq, sq, init0, "add", norm_dims, shape,
+                          reduced_shape, d); body << '\n';
+    // mean = sum_sq / N
+    auto n_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, n_c,
+                                  scalar_literal(static_cast<double>(N), d),
+                                  reduced_shape, d);
+    body << '\n';
+    auto mean_sq = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", mean_sq, sum_sq, n_c, reduced_shape, d);
+    body << '\n';
+    // var_eps = mean_sq + eps
+    auto eps_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, eps_c,
+                                  scalar_literal(static_cast<double>(eps), d),
+                                  reduced_shape, d);
+    body << '\n';
+    auto var_eps = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", var_eps, mean_sq, eps_c, reduced_shape, d);
+    body << '\n';
+    // rms = sqrt(var_eps)
+    auto rms = ctx.fresh_name();
+    emit_stablehlo_unary(body, "sqrt", rms, var_eps, reduced_shape, d);
+    body << '\n';
+    auto rms_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, rms_b, rms, bcast_dims,
+                                    reduced_shape, shape, d);
+    body << '\n';
+    // xhat = x / rms_b
+    auto xhat = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", xhat, x, rms_b, shape, d);
+    body << '\n';
+
+    std::string final_name = xhat;
+    if (node.inputs().size() >= 2) {
+        const auto& w_val = node.inputs()[1];
+        auto w_b = maybe_broadcast(body, ctx, ctx.name_for(w_val->id()),
+                                   w_val->shape(), shape, d);
+        auto scaled = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", scaled, xhat, w_b, shape, d);
+        body << '\n';
+        final_name = scaled;
+    }
+
+    // Bind the output value's SSA name to `final_name` — the chained
+    // multiply/divide already produced the result tensor under that name,
+    // no need to emit an extra copy.
+    ctx.bind(out_val->id(), final_name);
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2770,7 +2882,12 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
                 }
                 break;
             case OpType::RMSNorm:
-                handle_rms_norm_custom_call(ctx, *node, body); break;
+                if (plugin_enabled_) {
+                    handle_rms_norm_custom_call(ctx, *node, body);
+                } else {
+                    handle_rms_norm_expand(ctx, *node, body);
+                }
+                break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
