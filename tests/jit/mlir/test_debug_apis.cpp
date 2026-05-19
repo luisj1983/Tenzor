@@ -49,3 +49,26 @@ TEST(DebugAPIs, ShowGraphDumpsAddNode) {
     auto text = compiled.dump_graph(x);
     EXPECT_NE(text.find("Add"), std::string::npos) << text;
 }
+
+// ---------------------------------------------------------------------------
+// F.2 — show_mlir contains stablehlo.add and func.func @main
+// ---------------------------------------------------------------------------
+
+TEST(DebugAPIs, ShowMlirContainsStablehlo) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x)
+        -> ::tenzor::Variable { return x + x; };
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 1.5f, ::tenzor::DType::Float32),
+        /*requires_grad=*/false);
+
+    auto _trigger = compiled(x);
+    auto text = compiled.dump_mlir(x);
+    EXPECT_NE(text.find("stablehlo.add"), std::string::npos) << text;
+    EXPECT_NE(text.find("func.func @main"), std::string::npos);
+}

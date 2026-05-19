@@ -302,6 +302,20 @@ void register_jit(py::module_& m) {
         py::arg("compiled"), py::arg("example"),
         "Trace and dump the optimized tenzor::jit::Graph as text.");
 
+    jit.def("show_mlir",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_mlir: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_mlir(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Lower the traced graph and return the StableHLO text "
+        "(plugin-enabled).");
+
     // =========================================================================
     // Lazy Tensor API
     // =========================================================================

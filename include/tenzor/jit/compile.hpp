@@ -147,6 +147,16 @@ public:
      */
     auto dump_graph(const Variable& input) -> std::string;
 
+    /**
+     * @brief Trace + lower the function and return the StableHLO MLIR text
+     *        that would be passed to iree-compile. Used by
+     *        tz.jit.show_mlir().
+     *
+     * Mirrors the MLIR path: same trace, same fusion pass, same lowering
+     * with plugin_enabled=true (so Tenzor custom_calls survive in the text).
+     */
+    auto dump_mlir(const Variable& input) -> std::string;
+
 private:
     FnType fn_;
     CompileConfig config_;

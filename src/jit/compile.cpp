@@ -358,11 +358,36 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     return result;
 }
 
+// ============================================================================
+// Debug / introspection APIs (Group F.2 — show_mlir)
+// ============================================================================
+
+auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
+    namespace mj = ::tenzor::jit::mlir_jit;
+    auto graph = trace_single_input_graph(fn_, input);
+    if (!graph || graph->num_nodes() == 0) {
+        return "<empty graph: nothing to lower>\n";
+    }
+    if (config_.enable_fusion) {
+        Compiler compiler(true);
+        compiler.optimize(*graph);
+    }
+    mj::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(true);
+    return lowerer.lower(*graph);
+}
+
 #else  // TENZOR_HAS_MLIR_JIT
 
 auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
     throw std::runtime_error(
         "CompiledFunction::mlir_invoke: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
+auto CompiledFunction::dump_mlir(const Variable& /*input*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_mlir: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
 }
 
