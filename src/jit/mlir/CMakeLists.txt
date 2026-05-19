@@ -2,13 +2,17 @@
 # Gated by TENZOR_USE_MLIR_JIT. Per the 2026-05-19 amendment, Tenzor emits MLIR
 # as text and links only against IREE Compiler (embedding API) + Runtime C API.
 
+find_package(OpenSSL REQUIRED)
+
 add_library(tenzor_jit_mlir OBJECT
     _stub.cpp
     mlir_text_emit.cpp
+    iree_compile.cpp
 )
 target_link_libraries(tenzor_jit_mlir PUBLIC
     iree_compiler_API_SharedImpl   # embedding_api.h
     iree_runtime_runtime           # api.h
+    OpenSSL::Crypto                # SHA-256 for cache key
 )
 target_include_directories(tenzor_jit_mlir PUBLIC
     ${CMAKE_SOURCE_DIR}/include

@@ -12,4 +12,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_mlir_text_emit
         DISCOVERY_TIMEOUT 30 BACKENDS none LABELS "jit;mlir")
+
+    # Task A.7 — IREE Compiler embedding API integration.
+    add_executable(test_iree_compile test_iree_compile.cpp)
+    target_link_libraries(test_iree_compile
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_iree_compile
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
 endif()
