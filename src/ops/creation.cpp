@@ -212,107 +212,10 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     return tensor;
 }
 
-auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -> Tensor {
-    // Use OpId dispatch for non-CPU devices
-    if (device.type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-        attrs.set(AttrKey::Value, static_cast<double>(value));
-        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
-        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
-
-        return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
-    }
-
-    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
-    if (!tensor.impl() || !tensor.storage()) return tensor;
-
-    size_t numel = tensor.numel();
-    void* data = tensor.storage()->data();
-
-    // Fill with value based on dtype
-    switch (dtype) {
-        case DType::Float16: {
-            Float16* ptr = static_cast<Float16*>(data);
-            std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
-            break;
-        }
-        case DType::BFloat16: {
-            BFloat16* ptr = static_cast<BFloat16*>(data);
-            std::fill(ptr, ptr + numel, BFloat16(static_cast<float>(value)));
-            break;
-        }
-        case DType::Float32: {
-            float* ptr = static_cast<float*>(data);
-            std::fill(ptr, ptr + numel, static_cast<float>(value));
-            break;
-        }
-        case DType::Float64: {
-            double* ptr = static_cast<double*>(data);
-            std::fill(ptr, ptr + numel, static_cast<double>(value));
-            break;
-        }
-        case DType::Int32: {
-            int32_t* ptr = static_cast<int32_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int32_t>(value));
-            break;
-        }
-        case DType::Int64: {
-            int64_t* ptr = static_cast<int64_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int64_t>(value));
-            break;
-        }
-        case DType::UInt8: {
-            uint8_t* ptr = static_cast<uint8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
-            break;
-        }
-        case DType::UInt16: {
-            uint16_t* ptr = static_cast<uint16_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint16_t>(value));
-            break;
-        }
-        case DType::UInt32: {
-            uint32_t* ptr = static_cast<uint32_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint32_t>(value));
-            break;
-        }
-        case DType::UInt64: {
-            uint64_t* ptr = static_cast<uint64_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint64_t>(value));
-            break;
-        }
-        case DType::Int8: {
-            int8_t* ptr = static_cast<int8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
-            break;
-        }
-        case DType::Int16: {
-            int16_t* ptr = static_cast<int16_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int16_t>(value));
-            break;
-        }
-        case DType::Bool: {
-            bool* ptr = static_cast<bool*>(data);
-            std::fill(ptr, ptr + numel, value != 0.0f);
-            break;
-        }
-        case DType::Complex64: {
-            auto* ptr = static_cast<std::complex<float>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<float>(static_cast<float>(value), 0.0f));
-            break;
-        }
-        case DType::Complex128: {
-            auto* ptr = static_cast<std::complex<double>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<double>(static_cast<double>(value), 0.0));
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported dtype for full()");
-    }
-    return tensor;
-}
+// full(..., float value, ...) collapsed into full(..., double value, ...)
+// per 2026-05-19 cleanup. float→double promotion + the dtype-cast happen
+// downstream so no behaviour changes; the two-overload ambiguity that broke
+// `full({3}, 42, ...)` (with an int literal) is gone.
 
 auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
@@ -773,10 +676,9 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
     return tensor;
 }
 
-auto linspace(float start, float end, int64_t steps, DType dtype, Device device) -> Tensor {
-    // Thin wrapper: promote to double so callers don't silently narrow.
-    return linspace(static_cast<double>(start), static_cast<double>(end), steps, dtype, device);
-}
+// linspace(float, float, ...) collapsed into linspace(double, double, ...)
+// per 2026-05-19 cleanup: float→double promotion is implicit, eliminating
+// the int-literal ambiguity for callers like linspace(0, 1, 5, ...).
 
 auto linspace(double start, double end, int64_t steps, DType dtype, Device device) -> Tensor {
     if (steps <= 0) {

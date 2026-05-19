@@ -69,22 +69,8 @@ auto ones(std::vector<int64_t> shape,
  * @return New tensor filled with value
  */
 auto full(std::vector<int64_t> shape,
-         float value,
-         DType dtype = DType::Float32,
-         Device device = Device::cpu()) -> Tensor;
-
-/**
- * @brief Create tensor filled with specific value (double precision).
- *
- * @param shape Tensor dimensions
- * @param value Fill value (double precision)
- * @param dtype Element data type
- * @param device Target device
- * @return New tensor filled with value
- */
-auto full(std::vector<int64_t> shape,
          double value,
-         DType dtype = DType::Float64,
+         DType dtype = DType::Float32,
          Device device = Device::cpu()) -> Tensor;
 
 /**
@@ -364,25 +350,8 @@ auto arange(double start, double end, double step = 1.0,
  * auto t = linspace(0.0f, 1.0f, 5);  // [0.0, 0.25, 0.5, 0.75, 1.0]
  * @endcode
  */
-auto linspace(float start, float end, int64_t steps,
-             DType dtype = DType::Float32,
-             Device device = Device::cpu()) -> Tensor;
-
-/**
- * @brief Create 1D tensor with linearly spaced values (double-precision endpoints).
- *
- * Matches the full(double, ...) pattern: accepts double endpoints so callers
- * using Float64 or Int64 dtypes don't lose precision at the API boundary.
- *
- * @param start Start value (inclusive) — double precision
- * @param end End value (inclusive) — double precision
- * @param steps Number of values to generate
- * @param dtype Element data type (default: Float64)
- * @param device Target device (default: CPU)
- * @return 1D tensor with linearly spaced values
- */
 auto linspace(double start, double end, int64_t steps,
-              DType dtype = DType::Float64,
+              DType dtype = DType::Float32,
               Device device = Device::cpu()) -> Tensor;
 
 /**

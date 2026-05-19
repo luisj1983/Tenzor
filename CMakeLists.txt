@@ -195,10 +195,7 @@ if(TENZOR_USE_MLIR_JIT)
     # Discovery priority:
     #   1. $TENZOR_ROCM_RUNTIME_LIB_DIR  — explicit override
     #   2. ${TENZOR_ROCM_RUNTIME_LIB_DIR} — CMake-level override
-    #   3. /opt/rocm/lib                 — host ROCm install (only if intact)
-    #   4. /home/lee/rocm-recovered/opt/rocm/lib — user-recovered fallback on
-    #      hosts where /opt/rocm is zero-byte-corrupted (the lee@archlinux
-    #      box's state circa 2026-05-19).
+    #   3. /opt/rocm/lib                 — host ROCm install
     #
     # The discovery probes one canonical .so (libamdhip64.so) and rejects
     # zero-byte files outright.
@@ -211,7 +208,6 @@ if(TENZOR_USE_MLIR_JIT)
         list(APPEND _rocm_candidate_dirs "${TENZOR_ROCM_RUNTIME_LIB_DIR}")
     endif()
     list(APPEND _rocm_candidate_dirs "/opt/rocm/lib")
-    list(APPEND _rocm_candidate_dirs "/home/lee/rocm-recovered/opt/rocm/lib")
     foreach(_d IN LISTS _rocm_candidate_dirs)
         if(EXISTS "${_d}/libamdhip64.so")
             file(SIZE "${_d}/libamdhip64.so" _hip_so_size)
