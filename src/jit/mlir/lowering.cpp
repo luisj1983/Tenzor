@@ -1203,6 +1203,203 @@ auto handle_broadcast(LoweringContext& ctx,
     body << '\n';
 }
 
+// ── Norms ───────────────────────────────────────────────────────────────────
+
+/// LayerNorm along the last `len(normalized_shape)` dims (StableHLO has
+/// no direct layer-norm op so we decompose).
+/// Inputs:
+///   x       : tensor (rank ≥ rank of normalized_shape)
+///   weight? : optional gamma — same shape as the trailing normalized
+///             dims (rank-N where N = normalized_shape rank)
+///   bias?   : optional beta — same shape as weight
+auto handle_layer_norm(LoweringContext& ctx,
+                       const ::tenzor::jit::Node& node,
+                       std::ostream& body) -> void {
+    if (node.outputs().empty()) {
+        throw std::runtime_error("GraphToMLIR: LayerNorm expects 1+ outputs");
+    }
+    if (node.inputs().empty()) {
+        throw std::runtime_error("GraphToMLIR: LayerNorm expects 1+ inputs");
+    }
+    const auto& x_val = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto shape = x_val->shape();
+    const auto d = out_val->dtype();
+    const float eps = get_attr_float(node, {"eps"}, 1e-5f);
+
+    // The normalized dims are the trailing dims given by attr
+    // "normalized_shape" (or, if absent, the last dim only).
+    std::vector<int64_t> norm_dims;
+    if (node.has_attr("normalized_shape")) {
+        auto ns = node.get_vec_attr("normalized_shape");
+        // norm_dims = last len(ns) dims of x.
+        const int64_t rank = static_cast<int64_t>(shape.size());
+        const int64_t off = rank - static_cast<int64_t>(ns.size());
+        for (int64_t i = off; i < rank; ++i) norm_dims.push_back(i);
+    } else {
+        norm_dims.push_back(static_cast<int64_t>(shape.size()) - 1);
+    }
+    // Shape after reducing across norm_dims (no-keepdim) and after re-
+    // broadcasting back to x_shape.
+    std::vector<int64_t> reduced_shape;
+    {
+        std::unordered_set<int64_t> drop(norm_dims.begin(), norm_dims.end());
+        for (std::size_t i = 0; i < shape.size(); ++i) {
+            if (!drop.count(static_cast<int64_t>(i))) {
+                reduced_shape.push_back(shape[i]);
+            }
+        }
+    }
+    std::vector<int64_t> bcast_dims;
+    for (int64_t i = 0; i < static_cast<int64_t>(shape.size()); ++i) {
+        if (std::find(norm_dims.begin(), norm_dims.end(), i) ==
+            norm_dims.end()) {
+            bcast_dims.push_back(i);
+        }
+    }
+
+    // N = product of normalized dim extents.
+    int64_t N = 1;
+    for (auto k : norm_dims) N *= shape[k];
+
+    const auto& x = ctx.name_for(x_val->id());
+
+    // sum_x = reduce_sum(x, norm_dims)
+    auto init0 = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto sum_x = ctx.fresh_name();
+    emit_stablehlo_reduce(body, sum_x, x, init0, "add", norm_dims, shape,
+                          reduced_shape, d);
+    body << '\n';
+    // n_const = N
+    auto n_const = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, n_const,
+                                  scalar_literal(static_cast<double>(N), d),
+                                  reduced_shape, d);
+    body << '\n';
+    auto mean_r = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", mean_r, sum_x, n_const,
+                          reduced_shape, d);
+    body << '\n';
+    auto mean_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, mean_b, mean_r, bcast_dims,
+                                    reduced_shape, shape, d);
+    body << '\n';
+    // centered = x - mean
+    auto centered = ctx.fresh_name();
+    emit_stablehlo_binary(body, "subtract", centered, x, mean_b, shape, d);
+    body << '\n';
+    // sq = centered * centered
+    auto sq = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", sq, centered, centered, shape, d);
+    body << '\n';
+    // sum_sq
+    auto init1 = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init1, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto sum_sq = ctx.fresh_name();
+    emit_stablehlo_reduce(body, sum_sq, sq, init1, "add", norm_dims, shape,
+                          reduced_shape, d);
+    body << '\n';
+    auto var_r = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", var_r, sum_sq, n_const,
+                          reduced_shape, d);
+    body << '\n';
+    // var + eps
+    auto eps_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, eps_c,
+                                  scalar_literal(static_cast<double>(eps), d),
+                                  reduced_shape, d);
+    body << '\n';
+    auto var_eps = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", var_eps, var_r, eps_c, reduced_shape, d);
+    body << '\n';
+    auto std_r = ctx.fresh_name();
+    emit_stablehlo_unary(body, "sqrt", std_r, var_eps, reduced_shape, d);
+    body << '\n';
+    auto std_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, std_b, std_r, bcast_dims,
+                                    reduced_shape, shape, d);
+    body << '\n';
+    auto x_hat = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", x_hat, centered, std_b, shape, d);
+    body << '\n';
+
+    // Apply weight/bias if present (inputs[1], inputs[2]).
+    std::string final_name = x_hat;
+    if (node.inputs().size() >= 2) {
+        const auto& w_val = node.inputs()[1];
+        auto w_b = maybe_broadcast(body, ctx, ctx.name_for(w_val->id()),
+                                   w_val->shape(), shape, d);
+        auto scaled = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", scaled, x_hat, w_b, shape, d);
+        body << '\n';
+        final_name = scaled;
+    }
+    if (node.inputs().size() >= 3) {
+        const auto& b_val = node.inputs()[2];
+        auto b_b = maybe_broadcast(body, ctx, ctx.name_for(b_val->id()),
+                                   b_val->shape(), shape, d);
+        auto shifted = ctx.fresh_name();
+        emit_stablehlo_binary(body, "add", shifted, final_name, b_b, shape, d);
+        body << '\n';
+        final_name = shifted;
+    }
+
+    // Bind the primary output (out_val->id()) to the final tensor.
+    ctx.bind(out_val->id(), final_name);
+    // If the node has additional outputs (mean, rstd from FusedLayerNorm
+    // contract), we don't currently emit them — those output values
+    // become orphaned but won't break the graph since they're not in
+    // g.outputs(). If they ARE in g.outputs() the lowering will error
+    // out when looking up their SSA name.
+}
+
+/// BatchNorm2d inference: y = (x - mean) / sqrt(var + eps) * weight + bias
+/// Inputs: (x, weight, bias, running_mean, running_var)
+auto handle_batch_norm2d(LoweringContext& ctx,
+                         const ::tenzor::jit::Node& node,
+                         std::ostream& body) -> void {
+    if (node.inputs().size() < 5 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: BatchNorm2d expects 5 inputs and 1+ outputs");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& w_val   = node.inputs()[1];
+    const auto& b_val   = node.inputs()[2];
+    const auto& m_val   = node.inputs()[3];
+    const auto& v_val   = node.inputs()[4];
+    const auto& out_val = node.outputs()[0];
+    const auto shape = x_val->shape();
+    const auto d = out_val->dtype();
+    const float eps = get_attr_float(node, {"eps"}, 1e-5f);
+
+    // Use the explicit stablehlo.batch_norm_inference op.
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    body << '%' << out_name << " = \"stablehlo.batch_norm_inference\"(%"
+         << ctx.name_for(x_val->id()) << ", %"
+         << ctx.name_for(w_val->id()) << ", %"
+         << ctx.name_for(b_val->id()) << ", %"
+         << ctx.name_for(m_val->id()) << ", %"
+         << ctx.name_for(v_val->id()) << ") <{"
+         << "epsilon = " << std::scientific << std::setprecision(9) << eps
+         << " : f32, feature_index = 1 : i64}> : (";
+    write_tensor_type_for_emit(body, shape, d);
+    body << ", ";
+    write_tensor_type_for_emit(body, w_val->shape(), d);
+    body << ", ";
+    write_tensor_type_for_emit(body, b_val->shape(), d);
+    body << ", ";
+    write_tensor_type_for_emit(body, m_val->shape(), d);
+    body << ", ";
+    write_tensor_type_for_emit(body, v_val->shape(), d);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, shape, d);
+    body << '\n';
+}
+
 // ── Cast / Index ────────────────────────────────────────────────────────────
 
 auto handle_cast(LoweringContext& ctx,
@@ -1491,6 +1688,10 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Cast:         handle_cast(ctx, *node, body);         break;
             case OpType::Embedding:    handle_embedding(ctx, *node, body);    break;
             case OpType::IndexSelect:  handle_index_select(ctx, *node, body); break;
+
+            // ── Norms ──
+            case OpType::LayerNorm:    handle_layer_norm(ctx, *node, body);   break;
+            case OpType::BatchNorm2d:  handle_batch_norm2d(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
