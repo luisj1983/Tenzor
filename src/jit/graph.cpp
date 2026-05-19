@@ -404,15 +404,47 @@ auto Graph::infer_types() -> void {
             case OpType::Conv2d:
                 if (!input_shapes.empty()) {
                     auto& shape = input_shapes[0];  // [N, C, H, W]
+                    // Prefer reading from the weight tensor's shape
+                    // (input 1: [out_channels, in_channels/groups,
+                    // kernel_h, kernel_w]). The dispatch-level Conv2d
+                    // doesn't push out_channels/kernel_* as attrs, so
+                    // the legacy attr path is now a fallback for
+                    // hand-built graphs.
                     int64_t out_channels = node->get_int_attr("out_channels");
                     int64_t kernel_h = node->get_int_attr("kernel_h");
                     int64_t kernel_w = node->get_int_attr("kernel_w");
-                    int64_t stride_h = node->has_attr("stride_h") ? node->get_int_attr("stride_h") : 1;
-                    int64_t stride_w = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : 1;
-                    int64_t padding_h = node->has_attr("padding_h") ? node->get_int_attr("padding_h") : 0;
-                    int64_t padding_w = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : 0;
-                    int64_t dilation_h = node->has_attr("dilation_h") ? node->get_int_attr("dilation_h") : 1;
-                    int64_t dilation_w = node->has_attr("dilation_w") ? node->get_int_attr("dilation_w") : 1;
+                    if (input_shapes.size() >= 2 &&
+                        input_shapes[1].size() == 4) {
+                        out_channels = input_shapes[1][0];
+                        kernel_h     = input_shapes[1][2];
+                        kernel_w     = input_shapes[1][3];
+                    }
+                    // Honor both paired (stride_h/stride_w from the
+                    // dispatch interceptor's hw-pair copy) and the
+                    // pair-as-vec form ("stride", "padding", "dilation"
+                    // = {h, w}) that the interceptor populates from
+                    // AttrKey::Padding/Stride/Dilation scalars.
+                    auto pair_from = [&](const char* h_key, const char* w_key,
+                                          const char* vec_key,
+                                          int64_t default_v)
+                            -> std::pair<int64_t, int64_t> {
+                        if (node->has_attr(h_key) && node->has_attr(w_key)) {
+                            return {node->get_int_attr(h_key),
+                                    node->get_int_attr(w_key)};
+                        }
+                        if (node->has_attr(vec_key)) {
+                            auto v = node->get_vec_attr(vec_key);
+                            if (v.size() == 2) return {v[0], v[1]};
+                            if (v.size() == 1) return {v[0], v[0]};
+                        }
+                        return {default_v, default_v};
+                    };
+                    auto [stride_h, stride_w]   = pair_from(
+                        "stride_h",  "stride_w",  "stride",   1);
+                    auto [padding_h, padding_w] = pair_from(
+                        "padding_h", "padding_w", "padding",  0);
+                    auto [dilation_h, dilation_w] = pair_from(
+                        "dilation_h", "dilation_w", "dilation", 1);
 
                     if (shape.size() == 4) {
                         int64_t H_out = (shape[2] + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;

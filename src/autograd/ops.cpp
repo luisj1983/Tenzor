@@ -491,16 +491,21 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
     auto compute = [&]() {
         return tenzor::reshape(input.tensor(), shape);
     };
+    // Always record the *resolved* shape (using the eager output's
+    // concrete dims) so the JIT graph never carries a `-1` placeholder
+    // that the MLIR lowering can't materialise.
+    auto record = [&](const Tensor& t) {
+        if (!jit_tracing_active()) return;
+        std::vector<int64_t> resolved(t.shape().begin(), t.shape().end());
+        jit_record_shape_op(::tenzor::jit::OpType::Reshape, {&input}, t,
+                            {},
+                            {{"shape", resolved}});
+    };
 
     if (!input.requires_grad() || !is_grad_enabled()) {
         // No gradient needed, just compute (and possibly record a trace).
         auto out_t = compute();
-        if (jit_tracing_active()) {
-            jit_record_shape_op(::tenzor::jit::OpType::Reshape, {&input},
-                                out_t,
-                                {},
-                                {{"shape", shape}});
-        }
+        record(out_t);
         return Variable(out_t, false);
     }
 
@@ -525,12 +530,7 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 
     // Compute result
     auto result_tensor = compute();
-    if (jit_tracing_active()) {
-        jit_record_shape_op(::tenzor::jit::OpType::Reshape, {&input},
-                            result_tensor,
-                            {},
-                            {{"shape", shape}});
-    }
+    record(result_tensor);
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 

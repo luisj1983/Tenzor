@@ -42,7 +42,8 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Conv2dForward:     return OpType::Conv2d;
 
         // Normalization
-        case OpId::BatchNorm2dForward: return OpType::BatchNorm2d;
+        case OpId::BatchNorm2dForward:       return OpType::BatchNorm2d;
+        case OpId::BatchNorm2dForwardAffine: return OpType::BatchNorm2d;
         case OpId::LayerNorm:  return OpType::LayerNorm;
 
         // Reductions
@@ -128,11 +129,36 @@ auto make_tracing_interceptor(
             input_ids.push_back(tracer.register_tensor(t));
         }
 
-        // Register output tensors
+        // Reorder BN2d's affine forward inputs from the eager kernel's
+        // canonical (x, mean, var, weight, bias) into the IR's expected
+        // (x, weight, bias, mean, var) so the MLIR lowering's BN2d
+        // handler (which mirrors stablehlo.batch_norm_inference's
+        // operand order) wires up the right scale/offset/mean/var
+        // tensors. Without this the lowered graph silently treats the
+        // running stats as scale/bias and vice versa.
+        if (op == OpId::BatchNorm2dForwardAffine && input_ids.size() == 5) {
+            auto [x_id, m_id, v_id, w_id, b_id] = std::tuple{
+                input_ids[0], input_ids[1], input_ids[2],
+                input_ids[3], input_ids[4]};
+            input_ids = {x_id, w_id, b_id, m_id, v_id};
+        }
+
+        // Register output tensors. Some fused forward kernels return
+        // auxiliary tensors (saved-mean, saved-rrms, indices, …) that
+        // the IR side doesn't model; surface only the *primary* output
+        // (results[0]) to avoid building Values with no consumer that
+        // later passes can't infer shapes for.
         std::vector<std::string> output_ids;
-        output_ids.reserve(results.size());
-        for (auto& t : results) {
-            output_ids.push_back(tracer.register_tensor(t));
+        if (op == OpId::BatchNorm2dForwardAffine ||
+            op == OpId::BatchNorm2dForward) {
+            if (!results.empty()) {
+                output_ids.push_back(tracer.register_tensor(results[0]));
+            }
+        } else {
+            output_ids.reserve(results.size());
+            for (auto& t : results) {
+                output_ids.push_back(tracer.register_tensor(t));
+            }
         }
 
         // Record the operation
