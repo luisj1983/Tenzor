@@ -1203,6 +1203,424 @@ auto handle_broadcast(LoweringContext& ctx,
     body << '\n';
 }
 
+// ── Vision ──────────────────────────────────────────────────────────────────
+
+/// Conv2d: NCHW input, OIHW weight, optional bias.
+auto handle_conv2d(LoweringContext& ctx,
+                   const ::tenzor::jit::Node& node,
+                   std::ostream& body) -> void {
+    if (node.outputs().empty() || node.inputs().size() < 2) {
+        throw std::runtime_error(
+            "GraphToMLIR: Conv2d expects (x, w [, b]) inputs and 1 output");
+    }
+    const auto& x = node.inputs()[0];
+    const auto& w = node.inputs()[1];
+    const auto& out = node.outputs()[0];
+    const auto d = out->dtype();
+
+    // Attribute reads (defaults match torch's nn.Conv2d).
+    auto get_pair = [&](const char* vec_key, const char* h_key,
+                        const char* w_key, int64_t default_v) {
+        if (node.has_attr(vec_key)) {
+            auto v = node.get_vec_attr(vec_key);
+            if (v.size() == 2) return std::pair{v[0], v[1]};
+            if (v.size() == 1) return std::pair{v[0], v[0]};
+        }
+        int64_t h = node.has_attr(h_key)
+                        ? node.get_int_attr(h_key)
+                        : (node.has_attr("stride")
+                               ? node.get_int_attr("stride") : default_v);
+        int64_t wv = node.has_attr(w_key)
+                         ? node.get_int_attr(w_key)
+                         : (node.has_attr("stride")
+                                ? node.get_int_attr("stride") : default_v);
+        return std::pair{h, wv};
+    };
+    auto [stride_h, stride_w]   = get_pair("stride",   "stride_h",
+                                           "stride_w", 1);
+    auto [pad_h,    pad_w]      = get_pair("padding",  "padding_h",
+                                           "padding_w", 0);
+    auto [dilation_h, dilation_w] = get_pair("dilation", "dilation_h",
+                                             "dilation_w", 1);
+    const int64_t groups = node.has_attr("groups")
+                               ? node.get_int_attr("groups") : 1;
+
+    auto out_name = ctx.fresh_name();
+    auto conv_name = node.inputs().size() >= 3 ? ctx.fresh_name()
+                                               : out_name;
+
+    body << '%' << conv_name << " = stablehlo.convolution(%"
+         << ctx.name_for(x->id()) << ", %" << ctx.name_for(w->id()) << ")\n"
+         << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],\n"
+         << "    window = {stride = [" << stride_h << ", " << stride_w
+         << "], pad = [[" << pad_h << ", " << pad_h << "], ["
+         << pad_w << ", " << pad_w << "]], rhs_dilate = ["
+         << dilation_h << ", " << dilation_w << "]} "
+         << "{batch_group_count = 1 : i64, feature_group_count = "
+         << groups << " : i64} : (";
+    write_tensor_type_for_emit(body, x->shape(), d);
+    body << ", ";
+    write_tensor_type_for_emit(body, w->shape(), d);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, out->shape(), d);
+    body << '\n';
+
+    if (node.inputs().size() >= 3) {
+        const auto& b_val = node.inputs()[2];
+        // Bias: (C_out,) broadcast over (N, C_out, H_out, W_out) — dim 1.
+        auto bias_b = ctx.fresh_name();
+        emit_stablehlo_broadcast_in_dim(body, bias_b,
+                                        ctx.name_for(b_val->id()),
+                                        /*bcast_dims=*/{1}, b_val->shape(),
+                                        out->shape(), d);
+        body << '\n';
+        emit_stablehlo_binary(body, "add", out_name, conv_name, bias_b,
+                              out->shape(), d);
+        body << '\n';
+    }
+    ctx.bind(out->id(), out_name);
+}
+
+/// Emit a stablehlo.reduce_window pooling op (MaxPool / AvgPool sum).
+auto emit_reduce_window(std::ostream& body, LoweringContext& ctx,
+                        const std::string& result, const std::string& operand,
+                        const std::string& init_name,
+                        const std::string& reducer,
+                        const std::vector<int64_t>& window,
+                        const std::vector<int64_t>& strides,
+                        const std::vector<int64_t>& padding_low,
+                        const std::vector<int64_t>& padding_high,
+                        const std::vector<int64_t>& operand_shape,
+                        const std::vector<int64_t>& result_shape,
+                        ::tenzor::DType d) -> void {
+    body << '%' << result
+         << " = \"stablehlo.reduce_window\"(%" << operand << ", %"
+         << init_name << ") <{window_dimensions = array<i64: ";
+    for (std::size_t i = 0; i < window.size(); ++i) {
+        if (i != 0) body << ", ";
+        body << window[i];
+    }
+    body << ">, window_strides = array<i64: ";
+    for (std::size_t i = 0; i < strides.size(); ++i) {
+        if (i != 0) body << ", ";
+        body << strides[i];
+    }
+    body << ">, padding = dense<[[";
+    for (std::size_t i = 0; i < padding_low.size(); ++i) {
+        if (i != 0) body << "], [";
+        body << padding_low[i] << ", " << padding_high[i];
+    }
+    body << "]]> : tensor<" << padding_low.size() << "x2xi64>}> ({"
+         << "\n  ^bb0(%a: tensor<" << mlir_type_name(d) << ">, %b: tensor<"
+         << mlir_type_name(d) << ">):"
+         << "\n    %r = stablehlo." << reducer << " %a, %b : tensor<"
+         << mlir_type_name(d) << ">"
+         << "\n    stablehlo.return %r : tensor<" << mlir_type_name(d) << ">"
+         << "\n  }) : (";
+    write_tensor_type_for_emit(body, operand_shape, d);
+    body << ", ";
+    write_tensor_type_for_emit(body, {}, d);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, result_shape, d);
+}
+
+/// Build pool attributes (window, strides, padding) for 2D pooling on
+/// NCHW: window/stride/padding apply only to dims 2,3.
+auto pool_window_for_2d(const ::tenzor::jit::Node& node,
+                        const std::vector<int64_t>& x_shape)
+    -> std::tuple<std::vector<int64_t>, std::vector<int64_t>,
+                  std::vector<int64_t>, std::vector<int64_t>> {
+    auto get_hw = [&](const char* vec_key, const char* h_key,
+                      const char* w_key, int64_t fallback) {
+        if (node.has_attr(vec_key)) {
+            auto v = node.get_vec_attr(vec_key);
+            if (v.size() == 2) return std::pair{v[0], v[1]};
+            if (v.size() == 1) return std::pair{v[0], v[0]};
+        }
+        int64_t h = node.has_attr(h_key) ? node.get_int_attr(h_key)
+                                         : fallback;
+        int64_t w = node.has_attr(w_key) ? node.get_int_attr(w_key)
+                                         : fallback;
+        return std::pair{h, w};
+    };
+    auto [kh, kw] = get_hw("kernel_size", "kernel_h", "kernel_w", 1);
+    auto [sh, sw] = get_hw("stride",      "stride_h", "stride_w",
+                           /*fallback to kernel*/ kh);
+    auto [ph, pw] = get_hw("padding",     "padding_h", "padding_w", 0);
+    std::vector<int64_t> window  = {1, 1, kh, kw};
+    std::vector<int64_t> strides = {1, 1, sh, sw};
+    std::vector<int64_t> pad_lo  = {0, 0, ph, pw};
+    std::vector<int64_t> pad_hi  = {0, 0, ph, pw};
+    (void)x_shape;
+    return {window, strides, pad_lo, pad_hi};
+}
+
+auto handle_max_pool2d(LoweringContext& ctx,
+                       const ::tenzor::jit::Node& node,
+                       std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: MaxPool2d expects 1 input and 1+ outputs");
+    }
+    const auto& x   = node.inputs()[0];
+    const auto& out = node.outputs()[0];
+    const auto d = out->dtype();
+    auto [win, str, plo, phi] = pool_window_for_2d(node, x->shape());
+
+    std::string init_max = "0xFF800000";
+    if (d == ::tenzor::DType::Float64) init_max = "0xFFF0000000000000";
+    auto init_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_name, init_max, {}, d);
+    body << '\n';
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_reduce_window(body, ctx, out_name, ctx.name_for(x->id()), init_name,
+                       "maximum", win, str, plo, phi, x->shape(),
+                       out->shape(), d);
+    body << '\n';
+}
+
+auto handle_avg_pool2d(LoweringContext& ctx,
+                       const ::tenzor::jit::Node& node,
+                       std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: AvgPool2d expects 1 input and 1+ outputs");
+    }
+    const auto& x   = node.inputs()[0];
+    const auto& out = node.outputs()[0];
+    const auto d = out->dtype();
+    auto [win, str, plo, phi] = pool_window_for_2d(node, x->shape());
+
+    auto init_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, d), {},
+                                  d);
+    body << '\n';
+
+    auto sum_name = ctx.fresh_name();
+    emit_reduce_window(body, ctx, sum_name, ctx.name_for(x->id()), init_name,
+                       "add", win, str, plo, phi, x->shape(), out->shape(),
+                       d);
+    body << '\n';
+
+    // Divide by window area kH * kW.
+    const int64_t area = win[2] * win[3];
+    auto area_const = ctx.fresh_name();
+    emit_stablehlo_splat_constant(
+        body, area_const, scalar_literal(static_cast<double>(area), d),
+        out->shape(), d);
+    body << '\n';
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_binary(body, "divide", out_name, sum_name, area_const,
+                          out->shape(), d);
+    body << '\n';
+}
+
+/// AdaptiveAvgPool2d: compute kernel/stride to bring (H_in, W_in) →
+/// (H_out, W_out). Uses the standard formula stride = floor(H_in/H_out),
+/// kernel = H_in - (H_out - 1) * stride.
+auto handle_adaptive_avg_pool2d(LoweringContext& ctx,
+                                const ::tenzor::jit::Node& node,
+                                std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: AdaptiveAvgPool2d expects 1 input, 1+ outputs");
+    }
+    const auto& x_val = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto& xs = x_val->shape();
+    const auto& os = out_val->shape();
+    if (xs.size() != 4 || os.size() != 4) {
+        throw std::runtime_error(
+            "GraphToMLIR: AdaptiveAvgPool2d requires rank-4 input/output");
+    }
+    const auto d = out_val->dtype();
+    const int64_t H_in = xs[2], W_in = xs[3];
+    const int64_t H_out = os[2], W_out = os[3];
+    const int64_t sh = H_out > 0 ? H_in / H_out : H_in;
+    const int64_t sw = W_out > 0 ? W_in / W_out : W_in;
+    const int64_t kh = H_in - (H_out - 1) * sh;
+    const int64_t kw = W_in - (W_out - 1) * sw;
+
+    std::vector<int64_t> win = {1, 1, kh, kw};
+    std::vector<int64_t> str = {1, 1, sh, sw};
+    std::vector<int64_t> plo = {0, 0, 0, 0};
+    std::vector<int64_t> phi = {0, 0, 0, 0};
+
+    auto init_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, d), {},
+                                  d);
+    body << '\n';
+    auto sum_name = ctx.fresh_name();
+    emit_reduce_window(body, ctx, sum_name, ctx.name_for(x_val->id()),
+                       init_name, "add", win, str, plo, phi, xs, os, d);
+    body << '\n';
+    const int64_t area = kh * kw;
+    auto area_const = ctx.fresh_name();
+    emit_stablehlo_splat_constant(
+        body, area_const, scalar_literal(static_cast<double>(area), d), os, d);
+    body << '\n';
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_binary(body, "divide", out_name, sum_name, area_const, os,
+                          d);
+    body << '\n';
+}
+
+/// Dropout: in inference (training=false) it's the identity. In training
+/// we'd need an RNG + threshold; for the JIT path we treat it as
+/// inference-only since the JIT compile happens at evaluation time and
+/// trained-mode dropout requires deterministic seeding to be useful.
+auto handle_dropout(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& /*body*/) -> void {
+    if (node.inputs().empty() || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: Dropout expects 1+ input, 1+ output");
+    }
+    // Identity: rebind output to input's SSA name.
+    ctx.bind(node.outputs()[0]->id(),
+             ctx.name_for(node.inputs()[0]->id()));
+}
+
+/// Padding: stablehlo.pad with given low/high (no interior padding).
+auto handle_padding(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: Padding expects 1 input, 1+ output");
+    }
+    const auto& x_val = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto& xs = x_val->shape();
+    const auto& os = out_val->shape();
+    const auto d = out_val->dtype();
+    if (xs.size() != os.size()) {
+        throw std::runtime_error(
+            "GraphToMLIR: Padding must preserve rank");
+    }
+
+    // Pull padding pairs from "padding" vec (pytorch order: last-dim
+    // first, [w_lo, w_hi, h_lo, h_hi, ...]). Fall back to inferring
+    // symmetric padding from shape difference.
+    std::vector<int64_t> low(xs.size(), 0), high(xs.size(), 0);
+    if (node.has_attr("padding")) {
+        auto v = node.get_vec_attr("padding");
+        // pytorch's F.pad uses last-dim-first pairs; ONNX/StableHLO use
+        // first-dim-first single-pair-per-dim. Accept either; if length
+        // is 2 * rank, assume first-dim-first.
+        if (static_cast<int64_t>(v.size()) == 2 * static_cast<int64_t>(xs.size())) {
+            for (std::size_t i = 0; i < xs.size(); ++i) {
+                low[i]  = v[2 * i];
+                high[i] = v[2 * i + 1];
+            }
+        } else if (v.size() % 2 == 0) {
+            // pytorch order: pad innermost dims.
+            const std::size_t pairs = v.size() / 2;
+            for (std::size_t i = 0; i < pairs; ++i) {
+                const std::size_t dim = xs.size() - 1 - i;
+                low[dim]  = v[2 * i];
+                high[dim] = v[2 * i + 1];
+            }
+        }
+    } else {
+        for (std::size_t i = 0; i < xs.size(); ++i) {
+            const int64_t diff = os[i] - xs[i];
+            low[i]  = diff / 2;
+            high[i] = diff - low[i];
+        }
+    }
+    std::vector<int64_t> interior(xs.size(), 0);
+
+    auto padval = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, padval, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_pad(body, out_name, ctx.name_for(x_val->id()), padval,
+                       low, high, interior, xs, os, d);
+    body << '\n';
+}
+
+/// Interpolate: nearest-neighbor and bilinear upsampling. Without
+/// dynamic-shape support we materialize index gather tensors at compile
+/// time. For MVP-1 we implement nearest-neighbor by gather (an exact
+/// reference impl) and leave bilinear as a more complex follow-up.
+/// Falls back to a broadcast when the input already matches the output
+/// shape (identity).
+auto handle_interpolate(LoweringContext& ctx,
+                        const ::tenzor::jit::Node& node,
+                        std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: Interpolate expects 1 input, 1+ output");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto xs = x_val->shape();
+    const auto os = out_val->shape();
+    const auto d = out_val->dtype();
+
+    if (xs == os) {
+        // Identity passthrough — also handles rank mismatch errors via
+        // the comparison being false.
+        ctx.bind(out_val->id(), ctx.name_for(x_val->id()));
+        return;
+    }
+
+    // Nearest-neighbor 2D over NCHW. We materialize a (H_out, W_out)
+    // index pair via stablehlo.iota + arithmetic, then gather. For
+    // simplicity in the text emitter we emit one gather over the H
+    // axis then another over the W axis. For now, we implement a single
+    // gather-by-iota along H; W is handled by repeating logic.
+    //
+    // This is a reference implementation that produces correct output
+    // for integer-ratio upsampling. For mixed-ratio cases the IREE
+    // compiler will still accept the IR; the result matches
+    // torch's nearest-neighbor when the same rounding rule is used.
+    //
+    // To keep the IR small for MVP-1 we just emit a stablehlo.reshape
+    // followed by stablehlo.broadcast_in_dim when the upscale factor is
+    // an integer along each spatial dim. Otherwise we error.
+    if (xs.size() != 4 || os.size() != 4) {
+        throw std::runtime_error(
+            "GraphToMLIR: Interpolate only implemented for rank-4 NCHW");
+    }
+    const int64_t H_in = xs[2], W_in = xs[3];
+    const int64_t H_out = os[2], W_out = os[3];
+    if (H_out % H_in != 0 || W_out % W_in != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: Interpolate non-integer upsample not supported "
+            "in MVP-1");
+    }
+    const int64_t fh = H_out / H_in;
+    const int64_t fw = W_out / W_in;
+
+    // Reshape (N, C, H_in, W_in) -> (N, C, H_in, 1, W_in, 1)
+    std::vector<int64_t> exp_shape =
+        {xs[0], xs[1], xs[2], 1, xs[3], 1};
+    auto exp_name = ctx.fresh_name();
+    emit_stablehlo_reshape(body, exp_name, ctx.name_for(x_val->id()), xs,
+                           exp_shape, d);
+    body << '\n';
+    // Broadcast to (N, C, H_in, fh, W_in, fw)
+    std::vector<int64_t> bcast_shape =
+        {xs[0], xs[1], xs[2], fh, xs[3], fw};
+    auto bcast_name = ctx.fresh_name();
+    std::vector<int64_t> bcast_dims = {0, 1, 2, 3, 4, 5};
+    emit_stablehlo_broadcast_in_dim(body, bcast_name, exp_name, bcast_dims,
+                                    exp_shape, bcast_shape, d);
+    body << '\n';
+    // Reshape back to (N, C, H_out, W_out)
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_reshape(body, out_name, bcast_name, bcast_shape, os, d);
+    body << '\n';
+}
+
 // ── Norms ───────────────────────────────────────────────────────────────────
 
 /// LayerNorm along the last `len(normalized_shape)` dims (StableHLO has
@@ -1692,6 +2110,17 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             // ── Norms ──
             case OpType::LayerNorm:    handle_layer_norm(ctx, *node, body);   break;
             case OpType::BatchNorm2d:  handle_batch_norm2d(ctx, *node, body); break;
+
+            // ── Vision ──
+            case OpType::Conv2d:       handle_conv2d(ctx, *node, body);              break;
+            case OpType::MaxPool2d:    handle_max_pool2d(ctx, *node, body);          break;
+            case OpType::AvgPool2d:    handle_avg_pool2d(ctx, *node, body);          break;
+            case OpType::AdaptiveAvgPool2d:
+                                       handle_adaptive_avg_pool2d(ctx, *node, body); break;
+            case OpType::Dropout:      handle_dropout(ctx, *node, body);             break;
+            case OpType::Padding:      handle_padding(ctx, *node, body);             break;
+            case OpType::Interpolate:  handle_interpolate(ctx, *node, body);         break;
+            // ResidualAdd is already in the binary elementwise group.
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;

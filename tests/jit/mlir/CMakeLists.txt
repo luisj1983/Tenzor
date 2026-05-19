@@ -98,4 +98,13 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_norms
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.8 — Vision ops (Conv2d, MaxPool2d, AvgPool2d,
+    # AdaptiveAvgPool2d, Dropout, Padding, Interpolate; ResidualAdd is
+    # already covered by the elementwise group).
+    add_executable(test_op_vision test_op_vision.cpp)
+    target_link_libraries(test_op_vision
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_vision
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()
