@@ -102,3 +102,35 @@ TEST(DebugAPIs, ShowStableHLODecomposesCustomCalls) {
         << sh;
     EXPECT_NE(sh.find("stablehlo.add"), std::string::npos) << sh;
 }
+
+// ---------------------------------------------------------------------------
+// F.4 — show_iree captures the iree-compile pipeline dump
+// ---------------------------------------------------------------------------
+
+TEST(DebugAPIs, ShowIreeCapturesPipelineDump) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x)
+        -> ::tenzor::Variable { return x + x; };
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 1.5f, ::tenzor::DType::Float32),
+        /*requires_grad=*/false);
+
+    auto _trigger = compiled(x);
+    auto text = compiled.dump_iree(x);
+    EXPECT_GT(text.size(), 100u);
+    // iree-compile prints "// -----// IR Dump After XYZPass" between
+    // pass dumps when --mlir-print-ir-after-all is enabled. Either the
+    // "IR Dump" preamble or the "// -----//" pass separator is sufficient
+    // evidence that the dump made it through the popen pipeline.
+    const bool has_dump_header =
+        text.find("IR Dump") != std::string::npos ||
+        text.find("// -----//") != std::string::npos;
+    EXPECT_TRUE(has_dump_header)
+        << "expected --mlir-print-ir-after-all pipeline trace; first 200 "
+        << "bytes were: " << text.substr(0, 200);
+}

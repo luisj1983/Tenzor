@@ -13,8 +13,14 @@
 #include "tenzor/jit/mlir/lowering.hpp"
 #endif
 
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <unistd.h>
 #include <unordered_map>
 
 namespace tenzor {
@@ -395,6 +401,61 @@ auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
     return lowerer.lower(*graph);
 }
 
+auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
+    const std::string mlir_text = dump_mlir(input);
+    if (mlir_text.rfind("<empty", 0) == 0) {
+        return mlir_text;
+    }
+
+    // Resolve the IREE target the same way mlir_invoke does so the dump
+    // exactly mirrors what the runtime compiles.
+    const std::string target =
+        resolve_target(config_.target, input.tensor().device());
+
+    // Write the MLIR text to a temp file and shell out to iree-compile with
+    // --compile-to=vm (the fast pipeline that produces no .vmfb, just runs
+    // up to the VM stage) plus --mlir-print-ir-after-all. The full pipeline
+    // IR is printed to stderr; we capture both streams via 2>&1.
+    namespace fs = std::filesystem;
+    const fs::path tmp_in =
+        fs::temp_directory_path() /
+        ("tz_jit_dump_iree_" + std::to_string(::getpid()) + ".mlir");
+    {
+        std::ofstream f(tmp_in, std::ios::binary | std::ios::trunc);
+        f.write(mlir_text.data(),
+                static_cast<std::streamsize>(mlir_text.size()));
+    }
+
+    // Locate the iree-compile binary. The build pins it via PATH; honor an
+    // explicit IREE_BIN_DIR override for non-standard install layouts.
+    std::string iree_compile = "iree-compile";
+    if (const char* env = std::getenv("IREE_BIN_DIR"); env && *env) {
+        iree_compile = std::string(env) + "/iree-compile";
+    }
+
+    const std::string cmd =
+        iree_compile + " --iree-input-type=stablehlo" +
+        " --iree-hal-target-backends=" + target +
+        " --mlir-disable-threading" +
+        " --mlir-print-ir-after-all" +
+        " --compile-to=vm" +
+        " -o /dev/null " + tmp_in.string() + " 2>&1";
+
+    std::string captured;
+    if (FILE* pipe = ::popen(cmd.c_str(), "r")) {
+        char buf[4096];
+        while (auto n = std::fread(buf, 1, sizeof(buf), pipe)) {
+            captured.append(buf, n);
+        }
+        ::pclose(pipe);
+    } else {
+        captured = "<failed to spawn iree-compile via popen()>\n";
+    }
+    std::error_code _ec;
+    fs::remove(tmp_in, _ec);
+    return captured;
+}
+
 #else  // TENZOR_HAS_MLIR_JIT
 
 auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
@@ -412,6 +473,12 @@ auto CompiledFunction::dump_mlir(const Variable& /*input*/) -> std::string {
 auto CompiledFunction::dump_stablehlo(const Variable& /*input*/) -> std::string {
     throw std::runtime_error(
         "CompiledFunction::dump_stablehlo: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
+auto CompiledFunction::dump_iree(const Variable& /*input*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_iree: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
 }
 

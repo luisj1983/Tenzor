@@ -330,6 +330,20 @@ void register_jit(py::module_& m) {
         "Lower the traced graph with plugin_enabled=false (custom_call ops "
         "decomposed).");
 
+    jit.def("show_iree",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_iree: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_iree(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Run iree-compile --mlir-print-ir-after-all on the lowered MLIR "
+        "and return the captured pipeline trace.");
+
     // =========================================================================
     // Lazy Tensor API
     // =========================================================================

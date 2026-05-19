@@ -164,6 +164,13 @@ public:
      */
     auto dump_stablehlo(const Variable& input) -> std::string;
 
+    /**
+     * @brief Run iree-compile with --mlir-print-ir-after-all on the lowered
+     *        MLIR text and return the captured pipeline IR dump as a single
+     *        string. Used by tz.jit.show_iree().
+     */
+    auto dump_iree(const Variable& input) -> std::string;
+
 private:
     FnType fn_;
     CompileConfig config_;
