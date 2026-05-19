@@ -107,4 +107,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_vision
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task D.1.1 — FlashAttention dialect op lowers to stablehlo.custom_call
+    # @tenzor_flash_attention.
+    add_executable(test_op_flash_attention test_op_flash_attention.cpp)
+    target_link_libraries(test_op_flash_attention
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_flash_attention
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 endif()
