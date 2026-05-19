@@ -117,6 +117,56 @@ cmake -B build -G Ninja \
   -DTENZOR_IREE_COMPILE=$TENZOR_IREE_COMPILE
 ```
 
+## Version-matching caveat (read this before building StableHLO)
+
+StableHLO is tightly coupled to a *specific LLVM commit* (recorded in
+`stablehlo-src/build_tools/llvm_version.txt`), not to LLVM major.minor
+versions. Building StableHLO against the wrong LLVM commit produces
+compile errors like:
+
+```
+error: cannot declare variable 'instance' to be of abstract type
+  'mlir::stablehlo::side_effects::RecvResource'
+note: 'virtual llvm::StringRef mlir::SideEffects::Resource::getName()'
+  is pure within 'RecvResource'
+```
+
+This indicates the MLIR `Resource` base class has changed between the
+LLVM you built and the LLVM commit StableHLO was integrated against.
+
+**Resolution**: check out the exact LLVM commit StableHLO targets, then
+rebuild MLIR:
+
+```bash
+cat ~/stablehlo-src/build_tools/llvm_version.txt
+# e.g. 87d42c13cd6b119240781f31e5869981d500a186
+
+cd ~/llvm22-src
+git fetch --depth=1 origin 87d42c13cd6b119240781f31e5869981d500a186
+git checkout FETCH_HEAD -- llvm mlir cmake third-party
+# rebuild MLIR libs as in the section above
+```
+
+If you instead want to stay on a released LLVM tag (e.g. `llvmorg-22.1.5`),
+check out the matching StableHLO release tag — StableHLO publishes a
+release for each LLVM integrate point.
+
+## Tenzor MLIR/IREE version pin overrides
+
+`CMakeLists.txt` defaults `TENZOR_MLIR_VERSION` to 18.0, `TENZOR_IREE_VERSION`
+to 3.0. These are cache-string defaults — override at configure time
+if you are using a different installed version:
+
+```bash
+cmake -B build -G Ninja \
+  -DTENZOR_USE_MLIR_JIT=ON \
+  -DTENZOR_MLIR_VERSION=22.1.5 \
+  -DTENZOR_IREE_VERSION=3.11.0 \
+  -DMLIR_DIR=/home/me/llvm22-src/build/lib/cmake/mlir \
+  -DIREE_RUNTIME_DIR=/home/me/iree-dist/lib/cmake/IREE \
+  -DTENZOR_IREE_COMPILE=/home/me/iree-dist/bin/iree-compile
+```
+
 ## Environment variable overrides
 
 | Variable | Purpose |
