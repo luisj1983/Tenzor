@@ -1,22 +1,33 @@
-// Phase 13 / Task A.8 — IREE Runtime invocation wrapper.
+// Phase 13 / Task A.8 + X.2 — IREE Runtime invocation wrapper.
 //
-// Environmental note (2026-05-19 amendment, item §):
-// The local IREE distributions on this host (iree-dist + pip-installed
-// iree-base-{compiler,runtime}) ship complete iree-compile / iree-run-module
-// binaries but neither ships the full iree/base/*.h header set that the
-// in-process iree/runtime/api.h depends on (9 missing base headers — see
-// src/jit/mlir/iree_customcalls.cpp for the list). IreeInvoker therefore
-// drives the runtime via the `iree-run-module` subprocess discovered by
-// tenzor::jit::mlir_jit::resolve_iree_run_module() (env override → pip venv
-// → CMake-found dist → $PATH). This is a real invocation — the subprocess
-// loads the same .vmfb bytecode the embedding-API compile produced and runs
-// it on the same HAL backends — not a stub.
+// Two operating modes (Path A of the 2026-05-19 amendment):
 //
-// The in-process runtime + custom_call plugin (Path A of the 2026-05-19
-// amendment) lights up automatically once a header-complete IREE C SDK is
-// installed; the runtime callbacks in iree_customcalls.cpp are wired up to
-// dispatch into existing kernels, but currently return UNIMPLEMENTED
-// because the C glue cannot compile without the base headers.
+//   - Mode::InProcess  → drives iree_runtime_instance / session / call via
+//                        the in-process IREE C API. Registers the Tenzor VM
+//                        native module ("tenzor_plugin") that supplies the
+//                        4 MVP-1 dialect-op callbacks before loading the
+//                        bytecode module. Required whenever the compiled
+//                        vmfb references the tenzor_plugin module
+//                        (i.e. plugin_enabled=true on the lowering side).
+//   - Mode::Subprocess → invokes iree-run-module on the cached .vmfb. Used
+//                        for targets where the in-process HAL driver is
+//                        unavailable, or for the expand path where the
+//                        compiled vmfb is plugin-free.
+//
+// The in-process path uses the authentic IREE 3.11.0 headers staged in
+// third_party/iree_compat (see CMakeLists.txt). The runtime static
+// archives at /home/lee/iree-dist/lib/libiree_runtime_unified.a (and
+// friends) are the actual implementation; the headers and archives ship
+// from the same upstream tag so ABI matches.
+//
+// One IreeInvoker corresponds to one vmfb at one target.
+//
+// Custom_call wiring (Group D): the 4 dialect ops (flash_attention, gqa,
+// rope_apply, rms_norm) are lowered to a `call @tenzor_plugin.<op>` against
+// a `func.func private` declaration in the @main module. The InProcess
+// invoker registers an iree_vm_native_module_t for the "tenzor_plugin"
+// module that satisfies these imports before loading the bytecode module,
+// so the calls reach customcalls::dispatch_<op>() in iree_customcalls.cpp.
 
 #pragma once
 
@@ -32,12 +43,20 @@ namespace tenzor::jit::mlir_jit {
 /// Loads a compiled vmfb artifact and exposes a synchronous `invoke()` that
 /// marshals tensors into the IREE runtime and unmarshals the outputs back.
 ///
-/// One IreeInvoker corresponds to one vmfb at one target. The default HAL
-/// device is selected by IREE based on the target backend in the artifact
-/// (e.g. `local-sync` for `llvm-cpu`).
+/// One IreeInvoker corresponds to one vmfb at one target.
 class IreeInvoker {
 public:
-    static auto load(const CompiledArtifact& artifact)
+    enum class Mode {
+        Subprocess,  ///< Drive via the iree-run-module CLI.
+        InProcess,   ///< Drive via the in-process iree_runtime_* C API.
+    };
+
+    /// Construct an invoker for an artifact. Defaults to InProcess so the
+    /// plugin path light up automatically; callers needing the subprocess
+    /// path (e.g. targets without a registered HAL driver in the linked
+    /// runtime) can pass Mode::Subprocess explicitly.
+    static auto load(const CompiledArtifact& artifact,
+                     Mode mode = Mode::InProcess)
         -> std::unique_ptr<IreeInvoker>;
 
     /// Invoke the `@main` function with the given input tensors. Returns the
@@ -47,21 +66,36 @@ public:
     auto invoke(const std::vector<::tenzor::Tensor>& inputs)
         -> std::vector<::tenzor::Tensor>;
 
+    /// The mode this invoker is operating in.
+    auto mode() const -> Mode { return mode_; }
+
     ~IreeInvoker();
 
     // Non-copyable, non-movable to keep the underlying device handle pinned.
-    IreeInvoker(const IreeInvoker&)            = delete;
-    auto operator=(const IreeInvoker&) -> IreeInvoker& = delete;
-    IreeInvoker(IreeInvoker&&)                 = delete;
-    auto operator=(IreeInvoker&&) -> IreeInvoker&     = delete;
+    IreeInvoker(const IreeInvoker&)                          = delete;
+    auto operator=(const IreeInvoker&) -> IreeInvoker&       = delete;
+    IreeInvoker(IreeInvoker&&)                               = delete;
+    auto operator=(IreeInvoker&&) -> IreeInvoker&            = delete;
 
 private:
     IreeInvoker() = default;
 
+    Mode mode_ = Mode::InProcess;
+
+    // Subprocess fields (always set so the destructor and resolver can read
+    // them without checking which mode was used).
     std::string vmfb_path_;
     std::string target_;
-    std::string device_;
-    std::string iree_run_module_;
+    std::string device_;            ///< HAL driver name ("local-task" etc.)
+    std::string iree_run_module_;   ///< Subprocess CLI path (subprocess mode).
+
+    // In-process fields. Stored as void* in the header so we don't drag
+    // <iree/runtime/api.h> through every translation unit. The .cpp
+    // unifies these via static_cast<iree_runtime_*_t*> at use sites.
+    void* instance_       = nullptr;  ///< iree_runtime_instance_t*
+    void* device_handle_  = nullptr;  ///< iree_hal_device_t*
+    void* session_        = nullptr;  ///< iree_runtime_session_t*
+    void* plugin_module_  = nullptr;  ///< iree_vm_module_t* (tenzor_plugin)
 };
 
 /// Thrown when iree-run-module reports a runtime failure. Carries the full

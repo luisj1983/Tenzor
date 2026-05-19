@@ -1,10 +1,26 @@
-// Phase 13 / Task A.8 — IREE Runtime invocation wrapper.
+// Phase 13 / Task A.8 + X.2 — IREE Runtime invocation wrapper.
+//
+// Implements both modes of IreeInvoker:
+//
+//   - Mode::InProcess  (default): drives the IREE C runtime in-process via
+//                                 iree_runtime_instance + session + call.
+//                                 Registers the Tenzor VM native module
+//                                 (`tenzor_plugin`) before loading the
+//                                 bytecode so the 4 dialect-op callbacks
+//                                 resolve to the existing tenzor kernels.
+//   - Mode::Subprocess          : invokes iree-run-module on the cached .vmfb.
+//                                 Used when the linked runtime lacks the HAL
+//                                 driver for a target.
 
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 
+#include "_iree_marshal.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/ops/creation.hpp"
+
+#include <iree/runtime/api.h>
+#include <iree/vm/api.h>
 
 #include <array>
 #include <cctype>
@@ -28,13 +44,21 @@ namespace tenzor::jit::mlir_jit {
 
 namespace fs = std::filesystem;
 
+// Declared in iree_customcalls.cpp: creates the in-process VM native module
+// "tenzor_plugin" providing the 4 dialect-op callbacks.
+auto create_tenzor_plugin_module(iree_vm_instance_t* instance,
+                                 iree_allocator_t allocator,
+                                 iree_vm_module_t** out_module)
+    -> iree_status_t;
+
 namespace {
 
 /// Map an IREE HAL target (as set in CompileOptions::target) to the runtime
-/// driver name accepted by `iree-run-module --device=...`.
+/// driver name accepted by `iree-run-module --device=...` and
+/// `iree_runtime_instance_try_create_default_device`.
 auto device_for_target(const std::string& target) -> std::string {
     if (target == "llvm-cpu") {
-        return "local-sync";
+        return "local-task";
     }
     if (target == "cuda") {
         return "cuda";
@@ -73,7 +97,7 @@ auto iree_element_to_dtype(const std::string& s) -> ::tenzor::DType {
     throw JitInvokeError("Unsupported IREE element type in output: " + s);
 }
 
-/// Render `--input=DxDx...xT=v0 v1 ...`.
+/// Render `--input=DxDx...xT=v0 v1 ...` for the subprocess path.
 auto render_input_flag(const ::tenzor::Tensor& t) -> std::string {
     const ::tenzor::Tensor cpu = t.cpu().contiguous();
     std::ostringstream os;
@@ -153,7 +177,6 @@ auto run_subprocess(const std::vector<std::string>& argv) -> SubprocessResult {
         }
         c_argv.push_back(nullptr);
         execv(c_argv[0], c_argv.data());
-        // If we reach here, execv failed.
         const std::string msg =
             "execv failed: " + std::string(std::strerror(errno)) + "\n";
         (void)!write(STDERR_FILENO, msg.data(), msg.size());
@@ -205,7 +228,6 @@ auto run_subprocess(const std::vector<std::string>& argv) -> SubprocessResult {
 }
 
 /// Parse one `result[N]: hal.buffer_view` block from stdout into a Tensor.
-/// The line after the header has format `DxDxDxT=v0 v1 v2 ...`.
 auto parse_output_line(const std::string& shape_and_data)
     -> ::tenzor::Tensor {
     const std::size_t eq_pos = shape_and_data.find('=');
@@ -216,7 +238,6 @@ auto parse_output_line(const std::string& shape_and_data)
     const std::string header = shape_and_data.substr(0, eq_pos);
     std::string values = shape_and_data.substr(eq_pos + 1);
 
-    // header looks like "4xf32" or "2x3xf64" or "f32" (rank 0).
     std::vector<int64_t> shape;
     std::string element;
     std::size_t pos = 0;
@@ -247,16 +268,20 @@ auto parse_output_line(const std::string& shape_and_data)
     for (auto d : shape) numel *= d;
     if (shape.empty()) numel = 1;
 
-    // For multi-dim outputs `iree-run-module` formats values with inner
-    // brackets — e.g. `4x1xf32=[13][2][11][0]` or `2x2xf32=[[1 2][3 4]]`.
-    // Normalize: replace any non-numeric punctuation that confuses
-    // stream reads with a single space, leaving only whitespace, digits,
-    // signs, decimal points and exponent letters.
     for (auto& c : values) {
         if (c == '[' || c == ']' || c == ',') c = ' ';
     }
 
-    ::tenzor::Tensor out = ::tenzor::full(shape, 0.0, dt);
+    ::tenzor::Tensor out;
+    if (dt == ::tenzor::DType::Float32) {
+        out = ::tenzor::full(shape, 0.0f, dt);
+    } else if (dt == ::tenzor::DType::Float64) {
+        out = ::tenzor::full(shape, 0.0, dt);
+    } else if (dt == ::tenzor::DType::Int32) {
+        out = ::tenzor::full(shape, 0.0f, dt);
+    } else if (dt == ::tenzor::DType::Int64) {
+        out = ::tenzor::full(shape, 0.0f, dt);
+    }
     std::istringstream is(values);
     if (dt == ::tenzor::DType::Float32) {
         float* p = out.data<float>();
@@ -274,8 +299,6 @@ auto parse_output_line(const std::string& shape_and_data)
     return out;
 }
 
-/// Extract every `DxDx...=v0 v1 ...` line that follows a `result[N]:
-/// hal.buffer_view` header from the iree-run-module stdout.
 auto parse_outputs(const std::string& stdout_text)
     -> std::vector<::tenzor::Tensor> {
     std::vector<::tenzor::Tensor> outs;
@@ -296,30 +319,123 @@ auto parse_outputs(const std::string& stdout_text)
     return outs;
 }
 
+/// Convert an iree_status_t error into a string and free the status object.
+auto status_to_string(iree_status_t status) -> std::string {
+    if (iree_status_is_ok(status)) return "ok";
+    char* buf = nullptr;
+    iree_host_size_t len = 0;
+    iree_allocator_t alloc = iree_allocator_system();
+    if (!iree_status_to_string(status, &alloc, &buf, &len) || !buf) {
+        iree_status_ignore(status);
+        return "(failed to format status)";
+    }
+    std::string out(buf, len);
+    iree_allocator_free(alloc, buf);
+    iree_status_ignore(status);
+    return out;
+}
+
+#define TENZOR_IREE_CHECK(expr, what)                                          \
+    do {                                                                       \
+        iree_status_t _s = (expr);                                             \
+        if (!iree_status_is_ok(_s)) {                                          \
+            throw JitInvokeError(std::string(what) + ": " +                    \
+                                 status_to_string(_s));                        \
+        }                                                                      \
+    } while (0)
+
 }  // namespace
 
-auto IreeInvoker::load(const CompiledArtifact& artifact)
+auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode)
     -> std::unique_ptr<IreeInvoker> {
     if (!fs::exists(artifact.vmfb_path)) {
         throw JitInvokeError("vmfb not found: " + artifact.vmfb_path.string());
     }
     auto inv = std::unique_ptr<IreeInvoker>(new IreeInvoker());
-    inv->vmfb_path_       = artifact.vmfb_path.string();
-    inv->target_          = artifact.target;
-    inv->device_          = device_for_target(artifact.target);
-    inv->iree_run_module_ = ::tenzor::jit::mlir_jit::resolve_iree_run_module();
+    inv->mode_      = mode;
+    inv->vmfb_path_ = artifact.vmfb_path.string();
+    inv->target_    = artifact.target;
+    inv->device_    = device_for_target(artifact.target);
+
+    if (mode == Mode::Subprocess) {
+        inv->iree_run_module_ =
+            ::tenzor::jit::mlir_jit::resolve_iree_run_module();
+        return inv;
+    }
+
+    // ─── InProcess setup ─────────────────────────────────────────────────
+    // 1. Create the runtime instance with all available HAL drivers.
+    iree_runtime_instance_options_t opts;
+    iree_runtime_instance_options_initialize(&opts);
+    iree_runtime_instance_options_use_all_available_drivers(&opts);
+    iree_runtime_instance_t* instance = nullptr;
+    TENZOR_IREE_CHECK(
+        iree_runtime_instance_create(&opts, iree_allocator_system(),
+                                     &instance),
+        "iree_runtime_instance_create");
+    inv->instance_ = instance;
+
+    // 2. Acquire the HAL device for the requested driver.
+    iree_hal_device_t* device = nullptr;
+    iree_string_view_t driver_sv =
+        iree_make_string_view(inv->device_.data(), inv->device_.size());
+    TENZOR_IREE_CHECK(
+        iree_runtime_instance_try_create_default_device(instance, driver_sv,
+                                                         &device),
+        std::string("iree_runtime_instance_try_create_default_device(") +
+            inv->device_ + ")");
+    inv->device_handle_ = device;
+
+    // 3. Create the session bound to the device.
+    iree_runtime_session_options_t session_opts;
+    iree_runtime_session_options_initialize(&session_opts);
+    iree_runtime_session_t* session = nullptr;
+    TENZOR_IREE_CHECK(
+        iree_runtime_session_create_with_device(
+            instance, &session_opts, device,
+            iree_runtime_instance_host_allocator(instance), &session),
+        "iree_runtime_session_create_with_device");
+    inv->session_ = session;
+
+    // 4. Append the Tenzor plugin VM module so the upcoming bytecode load
+    //    can resolve `tenzor_plugin.<op>` imports.
+    iree_vm_module_t* plugin_module = nullptr;
+    TENZOR_IREE_CHECK(
+        create_tenzor_plugin_module(
+            iree_runtime_instance_vm_instance(instance),
+            iree_runtime_session_host_allocator(session), &plugin_module),
+        "create_tenzor_plugin_module");
+    inv->plugin_module_ = plugin_module;
+    TENZOR_IREE_CHECK(
+        iree_runtime_session_append_module(session, plugin_module),
+        "iree_runtime_session_append_module(tenzor_plugin)");
+
+    // 5. Load the compiled bytecode module — its `tenzor_plugin.<op>`
+    //    imports now resolve against the plugin module just appended.
+    TENZOR_IREE_CHECK(
+        iree_runtime_session_append_bytecode_module_from_file(
+            session, inv->vmfb_path_.c_str()),
+        "iree_runtime_session_append_bytecode_module_from_file");
+
     return inv;
 }
 
-auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
+namespace {
+
+auto invoke_subprocess(IreeInvoker& self,
+                       const std::vector<::tenzor::Tensor>& inputs,
+                       const std::string& vmfb_path,
+                       const std::string& device,
+                       const std::string& iree_run_module)
     -> std::vector<::tenzor::Tensor> {
+    (void)self;
     std::vector<std::string> argv;
     argv.reserve(inputs.size() + 5);
-    argv.push_back(iree_run_module_);
-    argv.push_back("--device=" + device_);
-    argv.push_back("--module=" + vmfb_path_);
+    argv.push_back(iree_run_module);
+    argv.push_back("--device=" + (device == "local-task" ? "local-sync"
+                                                         : device));
+    argv.push_back("--module=" + vmfb_path);
     argv.push_back("--function=main");
-    // Bump element cap so larger tensors print in full.
     argv.push_back("--output_max_element_count=1048576");
     for (const auto& t : inputs) {
         argv.push_back(render_input_flag(t));
@@ -340,6 +456,108 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
     return outs;
 }
 
-IreeInvoker::~IreeInvoker() = default;
+}  // namespace
+
+auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
+    -> std::vector<::tenzor::Tensor> {
+    if (mode_ == Mode::Subprocess) {
+        return invoke_subprocess(*this, inputs, vmfb_path_, device_,
+                                 iree_run_module_);
+    }
+
+    // ─── InProcess invoke ────────────────────────────────────────────────
+    auto* session  = static_cast<iree_runtime_session_t*>(session_);
+    auto* device   = static_cast<iree_hal_device_t*>(device_handle_);
+    auto* allocator = iree_runtime_session_device_allocator(session);
+
+    iree_runtime_call_t call;
+    TENZOR_IREE_CHECK(
+        iree_runtime_call_initialize_by_name(
+            session, iree_make_cstring_view("module.main"), &call),
+        "iree_runtime_call_initialize_by_name(module.main)");
+
+    // Push each input as a buffer_view ref.
+    for (const auto& t : inputs) {
+        iree_hal_buffer_view_t* bv = nullptr;
+        TENZOR_IREE_CHECK(
+            marshal::tensor_to_buffer_view(device, allocator, t, &bv),
+            "marshal::tensor_to_buffer_view");
+        iree_status_t s =
+            iree_runtime_call_inputs_push_back_buffer_view(&call, bv);
+        iree_hal_buffer_view_release(bv);
+        if (!iree_status_is_ok(s)) {
+            iree_runtime_call_deinitialize(&call);
+            throw JitInvokeError(
+                "iree_runtime_call_inputs_push_back_buffer_view: " +
+                status_to_string(s));
+        }
+    }
+
+    // Run.
+    iree_status_t invoke_s = iree_runtime_call_invoke(&call, 0);
+    if (!iree_status_is_ok(invoke_s)) {
+        iree_runtime_call_deinitialize(&call);
+        throw JitInvokeError("iree_runtime_call_invoke: " +
+                             status_to_string(invoke_s));
+    }
+
+    // Collect outputs.
+    std::vector<::tenzor::Tensor> out_tensors;
+    while (true) {
+        iree_hal_buffer_view_t* bv = nullptr;
+        iree_status_t pop_s =
+            iree_runtime_call_outputs_pop_front_buffer_view(&call, &bv);
+        if (iree_status_is_out_of_range(pop_s)) {
+            iree_status_ignore(pop_s);
+            break;
+        }
+        if (!iree_status_is_ok(pop_s)) {
+            iree_runtime_call_deinitialize(&call);
+            throw JitInvokeError(
+                "iree_runtime_call_outputs_pop_front_buffer_view: " +
+                status_to_string(pop_s));
+        }
+        try {
+            out_tensors.push_back(marshal::buffer_view_to_tensor(bv));
+        } catch (...) {
+            iree_hal_buffer_view_release(bv);
+            iree_runtime_call_deinitialize(&call);
+            throw;
+        }
+        iree_hal_buffer_view_release(bv);
+    }
+
+    iree_runtime_call_deinitialize(&call);
+
+    if (out_tensors.empty()) {
+        throw JitInvokeError(
+            "in-process IREE invoke produced no outputs from @main");
+    }
+    return out_tensors;
+}
+
+IreeInvoker::~IreeInvoker() {
+    // Release in reverse order of creation. nullptr is safe: each release
+    // helper short-circuits on a null pointer.
+    if (plugin_module_) {
+        iree_vm_module_release(static_cast<iree_vm_module_t*>(plugin_module_));
+        plugin_module_ = nullptr;
+    }
+    if (session_) {
+        iree_runtime_session_release(
+            static_cast<iree_runtime_session_t*>(session_));
+        session_ = nullptr;
+    }
+    if (device_handle_) {
+        iree_hal_device_release(
+            static_cast<iree_hal_device_t*>(device_handle_));
+        device_handle_ = nullptr;
+    }
+    if (instance_) {
+        iree_runtime_instance_release(
+            static_cast<iree_runtime_instance_t*>(instance_));
+        instance_ = nullptr;
+    }
+}
 
 }  // namespace tenzor::jit::mlir_jit
