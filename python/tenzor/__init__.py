@@ -169,13 +169,25 @@ if _os.path.exists(_jit_path):
     _jit_mod = _importlib_util.module_from_spec(_jit_spec)
     _sys.modules['tenzor.jit'] = _jit_mod
     _jit_spec.loader.exec_module(_jit_mod)
-    jit = _jit_mod.jit  # the decorator
+    jit = _jit_mod.jit  # the decorator (callable)
     # Expose show_* / cache_stats helpers as attributes of the decorator so
     # `tz.jit.show_graph(fn)` works (in addition to `tz._jit_mod.show_graph`).
     for _attr in ('show_graph', 'show_mlir', 'show_stablehlo', 'show_iree',
-                  'cache_stats'):
+                  'cache_stats', 'JitNotEnabledError'):
         if hasattr(_jit_mod, _attr):
             setattr(jit, _attr, getattr(_jit_mod, _attr))
+    # Pre-Phase-13 tests use `tz.jit.trace`, `tz.jit.Compiler`,
+    # `tz.jit.export_graph_text`, etc. — these are pybind11 attributes on
+    # the C++ submodule `tenzor_core.jit`. To keep both APIs working we
+    # also copy every non-private attribute from the C++ submodule onto
+    # the Python decorator.
+    try:
+        from .tenzor_core import jit as _cpp_jit_mod  # type: ignore[import]
+        for _attr in dir(_cpp_jit_mod):
+            if not _attr.startswith('_') and not hasattr(jit, _attr):
+                setattr(jit, _attr, getattr(_cpp_jit_mod, _attr))
+    except (ImportError, AttributeError):
+        pass
 else:  # pragma: no cover — defensive only; jit.py is always shipped.
     from . import jit as _jit_mod  # type: ignore
     jit = _jit_mod.jit
