@@ -132,10 +132,55 @@ if(TENZOR_USE_MLIR_JIT)
     find_package(IREERuntime REQUIRED CONFIG)
 
     # Verify iree-compile binary too — needed by tests that prefer subprocess for
-    # debug-dumping (in-process compile is the primary path).
+    # debug-dumping AND by the GPU-target subprocess fallback in iree_paths.cpp
+    # when the linked libIREECompiler lacks a target the user requested.
+    #
+    # Discovery priority: explicit $TENZOR_IREE_COMPILE → pip-installed full-GPU
+    # venvs (have cuda/rocm out of the box) → CMake-found dist bin/ → $PATH. The
+    # pip wheel is preferred because the lite iree-dist commonly ships without
+    # cuda/rocm backends while the official `iree-base-compiler` wheel always
+    # has them.
     find_program(IREE_COMPILE_EXECUTABLE iree-compile
-        HINTS $ENV{TENZOR_IREE_COMPILE} ${IREECompiler_DIR}/../../../bin REQUIRED)
+        HINTS
+            $ENV{TENZOR_IREE_COMPILE}
+            /home/lee/.venvs/tenzor-jit/bin
+            /home/lee/venv-iree/bin
+            ${IREECompiler_DIR}/../../../bin
+        REQUIRED)
     message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
+
+    # Probe iree-compile for its registered HAL target backends at configure
+    # time. Tests that target cuda/rocm can read these to make a hard FAIL vs
+    # SKIP decision: hardware present + binary missing target = fail loudly.
+    execute_process(
+        COMMAND "${IREE_COMPILE_EXECUTABLE}" --iree-hal-list-target-backends
+        OUTPUT_VARIABLE _iree_hal_targets_raw
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    message(STATUS "  iree-compile HAL targets:")
+    string(REPLACE "\n" ";" _iree_hal_targets_lines "${_iree_hal_targets_raw}")
+    set(IREE_COMPILE_HAL_TARGETS "")
+    foreach(_line IN LISTS _iree_hal_targets_lines)
+        string(STRIP "${_line}" _line_s)
+        if(NOT _line_s OR _line_s MATCHES "^Registered" OR _line_s MATCHES "^#")
+            continue()
+        endif()
+        list(APPEND IREE_COMPILE_HAL_TARGETS "${_line_s}")
+        message(STATUS "    - ${_line_s}")
+    endforeach()
+    set(IREE_COMPILE_HAL_TARGETS "${IREE_COMPILE_HAL_TARGETS}"
+        CACHE INTERNAL "HAL target backends supported by IREE_COMPILE_EXECUTABLE")
+
+    # iree-run-module discovery follows the same priority. Cached so tests can
+    # bake it into argv via -DTENZOR_IREE_RUN_MODULE_PATH=...
+    find_program(IREE_RUN_MODULE_EXECUTABLE iree-run-module
+        HINTS
+            $ENV{TENZOR_IREE_RUN_MODULE}
+            /home/lee/.venvs/tenzor-jit/bin
+            /home/lee/venv-iree/bin
+            ${IREECompiler_DIR}/../../../bin
+        REQUIRED)
+    message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")
 endif()
 
 # Link-Time Optimization

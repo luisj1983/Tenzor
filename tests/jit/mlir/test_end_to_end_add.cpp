@@ -13,6 +13,8 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -62,24 +64,10 @@ auto target_hw_present(const std::string& target) -> bool {
 auto iree_target_supported(const std::string& target) -> bool {
     // llvm-cpu is the IREE default; always present in any dist.
     if (target == "llvm-cpu") return true;
-    static const auto supported = []() -> std::set<std::string> {
-        std::set<std::string> out;
-        FILE* p = popen("iree-compile --iree-hal-list-target-backends 2>/dev/null", "r");
-        if (!p) return out;
-        char buf[256];
-        while (fgets(buf, sizeof(buf), p)) {
-            std::string line(buf);
-            // The output prefixes each backend with whitespace.
-            auto first = line.find_first_not_of(" \t");
-            if (first == std::string::npos) continue;
-            auto last = line.find_first_of(" \t\n\r", first);
-            if (last == std::string::npos) last = line.size();
-            out.insert(line.substr(first, last - first));
-        }
-        pclose(p);
-        return out;
-    }();
-    return supported.count(target) > 0;
+    // Delegate to the same discovery + probe used by the in-process
+    // compile_mlir() subprocess fallback so test SKIP / RUN decisions
+    // stay consistent with what the runtime actually does.
+    return ::tenzor::jit::mlir_jit::iree_compile_supports(target);
 }
 
 auto device_for_target(const std::string& target) -> ::tenzor::Device {
@@ -157,6 +145,13 @@ TEST(EndToEndAdd, SecondInvocationHitsInProcessCache) {
         GTEST_SKIP() << "no llvm-cpu";
     }
 
+    // Counter-based signal: every CompiledFunction call goes through the
+    // shape-keyed in-process cache; the second invoke with the same shape
+    // must bump hits without bumping misses. Wall-time on subprocess
+    // iree-run-module is too noisy (range 30-90 ms on a warm laptop) to be
+    // a reliable cache indicator.
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
+
     ::tenzor::jit::CompileConfig cfg;
     cfg.backend = "mlir";
     cfg.target  = "llvm-cpu";
@@ -166,23 +161,17 @@ TEST(EndToEndAdd, SecondInvocationHitsInProcessCache) {
     auto x_tensor = ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32);
     auto x = ::tenzor::Variable(x_tensor, false);
 
-    auto t0 = std::chrono::high_resolution_clock::now();
     auto y1 = compiled(x);
-    auto t1 = std::chrono::high_resolution_clock::now();
+    const auto s1 = ::tenzor::jit::mlir_jit::cache_stats();
     auto y2 = compiled(x);
-    auto t2 = std::chrono::high_resolution_clock::now();
+    const auto s2 = ::tenzor::jit::mlir_jit::cache_stats();
 
-    const double ms1 =
-        std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double ms2 =
-        std::chrono::duration<double, std::milli>(t2 - t1).count();
-    // The IreeInvoker subprocess `iree-run-module` invoke takes ~10-15 ms
-    // on a warm machine; the cache savings on second call are everything
-    // ABOVE that: trace + Compiler::optimize + lower + iree-compile +
-    // IreeInvoker::load. Use absolute savings rather than ratio to avoid
-    // false positives when the subprocess fluctuates: first call should be
-    // ≥ ms2 + 5 ms (i.e. we save at least 5ms of compile+load work).
-    EXPECT_GE(ms1, ms2 + 5.0)
-        << "no cache hit: first=" << ms1 << " ms second=" << ms2 << " ms "
-        << "(expected first ≥ second + 5ms of saved compile/load work)";
+    EXPECT_EQ(s1.hits, 0u)   << "first invocation should have been a miss";
+    EXPECT_GE(s1.misses, 1u) << "first invocation should record a miss";
+    EXPECT_GE(s2.hits, s1.hits + 1u)
+        << "second invocation should hit the in-process compile cache "
+           "(hits went " << s1.hits << " -> " << s2.hits << ")";
+    EXPECT_EQ(s2.misses, s1.misses)
+        << "second invocation should not produce a new miss "
+           "(misses went " << s1.misses << " -> " << s2.misses << ")";
 }

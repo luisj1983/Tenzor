@@ -3,6 +3,7 @@
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/ops/creation.hpp"
 
 #include <array>
@@ -28,45 +29,6 @@ namespace tenzor::jit::mlir_jit {
 namespace fs = std::filesystem;
 
 namespace {
-
-/// Discover the iree-run-module binary path.
-/// 1. TENZOR_IREE_RUN_MODULE env var, if set and executable.
-/// 2. `iree-run-module` on $PATH.
-/// 3. Sibling of iree-compile, derived from $TENZOR_IREE_COMPILE.
-auto resolve_iree_run_module() -> std::string {
-    if (const char* env = std::getenv("TENZOR_IREE_RUN_MODULE");
-        env && *env && access(env, X_OK) == 0) {
-        return env;
-    }
-    // Search PATH manually so we get a clear error rather than relying on
-    // execvp() failing inside the child.
-    if (const char* path = std::getenv("PATH"); path) {
-        std::string p(path);
-        std::size_t pos = 0;
-        while (pos < p.size()) {
-            const std::size_t next = p.find(':', pos);
-            const std::size_t end  = next == std::string::npos ? p.size() : next;
-            const std::string dir = p.substr(pos, end - pos);
-            if (!dir.empty()) {
-                const std::string cand = dir + "/iree-run-module";
-                if (access(cand.c_str(), X_OK) == 0) {
-                    return cand;
-                }
-            }
-            pos = end + 1;
-        }
-    }
-    if (const char* env = std::getenv("TENZOR_IREE_COMPILE");
-        env && *env) {
-        fs::path p = fs::path(env).parent_path() / "iree-run-module";
-        if (access(p.c_str(), X_OK) == 0) {
-            return p.string();
-        }
-    }
-    throw JitInvokeError(
-        "iree-run-module binary not found. Set TENZOR_IREE_RUN_MODULE or add "
-        "the IREE bin/ directory to PATH.");
-}
 
 /// Map an IREE HAL target (as set in CompileOptions::target) to the runtime
 /// driver name accepted by `iree-run-module --device=...`.
@@ -345,7 +307,7 @@ auto IreeInvoker::load(const CompiledArtifact& artifact)
     inv->vmfb_path_       = artifact.vmfb_path.string();
     inv->target_          = artifact.target;
     inv->device_          = device_for_target(artifact.target);
-    inv->iree_run_module_ = resolve_iree_run_module();
+    inv->iree_run_module_ = ::tenzor::jit::mlir_jit::resolve_iree_run_module();
     return inv;
 }
 

@@ -7,6 +7,7 @@ find_package(OpenSSL REQUIRED)
 add_library(tenzor_jit_mlir OBJECT
     mlir_text_emit.cpp
     iree_compile.cpp
+    iree_paths.cpp
     iree_runtime.cpp
     iree_customcalls.cpp
     lowering.cpp
@@ -20,6 +21,13 @@ target_include_directories(tenzor_jit_mlir PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
 target_compile_features(tenzor_jit_mlir PUBLIC cxx_std_23)
+
+# Propagate the CMake-found `iree-compile` path into the source so the
+# runtime discovery chain in iree_paths.cpp can prefer it over $PATH.
+if(IREE_COMPILE_EXECUTABLE)
+    target_compile_definitions(tenzor_jit_mlir PRIVATE
+        TENZOR_IREE_COMPILE_PATH="${IREE_COMPILE_EXECUTABLE}")
+endif()
 
 # OBJECT library is spliced into the shared tenzor_core; PIC required.
 set_target_properties(tenzor_jit_mlir PROPERTIES POSITION_INDEPENDENT_CODE ON)

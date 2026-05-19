@@ -1,11 +1,20 @@
 // Phase 13 / Task A.7 — IREE Compiler embedding API integration.
+//
+// The primary path uses IREE's in-process embedding API (fast, no fork).
+// For HAL targets the linked libIREECompiler.so was not built with (commonly
+// `cuda` / `rocm` on lite distributions), compile_mlir() transparently falls
+// through to a subprocess invocation of `iree-compile` discovered via the
+// iree_paths.hpp chain — typically the pip-installed `iree-base-compiler`
+// wheel which always ships every HAL target.
 
 #include "tenzor/jit/mlir/iree_compile.hpp"
+#include "tenzor/jit/mlir/iree_paths.hpp"
 
 #include <iree/compiler/embedding_api.h>
 
 #include <openssl/sha.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -16,9 +25,14 @@
 #include <fstream>
 #include <iomanip>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace tenzor::jit::mlir_jit {
 
@@ -79,6 +93,178 @@ struct CompilerError {
         return m ? std::string(m) : std::string{};
     }
 };
+
+// ============================================================================
+// Embedding-API target probe.
+// ============================================================================
+
+/// Enumerate the HAL target backends the *linked* libIREECompiler supports
+/// via the embedding API itself. This is distinct from
+/// iree_compile_supported_targets() (which probes the binary on disk) — the
+/// in-process shared library may have been built with a smaller subset.
+auto embedding_api_supported_targets() -> const std::set<std::string>& {
+    static const std::set<std::string> cached = []() {
+        ensure_global_init();
+        std::set<std::string> out;
+        struct Ctx {
+            std::set<std::string>* out;
+        } ctx{&out};
+        ireeCompilerEnumerateRegisteredHALTargetBackends(
+            [](const char* backend, void* user_data) {
+                auto* c = static_cast<Ctx*>(user_data);
+                if (backend != nullptr) {
+                    c->out->insert(backend);
+                }
+            },
+            &ctx);
+        return out;
+    }();
+    return cached;
+}
+
+// ============================================================================
+// Subprocess fallback: iree-compile <mlir> --output-format=vm-bytecode
+// ============================================================================
+
+/// Spawn an iree-compile subprocess with the given args, write `mlir_text`
+/// to its stdin, and read the compiled vmfb bytes from its stdout. Returns
+/// the captured stderr in `stderr_out`.
+auto run_iree_compile_subprocess(const std::string& binary,
+                                 const std::vector<std::string>& args,
+                                 const std::string& mlir_text,
+                                 std::string& stderr_out,
+                                 std::string& vmfb_out) -> int {
+    int in_pipe[2];   // parent -> child stdin
+    int out_pipe[2];  // child stdout -> parent
+    int err_pipe[2];  // child stderr -> parent
+    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+        throw JitCompileError(
+            std::string("pipe() failed: ") + std::strerror(errno), {});
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1],
+                       err_pipe[0], err_pipe[1]}) {
+            close(fd);
+        }
+        throw JitCompileError(
+            std::string("fork() failed: ") + std::strerror(errno), {});
+    }
+
+    if (pid == 0) {
+        // Child: wire up stdio and exec.
+        dup2(in_pipe[0],  STDIN_FILENO);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(in_pipe[0]);  close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 2);
+        argv.push_back(const_cast<char*>(binary.c_str()));
+        for (const auto& a : args) {
+            argv.push_back(const_cast<char*>(a.c_str()));
+        }
+        argv.push_back(nullptr);
+        execv(binary.c_str(), argv.data());
+        // execv failed.
+        const std::string msg =
+            std::string("execv failed: ") + std::strerror(errno) + "\n";
+        (void)!write(STDERR_FILENO, msg.data(), msg.size());
+        _exit(127);
+    }
+
+    // Parent.
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+
+    // Write the MLIR text to the child stdin. Doing the write before reading
+    // stdout/stderr could deadlock if the child's stdout buffer fills before
+    // it finishes consuming stdin; for typical Phase-1A graphs the MLIR is a
+    // few KB so a single write fits comfortably, but for safety we still
+    // handle short writes.
+    {
+        std::size_t total = 0;
+        while (total < mlir_text.size()) {
+            const ssize_t n = write(in_pipe[1], mlir_text.data() + total,
+                                    mlir_text.size() - total);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            total += static_cast<std::size_t>(n);
+        }
+    }
+    close(in_pipe[1]);
+
+    auto drain = [](int fd) {
+        std::string s;
+        char buf[8192];
+        while (true) {
+            const ssize_t r = read(fd, buf, sizeof(buf));
+            if (r > 0) {
+                s.append(buf, static_cast<std::size_t>(r));
+            } else if (r == 0) {
+                break;
+            } else {
+                if (errno == EINTR) continue;
+                break;
+            }
+        }
+        return s;
+    };
+
+    vmfb_out   = drain(out_pipe[0]);
+    stderr_out = drain(err_pipe[0]);
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            throw JitCompileError(
+                std::string("waitpid() failed: ") + std::strerror(errno), {});
+        }
+    }
+    if (WIFEXITED(status))   return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
+/// Compile via the iree-compile subprocess for targets the linked
+/// libIREECompiler.so does not register. Writes the vmfb to `vmfb_path`.
+auto compile_via_subprocess(const std::string& mlir_text,
+                            const std::string& target,
+                            const fs::path& vmfb_path,
+                            const fs::path& mlir_path) -> void {
+    const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
+    std::vector<std::string> args{
+        "--iree-hal-target-backends=" + target,
+        "--iree-input-type=stablehlo",
+        "--output-format=vm-bytecode",
+        "-o", vmfb_path.string(),
+        "-",  // read MLIR from stdin
+    };
+    std::string stderr_text, vmfb_unused;
+    const int rc = run_iree_compile_subprocess(bin, args, mlir_text,
+                                               stderr_text, vmfb_unused);
+    if (rc != 0) {
+        throw JitCompileError(
+            "iree-compile subprocess (target=" + target + ") exit=" +
+                std::to_string(rc) + " from " + bin + "\nstderr:\n" +
+                stderr_text,
+            mlir_path);
+    }
+    if (!fs::exists(vmfb_path) || fs::file_size(vmfb_path) == 0) {
+        throw JitCompileError(
+            "iree-compile subprocess (target=" + target +
+                ") reported success but produced no vmfb at " +
+                vmfb_path.string() + "\nstderr:\n" + stderr_text,
+            mlir_path);
+    }
+}
 
 }  // namespace
 
@@ -204,6 +390,39 @@ auto compile_mlir(const std::string& mlir_text,
     // Cache miss — measure the actual compile time end-to-end so that
     // cache_stats().total_compile_ms reflects only real iree-compile work.
     const auto compile_t0 = std::chrono::steady_clock::now();
+
+    // Path selection: if the linked libIREECompiler registers `opts.target`,
+    // use the in-process embedding API (fast, no fork). Otherwise fall
+    // through to the iree-compile subprocess, which is the full-GPU pip
+    // wheel on this host. Both paths produce the same vmfb format.
+    const auto& embedded = embedding_api_supported_targets();
+    if (embedded.count(opts.target) == 0) {
+        if (!iree_compile_supports(opts.target)) {
+            std::ostringstream available;
+            available << "[";
+            bool first = true;
+            for (const auto& t : iree_compile_supported_targets()) {
+                if (!first) available << ", ";
+                available << t;
+                first = false;
+            }
+            available << "]";
+            throw JitCompileError(
+                "compile_mlir: target '" + opts.target +
+                    "' is not supported by either the linked libIREECompiler "
+                    "or the discovered iree-compile binary " +
+                    resolve_iree_compile() +
+                    ". Subprocess-available targets=" + available.str(),
+                mlir_path);
+        }
+        compile_via_subprocess(mlir_text, opts.target, vmfb_path, mlir_path);
+        const auto compile_t1 = std::chrono::steady_clock::now();
+        const double compile_ms =
+            std::chrono::duration<double, std::milli>(compile_t1 - compile_t0)
+                .count();
+        internal::record_compile_ms(compile_ms);
+        return CompiledArtifact{vmfb_path, opts.target};
+    }
 
     iree_compiler_session_t* session = ireeCompilerSessionCreate();
     if (session == nullptr) {
