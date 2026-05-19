@@ -115,30 +115,26 @@ option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" OFF)
 option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
 
-# Pinned versions — version skew at runtime invalidates compile cache, never silent.
-set(TENZOR_MLIR_VERSION       18.0  CACHE STRING "Required MLIR version")
-set(TENZOR_STABLEHLO_VERSION  1.5.0 CACHE STRING "Required StableHLO version")
-set(TENZOR_IREE_VERSION       3.0   CACHE STRING "Required IREE version")
+# Pinned version — IREE distribution bundles MLIR + StableHLO. The 2026-05-19
+# spec amendment (docs/superpowers/specs/2026-05-19-tz-jit-stablehlo-amendment-text-mlir.md)
+# folds MLIR/StableHLO into a single IREE dependency surface; Tenzor emits MLIR
+# as text and consumes IREE Compiler + Runtime C APIs only.
+set(TENZOR_IREE_VERSION       3.0   CACHE STRING "Required IREE version (informational)")
 
 if(TENZOR_USE_MLIR_JIT)
-    message(STATUS "Tenzor: MLIR JIT enabled (Phase 13)")
-    message(STATUS "  MLIR ${TENZOR_MLIR_VERSION}, StableHLO ${TENZOR_STABLEHLO_VERSION}, IREE ${TENZOR_IREE_VERSION}")
+    message(STATUS "Tenzor: MLIR JIT enabled (text-based, IREE-driven per 2026-05-19 amendment)")
+    message(STATUS "  IREE ${TENZOR_IREE_VERSION}")
 
-    # MLIR (build-time C++ API). LLVM is a transitive dependency.
-    find_package(MLIR ${TENZOR_MLIR_VERSION} REQUIRED CONFIG
-        HINTS $ENV{MLIR_DIR} /usr/lib/llvm-${TENZOR_MLIR_VERSION}/lib/cmake/mlir)
+    # IREE Compiler (embedding API) and Runtime — single dependency surface per
+    # the 2026-05-19 spec amendment. MLIR/StableHLO come bundled inside IREE.
+    list(APPEND CMAKE_PREFIX_PATH $ENV{IREE_DIR})
+    find_package(IREECompiler REQUIRED CONFIG)
+    find_package(IREERuntime REQUIRED CONFIG)
 
-    # StableHLO dialect library.
-    find_package(StableHLO ${TENZOR_STABLEHLO_VERSION} REQUIRED CONFIG
-        HINTS $ENV{STABLEHLO_DIR})
-
-    # IREE runtime (in-process); iree-compile is invoked as subprocess at runtime.
-    find_package(IREERuntime ${TENZOR_IREE_VERSION} REQUIRED CONFIG
-        HINTS $ENV{IREE_RUNTIME_DIR})
-
-    # Verify iree-compile is callable AT CONFIGURE TIME so users find out early.
+    # Verify iree-compile binary too — needed by tests that prefer subprocess for
+    # debug-dumping (in-process compile is the primary path).
     find_program(IREE_COMPILE_EXECUTABLE iree-compile
-        HINTS $ENV{TENZOR_IREE_COMPILE} REQUIRED)
+        HINTS $ENV{TENZOR_IREE_COMPILE} ${IREECompiler_DIR}/../../../bin REQUIRED)
     message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
 endif()
 
