@@ -167,6 +167,20 @@ auto emit_stablehlo_pad(std::ostream& os, const std::string& result,
                         const std::vector<int64_t>& dst_shape,
                         ::tenzor::DType d) -> void;
 
+/// Emit a `stablehlo.dot_general` op with explicit batching and
+/// contracting dim lists. Output type is required (dot_general doesn't
+/// auto-infer from operands).
+auto emit_stablehlo_dot_general(std::ostream& os, const std::string& result,
+                                const std::string& a, const std::string& b,
+                                const std::vector<int64_t>& lhs_batch,
+                                const std::vector<int64_t>& rhs_batch,
+                                const std::vector<int64_t>& lhs_contracting,
+                                const std::vector<int64_t>& rhs_contracting,
+                                const std::vector<int64_t>& lhs_shape,
+                                const std::vector<int64_t>& rhs_shape,
+                                const std::vector<int64_t>& result_shape,
+                                ::tenzor::DType d) -> void;
+
 /// Emit a `stablehlo.custom_call @<callee>(...)` invocation.
 ///
 /// Generated form:

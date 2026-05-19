@@ -69,4 +69,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_op_reductions
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.4 — Linalg (MatMul / Bmm / Linear).
+    add_executable(test_op_linalg test_op_linalg.cpp)
+    target_link_libraries(test_op_linalg
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_linalg
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()

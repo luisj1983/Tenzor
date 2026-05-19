@@ -8,11 +8,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <type_traits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -189,10 +191,7 @@ auto normalize_dim(int64_t d, int64_t rank) -> int64_t {
 
 // ─── Handler helpers ────────────────────────────────────────────────────────
 
-/// Extract a scalar value from a rank-0 tensor (any supported dtype). Used
-/// when emitting `stablehlo.constant` for traced scalars from `Variable +
-/// 2.0f` patterns. For non-rank-0 tensors we emit a typed `dense<...>`
-/// elements attribute via `emit_dense_constant_from_tensor` instead.
+/// Extract a scalar value from a rank-0 (or numel==1) tensor.
 auto extract_scalar_value(const ::tenzor::Tensor& t) -> double {
     using ::tenzor::DType;
     auto cpu = t.device().type == ::tenzor::Device::Type::CPU ? t : t.cpu();
@@ -208,11 +207,21 @@ auto extract_scalar_value(const ::tenzor::Tensor& t) -> double {
     }
 }
 
-/// Emit a stablehlo.constant from a Tensor, binding the SSA name. For
-/// rank-0 we emit `dense<scalar>`; for higher rank we currently support
-/// uniform-splat tensors only (all elements equal) — sufficient for the
-/// scalar broadcasts the autograd layer inserts, but not yet for general
-/// weight constants. Throws if the tensor isn't a uniform splat.
+/// Render a per-element MLIR float/int literal at full precision.
+template <typename T>
+auto render_one(std::ostream& os, T v) -> void {
+    if constexpr (std::is_floating_point_v<T>) {
+        os << std::scientific << std::setprecision(9)
+           << static_cast<double>(v);
+    } else {
+        os << static_cast<long long>(v);
+    }
+}
+
+/// Emit a stablehlo.constant whose payload is the full element-list of
+/// `t`. For numel == 1 this collapses to the splat-constant form; for
+/// larger tensors we emit a `dense<[...]>` elements attribute with the
+/// same shape. Used for weight constants closed-over by JIT'd lambdas.
 auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
                           const std::string& value_id,
                           const ::tenzor::Tensor& t,
@@ -221,14 +230,71 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
     auto name = ctx.fresh_name();
     ctx.bind(value_id, name);
     if (t.numel() == 0) {
-        // Empty: emit an empty splat, harmless.
         emit_stablehlo_splat_constant(body, name, scalar_literal(0.0, d),
                                       shape, d);
         body << '\n';
         return name;
     }
-    const double v = extract_scalar_value(t);
-    emit_stablehlo_splat_constant(body, name, scalar_literal(v, d), shape, d);
+    if (t.numel() == 1) {
+        const double v = extract_scalar_value(t);
+        emit_stablehlo_splat_constant(body, name, scalar_literal(v, d),
+                                      shape, d);
+        body << '\n';
+        return name;
+    }
+
+    // Multi-element constant: emit a `dense<[v0, v1, ...]>` payload with
+    // the actual values. The element order is row-major (MLIR's
+    // standard), and we recurse the shape to emit nested brackets so the
+    // attribute matches the tensor type exactly. Materializes one float
+    // per element — fine for the kilobyte-scale weight constants typical
+    // of JIT'd inference graphs.
+    using ::tenzor::DType;
+    auto cpu = t.device().type == ::tenzor::Device::Type::CPU ? t : t.cpu();
+
+    std::ostringstream payload;
+    std::function<void(int64_t, int64_t&, int64_t)> emit_dim =
+        [&](int64_t dim_idx, int64_t& flat_idx, int64_t) {
+        const int64_t extent = shape[dim_idx];
+        payload << '[';
+        for (int64_t i = 0; i < extent; ++i) {
+            if (i != 0) payload << ", ";
+            if (dim_idx + 1 == static_cast<int64_t>(shape.size())) {
+                switch (d) {
+                    case DType::Float32:
+                        render_one(payload, cpu.data<float>()[flat_idx++]);
+                        break;
+                    case DType::Float64:
+                        render_one(payload, cpu.data<double>()[flat_idx++]);
+                        break;
+                    case DType::Int32:
+                        render_one(payload, cpu.data<int32_t>()[flat_idx++]);
+                        break;
+                    case DType::Int64:
+                        render_one(payload, cpu.data<int64_t>()[flat_idx++]);
+                        break;
+                    default:
+                        throw std::runtime_error(
+                            "GraphToMLIR: emit_tensor_constant: "
+                            "unsupported DType for multi-element constant");
+                }
+            } else {
+                emit_dim(dim_idx + 1, flat_idx, 0);
+            }
+        }
+        payload << ']';
+    };
+    if (shape.empty()) {
+        // Scalar - shouldn't reach here (numel handled above) but be safe.
+        const double v = extract_scalar_value(cpu);
+        emit_stablehlo_splat_constant(body, name, scalar_literal(v, d),
+                                      shape, d);
+        body << '\n';
+        return name;
+    }
+    int64_t flat_idx = 0;
+    emit_dim(0, flat_idx, 0);
+    emit_stablehlo_splat_constant(body, name, payload.str(), shape, d);
     body << '\n';
     return name;
 }
@@ -753,6 +819,128 @@ auto handle_softmax(LoweringContext& ctx,
     body << '\n';
 }
 
+/// Lower MatMul for rank-2 or higher inputs.
+///   rank-2: (M, K) @ (K, N) → (M, N) with lhs_contracting=[1],
+///           rhs_contracting=[0].
+///   rank-N (≥3): the leading N-2 dims are batch dims (broadcast batching
+///           in StableHLO requires explicit broadcast, but Tenzor's eager
+///           matmul broadcasts implicitly; for graph traces the batch
+///           dims are concrete and equal on both sides).
+auto handle_matmul(LoweringContext& ctx,
+                   const ::tenzor::jit::Node& node,
+                   std::ostream& body) -> void {
+    if (node.inputs().size() != 2 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: MatMul expects 2 inputs and 1 output");
+    }
+    const auto& lhs = node.inputs()[0];
+    const auto& rhs = node.inputs()[1];
+    const auto& out = node.outputs()[0];
+
+    const auto lhs_shape = lhs->shape();
+    const auto rhs_shape = rhs->shape();
+    const int64_t lr = static_cast<int64_t>(lhs_shape.size());
+    const int64_t rr = static_cast<int64_t>(rhs_shape.size());
+    if (lr < 2 || rr < 2) {
+        throw std::runtime_error(
+            "GraphToMLIR: MatMul requires rank ≥ 2 on both sides");
+    }
+
+    // Batch dims: matched leading dims on both sides. When one side has
+    // fewer batch dims, we'd need to broadcast — defer that to higher
+    // ranks for now and require both ranks equal.
+    std::vector<int64_t> lhs_batch, rhs_batch;
+    if (lr == rr) {
+        for (int64_t i = 0; i < lr - 2; ++i) {
+            lhs_batch.push_back(i);
+            rhs_batch.push_back(i);
+        }
+    }
+    std::vector<int64_t> lhs_contracting = {lr - 1};
+    std::vector<int64_t> rhs_contracting = {rr - 2};
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_dot_general(body, out_name, ctx.name_for(lhs->id()),
+                               ctx.name_for(rhs->id()), lhs_batch, rhs_batch,
+                               lhs_contracting, rhs_contracting, lhs_shape,
+                               rhs_shape, out->shape(), out->dtype());
+    body << '\n';
+}
+
+/// Bmm: rank-3 batched matmul, dim 0 is batch. (B, M, K) @ (B, K, N) → (B, M, N).
+auto handle_bmm(LoweringContext& ctx,
+                const ::tenzor::jit::Node& node,
+                std::ostream& body) -> void {
+    if (node.inputs().size() != 2 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Bmm expects 2 inputs and 1 output");
+    }
+    const auto& lhs = node.inputs()[0];
+    const auto& rhs = node.inputs()[1];
+    const auto& out = node.outputs()[0];
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_dot_general(body, out_name, ctx.name_for(lhs->id()),
+                               ctx.name_for(rhs->id()),
+                               /*lhs_batch=*/{0}, /*rhs_batch=*/{0},
+                               /*lhs_contracting=*/{2},
+                               /*rhs_contracting=*/{1},
+                               lhs->shape(), rhs->shape(), out->shape(),
+                               out->dtype());
+    body << '\n';
+}
+
+/// Linear: `out = x @ W^T + b`. The eager dispatch traces inputs as
+/// (x, W) or (x, W, b). Output Value's shape is the final shape.
+auto handle_linear(LoweringContext& ctx,
+                   const ::tenzor::jit::Node& node,
+                   std::ostream& body) -> void {
+    if (node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Linear expects 1 output");
+    }
+    if (node.inputs().size() != 2 && node.inputs().size() != 3) {
+        throw std::runtime_error(
+            "GraphToMLIR: Linear expects 2 or 3 inputs (x, W [, b])");
+    }
+    const auto& x = node.inputs()[0];
+    const auto& w = node.inputs()[1];
+    const auto& out = node.outputs()[0];
+    const auto x_shape = x->shape();
+    const auto w_shape = w->shape();
+    const auto out_shape = out->shape();
+    const auto d = out->dtype();
+
+    // For x [..., in_features] @ W [out_features, in_features]^T → out
+    // [..., out_features], dot_general contracts last dim of x with last
+    // dim of W (since W is stored as (out_features, in_features)).
+    const int64_t xr = static_cast<int64_t>(x_shape.size());
+    const int64_t wr = static_cast<int64_t>(w_shape.size());
+    std::vector<int64_t> lhs_contracting = {xr - 1};
+    std::vector<int64_t> rhs_contracting = {wr - 1};
+
+    auto matmul_name = ctx.fresh_name();
+    emit_stablehlo_dot_general(body, matmul_name, ctx.name_for(x->id()),
+                               ctx.name_for(w->id()),
+                               /*lhs_batch=*/{}, /*rhs_batch=*/{},
+                               lhs_contracting, rhs_contracting, x_shape,
+                               w_shape, out_shape, d);
+    body << '\n';
+
+    if (node.inputs().size() == 3) {
+        const auto& b = node.inputs()[2];
+        auto bias_b = maybe_broadcast(body, ctx, ctx.name_for(b->id()),
+                                      b->shape(), out_shape, d);
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out->id(), out_name);
+        emit_stablehlo_binary(body, "add", out_name, matmul_name, bias_b,
+                              out_shape, d);
+        body << '\n';
+    } else {
+        ctx.bind(out->id(), matmul_name);
+    }
+}
+
 auto handle_pow(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -868,6 +1056,11 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Mean:         handle_mean(ctx, *node, body);    break;
             case OpType::Max:          handle_max(ctx, *node, body);     break;
             case OpType::Softmax:      handle_softmax(ctx, *node, body); break;
+
+            // ── Linalg ──
+            case OpType::MatMul:       handle_matmul(ctx, *node, body); break;
+            case OpType::Bmm:          handle_bmm(ctx, *node, body);    break;
+            case OpType::Linear:       handle_linear(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;

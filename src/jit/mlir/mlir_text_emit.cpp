@@ -244,6 +244,45 @@ auto emit_stablehlo_pad(std::ostream& os, const std::string& result,
     write_tensor_type(os, dst_shape, d);
 }
 
+auto emit_stablehlo_dot_general(std::ostream& os, const std::string& result,
+                                const std::string& a, const std::string& b,
+                                const std::vector<int64_t>& lhs_batch,
+                                const std::vector<int64_t>& rhs_batch,
+                                const std::vector<int64_t>& lhs_contracting,
+                                const std::vector<int64_t>& rhs_contracting,
+                                const std::vector<int64_t>& lhs_shape,
+                                const std::vector<int64_t>& rhs_shape,
+                                const std::vector<int64_t>& result_shape,
+                                ::tenzor::DType d) -> void {
+    os << '%' << result << " = stablehlo.dot_general %" << a << ", %" << b
+       << ", batching_dims = [";
+    for (std::size_t i = 0; i < lhs_batch.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << lhs_batch[i];
+    }
+    os << "] x [";
+    for (std::size_t i = 0; i < rhs_batch.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << rhs_batch[i];
+    }
+    os << "], contracting_dims = [";
+    for (std::size_t i = 0; i < lhs_contracting.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << lhs_contracting[i];
+    }
+    os << "] x [";
+    for (std::size_t i = 0; i < rhs_contracting.size(); ++i) {
+        if (i != 0) os << ", ";
+        os << rhs_contracting[i];
+    }
+    os << "] : (";
+    write_tensor_type(os, lhs_shape, d);
+    os << ", ";
+    write_tensor_type(os, rhs_shape, d);
+    os << ") -> ";
+    write_tensor_type(os, result_shape, d);
+}
+
 auto emit_custom_call(std::ostream& os, const std::string& callee,
                       const std::string& result,
                       const std::vector<std::string>& operand_names,
