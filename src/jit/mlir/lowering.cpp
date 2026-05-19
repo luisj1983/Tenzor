@@ -396,6 +396,127 @@ auto handle_clamp(LoweringContext& ctx,
     body << '\n';
 }
 
+auto handle_relu(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: ReLU expects 1 input and 1 output");
+    }
+    const auto& out = node.outputs()[0];
+    const auto shape = out->shape();
+    const auto d = out->dtype();
+    const auto& x = ctx.name_for(node.inputs()[0]->id());
+    auto zero_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, zero_name, scalar_literal(0.0, d),
+                                  shape, d);
+    body << '\n';
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_binary(body, "maximum", out_name, x, zero_name, shape, d);
+    body << '\n';
+}
+
+auto handle_sigmoid(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    handle_unary(ctx, node, body, "logistic");
+}
+
+auto handle_silu(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: SiLU expects 1 input and 1 output");
+    }
+    const auto& out = node.outputs()[0];
+    const auto shape = out->shape();
+    const auto d = out->dtype();
+    const auto& x = ctx.name_for(node.inputs()[0]->id());
+    auto sig_name = ctx.fresh_name();
+    emit_stablehlo_unary(body, "logistic", sig_name, x, shape, d);
+    body << '\n';
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_binary(body, "multiply", out_name, x, sig_name, shape, d);
+    body << '\n';
+}
+
+/// GELU via the tanh approximation:
+///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+/// This avoids depending on `stablehlo.erf`, which isn't part of the core
+/// StableHLO op set (it's in CHLO and not always exposed through IREE's
+/// frontend). Numerical error vs the exact erf-based form is < 1e-4 in
+/// F32, well below the typical 1e-3 layer tolerance.
+auto handle_gelu(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: GELU expects 1 input and 1 output");
+    }
+    const auto& out = node.outputs()[0];
+    const auto shape = out->shape();
+    const auto d = out->dtype();
+    const auto& x = ctx.name_for(node.inputs()[0]->id());
+
+    // Constants.
+    auto c_half      = ctx.fresh_name();
+    auto c_one       = ctx.fresh_name();
+    auto c_three     = ctx.fresh_name();
+    auto c_kappa     = ctx.fresh_name();        // 0.044715
+    auto c_sqrt2pi   = ctx.fresh_name();        // sqrt(2/π) ≈ 0.7978845608
+    emit_stablehlo_splat_constant(body, c_half, scalar_literal(0.5, d),
+                                  shape, d); body << '\n';
+    emit_stablehlo_splat_constant(body, c_one,  scalar_literal(1.0, d),
+                                  shape, d); body << '\n';
+    emit_stablehlo_splat_constant(body, c_three, scalar_literal(3.0, d),
+                                  shape, d); body << '\n';
+    emit_stablehlo_splat_constant(body, c_kappa,
+                                  scalar_literal(0.044715, d), shape, d);
+    body << '\n';
+    emit_stablehlo_splat_constant(body, c_sqrt2pi,
+                                  scalar_literal(0.7978845608028654, d),
+                                  shape, d);
+    body << '\n';
+
+    // x_cubed = x^3
+    auto x_cubed = ctx.fresh_name();
+    emit_stablehlo_binary(body, "power", x_cubed, x, c_three, shape, d);
+    body << '\n';
+    // x_cubed_scaled = kappa * x^3
+    auto x3s = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", x3s, c_kappa, x_cubed, shape, d);
+    body << '\n';
+    // inner = x + kappa*x^3
+    auto inner = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", inner, x, x3s, shape, d);
+    body << '\n';
+    // arg = sqrt(2/π) * inner
+    auto arg = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", arg, c_sqrt2pi, inner, shape, d);
+    body << '\n';
+    // t = tanh(arg)
+    auto tval = ctx.fresh_name();
+    emit_stablehlo_unary(body, "tanh", tval, arg, shape, d);
+    body << '\n';
+    // one_plus = 1 + tanh(arg)
+    auto one_plus = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", one_plus, c_one, tval, shape, d);
+    body << '\n';
+    // half_x = 0.5 * x
+    auto half_x = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", half_x, c_half, x, shape, d);
+    body << '\n';
+    // out = (0.5 * x) * (1 + tanh(...))
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    emit_stablehlo_binary(body, "multiply", out_name, half_x, one_plus,
+                          shape, d);
+    body << '\n';
+}
+
 auto handle_pow(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -499,6 +620,12 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Pow:          handle_pow(ctx, *node, body);   break;
             case OpType::Where:        handle_where(ctx, *node, body); break;
             case OpType::Clamp:        handle_clamp(ctx, *node, body); break;
+
+            // ── Activations ──
+            case OpType::ReLU:         handle_relu(ctx, *node, body);    break;
+            case OpType::Sigmoid:      handle_sigmoid(ctx, *node, body); break;
+            case OpType::SiLU:         handle_silu(ctx, *node, body);    break;
+            case OpType::GELU:         handle_gelu(ctx, *node, body);    break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;

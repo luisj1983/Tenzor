@@ -55,4 +55,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_op_elementwise
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.2 — Activations (ReLU / Sigmoid / SiLU / GELU).
+    add_executable(test_op_activations test_op_activations.cpp)
+    target_link_libraries(test_op_activations
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_activations
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()
