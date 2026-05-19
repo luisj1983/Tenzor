@@ -575,6 +575,10 @@ target_link_libraries(test_fft PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_linalg test_linalg.cpp)
 target_link_libraries(test_linalg PRIVATE tenzor_core GTest::gtest_main)
 
+# Linear Algebra — Complex64/Complex128 via LAPACKE (Task 2.9)
+add_executable(test_linalg_complex test_linalg_complex.cpp)
+target_link_libraries(test_linalg_complex PRIVATE tenzor_core GTest::gtest)
+
 # Linear Algebra — advanced routines (lstsq, pinv, matrix_exp)
 add_executable(test_linalg_lstsq_pinv_matexp test_linalg_lstsq_pinv_matexp.cpp)
 target_link_libraries(test_linalg_lstsq_pinv_matexp PRIVATE tenzor_core GTest::gtest_main)
@@ -737,6 +741,7 @@ tenzor_discover_tests(test_sparse_autograd DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_complex_arithmetic DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_linalg DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_linalg_complex LABELS "audit;cpu" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_linalg_lstsq_pinv_matexp DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fft_shift_hfft DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_empty_tensor_ops DISCOVERY_TIMEOUT 60)
@@ -819,6 +824,23 @@ tenzor_discover_tests(test_quantization_observers LABELS "unit" DISCOVERY_TIMEOU
 add_executable(test_scatter_variants test_scatter_variants.cpp)
 target_link_libraries(test_scatter_variants PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_scatter_variants LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Audit P0 #7: cat/slice kernel negative-dim normalization (defensive fix)
+add_executable(test_cat_slice_negative_dim test_cat_slice_negative_dim.cpp)
+target_link_libraries(test_cat_slice_negative_dim PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cat_slice_negative_dim LABELS "audit;unit" DISCOVERY_TIMEOUT 60)
+
+# Audit P0 #8: caching allocator cross-thread dealloc bookkeeping drift
+add_executable(test_caching_allocator_cross_thread test_caching_allocator_cross_thread.cpp)
+target_include_directories(test_caching_allocator_cross_thread PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_caching_allocator_cross_thread PRIVATE tenzor_backend_cpu GTest::gtest_main)
+tenzor_discover_tests(test_caching_allocator_cross_thread DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Task 7.1+7.2: split-sibling coalescing + memory_summary() introspection
+add_executable(test_caching_allocator_coalesce test_caching_allocator_coalesce.cpp)
+target_include_directories(test_caching_allocator_coalesce PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_caching_allocator_coalesce PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_caching_allocator_coalesce DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
 
 # Hardtanh activation
 add_executable(test_hardtanh test_hardtanh.cpp)
@@ -995,3 +1017,109 @@ tenzor_discover_tests(test_data_parallel_single_gpu_multidtype LABELS "unit" DIS
 add_executable(test_ddp_unused_params_multidtype test_ddp_unused_params_multidtype.cpp)
 target_link_libraries(test_ddp_unused_params_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_ddp_unused_params_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
+# Audit P0 #1 regression: softmax/log_softmax stride-from-shape bug
+add_executable(test_softmax_stride_audit test_softmax_stride_audit.cpp)
+target_link_libraries(test_softmax_stride_audit PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_softmax_stride_audit DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #2 regression: fused LayerNorm backward Float64 dtype bug
+add_executable(test_fused_layer_norm_backward_f64 test_fused_layer_norm_backward_f64.cpp)
+target_link_libraries(test_fused_layer_norm_backward_f64 PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_layer_norm_backward_f64 DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #3 regression: fill_kernel uninitialized memory for missing dtypes
+add_executable(test_fill_kernel_dtype_coverage test_fill_kernel_dtype_coverage.cpp)
+target_link_libraries(test_fill_kernel_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #9 regression: StridedFill switch default: break silently no-ops for
+# Complex64/128, UInt16/32/64, FP8, and quantized dtypes on non-contiguous views
+add_executable(test_strided_fill_dtype_coverage test_strided_fill_dtype_coverage.cpp)
+target_link_libraries(test_strided_fill_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_strided_fill_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #4 regression: scatter_add missing UInt16/UInt32/UInt64/Int16 dispatch
+add_executable(test_scatter_add_dtype_coverage test_scatter_add_dtype_coverage.cpp)
+target_link_libraries(test_scatter_add_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #5 regression: complex matmul TENZOR_HAS_MKL → TENZOR_USE_MKL guard fix
+add_executable(test_complex_matmul_mkl test_complex_matmul_mkl.cpp)
+target_link_libraries(test_complex_matmul_mkl PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_complex_matmul_mkl DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit P0 #6 regression: oneDNN LayerNorm/BatchNorm primitive cache keys must include eps
+add_executable(test_norm_eps_cache test_norm_eps_cache.cpp)
+target_link_libraries(test_norm_eps_cache PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_norm_eps_cache DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 2 Tasks 2.1+2.2: creation kernels (zeros/ones/full/arange/linspace) dtype coverage
+add_executable(test_creation_dtype_coverage test_creation_dtype_coverage.cpp)
+target_link_libraries(test_creation_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 2 Tasks 2.3+2.4+2.5+2.10: math kernels (matmul/bmm/dot/pow/clamp) dtype coverage + F64 precision
+add_executable(test_math_dtype_coverage test_math_dtype_coverage.cpp)
+target_link_libraries(test_math_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+add_executable(test_reductions_dtype_coverage test_reductions_dtype_coverage.cpp)
+target_link_libraries(test_reductions_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 3 Tasks 3.1+3.2+3.3: norm F64 native, NaN propagation, F64 Kahan
+add_executable(test_reduction_numerical_fixes test_reduction_numerical_fixes.cpp)
+target_link_libraries(test_reduction_numerical_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 4 Task 4.2: Int8/UInt8 mul/add/sub wrap-on-overflow consistency
+add_executable(test_int8_overflow_semantics test_int8_overflow_semantics.cpp)
+target_link_libraries(test_int8_overflow_semantics PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_int8_overflow_semantics DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 5 Task 5.4: Philox RNG thread-count-independent reproducibility
+add_executable(test_philox_reproducibility test_philox_reproducibility.cpp)
+target_link_libraries(test_philox_reproducibility PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_philox_reproducibility DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Audit Phase 5 Task 5.5: Deterministic mode forces single-threaded reductions
+add_executable(test_deterministic_mode test_deterministic_mode.cpp)
+target_link_libraries(test_deterministic_mode PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_deterministic_mode DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+
+# Task 4.3: F16/BF16 SIMD widen-convert-narrow in simd_elementwise.hpp
+add_executable(test_simd_elementwise_half test_simd_elementwise_half.cpp)
+target_link_libraries(test_simd_elementwise_half PRIVATE tenzor_core GTest::gtest_main)
+add_test(NAME cpu_test_simd_elementwise_half COMMAND test_simd_elementwise_half)
+set_tests_properties(cpu_test_simd_elementwise_half PROPERTIES TIMEOUT 120 LABELS "cpu;simd;half")
+
+# Task 6.1: MKL VML transcendental routing
+add_executable(test_mkl_vml test_mkl_vml.cpp)
+target_link_libraries(test_mkl_vml PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mkl_vml DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;vml")
+
+# Task 6.3: Int8 matmul via cblas_gemm_s8u8s32
+add_executable(test_int8_mkl_gemm test_int8_mkl_gemm.cpp)
+target_link_libraries(test_int8_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_int8_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;int8")
+
+# Task 6.4: BF16 matmul via MKL gemm_bf16bf16f32
+add_executable(test_bf16_mkl_gemm test_bf16_mkl_gemm.cpp)
+target_link_libraries(test_bf16_mkl_gemm PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_bf16_mkl_gemm DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;mkl;bf16")
+
+# Task 6.6: format_tag::any for oneDNN MatMul + Pooling primitives
+add_executable(test_onednn_format_any test_onednn_format_any.cpp)
+target_link_libraries(test_onednn_format_any PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;onednn")
+
+# Phase 9: _foreach_* multi-tensor optimizer ops
+add_executable(test_foreach_ops test_foreach_ops.cpp)
+target_link_libraries(test_foreach_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu;foreach")
+
+# Phase 11: New distribution sampler free functions
+add_executable(test_distributions_samplers test_distributions_samplers.cpp)
+target_link_libraries(test_distributions_samplers PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS cpu LABELS "cpu;distributions")

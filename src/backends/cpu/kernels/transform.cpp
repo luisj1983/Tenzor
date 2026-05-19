@@ -70,12 +70,99 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint8_t>(value);
         }
+    } else if (input.dtype() == DType::UInt16) {
+        auto* data = result.data<uint16_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint16_t>(value);
+        }
+    } else if (input.dtype() == DType::UInt32) {
+        auto* data = result.data<uint32_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint32_t>(value);
+        }
+    } else if (input.dtype() == DType::UInt64) {
+        auto* data = result.data<uint64_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint64_t>(value);
+        }
     } else if (input.dtype() == DType::Bool) {
         auto* data = result.data<bool>();
         bool val = (value != 0.0f);
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
+    } else if (input.dtype() == DType::Complex64) {
+        auto* data = result.data<std::complex<float>>();
+        std::complex<float> val(value, 0.0f);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        auto* data = result.data<std::complex<double>>();
+        std::complex<double> val(static_cast<double>(value), 0.0);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::FP8_E4M3) {
+        auto* data = result.data<FP8_E4M3>();
+        FP8_E4M3 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::FP8_E5M2) {
+        auto* data = result.data<FP8_E5M2>();
+        FP8_E5M2 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::QInt8) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        auto* data = result.data<int8_t>();
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const int8_t qbyte = static_cast<int8_t>(
+            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else if (input.dtype() == DType::QUInt8) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        auto* data = result.data<uint8_t>();
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const uint8_t qbyte = static_cast<uint8_t>(
+            std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else if (input.dtype() == DType::QInt4x2) {
+        if (input.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        // Two 4-bit signed values per byte; clamp to [-8, 7] then pack nibbles.
+        // For a uniform fill both nibbles equal qval, so:
+        //   byte = (qval & 0xF) | ((qval & 0xF) << 4)
+        auto* data = reinterpret_cast<uint8_t*>(result.data<int8_t>());
+        const int64_t qval = static_cast<int64_t>(std::round(static_cast<double>(value) / input.q_scale()))
+                             + input.q_zero_point();
+        const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+        const uint8_t qbyte = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = qbyte;
+        }
+    } else {
+        throw std::runtime_error(std::string("fill_kernel: unsupported dtype ") +
+                                 std::string(dtype_name(input.dtype())));
     }
 
     return result;
@@ -359,6 +446,15 @@ auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
         throw std::runtime_error("cat requires at least one tensor");
     }
 
+    // Defensive: normalize negative dim. The public op in src/ops/transform.cpp
+    // also normalizes, but the kernel is reachable directly via
+    // dispatch<OpId::Cat>(...) and a future caller must not cause OOB reads.
+    int64_t ndim = static_cast<int64_t>(tensors[0].ndim());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("cat_kernel: dim out of range");
+    }
+
     // Calculate output shape
     auto out_shape = std::vector<int64_t>(tensors[0].shape().begin(), tensors[0].shape().end());
     int64_t cat_dim_size = 0;
@@ -437,6 +533,14 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     auto shape = input.shape();
     auto strides = input.strides();
     int64_t ndim = shape.size();
+
+    // Defensive: normalize negative dim. The public op in src/ops/transform.cpp
+    // also normalizes, but the kernel is reachable directly via
+    // dispatch<OpId::Slice>(...) and a future caller must not cause OOB reads.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("slice_kernel: dim out of range");
+    }
 
     // Handle negative indices
     if (start < 0) start += shape[dim];

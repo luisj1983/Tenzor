@@ -42,7 +42,8 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Conv2dForward:     return OpType::Conv2d;
 
         // Normalization
-        case OpId::BatchNorm2dForward: return OpType::BatchNorm2d;
+        case OpId::BatchNorm2dForward:       return OpType::BatchNorm2d;
+        case OpId::BatchNorm2dForwardAffine: return OpType::BatchNorm2d;
         case OpId::LayerNorm:  return OpType::LayerNorm;
 
         // Reductions
@@ -67,10 +68,16 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Squeeze:    return OpType::Squeeze;
         case OpId::Unsqueeze:  return OpType::Unsqueeze;
         case OpId::Flatten:    return OpType::Flatten;
+        case OpId::Stack:      return OpType::Stack;
+        // Eager broadcast_to dispatches OpId::Expand; the IR represents
+        // it with OpType::Broadcast (handled by handle_broadcast which
+        // lowers to stablehlo.broadcast_in_dim).
+        case OpId::Expand:     return OpType::Broadcast;
 
         // Indexing
         case OpId::Slice:      return OpType::Slice;
         case OpId::Cat:        return OpType::Cat;
+        case OpId::Where:      return OpType::Where;
 
         // Linear
         case OpId::Linear:     return OpType::Linear;
@@ -80,6 +87,15 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
 
         // Dropout
         case OpId::Dropout:    return OpType::Dropout;
+
+        // Cast (GPU dispatch path; CPU rewrites in Tensor::to(dtype)).
+        case OpId::Cast:       return OpType::Cast;
+
+        // Index ops
+        case OpId::IndexSelect: return OpType::IndexSelect;
+
+        // Vision
+        case OpId::Interpolate: return OpType::Interpolate;
 
         default:
             return std::nullopt;
@@ -122,11 +138,36 @@ auto make_tracing_interceptor(
             input_ids.push_back(tracer.register_tensor(t));
         }
 
-        // Register output tensors
+        // Reorder BN2d's affine forward inputs from the eager kernel's
+        // canonical (x, mean, var, weight, bias) into the IR's expected
+        // (x, weight, bias, mean, var) so the MLIR lowering's BN2d
+        // handler (which mirrors stablehlo.batch_norm_inference's
+        // operand order) wires up the right scale/offset/mean/var
+        // tensors. Without this the lowered graph silently treats the
+        // running stats as scale/bias and vice versa.
+        if (op == OpId::BatchNorm2dForwardAffine && input_ids.size() == 5) {
+            auto [x_id, m_id, v_id, w_id, b_id] = std::tuple{
+                input_ids[0], input_ids[1], input_ids[2],
+                input_ids[3], input_ids[4]};
+            input_ids = {x_id, w_id, b_id, m_id, v_id};
+        }
+
+        // Register output tensors. Some fused forward kernels return
+        // auxiliary tensors (saved-mean, saved-rrms, indices, …) that
+        // the IR side doesn't model; surface only the *primary* output
+        // (results[0]) to avoid building Values with no consumer that
+        // later passes can't infer shapes for.
         std::vector<std::string> output_ids;
-        output_ids.reserve(results.size());
-        for (auto& t : results) {
-            output_ids.push_back(tracer.register_tensor(t));
+        if (op == OpId::BatchNorm2dForwardAffine ||
+            op == OpId::BatchNorm2dForward) {
+            if (!results.empty()) {
+                output_ids.push_back(tracer.register_tensor(results[0]));
+            }
+        } else {
+            output_ids.reserve(results.size());
+            for (auto& t : results) {
+                output_ids.push_back(tracer.register_tensor(t));
+            }
         }
 
         // Record the operation
@@ -160,6 +201,33 @@ auto make_tracing_interceptor(
         copy_float(AttrKey::Eps,      "eps");
         copy_float(AttrKey::Negative_slope, "negative_slope");
         copy_int(AttrKey::Dim,         "dim");
+        // Reduction keepdim flag — graph.cpp's infer_types() needs this to
+        // correctly compute reduced shapes (without it, infer_types
+        // defaults to keepdim=false and silently drops the kept dim).
+        auto copy_bool = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) traced.bool_attrs[name] = attrs.get_bool(k, false);
+        };
+        copy_bool(AttrKey::Keepdim, "keepdim");
+        // Slice indices: Start/End/Step are scalar ints used by Slice and
+        // a handful of indexing ops. The MLIR lowerer needs them to
+        // emit stablehlo.slice.
+        copy_int(AttrKey::Start, "start");
+        copy_int(AttrKey::End,   "end");
+        copy_int(AttrKey::Step,  "step");
+        // Cast op target dtype (stored as uint8 cast to int64).
+        copy_int(AttrKey::TargetDtype, "target_dtype");
+        // Reshape stores its target shape as a comma-separated string under
+        // AttrKey::Shape; parse to an int-list so consumers don't have to.
+        auto copy_int_list_to_vec = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) {
+                auto v = attrs.get_int_list(k);
+                if (!v.empty()) traced.vec_attrs[name] = std::move(v);
+            }
+        };
+        copy_int_list_to_vec(AttrKey::Shape, "shape");
+        copy_int_list_to_vec(AttrKey::Dims,  "dims");
+        copy_int_list_to_vec(AttrKey::Starts, "starts");
+        copy_int_list_to_vec(AttrKey::Ends,   "ends");
         copy_int(AttrKey::KernelSize,  "kernel_size");
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");

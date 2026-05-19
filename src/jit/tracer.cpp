@@ -87,6 +87,17 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Loop: return "Loop";
         case OpType::LayoutConvert: return "LayoutConvert";
         case OpType::Cast: return "Cast";
+        // Phase 13 / MVP-1 additions
+        case OpType::SiLU: return "SiLU";
+        case OpType::Where: return "Where";
+        case OpType::Stack: return "Stack";
+        case OpType::Broadcast: return "Broadcast";
+        case OpType::IndexSelect: return "IndexSelect";
+        case OpType::RMSNorm: return "RMSNorm";
+        case OpType::GQA: return "GQA";
+        case OpType::RoPE: return "RoPE";
+        case OpType::Padding: return "Padding";
+        case OpType::Interpolate: return "Interpolate";
         default: return "Unknown";
     }
 }
@@ -155,7 +166,18 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"If", OpType::If},
         {"Loop", OpType::Loop},
         {"LayoutConvert", OpType::LayoutConvert},
-        {"Cast", OpType::Cast}
+        {"Cast", OpType::Cast},
+        // Phase 13 / MVP-1 additions
+        {"SiLU", OpType::SiLU},
+        {"Where", OpType::Where},
+        {"Stack", OpType::Stack},
+        {"Broadcast", OpType::Broadcast},
+        {"IndexSelect", OpType::IndexSelect},
+        {"RMSNorm", OpType::RMSNorm},
+        {"GQA", OpType::GQA},
+        {"RoPE", OpType::RoPE},
+        {"Padding", OpType::Padding},
+        {"Interpolate", OpType::Interpolate},
     };
 
     auto it = string_to_type.find(str);
@@ -434,19 +456,30 @@ auto Tracer::record_op(TracedOp op) -> void {
 auto Tracer::register_tensor(const Tensor& tensor) -> std::string {
     void* ptr = const_cast<void*>(tensor.data_ptr());
 
-    auto it = tensor_id_map_.find(ptr);
-    if (it != tensor_id_map_.end()) {
-        return it->second;
-    }
-
-    auto id = generate_tensor_id();
-    tensor_id_map_[ptr] = id;
-
+    // Build the current logical view fingerprint up front so we can
+    // re-use a cached id only when shape/dtype match.
     std::vector<int64_t> shape;
+    shape.reserve(tensor.shape().size());
     for (auto s : tensor.shape()) {
         shape.push_back(s);
     }
 
+    auto it = tensor_id_map_.find(ptr);
+    if (it != tensor_id_map_.end()) {
+        const auto& info = tensor_info_[it->second];
+        if (info.shape == shape && info.dtype == tensor.dtype()) {
+            return it->second;
+        }
+        // data_ptr collision — the storage was reused (or this is a
+        // different logical view of the same buffer). Fall through and
+        // allocate a fresh id; we deliberately do NOT return the old id
+        // because the consumer's TensorInfo would otherwise carry the
+        // wrong shape, leading to "use of value expects different type
+        // than prior uses" errors at the MLIR lowering boundary.
+    }
+
+    auto id = generate_tensor_id();
+    tensor_id_map_[ptr] = id;
     tensor_info_[id] = TensorInfo(shape, tensor.dtype(), tensor.device());
     // Phase 6.4: retain the full Tensor so end_trace() can later decide
     // which tensors are parameters (constants) vs intermediates vs
@@ -458,6 +491,31 @@ auto Tracer::register_tensor(const Tensor& tensor) -> std::string {
 
 auto Tracer::register_tensor(const Variable& var) -> std::string {
     return register_tensor(var.tensor());
+}
+
+auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
+    // Always allocate a fresh ID — view-creating ops (reshape, transpose,
+    // permute, slice, cat-with-aliasing) produce results that share
+    // `data_ptr()` with one of the inputs but have different logical
+    // shape/strides; `register_tensor`'s dedup-by-data_ptr would alias
+    // them and silently lose the shape change.
+    auto id = generate_tensor_id();
+    std::vector<int64_t> shape;
+    for (auto s : tensor.shape()) {
+        shape.push_back(s);
+    }
+    tensor_info_[id] = TensorInfo(shape, tensor.dtype(), tensor.device());
+    tensor_storage_[id] = tensor;
+    // Overwrite the data_ptr → id mapping so downstream ops that look up
+    // by data_ptr (e.g. the dispatch interceptor's
+    // `register_tensor(input)`) see the *new* id corresponding to this
+    // view's logical shape, not the original tensor's. This is the only
+    // place we intentionally clobber `tensor_id_map_`.
+    void* ptr = const_cast<void*>(tensor.data_ptr());
+    if (ptr != nullptr) {
+        tensor_id_map_[ptr] = id;
+    }
+    return id;
 }
 
 auto Tracer::get_tensor_info(const std::string& tensor_id) const -> const TensorInfo& {

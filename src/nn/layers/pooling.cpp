@@ -6,6 +6,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -384,6 +385,22 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error("MaxPool2d: Unsupported dtype");
         }
     } // end CPU path
+
+    // Record into the active JIT trace if any. CPU's pointer loop above
+    // bypasses dispatch, so the dispatch interceptor never sees this op.
+    {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        if (tracer.is_tracing()) {
+            auto in_id  = tracer.register_tensor(contig_input.tensor());
+            auto out_id = tracer.register_new_tensor(output);
+            ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::MaxPool2d,
+                                       {in_id}, {out_id});
+            op.int_attrs["kernel_size"] = kernel_size_;
+            op.int_attrs["stride"]      = stride_;
+            op.int_attrs["padding"]     = padding_;
+            tracer.record_op(std::move(op));
+        }
+    }
 
     // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad());
@@ -1109,6 +1126,20 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
             output = output_f32.to(DType::BFloat16);
         } else {
             throw std::runtime_error("AdaptiveAvgPool2d: Unsupported dtype");
+        }
+    }
+
+    // JIT trace recording for the CPU path (which bypasses dispatch).
+    {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        if (tracer.is_tracing()) {
+            auto in_id  = tracer.register_tensor(input.tensor());
+            auto out_id = tracer.register_new_tensor(output);
+            ::tenzor::jit::TracedOp op(
+                ::tenzor::jit::OpType::AdaptiveAvgPool2d,
+                {in_id}, {out_id});
+            op.vec_attrs["output_size"] = {H_out, W_out};
+            tracer.record_op(std::move(op));
         }
     }
 

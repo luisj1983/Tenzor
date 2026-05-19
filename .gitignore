@@ -4,6 +4,12 @@ bin/
 lib/
 cmake-build-*/
 
+# Third-party binary distributions (large, not source). Kept here so
+# CMake can find them locally without polluting $HOME. See
+# docs/jit-mlir-setup.md for what should live here.
+third_party/iree_dist/
+.venv-iree/
+
 # Compiled files
 *.o
 *.so
@@ -65,3 +71,4 @@ crash-*
 
 # Local git worktrees
 .worktrees/
+.superpowers/

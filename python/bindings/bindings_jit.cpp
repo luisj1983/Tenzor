@@ -20,6 +20,10 @@
 #include <tenzor/lazy/lazy_tensor.hpp>
 #include <tenzor/nn/module.hpp>
 
+#ifdef TENZOR_HAS_MLIR_JIT
+#include <tenzor/jit/mlir/iree_compile.hpp>
+#endif
+
 namespace py = pybind11;
 
 namespace tenzor::python {
@@ -241,6 +245,128 @@ void register_jit(py::module_& m) {
     "Overload that specialises the compiled module for the supplied dummy\n"
     "input's dtype, device, and shape. Use this when compiling for non-CPU\n"
     "or non-Float32 inputs.");
+
+    // =========================================================================
+    // Group F — Debug UX: show_graph / show_mlir / show_stablehlo / show_iree
+    // and cache_stats. F.1 lands show_graph plus the shared
+    // CompiledFunctionHandle binding that the python/tenzor/jit.py decorator
+    // routes through (`_core.jit.compile_function`).
+    // =========================================================================
+
+    py::class_<tenzor::jit::CompiledFunction,
+               std::shared_ptr<tenzor::jit::CompiledFunction>>(
+        jit, "CompiledFunctionHandle",
+        "Underlying object held by the @tz.jit decorator. Exposes __call__\n"
+        "for invocation and is the argument accepted by the show_* free\n"
+        "functions on tenzor_core.jit.")
+        .def("__call__",
+             [](tenzor::jit::CompiledFunction& self,
+                const tenzor::Variable& x) {
+                 py::gil_scoped_release release;
+                 return self(x);
+             },
+             py::arg("input"));
+
+    jit.def("compile_function",
+        [](py::function fn, std::string backend, std::string target,
+           bool fallback_to_eager) {
+            (void)fallback_to_eager;  // Future: route into config_.
+            auto cpp_fn = [fn](const tenzor::Variable& input)
+                -> tenzor::Variable {
+                py::gil_scoped_acquire acquire;
+                auto result = fn(input);
+                return result.cast<tenzor::Variable>();
+            };
+
+            tenzor::jit::CompileConfig config;
+            config.backend = std::move(backend);
+            config.target  = std::move(target);
+
+            return std::make_shared<tenzor::jit::CompiledFunction>(
+                std::move(cpp_fn), std::move(config));
+        },
+        py::arg("fn"),
+        py::arg("backend") = "mlir",
+        py::arg("target")  = "auto",
+        py::arg("fallback_to_eager") = false,
+        "Build a CompiledFunctionHandle for @tz.jit. Use the returned\n"
+        "object's __call__ to invoke and the show_* free functions on\n"
+        "this module to introspect the pipeline.");
+
+    jit.def("show_graph",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_graph: passed object is not a tz.jit-compiled "
+                    "function (no _tz_compiled attribute)");
+            }
+            return cf->dump_graph(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Trace and dump the optimized tenzor::jit::Graph as text.");
+
+    jit.def("show_mlir",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_mlir: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_mlir(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Lower the traced graph and return the StableHLO text "
+        "(plugin-enabled).");
+
+    jit.def("show_stablehlo",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_stablehlo: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_stablehlo(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Lower the traced graph with plugin_enabled=false (custom_call ops "
+        "decomposed).");
+
+    jit.def("show_iree",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_iree: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_iree(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Run iree-compile --mlir-print-ir-after-all on the lowered MLIR "
+        "and return the captured pipeline trace.");
+
+#ifdef TENZOR_HAS_MLIR_JIT
+    jit.def("cache_stats", []() {
+        const auto s = tenzor::jit::mlir_jit::cache_stats();
+        py::dict d;
+        d["hits"]             = s.hits;
+        d["misses"]           = s.misses;
+        d["retraces"]         = s.retraces;
+        d["evictions"]        = s.evictions;
+        d["total_compile_ms"] = s.total_compile_ms;
+        return d;
+    },
+    "Return a dict of JIT cache counters: hits, misses, retraces, "
+    "evictions, total_compile_ms.");
+
+    jit.def("reset_cache_stats", []() {
+        tenzor::jit::mlir_jit::reset_cache_stats();
+    },
+    "Reset all JIT cache counters back to zero. Mainly for tests.");
+#endif
 
     // =========================================================================
     // Lazy Tensor API

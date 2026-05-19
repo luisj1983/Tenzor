@@ -50,12 +50,12 @@ namespace cpu {
     auto neg_kernel(const Tensor& input) -> Tensor;
     auto abs_kernel(const Tensor& input) -> Tensor;
     auto sign_kernel(const Tensor& input) -> Tensor;
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor;
-    auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor;
-    auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor;
+    auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor;
+    auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor;
     auto log_kernel(const Tensor& input) -> Tensor;
     auto exp_kernel(const Tensor& input) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent) -> Tensor;
     auto reciprocal_kernel(const Tensor& input) -> Tensor;
     auto floor_kernel(const Tensor& input) -> Tensor;
     auto ceil_kernel(const Tensor& input) -> Tensor;
@@ -398,12 +398,12 @@ namespace cpu {
     // Creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, const Device& device) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, const Device& device) -> Tensor;
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto arange_kernel(float start, float end, float step, DType dtype, const Device& device) -> Tensor;
-    auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
+    auto arange_kernel(double start, double end, double step, DType dtype, const Device& device) -> Tensor;
+    auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const Device& device) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
 
     // RNN - Cell operations
@@ -449,7 +449,7 @@ namespace cpu {
                                         const Tensor& h0) -> std::vector<Tensor>;
 
     // Embedding
-    auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
+    auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx = -1) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
     auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
@@ -1116,23 +1116,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+        double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
         return cpu::pow_kernel(inputs[0], exponent);
     });
 
     table.register_single_output_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
+        double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
         return cpu::clamp_kernel(inputs[0], min_val, max_val);
     });
 
     table.register_single_output_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
+        double min_val = attrs.get_float(AttrKey::Min, 0.0);
         return cpu::clamp_min_kernel(inputs[0], min_val);
     });
 
     table.register_single_output_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 0.0));
+        double max_val = attrs.get_float(AttrKey::Max, 0.0);
         return cpu::clamp_max_kernel(inputs[0], max_val);
     });
 
@@ -1521,20 +1521,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{running_mean, running_var};
     });
 
-    // Register both multi-output and single-output versions for LayerNorm
-    // Multi-output returns {output, mean, rstd} to match CUDA backend (needed for backward pass)
+    // Multi-output LayerNorm: returns {output, mean, rstd} for backward pass compatibility.
+    // The single-output variant was dropped (audit 8.1) — it caused a duplicate-registration
+    // warning and the backward pass always needs {mean, rstd}.
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, rstd] = cpu::layer_norm_kernel_with_stats(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
         return std::vector<Tensor>{output, mean, rstd};
-    });
-
-    // Single-output version for optimized dispatch (no vector allocation)
-    table.register_single_output_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1816,11 +1810,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Mirror Conv2dForward's per-axis-with-scalar-fallback pattern (audit 8.5).
+        // Read scalar keys as defaults, then override with per-axis keys when present.
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t sh = attrs.has(AttrKey::StrideH)   ? attrs.get_int(AttrKey::StrideH)   : s;
+        int64_t sw = attrs.has(AttrKey::StrideW)   ? attrs.get_int(AttrKey::StrideW)   : s;
+        int64_t ph = attrs.has(AttrKey::PaddingH)  ? attrs.get_int(AttrKey::PaddingH)  : p;
+        int64_t pw = attrs.has(AttrKey::PaddingW)  ? attrs.get_int(AttrKey::PaddingW)  : p;
+        int64_t dh = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+        int64_t dw = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
+        // Note: depthwise_conv2d_kernel currently accepts a single scalar for each
+        // of stride/padding/dilation. When the H and W values differ, we pass sh/ph/dh
+        // (H axis values). A future kernel update should accept separate H/W params.
+        (void)sw; (void)pw; (void)dw;
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::depthwise_conv2d_kernel(inputs[0], inputs[1], bias, stride, padding, dilation)};
+        return std::vector<Tensor>{cpu::depthwise_conv2d_kernel(inputs[0], inputs[1], bias, sh, ph, dh)};
     });
 
     // DeformableConv2d (DCNv2)
@@ -2111,10 +2117,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Embedding Operations
     // =========================================================================
-    TENZOR_REGISTER_BINARY_KERNEL(table, Embedding, cpu::embedding_kernel);
+    // Embedding: reads optional PaddingIdx attr; the kernel zeroes that output row.
+    table.register_single_output_kernel(OpId::Embedding,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                                  ? attrs.get_int(AttrKey::PaddingIdx)
+                                  : -1;
+            return cpu::embedding_kernel(inputs[0], inputs[1], padding_idx);
+        });
 
     // EmbeddingWithBoundsCheck — same as Embedding since CPU already validates indices
-    TENZOR_REGISTER_BINARY_KERNEL(table, EmbeddingWithBoundsCheck, cpu::embedding_kernel);
+    table.register_single_output_kernel(OpId::EmbeddingWithBoundsCheck,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                                  ? attrs.get_int(AttrKey::PaddingIdx)
+                                  : -1;
+            return cpu::embedding_kernel(inputs[0], inputs[1], padding_idx);
+        });
 
     table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -3241,8 +3260,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         // inputs: [input, running_mean, running_var, gamma, beta]
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+        // Shallow-copy: these must share storage with the caller's tensors so
+        // in-place running-stat updates propagate back.  If Tensor copy ever
+        // becomes deep, the mutation silently disappears — assert here to catch it.
         Tensor running_mean = inputs[1];
-        Tensor running_var = inputs[2];
+        Tensor running_var  = inputs[2];
+        if (running_mean.data_ptr() != inputs[1].data_ptr())
+            throw std::runtime_error(
+                "BatchNorm2dFusedTraining: running_mean copy does not share storage "
+                "with caller tensor — Tensor copy semantics changed to deep-copy?");
+        if (running_var.data_ptr() != inputs[2].data_ptr())
+            throw std::runtime_error(
+                "BatchNorm2dFusedTraining: running_var copy does not share storage "
+                "with caller tensor — Tensor copy semantics changed to deep-copy?");
         return cpu::batchnorm2d_fused_training_kernel(inputs[0], running_mean, running_var,
                                                        inputs[3], inputs[4], momentum, epsilon);
     });
@@ -3377,7 +3407,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Full, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
@@ -3411,9 +3441,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Arange, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
-        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 0.0);
+        double step = attrs.get_float(AttrKey::Step, 1.0);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
@@ -3421,8 +3451,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Linspace, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 1.0);
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
@@ -3503,17 +3533,74 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             }
             auto* ptr = base + byte_offset;
             switch (dtype) {
-                case DType::Float32:  *reinterpret_cast<float*>(ptr) = static_cast<float>(value); break;
-                case DType::Float64:  *reinterpret_cast<double*>(ptr) = value; break;
-                case DType::Int32:    *reinterpret_cast<int32_t*>(ptr) = static_cast<int32_t>(value); break;
-                case DType::Int64:    *reinterpret_cast<int64_t*>(ptr) = static_cast<int64_t>(value); break;
-                case DType::Int16:    *reinterpret_cast<int16_t*>(ptr) = static_cast<int16_t>(value); break;
-                case DType::Int8:     *reinterpret_cast<int8_t*>(ptr) = static_cast<int8_t>(value); break;
-                case DType::UInt8:    *reinterpret_cast<uint8_t*>(ptr) = static_cast<uint8_t>(value); break;
-                case DType::Float16:  *reinterpret_cast<Float16*>(ptr) = Float16(static_cast<float>(value)); break;
-                case DType::BFloat16: *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
-                case DType::Bool:     *reinterpret_cast<bool*>(ptr) = (value != 0.0); break;
-                default: break;
+                case DType::Float32:   *reinterpret_cast<float*>(ptr)    = static_cast<float>(value); break;
+                case DType::Float64:   *reinterpret_cast<double*>(ptr)   = value; break;
+                case DType::Int32:     *reinterpret_cast<int32_t*>(ptr)  = static_cast<int32_t>(value); break;
+                case DType::Int64:     *reinterpret_cast<int64_t*>(ptr)  = static_cast<int64_t>(value); break;
+                case DType::Int16:     *reinterpret_cast<int16_t*>(ptr)  = static_cast<int16_t>(value); break;
+                case DType::Int8:      *reinterpret_cast<int8_t*>(ptr)   = static_cast<int8_t>(value); break;
+                case DType::UInt8:     *reinterpret_cast<uint8_t*>(ptr)  = static_cast<uint8_t>(value); break;
+                case DType::UInt16:    *reinterpret_cast<uint16_t*>(ptr) = static_cast<uint16_t>(value); break;
+                case DType::UInt32:    *reinterpret_cast<uint32_t*>(ptr) = static_cast<uint32_t>(value); break;
+                case DType::UInt64:    *reinterpret_cast<uint64_t*>(ptr) = static_cast<uint64_t>(value); break;
+                case DType::Float16:   *reinterpret_cast<Float16*>(ptr)  = Float16(static_cast<float>(value)); break;
+                case DType::BFloat16:  *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
+                case DType::Bool:      *reinterpret_cast<bool*>(ptr)     = (value != 0.0); break;
+                case DType::Complex64:
+                    *reinterpret_cast<std::complex<float>*>(ptr) =
+                        std::complex<float>(static_cast<float>(value), 0.0f);
+                    break;
+                case DType::Complex128:
+                    *reinterpret_cast<std::complex<double>*>(ptr) =
+                        std::complex<double>(value, 0.0);
+                    break;
+                case DType::FP8_E4M3:
+                    *reinterpret_cast<FP8_E4M3*>(ptr) = FP8_E4M3(static_cast<float>(value));
+                    break;
+                case DType::FP8_E5M2:
+                    *reinterpret_cast<FP8_E5M2*>(ptr) = FP8_E5M2(static_cast<float>(value));
+                    break;
+                case DType::QInt8: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    *reinterpret_cast<int8_t*>(ptr) = static_cast<int8_t>(
+                        std::clamp(qv, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                    break;
+                }
+                case DType::QUInt8: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    *reinterpret_cast<uint8_t*>(ptr) = static_cast<uint8_t>(
+                        std::clamp(qv, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+                    break;
+                }
+                case DType::QInt4x2: {
+                    if (self.q_scale() == 0.0)
+                        throw std::runtime_error("StridedFill: quantized tensor requires "
+                                                 "quantization params (call set_quantization_params first)");
+                    const int64_t qv = static_cast<int64_t>(std::round(value / self.q_scale()))
+                                       + self.q_zero_point();
+                    const int64_t clamped = std::clamp(qv, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                    // QInt4x2 packs two 4-bit signed values per byte. Strides are at
+                    // byte granularity (the packed shape halves the last dimension), so
+                    // each element visited by this stride loop IS a whole byte. Writing
+                    // both nibbles is correct: both logical values in a visited byte
+                    // belong to the view. Sub-byte strides are not supported by the
+                    // framework, so adjacent-nibble corruption is structurally impossible.
+                    *reinterpret_cast<uint8_t*>(ptr) =
+                        static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                    break;
+                }
+                default:
+                    throw std::runtime_error(
+                        std::string("StridedFill: unsupported dtype ") +
+                        std::string(dtype_name(dtype)));
             }
         }
         return self;
@@ -4067,6 +4154,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMM: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
@@ -4076,6 +4170,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMV: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});

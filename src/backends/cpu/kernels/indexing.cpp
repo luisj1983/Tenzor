@@ -514,12 +514,20 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, c
         scatter_add_impl.template operator()<float>();
         output = output.to(DType::BFloat16);
     }
+    else if (input_c.dtype() == DType::Int8)  { scatter_add_impl.template operator()<int8_t>(); }
+    else if (input_c.dtype() == DType::Int16) { scatter_add_impl.template operator()<int16_t>(); }
     else if (input_c.dtype() == DType::Int32) { scatter_add_impl.template operator()<int32_t>(); }
     else if (input_c.dtype() == DType::Int64) { scatter_add_impl.template operator()<int64_t>(); }
-    else if (input_c.dtype() == DType::Int8) { scatter_add_impl.template operator()<int8_t>(); }
-    else if (input_c.dtype() == DType::UInt8) { scatter_add_impl.template operator()<uint8_t>(); }
+    else if (input_c.dtype() == DType::UInt8)  { scatter_add_impl.template operator()<uint8_t>(); }
+    else if (input_c.dtype() == DType::UInt16) { scatter_add_impl.template operator()<uint16_t>(); }
+    else if (input_c.dtype() == DType::UInt32) { scatter_add_impl.template operator()<uint32_t>(); }
+    else if (input_c.dtype() == DType::UInt64) { scatter_add_impl.template operator()<uint64_t>(); }
     else {
-        throw std::runtime_error("scatter_add: unsupported dtype");
+        // Bool: += on bool is UB-prone (no arithmetic semantics).
+        // Complex, FP8, quantized: not implemented for scatter_add.
+        throw std::runtime_error(
+            "scatter_add: unsupported dtype " +
+            std::string(dtype_name(input_c.dtype())));
     }
 
     return output;

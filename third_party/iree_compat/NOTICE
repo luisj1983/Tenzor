@@ -1,0 +1,52 @@
+third_party/iree_compat/
+========================
+
+The C-API header files under this directory are vendored unmodified from
+the IREE project (https://github.com/iree-org/iree), tag `iree-3.11.0`.
+
+Specifically, the files under:
+  - iree/base/
+  - iree/hal/
+  - iree/vm/
+  - iree/runtime/
+  - iree/io/
+
+are copies of the corresponding files in `runtime/src/iree/{base,hal,vm,runtime,io}/`
+in the upstream IREE source tree at that tag.
+
+License
+-------
+
+The IREE source is licensed under the Apache License, Version 2.0
+with LLVM Exceptions. See `LICENSE` in this directory for the full
+license text. Each file under this directory preserves its original
+SPDX header:
+
+  // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+  // Copyright <year> The IREE Authors
+
+Modifications
+-------------
+
+The files are vendored verbatim without modification. No patches have
+been applied.
+
+Why vendored?
+-------------
+
+The `third_party/iree_compat/` directory exists because the IREE binary
+distributions we encountered are incomplete: they ship the runtime static
+libraries (`libiree_runtime_*.a`) but omit several public headers (e.g.,
+`iree/base/allocator.h`, `iree/base/status.h`). Vendoring these 363
+headers from the authentic upstream source at tag `iree-3.11.0` is the
+only way to link against the runtime libraries without falling back to a
+header-incomplete dist.
+
+When upstream IREE binary distributions ship complete headers, this
+vendoring layer can be removed.
+
+Attribution
+-----------
+
+Contributors to the IREE project are listed in the upstream `AUTHORS`
+file at https://github.com/iree-org/iree/blob/iree-3.11.0/AUTHORS .

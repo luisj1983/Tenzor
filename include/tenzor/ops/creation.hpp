@@ -69,23 +69,9 @@ auto ones(std::vector<int64_t> shape,
  * @return New tensor filled with value
  */
 auto full(std::vector<int64_t> shape,
-         float value,
+         double value,
          DType dtype = DType::Float32,
          Device device = Device::cpu()) -> Tensor;
-
-/**
- * @brief Create tensor filled with specific value (double precision).
- *
- * @param shape Tensor dimensions
- * @param value Fill value (double precision)
- * @param dtype Element data type
- * @param device Target device
- * @return New tensor filled with value
- */
-auto full(std::vector<int64_t> shape,
-         double value,
-         DType dtype,
-         Device device) -> Tensor;
 
 /**
  * @brief Create uninitialized tensor.
@@ -237,6 +223,97 @@ auto exponential(const Tensor& rate) -> Tensor;
 /// @brief Sample from exponential distribution using a specific Generator.
 auto exponential(const Tensor& rate, Generator& generator) -> Tensor;
 
+// ============================================================================
+// New distribution samplers (Phase 11) — delegate to C++ distribution classes
+// ============================================================================
+
+/**
+ * @brief Sample from a Weibull distribution.
+ *
+ * @param scale Tensor of scale (lambda) parameters (> 0)
+ * @param concentration Tensor of concentration (k) parameters (> 0)
+ * @param shape Output shape; if empty, inferred from scale/concentration
+ * @return Tensor of Weibull samples
+ */
+auto weibull(const Tensor& scale, const Tensor& concentration,
+             std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a Laplace distribution.
+ *
+ * @param loc Tensor of location parameters
+ * @param scale Tensor of scale parameters (> 0)
+ * @param shape Output shape; if empty, inferred from loc/scale
+ * @return Tensor of Laplace samples
+ */
+auto laplace(const Tensor& loc, const Tensor& scale,
+             std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a Dirichlet distribution.
+ *
+ * @param concentration Tensor of concentration parameters (> 0); last dim = K
+ * @param shape Batch shape prefix; if empty, uses concentration.shape()[:-1]
+ * @return Tensor of Dirichlet samples (sum to 1 along last dim)
+ */
+auto dirichlet(const Tensor& concentration,
+               std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a HalfNormal distribution.
+ *
+ * @param scale Tensor of scale parameters (> 0)
+ * @param shape Output shape; if empty, inferred from scale
+ * @return Tensor of HalfNormal samples (non-negative)
+ */
+auto half_normal(const Tensor& scale,
+                 std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a VonMises distribution.
+ *
+ * @param loc Tensor of location (mu) parameters
+ * @param concentration Tensor of concentration (kappa) parameters (>= 0)
+ * @param shape Output shape; if empty, inferred from loc/concentration
+ * @return Tensor of VonMises samples in (-pi, pi]
+ */
+auto von_mises(const Tensor& loc, const Tensor& concentration,
+               std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a StudentT distribution.
+ *
+ * @param df Tensor of degrees-of-freedom parameters (> 0)
+ * @param loc Tensor of location parameters (default: 0)
+ * @param scale Tensor of scale parameters (> 0, default: 1)
+ * @param shape Output shape; if empty, inferred from df
+ * @return Tensor of StudentT samples
+ */
+auto student_t(const Tensor& df, const Tensor& loc, const Tensor& scale,
+               std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a NegativeBinomial distribution.
+ *
+ * @param total_count Tensor of total count parameters (r > 0)
+ * @param probs Tensor of success probability parameters (0 < p < 1)
+ * @param shape Output shape; if empty, inferred from total_count/probs
+ * @return Tensor of NegativeBinomial samples (Int64)
+ */
+auto negative_binomial(const Tensor& total_count, const Tensor& probs,
+                       std::vector<int64_t> shape = {}) -> Tensor;
+
+/**
+ * @brief Sample from a Binomial distribution.
+ *
+ * @param total_count Number of trials (n >= 0)
+ * @param probs Tensor of success probability parameters (0 <= p <= 1)
+ * @param shape Output shape; if empty, inferred from probs
+ * @return Tensor of Binomial samples (Int64)
+ */
+auto binomial(int64_t total_count, const Tensor& probs,
+              std::vector<int64_t> shape = {}) -> Tensor;
+
 /**
  * @brief Create 1D tensor with evenly spaced values.
  *
@@ -273,9 +350,9 @@ auto arange(double start, double end, double step = 1.0,
  * auto t = linspace(0.0f, 1.0f, 5);  // [0.0, 0.25, 0.5, 0.75, 1.0]
  * @endcode
  */
-auto linspace(float start, float end, int64_t steps,
-             DType dtype = DType::Float32,
-             Device device = Device::cpu()) -> Tensor;
+auto linspace(double start, double end, int64_t steps,
+              DType dtype = DType::Float32,
+              Device device = Device::cpu()) -> Tensor;
 
 /**
  * @brief Create a 1-D tensor of logarithmically spaced values.

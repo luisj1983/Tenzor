@@ -1373,22 +1373,27 @@ static auto compute_max_along_dim(const float* data, const std::vector<int64_t>&
 auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
     if (input.numel() == 0) return input.clone();
 
-    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
+    // Materialise a contiguous copy so all dtype branches can index with
+    // simple row-major arithmetic. Zero-cost when caller already passed a
+    // contiguous tensor (contiguous() short-circuits to a no-op).
+    auto cont_input = input.contiguous();
+
+    auto output = Tensor(std::vector<int64_t>(cont_input.shape().begin(), cont_input.shape().end()), cont_input.dtype(), cont_input.device());
 
     // Handle negative dimension
     if (dim < 0) {
-        dim += input.ndim();
+        dim += cont_input.ndim();
     }
 
-    if (dim < 0 || dim >= input.ndim()) {
+    if (dim < 0 || dim >= cont_input.ndim()) {
         throw std::runtime_error("Softmax dimension out of range");
     }
 
-    if (input.dtype() == DType::Float16) {
-        const Float16* in_data = input.data<Float16>();
+    if (cont_input.dtype() == DType::Float16) {
+        const Float16* in_data = cont_input.data<Float16>();
         Float16* out_data = output.data<Float16>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1429,11 +1434,11 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
+    } else if (cont_input.dtype() == DType::Float32) {
+        const float* in_data = cont_input.data<float>();
         float* out_data = output.data<float>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
 #ifdef TENZOR_USE_ONEDNN
@@ -1487,11 +1492,11 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* in_data = input.data<double>();
+    } else if (cont_input.dtype() == DType::Float64) {
+        const double* in_data = cont_input.data<double>();
         double* out_data = output.data<double>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1532,11 +1537,11 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::BFloat16) {
-        const BFloat16* in_data = input.data<BFloat16>();
+    } else if (cont_input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = cont_input.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1584,20 +1589,26 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
 // Backward: Jacobian-vector product
 // grad_input[i] = softmax[i] * (grad_output[i] - sum(grad_output * softmax))
 auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor {
-    if (output.numel() == 0) return output.clone();
-    auto grad_input = zeros_like(output);
+    // Materialise contiguous copies so row-major index arithmetic is correct
+    // for any non-contiguous (e.g. transposed) input tensors.
+    auto cont_grad_output = grad_output.contiguous();
+    auto cont_output      = output.contiguous();
+
+    if (cont_output.numel() == 0) return cont_output.clone();
+
+    auto grad_input = zeros_like(cont_output);
 
     // Handle negative dimension
     if (dim < 0) {
-        dim += output.ndim();
+        dim += cont_output.ndim();
     }
 
-    if (output.dtype() == DType::Float16) {
-        const Float16* grad_out_data = grad_output.data<Float16>();
-        const Float16* out_data = output.data<Float16>();
+    if (cont_output.dtype() == DType::Float16) {
+        const Float16* grad_out_data = cont_grad_output.data<Float16>();
+        const Float16* out_data = cont_output.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1628,12 +1639,12 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 }
             }
         }
-    } else if (output.dtype() == DType::Float32) {
-        const float* grad_out_data = grad_output.data<float>();
-        const float* out_data = output.data<float>();
+    } else if (cont_output.dtype() == DType::Float32) {
+        const float* grad_out_data = cont_grad_output.data<float>();
+        const float* out_data = cont_output.data<float>();
         float* grad_in_data = grad_input.data<float>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1664,12 +1675,12 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 }
             }
         }
-    } else if (output.dtype() == DType::Float64) {
-        const double* grad_out_data = grad_output.data<double>();
-        const double* out_data = output.data<double>();
+    } else if (cont_output.dtype() == DType::Float64) {
+        const double* grad_out_data = cont_grad_output.data<double>();
+        const double* out_data = cont_output.data<double>();
         double* grad_in_data = grad_input.data<double>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1699,12 +1710,12 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 }
             }
         }
-    } else if (output.dtype() == DType::BFloat16) {
-        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
-        const BFloat16* out_data = output.data<BFloat16>();
+    } else if (cont_output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = cont_grad_output.data<BFloat16>();
+        const BFloat16* out_data = cont_output.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1748,22 +1759,26 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
     if (input.numel() == 0) return input.clone();
 
-    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
+    // Materialise a contiguous copy so all dtype branches can index with
+    // simple row-major arithmetic. Zero-cost when already contiguous.
+    auto cont_input = input.contiguous();
+
+    auto output = Tensor(std::vector<int64_t>(cont_input.shape().begin(), cont_input.shape().end()), cont_input.dtype(), cont_input.device());
 
     // Handle negative dimension
     if (dim < 0) {
-        dim += input.ndim();
+        dim += cont_input.ndim();
     }
 
-    if (dim < 0 || dim >= input.ndim()) {
+    if (dim < 0 || dim >= cont_input.ndim()) {
         throw std::runtime_error("LogSoftmax dimension out of range");
     }
 
-    if (input.dtype() == DType::Float16) {
-        const Float16* in_data = input.data<Float16>();
+    if (cont_input.dtype() == DType::Float16) {
+        const Float16* in_data = cont_input.data<Float16>();
         Float16* out_data = output.data<Float16>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1803,11 +1818,11 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
+    } else if (cont_input.dtype() == DType::Float32) {
+        const float* in_data = cont_input.data<float>();
         float* out_data = output.data<float>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         // Compute max values for numerical stability
@@ -1856,11 +1871,11 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* in_data = input.data<double>();
+    } else if (cont_input.dtype() == DType::Float64) {
+        const double* in_data = cont_input.data<double>();
         double* out_data = output.data<double>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1899,11 +1914,11 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else if (input.dtype() == DType::BFloat16) {
-        const BFloat16* in_data = input.data<BFloat16>();
+    } else if (cont_input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = cont_input.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
 
-        auto shape_span = input.shape();
+        auto shape_span = cont_input.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1948,19 +1963,26 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
 
 // Backward: grad_input = grad_output - exp(log_softmax) * sum(grad_output)
 auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor {
-    auto grad_input = zeros_like(output);
+    // Materialise contiguous copies so row-major index arithmetic is correct
+    // for any non-contiguous (e.g. transposed) input tensors.
+    auto cont_grad_output = grad_output.contiguous();
+    auto cont_output      = output.contiguous();
+
+    if (cont_output.numel() == 0) return cont_output.clone();
+
+    auto grad_input = zeros_like(cont_output);
 
     // Handle negative dimension
     if (dim < 0) {
-        dim += output.ndim();
+        dim += cont_output.ndim();
     }
 
-    if (output.dtype() == DType::Float16) {
-        const Float16* grad_out_data = grad_output.data<Float16>();
-        const Float16* out_data = output.data<Float16>();
+    if (cont_output.dtype() == DType::Float16) {
+        const Float16* grad_out_data = cont_grad_output.data<Float16>();
+        const Float16* out_data = cont_output.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -1991,12 +2013,12 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                 }
             }
         }
-    } else if (output.dtype() == DType::Float32) {
-        const float* grad_out_data = grad_output.data<float>();
-        const float* out_data = output.data<float>();
+    } else if (cont_output.dtype() == DType::Float32) {
+        const float* grad_out_data = cont_grad_output.data<float>();
+        const float* out_data = cont_output.data<float>();
         float* grad_in_data = grad_input.data<float>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -2026,12 +2048,12 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                 }
             }
         }
-    } else if (output.dtype() == DType::Float64) {
-        const double* grad_out_data = grad_output.data<double>();
-        const double* out_data = output.data<double>();
+    } else if (cont_output.dtype() == DType::Float64) {
+        const double* grad_out_data = cont_grad_output.data<double>();
+        const double* out_data = cont_output.data<double>();
         double* grad_in_data = grad_input.data<double>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;
@@ -2061,12 +2083,12 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                 }
             }
         }
-    } else if (output.dtype() == DType::BFloat16) {
-        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
-        const BFloat16* out_data = output.data<BFloat16>();
+    } else if (cont_output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = cont_grad_output.data<BFloat16>();
+        const BFloat16* out_data = cont_output.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
 
-        auto shape_span = output.shape();
+        auto shape_span = cont_output.shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
         int64_t outer_size = 1;

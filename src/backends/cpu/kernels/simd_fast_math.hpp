@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
@@ -866,7 +867,7 @@ inline void gelu_batch_avx2(const float* input, float* output, size_t n) {
  * Optimized fast paths for common exponents
  */
 inline void pow_batch_avx2(const float* input, float* output, size_t n, float exponent) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 8) * 8;
 
     // Fast paths for common integer exponents
@@ -981,7 +982,7 @@ inline void pow_batch_avx2(const float* input, float* output, size_t n, float ex
  * @brief Process array with sin using SIMD + OpenMP
  */
 inline void sin_batch_avx2(const float* input, float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 8) * 8;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1000,7 +1001,7 @@ inline void sin_batch_avx2(const float* input, float* output, size_t n) {
  * @brief Process array with cos using SIMD + OpenMP
  */
 inline void cos_batch_avx2(const float* input, float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 8) * 8;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1020,7 +1021,7 @@ inline void cos_batch_avx2(const float* input, float* output, size_t n) {
  */
 inline void where_batch_avx2(const float* cond, const float* x, const float* y,
                              float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 8) * 8;
     __m256 zero = _mm256_setzero_ps();
 
@@ -1046,7 +1047,7 @@ inline void where_batch_avx2(const float* cond, const float* x, const float* y,
  * @brief Process leaky_relu with SIMD + OpenMP
  */
 inline void leaky_relu_batch_avx2(const float* input, float* output, size_t n, float alpha = 0.01f) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 8) * 8;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1071,7 +1072,7 @@ inline void leaky_relu_batch_avx2(const float* input, float* output, size_t n, f
  * Optimized fast paths for common exponents
  */
 inline void pow_batch_avx512(const float* input, float* output, size_t n, float exponent) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 16) * 16;
 
     // Fast paths for common integer exponents
@@ -1168,7 +1169,7 @@ inline void pow_batch_avx512(const float* input, float* output, size_t n, float 
  * @brief Process array with sin using AVX-512 + OpenMP
  */
 inline void sin_batch_avx512(const float* input, float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 16) * 16;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1191,7 +1192,7 @@ inline void sin_batch_avx512(const float* input, float* output, size_t n) {
  * @brief Process array with cos using AVX-512 + OpenMP
  */
 inline void cos_batch_avx512(const float* input, float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 16) * 16;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1215,7 +1216,7 @@ inline void cos_batch_avx512(const float* input, float* output, size_t n) {
  */
 inline void where_batch_avx512(const float* cond, const float* x, const float* y,
                                float* output, size_t n) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 16) * 16;
     __m512 zero = _mm512_setzero_ps();
 
@@ -1244,7 +1245,7 @@ inline void where_batch_avx512(const float* cond, const float* x, const float* y
  * @brief Process leaky_relu using AVX-512 + OpenMP
  */
 inline void leaky_relu_batch_avx512(const float* input, float* output, size_t n, float alpha = 0.01f) {
-    constexpr size_t OMP_THRESHOLD = 100000;
+    const size_t OMP_THRESHOLD = static_cast<size_t>(::tenzor::OmpThresholds::medium());
     const size_t simd_end = (n / 16) * 16;
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)

@@ -2107,6 +2107,66 @@ auto fused_conv2d_bn_relu_kernel(
 // FusedLayerNormBackward
 // =========================================================================
 
+// ---------------------------------------------------------------------------
+// Implementation: templatized on T so accumulators, loads and stores are
+// always done in the input precision.  Called for Float32 and Float64.
+// ---------------------------------------------------------------------------
+template <typename T>
+static void fused_layer_norm_backward_impl(
+    const T* in_data,
+    const T* go_data,
+    const T* mean_data,
+    const T* inv_std_data,
+    const T* w_data,
+    T*       gi_data,
+    T*       gw_data,
+    T*       gb_data,
+    int64_t  batch_size,
+    int64_t  norm_size)
+{
+    #pragma omp parallel if(batch_size > 16)
+    {
+        std::vector<T> local_gw(static_cast<size_t>(norm_size), T(0));
+        std::vector<T> local_gb(static_cast<size_t>(norm_size), T(0));
+
+        #pragma omp for
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const T* in_b = in_data + b * norm_size;
+            const T* go_b = go_data + b * norm_size;
+            T*       gi_b = gi_data + b * norm_size;
+            T m    = mean_data[b];
+            T rstd = inv_std_data[b];
+
+            // dot products needed to form grad_input
+            T ds = T(0);  // sum(grad_output * weight * normalized)
+            T db = T(0);  // sum(grad_output * weight)
+            for (int64_t j = 0; j < norm_size; ++j) {
+                T normalized = (in_b[j] - m) * rstd;
+                T go_w       = go_b[j] * w_data[j];
+                ds += go_w * normalized;
+                db += go_w;
+                local_gw[static_cast<size_t>(j)] += go_b[j] * normalized;
+                local_gb[static_cast<size_t>(j)] += go_b[j];
+            }
+
+            T inv_n = T(1) / static_cast<T>(norm_size);
+            for (int64_t j = 0; j < norm_size; ++j) {
+                T normalized = (in_b[j] - m) * rstd;
+                gi_b[j] = rstd * w_data[j] *
+                          (go_b[j] - inv_n * (db + normalized * ds));
+            }
+        }
+
+        #pragma omp critical
+        {
+            for (int64_t j = 0; j < norm_size; ++j) {
+                gw_data[j] += local_gw[static_cast<size_t>(j)];
+                gb_data[j] += local_gb[static_cast<size_t>(j)];
+            }
+        }
+    }
+}
+
 auto fused_layer_norm_backward_kernel(
     const Tensor& grad_output, const Tensor& input,
     const std::vector<int64_t>& normalized_shape,
@@ -2114,7 +2174,7 @@ auto fused_layer_norm_backward_kernel(
     const Tensor& weight) -> std::vector<Tensor> {
 
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor grad_cont  = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
 
     int64_t norm_size = 1;
     for (auto s : normalized_shape) {
@@ -2123,122 +2183,82 @@ auto fused_layer_norm_backward_kernel(
     int64_t batch_size = input_cont.numel() / norm_size;
 
     auto in_shape = input_cont.shape();
+    DType dtype   = input_cont.dtype();
+
     Tensor grad_input = Tensor::empty_uninitialized(
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
-        input_cont.dtype(), input_cont.device());
-    Tensor grad_weight({norm_size}, DType::Float32, input_cont.device());
-    Tensor grad_bias({norm_size}, DType::Float32, input_cont.device());
-    std::memset(grad_weight.data<float>(), 0, norm_size * sizeof(float));
-    std::memset(grad_bias.data<float>(), 0, norm_size * sizeof(float));
+        dtype, input_cont.device());
 
-    const float* mean_data = mean.data<float>();
-    const float* inv_std_data = inv_std.data<float>();
-
-    if (input_cont.dtype() == DType::Float32) {
-        const float* in_data = input_cont.data<float>();
-        const float* go_data = grad_cont.data<float>();
-        const float* w_data = weight.data<float>();
-        float* gi_data = grad_input.data<float>();
-        float* gw_data = grad_weight.data<float>();
-        float* gb_data = grad_bias.data<float>();
-
-        // Thread-local accumulators for grad_weight and grad_bias
-        #pragma omp parallel if(batch_size > 16)
-        {
-            std::vector<float> local_gw(norm_size, 0.0f);
-            std::vector<float> local_gb(norm_size, 0.0f);
-
-            #pragma omp for
-            for (int64_t b = 0; b < batch_size; ++b) {
-                const float* in_b = in_data + b * norm_size;
-                const float* go_b = go_data + b * norm_size;
-                float* gi_b = gi_data + b * norm_size;
-                float m = mean_data[b];
-                float rstd = inv_std_data[b];
-
-                // Compute dot products for grad_input
-                float ds = 0.0f;  // sum(grad_output * (input - mean))
-                float db = 0.0f;  // sum(grad_output * weight)
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    float normalized = (in_b[j] - m) * rstd;
-                    float go_w = go_b[j] * w_data[j];
-                    ds += go_w * normalized;
-                    db += go_w;
-                    local_gw[j] += go_b[j] * normalized;
-                    local_gb[j] += go_b[j];
-                }
-
-                float inv_n = 1.0f / static_cast<float>(norm_size);
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    float normalized = (in_b[j] - m) * rstd;
-                    gi_b[j] = rstd * w_data[j] * (go_b[j] - inv_n * (db + normalized * ds)) ;
-                }
-            }
-
-            #pragma omp critical
-            {
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    gw_data[j] += local_gw[j];
-                    gb_data[j] += local_gb[j];
-                }
-            }
-        }
-    } else if (input_cont.dtype() == DType::Float64) {
-        const double* in_data = input_cont.data<double>();
-        const double* go_data = grad_cont.data<double>();
-        const double* w_data = weight.data<double>();
-        double* gi_data = grad_input.data<double>();
-        float* gw_data = grad_weight.data<float>();
-        float* gb_data = grad_bias.data<float>();
-
-        #pragma omp parallel if(batch_size > 16)
-        {
-            std::vector<float> local_gw(norm_size, 0.0f);
-            std::vector<float> local_gb(norm_size, 0.0f);
-
-            #pragma omp for
-            for (int64_t b = 0; b < batch_size; ++b) {
-                const double* in_b = in_data + b * norm_size;
-                const double* go_b = go_data + b * norm_size;
-                double* gi_b = gi_data + b * norm_size;
-                double m = static_cast<double>(mean_data[b]);
-                double rstd = static_cast<double>(inv_std_data[b]);
-
-                double ds = 0.0;
-                double db = 0.0;
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    double normalized = (in_b[j] - m) * rstd;
-                    double go_w = go_b[j] * w_data[j];
-                    ds += go_w * normalized;
-                    db += go_w;
-                    local_gw[j] += static_cast<float>(go_b[j] * normalized);
-                    local_gb[j] += static_cast<float>(go_b[j]);
-                }
-
-                double inv_n = 1.0 / static_cast<double>(norm_size);
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    double normalized = (in_b[j] - m) * rstd;
-                    gi_b[j] = rstd * w_data[j] * (go_b[j] - inv_n * (db + normalized * ds));
-                }
-            }
-
-            #pragma omp critical
-            {
-                for (int64_t j = 0; j < norm_size; ++j) {
-                    gw_data[j] += local_gw[j];
-                    gb_data[j] += local_gb[j];
-                }
-            }
-        }
-    } else if (input_cont.dtype() == DType::Float16 || input_cont.dtype() == DType::BFloat16) {
-        // Convert to Float32, compute, convert back
+    // Float16 / BFloat16: widen-narrow shim — recurse with Float32 tensors,
+    // then cast the output back to the original dtype.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
         auto result = fused_layer_norm_backward_kernel(
             grad_output.to(DType::Float32), input.to(DType::Float32),
-            normalized_shape, mean, inv_std, weight.to(DType::Float32));
-        result[0] = result[0].to(input.dtype());
+            normalized_shape,
+            mean.to(DType::Float32), inv_std.to(DType::Float32),
+            weight.to(DType::Float32));
+        result[0] = result[0].to(dtype);  // grad_input
+        result[1] = result[1].to(dtype);  // grad_weight
+        result[2] = result[2].to(dtype);  // grad_bias
         return result;
+    }
+
+    // Allocate grad_weight and grad_bias with the input's dtype and
+    // zero-initialise them.  This is the primary fix for audit P0 #2:
+    // previously these were unconditionally DType::Float32.
+    Tensor grad_weight(std::vector<int64_t>{norm_size}, dtype, input_cont.device());
+    Tensor grad_bias  (std::vector<int64_t>{norm_size}, dtype, input_cont.device());
+
+    if (dtype == DType::Float32) {
+        std::memset(grad_weight.data<float>(), 0, static_cast<size_t>(norm_size) * sizeof(float));
+        std::memset(grad_bias.data<float>(),   0, static_cast<size_t>(norm_size) * sizeof(float));
+
+        Tensor mean_cont     = mean.is_contiguous()    ? mean    : mean.contiguous();
+        Tensor inv_std_cont  = inv_std.is_contiguous() ? inv_std : inv_std.contiguous();
+        Tensor weight_cont   = weight.is_contiguous()  ? weight  : weight.contiguous();
+
+        fused_layer_norm_backward_impl<float>(
+            input_cont.data<float>(),
+            grad_cont.data<float>(),
+            mean_cont.data<float>(),
+            inv_std_cont.data<float>(),
+            weight_cont.data<float>(),
+            grad_input.data<float>(),
+            grad_weight.data<float>(),
+            grad_bias.data<float>(),
+            batch_size, norm_size);
+
+    } else if (dtype == DType::Float64) {
+        std::memset(grad_weight.data<double>(), 0, static_cast<size_t>(norm_size) * sizeof(double));
+        std::memset(grad_bias.data<double>(),   0, static_cast<size_t>(norm_size) * sizeof(double));
+
+        // The saved mean and inv_std may have been stored as Float32 by the
+        // CPU forward path (see normalization.cpp, "CPU backward converts to
+        // Float32 anyway" comment).  Widen them to Float64 before dispatch so
+        // that data<double>() is safe to call.
+        Tensor mean_f64     = (mean.dtype()    == DType::Float64) ? mean    : mean.to(DType::Float64);
+        Tensor inv_std_f64  = (inv_std.dtype() == DType::Float64) ? inv_std : inv_std.to(DType::Float64);
+        Tensor weight_f64   = (weight.dtype()  == DType::Float64) ? weight  : weight.to(DType::Float64);
+
+        Tensor mean_cont    = mean_f64.is_contiguous()    ? mean_f64    : mean_f64.contiguous();
+        Tensor istd_cont    = inv_std_f64.is_contiguous() ? inv_std_f64 : inv_std_f64.contiguous();
+        Tensor weight_cont  = weight_f64.is_contiguous()  ? weight_f64  : weight_f64.contiguous();
+
+        fused_layer_norm_backward_impl<double>(
+            input_cont.data<double>(),
+            grad_cont.data<double>(),
+            mean_cont.data<double>(),
+            istd_cont.data<double>(),
+            weight_cont.data<double>(),
+            grad_input.data<double>(),
+            grad_weight.data<double>(),
+            grad_bias.data<double>(),
+            batch_size, norm_size);
+
     } else {
-        throw std::runtime_error("fused_layer_norm_backward: unsupported dtype");
+        throw std::runtime_error(
+            "fused_layer_norm_backward: unsupported dtype " +
+            std::string(dtype_name(dtype)));
     }
 
     return std::vector<Tensor>{grad_input, grad_weight, grad_bias};

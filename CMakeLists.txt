@@ -111,6 +111,192 @@ option(TENZOR_BUILD_LITE "Build lightweight mobile/embedded inference runtime" O
 option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
+# MLIR/StableHLO/IREE JIT pipeline (Phase 13)
+option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" ON)
+option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
+
+# Pinned version — IREE distribution bundles MLIR + StableHLO. The 2026-05-19
+# spec amendment (docs/superpowers/specs/2026-05-19-tz-jit-stablehlo-amendment-text-mlir.md)
+# folds MLIR/StableHLO into a single IREE dependency surface; Tenzor emits MLIR
+# as text and consumes IREE Compiler + Runtime C APIs only.
+set(TENZOR_IREE_VERSION       3.0   CACHE STRING "Required IREE version (informational)")
+
+if(TENZOR_USE_MLIR_JIT)
+    message(STATUS "Tenzor: MLIR JIT enabled (text-based, IREE-driven per 2026-05-19 amendment)")
+    message(STATUS "  IREE ${TENZOR_IREE_VERSION}")
+
+    # IREE Compiler (embedding API) and Runtime — single dependency surface per
+    # the 2026-05-19 spec amendment. MLIR/StableHLO come bundled inside IREE.
+    #
+    # Discovery (D + B hybrid):
+    #   1. $IREE_DIR / $TENZOR_IREE_DIR env var (explicit override)
+    #   2. third_party/iree_dist/lib/cmake/IREE inside the project tree
+    #      (gitignored; lives outside source control. See docs/jit-mlir-setup.md
+    #      for what should live here.)
+    #   3. System-installed IREE via find_package's default search
+    #   4. FetchContent source build (heavy: ~30-60 min cold, ~10 GB build dir
+    #      because IREE bundles LLVM/StableHLO). Triggered only when 1-3 fail.
+    set(_iree_local_dist "${CMAKE_SOURCE_DIR}/third_party/iree_dist")
+    if(DEFINED ENV{IREE_DIR})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{IREE_DIR}")
+    elseif(DEFINED ENV{TENZOR_IREE_DIR})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{TENZOR_IREE_DIR}")
+    elseif(EXISTS "${_iree_local_dist}/lib/cmake/IREE/IREECompilerConfig.cmake")
+        list(APPEND CMAKE_PREFIX_PATH "${_iree_local_dist}/lib/cmake/IREE")
+        message(STATUS "  Using project-local IREE at: ${_iree_local_dist}")
+    endif()
+
+    # Try find_package first; if that fails, FetchContent a source build.
+    # FIND_PACKAGE_ARGS isn't supported on some CMake variants so probe
+    # explicitly: try the find_package, fall through to fetch on failure.
+    find_package(IREECompiler CONFIG QUIET)
+    find_package(IREERuntime  CONFIG QUIET)
+    if(NOT IREECompiler_FOUND OR NOT IREERuntime_FOUND)
+        message(STATUS "  IREE not found locally — falling back to FetchContent")
+        message(WARNING
+            "  Building IREE from source. First build is ~30-60 min and "
+            "produces ~10 GB of intermediate artifacts (IREE bundles its own "
+            "LLVM + StableHLO). Subsequent builds are incremental. To skip "
+            "this, install IREE binaries to third_party/iree_dist/ or point "
+            "TENZOR_IREE_DIR at an existing install. See docs/jit-mlir-setup.md.")
+        include(FetchContent)
+        FetchContent_Declare(iree_src
+            GIT_REPOSITORY https://github.com/iree-org/iree.git
+            GIT_TAG iree-3.11.0
+            GIT_SUBMODULES_RECURSE TRUE)
+        set(IREE_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_SAMPLES         OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_TESTS           OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_DOCS            OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(iree_src)
+        # Re-find_package after the source build installs configs into
+        # ${iree_src_BINARY_DIR}/lib/cmake/IREE.
+        list(APPEND CMAKE_PREFIX_PATH "${iree_src_BINARY_DIR}")
+        find_package(IREECompiler REQUIRED CONFIG)
+        find_package(IREERuntime  REQUIRED CONFIG)
+    endif()
+
+    # Verify iree-compile binary too — needed by tests that prefer subprocess for
+    # debug-dumping AND by the GPU-target subprocess fallback in iree_paths.cpp
+    # when the linked libIREECompiler lacks a target the user requested.
+    #
+    # Discovery priority: explicit $TENZOR_IREE_COMPILE → pip-installed full-GPU
+    # venvs (have cuda/rocm out of the box) → CMake-found dist bin/ → $PATH. The
+    # pip wheel is preferred because the lite iree-dist commonly ships without
+    # cuda/rocm backends while the official `iree-base-compiler` wheel always
+    # has them.
+    find_program(IREE_COMPILE_EXECUTABLE iree-compile
+        HINTS
+            $ENV{TENZOR_IREE_COMPILE}
+            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
+            ${IREECompiler_DIR}/../../../bin
+        REQUIRED)
+    message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
+
+    # Probe iree-compile for its registered HAL target backends at configure
+    # time. Tests that target cuda/rocm can read these to make a hard FAIL vs
+    # SKIP decision: hardware present + binary missing target = fail loudly.
+    execute_process(
+        COMMAND "${IREE_COMPILE_EXECUTABLE}" --iree-hal-list-target-backends
+        OUTPUT_VARIABLE _iree_hal_targets_raw
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    message(STATUS "  iree-compile HAL targets:")
+    string(REPLACE "\n" ";" _iree_hal_targets_lines "${_iree_hal_targets_raw}")
+    set(IREE_COMPILE_HAL_TARGETS "")
+    foreach(_line IN LISTS _iree_hal_targets_lines)
+        string(STRIP "${_line}" _line_s)
+        if(NOT _line_s OR _line_s MATCHES "^Registered" OR _line_s MATCHES "^#")
+            continue()
+        endif()
+        list(APPEND IREE_COMPILE_HAL_TARGETS "${_line_s}")
+        message(STATUS "    - ${_line_s}")
+    endforeach()
+    set(IREE_COMPILE_HAL_TARGETS "${IREE_COMPILE_HAL_TARGETS}"
+        CACHE INTERNAL "HAL target backends supported by IREE_COMPILE_EXECUTABLE")
+
+    # iree-run-module discovery follows the same priority. Cached so tests can
+    # bake it into argv via -DTENZOR_IREE_RUN_MODULE_PATH=...
+    find_program(IREE_RUN_MODULE_EXECUTABLE iree-run-module
+        HINTS
+            $ENV{TENZOR_IREE_RUN_MODULE}
+            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
+            ${IREECompiler_DIR}/../../../bin
+        REQUIRED)
+    message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")
+
+    # ROCm runtime library discovery for the IREE HIP HAL driver.
+    #
+    # The IREE runtime dlopens libamdhip64.so + dependents (libhsa-runtime64,
+    # libamd_comgr, librocm-core, librocprofiler-register, libroctracer64,
+    # libhiprtc, libnuma) when an `hip` device is requested. Tenzor's Path C.2
+    # (see docs/superpowers/plans/2026-05-19-tz-jit-mlir-phase1a.md) decouples
+    # the JIT-test rocm gating from the Tenzor ROCm BACKEND being loaded — what
+    # matters at runtime is that the IREE runtime can dlopen a working set of
+    # ROCm libs.
+    #
+    # Discovery priority:
+    #   1. $TENZOR_ROCM_RUNTIME_LIB_DIR  — explicit override
+    #   2. ${TENZOR_ROCM_RUNTIME_LIB_DIR} — CMake-level override
+    #   3. /opt/rocm/lib                 — host ROCm install
+    #
+    # The discovery probes one canonical .so (libamdhip64.so) and rejects
+    # zero-byte files outright.
+    set(_tenzor_rocm_runtime_lib_dir "")
+    set(_rocm_candidate_dirs "")
+    if(DEFINED ENV{TENZOR_ROCM_RUNTIME_LIB_DIR})
+        list(APPEND _rocm_candidate_dirs "$ENV{TENZOR_ROCM_RUNTIME_LIB_DIR}")
+    endif()
+    if(TENZOR_ROCM_RUNTIME_LIB_DIR)
+        list(APPEND _rocm_candidate_dirs "${TENZOR_ROCM_RUNTIME_LIB_DIR}")
+    endif()
+    list(APPEND _rocm_candidate_dirs "/opt/rocm/lib")
+    foreach(_d IN LISTS _rocm_candidate_dirs)
+        if(EXISTS "${_d}/libamdhip64.so")
+            file(SIZE "${_d}/libamdhip64.so" _hip_so_size)
+            # Follow one level of symlinks to detect truncated targets.
+            get_filename_component(_real_hip_so "${_d}/libamdhip64.so" REALPATH)
+            if(EXISTS "${_real_hip_so}")
+                file(SIZE "${_real_hip_so}" _hip_so_size)
+            endif()
+            if(_hip_so_size GREATER 1024)
+                set(_tenzor_rocm_runtime_lib_dir "${_d}")
+                break()
+            endif()
+        endif()
+    endforeach()
+    if(_tenzor_rocm_runtime_lib_dir)
+        message(STATUS "  ROCm runtime libs (for IREE HIP HAL): "
+                "${_tenzor_rocm_runtime_lib_dir}")
+        set(TENZOR_ROCM_RUNTIME_LIB_DIR "${_tenzor_rocm_runtime_lib_dir}"
+            CACHE PATH "ROCm runtime libs for IREE HIP HAL dlopen." FORCE)
+    else()
+        message(STATUS "  ROCm runtime libs: none found "
+                "(rocm IREE-target tests will skip via "
+                "iree_can_initialize_default_device(\"hip\"))")
+        set(TENZOR_ROCM_RUNTIME_LIB_DIR ""
+            CACHE PATH "ROCm runtime libs for IREE HIP HAL dlopen." FORCE)
+    endif()
+
+    # IREE's iree-compile rocm target requires an explicit `--iree-rocm-target
+    # =<chip>` flag (gfx1150/gfx942/...); there is no default. Mirror the
+    # `CMAKE_HIP_ARCHITECTURES` value (auto-detected by the top-of-file ROCm
+    # block via rocm_agent_enumerator) into a separate cache var so the
+    # iree_compile.cpp subprocess invocation picks it up via the
+    # TENZOR_DEFAULT_ROCM_TARGET compile-time define. If no chip is
+    # detected, default to gfx1150 (the lee@archlinux box's Radeon 890M).
+    set(_tenzor_default_rocm_target "")
+    if(CMAKE_HIP_ARCHITECTURES)
+        list(GET CMAKE_HIP_ARCHITECTURES 0 _tenzor_default_rocm_target)
+    endif()
+    if(NOT _tenzor_default_rocm_target)
+        set(_tenzor_default_rocm_target "gfx1150")
+    endif()
+    set(TENZOR_DEFAULT_ROCM_TARGET "${_tenzor_default_rocm_target}"
+        CACHE STRING "Default --iree-rocm-target chip for iree-compile." FORCE)
+    message(STATUS "  Default IREE rocm target chip: ${TENZOR_DEFAULT_ROCM_TARGET}")
+endif()
+
 # Link-Time Optimization
 option(TENZOR_ENABLE_LTO "Enable Link-Time Optimization" OFF)
 if(TENZOR_ENABLE_LTO)
@@ -277,6 +463,14 @@ if(TENZOR_BUILD_PYTHON)
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
+        if(TENZOR_USE_MLIR_JIT)
+            # bindings/bindings_jit.cpp uses TENZOR_HAS_MLIR_JIT-guarded code
+            # (cache_stats / reset_cache_stats) so propagate the define.
+            target_compile_definitions(tenzor_python PRIVATE TENZOR_HAS_MLIR_JIT)
+            if(TARGET tenzor_jit_mlir)
+                target_link_libraries(tenzor_python PRIVATE tenzor_jit_mlir)
+            endif()
+        endif()
         if(TARGET tenzor_backend_cuda)
             target_link_libraries(tenzor_python PRIVATE tenzor_backend_cuda)
         endif()
@@ -307,7 +501,15 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/autograd.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/data.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/overrides.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/jit.py
         )
+        # Subpackages (directories with their own __init__.py) — copied via
+        # CMake's directory copy so that all files inside them land in the
+        # build tree without each having to be enumerated here.
+        file(GLOB _PY_SPECIAL_SOURCES CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/special/*.py)
+        file(GLOB _PY_DISTRIBUTIONS_SOURCES CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/distributions/*.py)
         set(_PY_STUBS
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
@@ -324,14 +526,35 @@ if(TENZOR_BUILD_PYTHON)
             get_filename_component(_fname ${_src} NAME)
             list(APPEND _PY_OUTPUTS ${CMAKE_BINARY_DIR}/python/tenzor/${_fname})
         endforeach()
+        foreach(_src ${_PY_SPECIAL_SOURCES})
+            get_filename_component(_fname ${_src} NAME)
+            list(APPEND _PY_OUTPUTS
+                ${CMAKE_BINARY_DIR}/python/tenzor/special/${_fname})
+        endforeach()
+        foreach(_src ${_PY_DISTRIBUTIONS_SOURCES})
+            get_filename_component(_fname ${_src} NAME)
+            list(APPEND _PY_OUTPUTS
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/${_fname})
+        endforeach()
 
         add_custom_command(
             OUTPUT ${_PY_OUTPUTS}
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_BINARY_DIR}/python/tenzor/special
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_SOURCES}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_STUBS}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_PY_SPECIAL_SOURCES}
+                ${CMAKE_BINARY_DIR}/python/tenzor/special/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_PY_DISTRIBUTIONS_SOURCES}
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/
             DEPENDS ${_PY_ALL_INPUTS}
+                ${_PY_SPECIAL_SOURCES} ${_PY_DISTRIBUTIONS_SOURCES}
             COMMENT "Copying Python files and type stubs to build directory"
         )
         add_custom_target(copy_python_files DEPENDS ${_PY_OUTPUTS})

@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/utils/config.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -557,8 +558,10 @@ static double parallel_simd_min_f64(const double* data, int64_t n) {
 static float parallel_simd_sum_f32(const float* data, int64_t n) {
     if (n == 0) return 0.0f;
 
-    // For small arrays, use single-threaded SIMD
-    if (n < REDUCTION_OMP_THRESHOLD) {
+    // Deterministic mode: force single-threaded path for bit-identical results
+    // regardless of OMP_NUM_THREADS. Parallel floating-point reductions are
+    // non-associative; different thread partitionings produce different rounding.
+    if (n < REDUCTION_OMP_THRESHOLD || ::tenzor::is_deterministic()) {
 #ifdef TENZOR_REDUCTION_AVX512
         return simd_sum_f32_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
@@ -579,7 +582,11 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 #ifdef _OPENMP
     max_threads = omp_get_max_threads();
 #endif
-    std::vector<float> partial_sums(max_threads, 0.0f);
+    // Pad each slot to a full cache line (64 bytes) to prevent false sharing:
+    // without padding 16 adjacent float slots share one 64-byte cache line and
+    // every store from one thread invalidates every other thread's line.
+    struct alignas(64) PaddedFloat { float v = 0.0f; char _pad[60]; };
+    std::vector<PaddedFloat> partial_sums(max_threads);
 
     #pragma omp parallel
     {
@@ -593,9 +600,9 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 
         if (start < end) {
 #ifdef TENZOR_REDUCTION_AVX512
-            partial_sums[tid] = simd_sum_f32_avx512(data + start, end - start);
+            partial_sums[tid].v = simd_sum_f32_avx512(data + start, end - start);
 #elif defined(TENZOR_REDUCTION_AVX2)
-            partial_sums[tid] = simd_sum_f32_avx2(data + start, end - start);
+            partial_sums[tid].v = simd_sum_f32_avx2(data + start, end - start);
 #else
             float local_sum = 0.0f;
             float local_comp = 0.0f;
@@ -605,7 +612,7 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
                 local_comp = (t - local_sum) - y;
                 local_sum = t;
             }
-            partial_sums[tid] = local_sum;
+            partial_sums[tid].v = local_sum;
 #endif
         }
     }
@@ -614,7 +621,7 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
     float total_sum = 0.0f;
     float comp = 0.0f;
     for (int i = 0; i < max_threads; ++i) {
-        float y = partial_sums[i] - comp;
+        float y = partial_sums[i].v - comp;
         float t = total_sum + y;
         comp = (t - total_sum) - y;
         total_sum = t;
@@ -623,9 +630,15 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
     return total_sum;
 }
 
-// Parallel SIMD max for float32
+// Parallel SIMD max for float32.
+// NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
 static float parallel_simd_max_f32(const float* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<float>::infinity();
+
+    // Fast NaN pre-scan: stop at the first NaN.
+    for (int64_t i = 0; i < n; ++i) {
+        if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
+    }
 
     if (n < REDUCTION_OMP_THRESHOLD) {
 #ifdef TENZOR_REDUCTION_AVX512
@@ -669,9 +682,15 @@ static float parallel_simd_max_f32(const float* data, int64_t n) {
     return global_max;
 }
 
-// Parallel SIMD min for float32
+// Parallel SIMD min for float32.
+// NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
 static float parallel_simd_min_f32(const float* data, int64_t n) {
     if (n == 0) return std::numeric_limits<float>::infinity();
+
+    // Fast NaN pre-scan: stop at the first NaN.
+    for (int64_t i = 0; i < n; ++i) {
+        if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
+    }
 
     if (n < REDUCTION_OMP_THRESHOLD) {
 #ifdef TENZOR_REDUCTION_AVX512
@@ -1109,9 +1128,45 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto dtype = input.dtype();
     const int64_t ndim = input.ndim();
 
-    // Mean only supports floating point types
+    // Integer and Bool dtypes: widen to Float32, compute mean, return Float32
+    // (PyTorch convention: integer mean returns Float32)
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::Int32 ||
+        dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
+        dtype == DType::UInt32 || dtype == DType::UInt64 || dtype == DType::Bool) {
+        auto f32_input = input.to(DType::Float32);
+        return mean_kernel(f32_input, dim, keepdim);
+    }
+
+    // Complex dtypes: sum then divide by count in complex domain
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        dim = normalize_dim(dim, ndim);
+        auto sum_result = sum_kernel(input, dim, keepdim);
+        int64_t count;
+        if (dim == REDUCE_ALL) {
+            count = input.numel();
+        } else {
+            count = input.shape()[dim];
+        }
+        const int64_t n = sum_result.numel();
+        if (dtype == DType::Complex64) {
+            auto* data = sum_result.data<std::complex<float>>();
+            const float scale = 1.0f / static_cast<float>(count);
+            for (int64_t i = 0; i < n; i++) {
+                data[i] *= scale;
+            }
+        } else {
+            auto* data = sum_result.data<std::complex<double>>();
+            const double scale = 1.0 / static_cast<double>(count);
+            for (int64_t i = 0; i < n; i++) {
+                data[i] *= scale;
+            }
+        }
+        return sum_result;
+    }
+
+    // Float-only path (Float16, BFloat16, Float32, Float64)
     if (dtype != DType::Float16 && dtype != DType::BFloat16 && dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float16, BFloat16, Float32, and Float64 are supported");
+        throw std::runtime_error("mean: unsupported dtype");
     }
 
     // Normalize negative dimension
@@ -1291,17 +1346,16 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<Float16>();
 
             if (dim == REDUCE_ALL) {
-                // Compute max in Float32
-                float max_val = std::numeric_limits<float>::lowest();
+                // Compute max in Float32; propagate NaN on first encounter.
                 const int64_t n = input.numel();
-                #pragma omp parallel for reduction(max:max_val) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) {
+                float max_val = static_cast<float>(input_data[0]);
+                bool saw_nan = std::isnan(max_val);
+                for (int64_t i = 1; i < n && !saw_nan; i++) {
                     float val = static_cast<float>(input_data[i]);
-                    if (val > max_val) {
-                        max_val = val;
-                    }
+                    if (std::isnan(val)) { saw_nan = true; break; }
+                    if (val > max_val) max_val = val;
                 }
-                output_data[0] = Float16(max_val);
+                output_data[0] = Float16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : max_val);
             } else {
                 // Dimensional reduction - compute in Float32
                 const int64_t dim_size = input_shape[dim];
@@ -1322,19 +1376,20 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    float max_val = std::numeric_limits<float>::lowest();
-                    for (int64_t i = 0; i < dim_size; i++) {
+                    indices[dim] = 0;
+                    int64_t in_idx0 = 0;
+                    for (int64_t d = 0; d < ndim; d++) in_idx0 += indices[d] * input_strides[d];
+                    float max_val = static_cast<float>(input_data[in_idx0]);
+                    bool saw_nan = std::isnan(max_val);
+                    for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
                         float val = static_cast<float>(input_data[in_idx]);
-                        if (val > max_val) {
-                            max_val = val;
-                        }
+                        if (std::isnan(val)) { saw_nan = true; break; }
+                        if (val > max_val) max_val = val;
                     }
-                    output_data[out_idx] = Float16(max_val);
+                    output_data[out_idx] = Float16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : max_val);
                 }
             }
             break;
@@ -1386,17 +1441,16 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<BFloat16>();
 
             if (dim == REDUCE_ALL) {
-                // Compute max in Float32
-                float max_val = std::numeric_limits<float>::lowest();
+                // Compute max in Float32; propagate NaN on first encounter.
                 const int64_t n = input.numel();
-                #pragma omp parallel for reduction(max:max_val) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) {
+                float max_val = static_cast<float>(input_data[0]);
+                bool saw_nan = std::isnan(max_val);
+                for (int64_t i = 1; i < n && !saw_nan; i++) {
                     float val = static_cast<float>(input_data[i]);
-                    if (val > max_val) {
-                        max_val = val;
-                    }
+                    if (std::isnan(val)) { saw_nan = true; break; }
+                    if (val > max_val) max_val = val;
                 }
-                output_data[0] = BFloat16(max_val);
+                output_data[0] = BFloat16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : max_val);
             } else {
                 // Dimensional reduction - compute in Float32
                 const int64_t dim_size = input_shape[dim];
@@ -1417,19 +1471,20 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    float max_val = std::numeric_limits<float>::lowest();
-                    for (int64_t i = 0; i < dim_size; i++) {
+                    indices[dim] = 0;
+                    int64_t in_idx0 = 0;
+                    for (int64_t d = 0; d < ndim; d++) in_idx0 += indices[d] * input_strides[d];
+                    float max_val = static_cast<float>(input_data[in_idx0]);
+                    bool saw_nan = std::isnan(max_val);
+                    for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
                         float val = static_cast<float>(input_data[in_idx]);
-                        if (val > max_val) {
-                            max_val = val;
-                        }
+                        if (std::isnan(val)) { saw_nan = true; break; }
+                        if (val > max_val) max_val = val;
                     }
-                    output_data[out_idx] = BFloat16(max_val);
+                    output_data[out_idx] = BFloat16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : max_val);
                 }
             }
             break;
@@ -1562,17 +1617,16 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<Float16>();
 
             if (dim == REDUCE_ALL) {
-                // Compute min in Float32
-                float min_val = std::numeric_limits<float>::max();
+                // Compute min in Float32; propagate NaN on first encounter.
                 const int64_t n = input.numel();
-                #pragma omp parallel for reduction(min:min_val) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) {
+                float min_val = static_cast<float>(input_data[0]);
+                bool saw_nan = std::isnan(min_val);
+                for (int64_t i = 1; i < n && !saw_nan; i++) {
                     float val = static_cast<float>(input_data[i]);
-                    if (val < min_val) {
-                        min_val = val;
-                    }
+                    if (std::isnan(val)) { saw_nan = true; break; }
+                    if (val < min_val) min_val = val;
                 }
-                output_data[0] = Float16(min_val);
+                output_data[0] = Float16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : min_val);
             } else {
                 // Dimensional reduction - compute in Float32
                 const int64_t dim_size = input_shape[dim];
@@ -1593,19 +1647,20 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    float min_val = std::numeric_limits<float>::max();
-                    for (int64_t i = 0; i < dim_size; i++) {
+                    indices[dim] = 0;
+                    int64_t in_idx0 = 0;
+                    for (int64_t d = 0; d < ndim; d++) in_idx0 += indices[d] * input_strides[d];
+                    float min_val = static_cast<float>(input_data[in_idx0]);
+                    bool saw_nan = std::isnan(min_val);
+                    for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
                         float val = static_cast<float>(input_data[in_idx]);
-                        if (val < min_val) {
-                            min_val = val;
-                        }
+                        if (std::isnan(val)) { saw_nan = true; break; }
+                        if (val < min_val) min_val = val;
                     }
-                    output_data[out_idx] = Float16(min_val);
+                    output_data[out_idx] = Float16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : min_val);
                 }
             }
             break;
@@ -1657,17 +1712,16 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<BFloat16>();
 
             if (dim == REDUCE_ALL) {
-                // Compute min in Float32
-                float min_val = std::numeric_limits<float>::max();
+                // Compute min in Float32; propagate NaN on first encounter.
                 const int64_t n = input.numel();
-                #pragma omp parallel for reduction(min:min_val) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) {
+                float min_val = static_cast<float>(input_data[0]);
+                bool saw_nan = std::isnan(min_val);
+                for (int64_t i = 1; i < n && !saw_nan; i++) {
                     float val = static_cast<float>(input_data[i]);
-                    if (val < min_val) {
-                        min_val = val;
-                    }
+                    if (std::isnan(val)) { saw_nan = true; break; }
+                    if (val < min_val) min_val = val;
                 }
-                output_data[0] = BFloat16(min_val);
+                output_data[0] = BFloat16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : min_val);
             } else {
                 // Dimensional reduction - compute in Float32
                 const int64_t dim_size = input_shape[dim];
@@ -1688,19 +1742,20 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    float min_val = std::numeric_limits<float>::max();
-                    for (int64_t i = 0; i < dim_size; i++) {
+                    indices[dim] = 0;
+                    int64_t in_idx0 = 0;
+                    for (int64_t d = 0; d < ndim; d++) in_idx0 += indices[d] * input_strides[d];
+                    float min_val = static_cast<float>(input_data[in_idx0]);
+                    bool saw_nan = std::isnan(min_val);
+                    for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
                         float val = static_cast<float>(input_data[in_idx]);
-                        if (val < min_val) {
-                            min_val = val;
-                        }
+                        if (std::isnan(val)) { saw_nan = true; break; }
+                        if (val < min_val) min_val = val;
                     }
-                    output_data[out_idx] = BFloat16(min_val);
+                    output_data[out_idx] = BFloat16(saw_nan ? std::numeric_limits<float>::quiet_NaN() : min_val);
                 }
             }
             break;
@@ -1717,16 +1772,67 @@ template<typename T>
 auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
     if (n == 0) throw std::runtime_error("argmax: input tensor is empty");
 
-    int64_t max_idx = 0;
-    T max_val = input_data[0];
-
-    for (int64_t i = 1; i < n; i++) {
-        if (input_data[i] > max_val) {
-            max_val = input_data[i];
-            max_idx = i;
+    // Small arrays: stay single-threaded (OMP overhead not worth it).
+    if (n < REDUCTION_OMP_THRESHOLD) {
+        int64_t max_idx = 0;
+        T max_val = input_data[0];
+        for (int64_t i = 1; i < n; i++) {
+            if (input_data[i] > max_val) {
+                max_val = input_data[i];
+                max_idx = i;
+            }
         }
+        return max_idx;
     }
 
+    // Large arrays: parallel per-thread argmax, then single-threaded reduce.
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+#endif
+    // Pad to cache line to avoid false sharing.
+    struct alignas(64) LocalMax {
+        T   val;
+        int64_t idx;
+        char _pad[64 - sizeof(T) - sizeof(int64_t) < 0 ? 0
+                                                        : 64 - sizeof(T) - sizeof(int64_t)];
+    };
+    std::vector<LocalMax> thread_max(max_threads, {input_data[0], 0, {}});
+
+    #pragma omp parallel
+    {
+        int tid = 0;
+        int nthreads = 1;
+#ifdef _OPENMP
+        tid      = omp_get_thread_num();
+        nthreads = omp_get_num_threads();
+#endif
+        int64_t chunk = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk;
+        int64_t end   = std::min(start + chunk, n);
+
+        T   local_val = (start < end) ? input_data[start] : input_data[0];
+        int64_t local_idx = (start < end) ? start : 0;
+
+        for (int64_t i = start + 1; i < end; i++) {
+            if (input_data[i] > local_val) {
+                local_val = input_data[i];
+                local_idx = i;
+            }
+        }
+        thread_max[tid].val = local_val;
+        thread_max[tid].idx = local_idx;
+    }
+
+    // Reduce across threads (sequential — tiny, ≤ max_threads iterations).
+    int64_t max_idx = thread_max[0].idx;
+    T       max_val = thread_max[0].val;
+    for (int t = 1; t < max_threads; t++) {
+        if (thread_max[t].val > max_val) {
+            max_val = thread_max[t].val;
+            max_idx = thread_max[t].idx;
+        }
+    }
     return max_idx;
 }
 
@@ -1933,6 +2039,72 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             if (dim == REDUCE_ALL) {
                 output_data[0] = argmax_impl(input_data, input.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            // Bool: false < true, so argmax returns index of first true
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<bool>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
             } else {
                 argmax_along_dim(input_data, output_data,
                                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -2253,6 +2425,72 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Int16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<int16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            // Bool: false < true, so argmin returns index of first false
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<bool>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
                                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -2973,8 +3211,12 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
 // the in-place vectorized "full reduction" path below does not generalize
 // to partial reductions without reshaping, and correctness matters more
 // than peak throughput for the dim-reduced case.
-static auto norm_kernel_dim_float32(const Tensor& input, float p,
-                                    int64_t dim, bool keepdim) -> Tensor {
+// Templatized per-dim norm kernel: T is the element type (float or double).
+// Accumulation is always done in double for both paths so that Float64 inputs
+// get full precision end-to-end without any F32 round-trip.
+template <typename T>
+static auto norm_kernel_dim(const Tensor& input, float p,
+                            int64_t dim, bool keepdim) -> Tensor {
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
@@ -2993,38 +3235,40 @@ static auto norm_kernel_dim_float32(const Tensor& input, float p,
     int64_t inner = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner *= input_shape[i];
 
+    // Output dtype matches input — Float32 → Float32, Float64 → Float64.
+    constexpr DType out_dtype = std::is_same_v<T, double> ? DType::Float64 : DType::Float32;
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
-    Tensor output(output_shape, DType::Float32, input.device());
-    auto* out_data = output.data<float>();
-    const auto* in_data = cont.data<float>();
+    Tensor output(output_shape, out_dtype, input.device());
+    auto* out_data = output.data<T>();
+    const auto* in_data = cont.data<T>();
 
-    auto reduce_slice = [&](int64_t o, int64_t i) -> float {
+    auto reduce_slice = [&](int64_t o, int64_t i) -> T {
         double acc = 0.0;
         if (std::isinf(p)) {
-            float m = 0.0f;
+            double m = 0.0;
             for (int64_t k = 0; k < reduce_sz; ++k) {
-                float v = std::abs(in_data[(o * reduce_sz + k) * inner + i]);
+                double v = std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]));
                 if (v > m) m = v;
             }
-            return m;
+            return static_cast<T>(m);
         }
         if (p == 1.0f) {
             for (int64_t k = 0; k < reduce_sz; ++k) {
-                acc += std::abs(in_data[(o * reduce_sz + k) * inner + i]);
+                acc += std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]));
             }
-            return static_cast<float>(acc);
+            return static_cast<T>(acc);
         }
         if (p == 2.0f) {
             for (int64_t k = 0; k < reduce_sz; ++k) {
-                float v = in_data[(o * reduce_sz + k) * inner + i];
-                acc += static_cast<double>(v) * v;
+                double v = static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]);
+                acc += v * v;
             }
-            return static_cast<float>(std::sqrt(acc));
+            return static_cast<T>(std::sqrt(acc));
         }
         for (int64_t k = 0; k < reduce_sz; ++k) {
-            acc += std::pow(std::abs(in_data[(o * reduce_sz + k) * inner + i]), p);
+            acc += std::pow(std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i])), static_cast<double>(p));
         }
-        return static_cast<float>(std::pow(acc, 1.0f / p));
+        return static_cast<T>(std::pow(acc, 1.0 / static_cast<double>(p)));
     };
 
     const int64_t slices = outer * inner;
@@ -3035,6 +3279,12 @@ static auto norm_kernel_dim_float32(const Tensor& input, float p,
         out_data[o * inner + i] = reduce_slice(o, i);
     }
     return output;
+}
+
+// Keep old name as thin wrapper for backward compatibility with any direct callers.
+static auto norm_kernel_dim_float32(const Tensor& input, float p,
+                                    int64_t dim, bool keepdim) -> Tensor {
+    return norm_kernel_dim<float>(input, p, dim, keepdim);
 }
 
 // Norm operation - compute Lp norm
@@ -3054,13 +3304,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             return norm_kernel_dim_float32(input, p, dim, keepdim);
         }
         if (input.dtype() == DType::Float64) {
-            // Build a Float32 view, reduce, cast back to Float64. The
-            // accuracy hit is negligible for typical normalization use
-            // cases (embedding norms, cosine sim) and avoids duplicating
-            // the kernel for every dtype.
-            auto as_f32 = input.to(DType::Float32);
-            auto out_f32 = norm_kernel_dim_float32(as_f32, p, dim, keepdim);
-            return out_f32.to(DType::Float64);
+            // Dispatch directly to the double-precision template; no F32
+            // round-trip, no precision loss.
+            return norm_kernel_dim<double>(input, p, dim, keepdim);
         }
         throw std::runtime_error(
             "norm: dim reduction only supported for Float32/Float64 on CPU "

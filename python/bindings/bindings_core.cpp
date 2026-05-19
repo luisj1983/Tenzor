@@ -43,6 +43,7 @@
 #include <tenzor/distributions/transformed.hpp>
 #include <tenzor/distributions/independent.hpp>
 #include <tenzor/distributions/mixture.hpp>
+#include <tenzor/ops/foreach.hpp>
 #include "../numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -4613,6 +4614,131 @@ Returns:
     io_mod.def("encode_png", &tenzor::io::encode_png,
         py::arg("tensor"),
         "Encode a uint8 CHW tensor to PNG bytes");
+
+    // -------------------------------------------------------------------------
+    // _foreach_* family — multi-tensor optimizer primitives (Phase 9-W2)
+    // -------------------------------------------------------------------------
+    m.def("_foreach_add",
+          static_cast<std::vector<Tensor>(*)(const std::vector<Tensor>&, const std::vector<Tensor>&)>(&tenzor::foreach_add),
+          py::arg("a"), py::arg("b"),
+          "Element-wise add over a list of tensor pairs.");
+    m.def("_foreach_add_",
+          [](std::vector<Tensor> a, const std::vector<Tensor>& b) {
+              tenzor::foreach_add_(a, b);
+              return a;
+          },
+          py::arg("a"), py::arg("b"),
+          "In-place element-wise add over a list of tensor pairs.");
+    m.def("_foreach_sub",
+          &tenzor::foreach_sub,
+          py::arg("a"), py::arg("b"),
+          "Element-wise sub over a list of tensor pairs.");
+    m.def("_foreach_sub_",
+          [](std::vector<Tensor> a, const std::vector<Tensor>& b) {
+              tenzor::foreach_sub_(a, b);
+              return a;
+          },
+          py::arg("a"), py::arg("b"),
+          "In-place element-wise sub over a list of tensor pairs.");
+    m.def("_foreach_mul",
+          &tenzor::foreach_mul,
+          py::arg("a"), py::arg("b"),
+          "Element-wise mul over a list of tensor pairs.");
+    m.def("_foreach_mul_",
+          [](std::vector<Tensor> a, const std::vector<Tensor>& b) {
+              tenzor::foreach_mul_(a, b);
+              return a;
+          },
+          py::arg("a"), py::arg("b"),
+          "In-place element-wise mul over a list of tensor pairs.");
+    m.def("_foreach_div",
+          &tenzor::foreach_div,
+          py::arg("a"), py::arg("b"),
+          "Element-wise div over a list of tensor pairs.");
+    m.def("_foreach_div_",
+          [](std::vector<Tensor> a, const std::vector<Tensor>& b) {
+              tenzor::foreach_div_(a, b);
+              return a;
+          },
+          py::arg("a"), py::arg("b"),
+          "In-place element-wise div over a list of tensor pairs.");
+    m.def("_foreach_neg",
+          &tenzor::foreach_neg,
+          py::arg("a"),
+          "Element-wise negation over a list of tensors.");
+    m.def("_foreach_neg_",
+          [](std::vector<Tensor> a) {
+              tenzor::foreach_neg_(a);
+              return a;
+          },
+          py::arg("a"),
+          "In-place element-wise negation over a list of tensors.");
+    m.def("_foreach_abs",
+          &tenzor::foreach_abs,
+          py::arg("a"),
+          "Element-wise absolute value over a list of tensors.");
+    m.def("_foreach_abs_",
+          [](std::vector<Tensor> a) {
+              tenzor::foreach_abs_(a);
+              return a;
+          },
+          py::arg("a"),
+          "In-place element-wise absolute value over a list of tensors.");
+    m.def("_foreach_sqrt",
+          &tenzor::foreach_sqrt,
+          py::arg("a"),
+          "Element-wise sqrt over a list of tensors.");
+    m.def("_foreach_sqrt_",
+          [](std::vector<Tensor> a) {
+              tenzor::foreach_sqrt_(a);
+              return a;
+          },
+          py::arg("a"),
+          "In-place element-wise sqrt over a list of tensors.");
+    m.def("_foreach_zero_",
+          [](std::vector<Tensor> a) {
+              tenzor::foreach_zero_(a);
+              return a;
+          },
+          py::arg("a"),
+          "Zero-fill each tensor in the list in-place.");
+    m.def("_foreach_copy",
+          &tenzor::foreach_copy,
+          py::arg("src"),
+          "Return deep copies of all tensors in the list.");
+    m.def("_foreach_addcdiv_",
+          [](std::vector<Tensor> self,
+             const std::vector<Tensor>& a,
+             const std::vector<Tensor>& b,
+             double scalar) {
+              tenzor::foreach_addcdiv_(self, a, b, scalar);
+              return self;
+          },
+          py::arg("self"), py::arg("a"), py::arg("b"), py::arg("scalar"),
+          "self[i] += scalar * a[i] / b[i] for each tensor.");
+    m.def("_foreach_addcmul_",
+          [](std::vector<Tensor> self,
+             const std::vector<Tensor>& a,
+             const std::vector<Tensor>& b,
+             double scalar) {
+              tenzor::foreach_addcmul_(self, a, b, scalar);
+              return self;
+          },
+          py::arg("self"), py::arg("a"), py::arg("b"), py::arg("scalar"),
+          "self[i] += scalar * a[i] * b[i] for each tensor.");
+    m.def("_foreach_lerp_",
+          [](std::vector<Tensor> self,
+             const std::vector<Tensor>& b,
+             double scalar) {
+              tenzor::foreach_lerp_(self, b, scalar);
+              return self;
+          },
+          py::arg("self"), py::arg("b"), py::arg("scalar"),
+          "self[i] = lerp(self[i], b[i], scalar) for each tensor.");
+    m.def("_foreach_norm",
+          &tenzor::foreach_norm,
+          py::arg("a"), py::arg("p") = 2.0,
+          "Compute p-norm of each tensor in the list.");
 
 } // register_core
 

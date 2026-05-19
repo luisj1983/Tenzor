@@ -9,15 +9,14 @@
  * - Zero-overhead dispatch after initialization
  * - Clean fallback hierarchy (AVX-512 → AVX2 → SSE → Scalar)
  * - Thread-safe initialization
+ * - Runtime ISA level override via TENZOR_FORCE_SIMD_LEVEL env var
  */
 
 #pragma once
 
 #include "tenzor/backends/cpu/simd.hpp"
-#include "simd_fast_math.hpp"
 #include <cstddef>
-#include <atomic>
-#include <mutex>
+#include <string>
 
 namespace tenzor {
 namespace cpu {
@@ -27,21 +26,27 @@ namespace dispatch {
 // Function pointer types
 // ============================================================================
 
-// Unary operations: out[i] = f(a[i])
+// Unary operations (float32): out[i] = f(a[i])
 using UnaryOp = void(*)(const float*, float*, size_t);
 
-// Binary operations: out[i] = f(a[i], b[i])
+// Binary operations (float32): out[i] = f(a[i], b[i])
 using BinaryOp = void(*)(const float*, const float*, float*, size_t);
 
-// Ternary operations: out[i] = f(a[i], b[i], c[i])
+// Ternary operations (float32): out[i] = f(a[i], b[i], c[i])
 using TernaryOp = void(*)(const float*, const float*, const float*, float*, size_t);
+
+// Unary operations (float64): out[i] = f(a[i])
+using UnaryOpF64 = void(*)(const double*, double*, size_t);
+
+// Binary operations (float64): out[i] = f(a[i], b[i])
+using BinaryOpF64 = void(*)(const double*, const double*, double*, size_t);
 
 // ============================================================================
 // Dispatch table
 // ============================================================================
 
 struct SIMDDispatch {
-    // Math operations
+    // Float32 math operations
     BinaryOp add;
     BinaryOp sub;
     BinaryOp mul;
@@ -51,14 +56,32 @@ struct SIMDDispatch {
     UnaryOp log;
     TernaryOp fma;
 
-    // Activation functions
+    // Float32 unary ops (in scope: neg, abs)
+    UnaryOp neg;
+    UnaryOp abs_f32;
+
+    // Float32 activation functions
     UnaryOp relu;
     UnaryOp sigmoid;
     UnaryOp tanh;
     UnaryOp gelu;
 
+    // Float64 binary ops
+    BinaryOpF64 add_f64;
+    BinaryOpF64 sub_f64;
+    BinaryOpF64 mul_f64;
+    BinaryOpF64 div_f64;
+
+    // Float64 unary ops
+    UnaryOpF64 sqrt_f64;
+    UnaryOpF64 neg_f64;
+    UnaryOpF64 abs_f64;
+
     // Initialization flag
     bool initialized;
+
+    // Active ISA level string (set during init, useful for testing)
+    const char* simd_level;
 };
 
 // Global dispatch table
@@ -73,8 +96,31 @@ extern SIMDDispatch g_dispatch;
  *
  * This function is thread-safe and will only initialize once.
  * Should be called early in program startup.
+ *
+ * Respects TENZOR_FORCE_SIMD_LEVEL env var:
+ *   "avx512"  — force AVX-512 (only if hardware supports it)
+ *   "avx2"    — force AVX2 (only if hardware supports it)
+ *   "sse2"    — force SSE2 scalar-width fallback
+ *   "scalar"  — force scalar fallback
  */
 void init_dispatch();
+
+/**
+ * @brief Re-initialize the dispatch table, re-reading TENZOR_FORCE_SIMD_LEVEL
+ *
+ * Intended for testing: allows forcing a different SIMD level mid-process.
+ * Not thread-safe with concurrent kernel calls — only use from single-threaded
+ * test code after setting/unsetting the env var.
+ */
+void reinit_dispatch();
+
+/**
+ * @brief Return the active SIMD level string ("avx512", "avx2", "sse2", "scalar")
+ *
+ * Returns the level that was selected when the dispatch table was last
+ * initialised. Valid after init_dispatch() or reinit_dispatch().
+ */
+std::string get_simd_level();
 
 /**
  * @brief Check if dispatch is initialized
@@ -169,6 +215,69 @@ inline void fast_tanh(const float* a, float* out, size_t size) {
  */
 inline void fast_gelu(const float* a, float* out, size_t size) {
     g_dispatch.gelu(a, out, size);
+}
+
+/**
+ * @brief Fast vectorized neg (float32): out[i] = -a[i]
+ */
+inline void fast_neg(const float* a, float* out, size_t size) {
+    g_dispatch.neg(a, out, size);
+}
+
+/**
+ * @brief Fast vectorized abs (float32): out[i] = |a[i]|
+ */
+inline void fast_abs_f32(const float* a, float* out, size_t size) {
+    g_dispatch.abs_f32(a, out, size);
+}
+
+/**
+ * @brief Fast vectorized add (float64): out[i] = a[i] + b[i]
+ */
+inline void fast_add_f64(const double* a, const double* b, double* out, size_t size) {
+    g_dispatch.add_f64(a, b, out, size);
+}
+
+/**
+ * @brief Fast vectorized sub (float64): out[i] = a[i] - b[i]
+ */
+inline void fast_sub_f64(const double* a, const double* b, double* out, size_t size) {
+    g_dispatch.sub_f64(a, b, out, size);
+}
+
+/**
+ * @brief Fast vectorized mul (float64): out[i] = a[i] * b[i]
+ */
+inline void fast_mul_f64(const double* a, const double* b, double* out, size_t size) {
+    g_dispatch.mul_f64(a, b, out, size);
+}
+
+/**
+ * @brief Fast vectorized div (float64): out[i] = a[i] / b[i]
+ */
+inline void fast_div_f64(const double* a, const double* b, double* out, size_t size) {
+    g_dispatch.div_f64(a, b, out, size);
+}
+
+/**
+ * @brief Fast vectorized sqrt (float64): out[i] = sqrt(a[i])
+ */
+inline void fast_sqrt_f64(const double* a, double* out, size_t size) {
+    g_dispatch.sqrt_f64(a, out, size);
+}
+
+/**
+ * @brief Fast vectorized neg (float64): out[i] = -a[i]
+ */
+inline void fast_neg_f64(const double* a, double* out, size_t size) {
+    g_dispatch.neg_f64(a, out, size);
+}
+
+/**
+ * @brief Fast vectorized abs (float64): out[i] = |a[i]|
+ */
+inline void fast_abs_f64(const double* a, double* out, size_t size) {
+    g_dispatch.abs_f64(a, out, size);
 }
 
 // ============================================================================

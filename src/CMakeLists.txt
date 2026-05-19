@@ -32,6 +32,7 @@ set(TENZOR_CORE_SOURCES
     ops/creation.cpp
     ops/philox_dropout.cpp   # F13/F22-followup: Philox-keyed dropout mask
     ops/math.cpp
+    ops/foreach.cpp
     ops/type_promotion.cpp
     ops/fp8_scaling.cpp
     ops/indexing.cpp
@@ -574,3 +575,19 @@ endif()
 
 # Build backends
 add_subdirectory(backends)
+
+# Phase 13 MLIR JIT pipeline (gated on TENZOR_USE_MLIR_JIT)
+if(TENZOR_USE_MLIR_JIT)
+    add_subdirectory(jit/mlir)
+    # Splice the MLIR JIT object files directly into tenzor_core (the OBJECT
+    # library itself is not in tenzor_core's install/export set, which CMake
+    # forbids; using $<TARGET_OBJECTS:...> embeds the .o files without
+    # exporting tenzor_jit_mlir as a separate target).
+    target_sources(tenzor_core PRIVATE $<TARGET_OBJECTS:tenzor_jit_mlir>)
+    target_link_libraries(tenzor_core PRIVATE
+        iree_compiler_API_SharedImpl
+        iree_runtime_runtime
+        OpenSSL::Crypto
+    )
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_MLIR_JIT)
+endif()

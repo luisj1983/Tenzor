@@ -11,6 +11,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "cpu_thread_config.hpp"
 #endif
 
 #ifndef _WIN32
@@ -80,10 +81,10 @@ namespace cpu {
     auto neg_kernel(const Tensor& input) -> Tensor;
     auto abs_kernel(const Tensor& input) -> Tensor;
     auto sign_kernel(const Tensor& input) -> Tensor;
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor;
     auto log_kernel(const Tensor& input) -> Tensor;
     auto exp_kernel(const Tensor& input) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent) -> Tensor;
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -491,23 +492,23 @@ public:
                 throw std::invalid_argument("clamp operation requires exactly 1 input");
             }
             // Parse min and max from attributes
-            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
+            double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+            double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
             return {cpu::clamp_kernel(inputs[0], min_val, max_val)};
         }
         else if (op_name == "clamp_min") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_min operation requires exactly 1 input");
             }
-            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-            return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity())};
+            double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+            return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<double>::infinity())};
         }
         else if (op_name == "clamp_max") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_max operation requires exactly 1 input");
             }
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
-            return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val)};
+            double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
+            return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<double>::infinity(), max_val)};
         }
         else if (op_name == "log") {
             if (inputs.size() != 1) {
@@ -525,7 +526,7 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("pow operation requires exactly 1 input");
             }
-            float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+            double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
             return {cpu::pow_kernel(inputs[0], exponent)};
         }
         else if (op_name == "relu") {
@@ -1174,25 +1175,8 @@ void register_cpu_kernels(BackendDispatchTable& table);
 // Export factory function
 extern "C" {
     Backend* create_backend() {
-        // Configure OpenMP to use all available hardware threads by default
-        // Users can override with OMP_NUM_THREADS environment variable
-#ifdef _OPENMP
-        if (std::getenv("OMP_NUM_THREADS") == nullptr) {
-            int num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-            omp_set_num_threads(num_threads);
-        }
-
-        // Warn if OpenMP is limited to 1 thread on a multi-core system.
-        // This can happen when another library (e.g., PyTorch, MKL) initializes
-        // the OpenMP runtime first with a different thread count.
-        if (omp_get_max_threads() == 1 && std::thread::hardware_concurrency() > 1) {
-            std::fprintf(stderr,
-                "[tenzor] Warning: OpenMP is limited to 1 thread on a %u-core system. "
-                "Set OMP_NUM_THREADS=%u before importing other libraries for full parallelism.\n",
-                std::thread::hardware_concurrency(),
-                std::thread::hardware_concurrency());
-        }
-#endif
+        // Single source of truth for OMP thread count: idempotent, once_flag guarded.
+        tenzor::backends::cpu::configure_omp_threads();
         return new CPUBackend();
     }
 

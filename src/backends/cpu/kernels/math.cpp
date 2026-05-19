@@ -38,10 +38,11 @@
 #include <omp.h>
 #endif
 
-// Intel MKL for optimized BLAS (5-10x faster GEMM)
+// Intel MKL for optimized BLAS (5-10x faster GEMM) and VML transcendentals
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #include <mkl_service.h>
+#include <mkl_vml.h>
 #endif
 
 // Intel oneDNN for optimized matrix operations (alternative to MKL)
@@ -574,6 +575,15 @@ static void matmul_microkernel_int8(
     }
 #endif
 }
+
+// NOTE on cblas_gemm_s8u8s32: The MKL 2025.3 build in this environment interprets
+// the A matrix as u8 (unsigned) rather than s8 (signed), contrary to the API
+// documentation. This makes cblas_gemm_s8u8s32 unusable for general S8×S8 matmul
+// without complex sign-decomposition workarounds that would negate any perf gain.
+// The blocked scalar path (matmul_blocked_int8) accumulates in i32 with correct
+// sign semantics and is used unconditionally for now.
+// TODO: revisit with MKL 2026.x or when running with dynamic linking of MKL that
+// supports CBLAS_INT8 mode.
 
 // Cache-blocked matrix multiplication (Int8) with OpenMP parallelization
 // Accumulates in int32 to avoid overflow, then saturates back to int8
@@ -1606,8 +1616,87 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const BFloat16* b_data = b_contig.data<BFloat16>();
             BFloat16* c_data = result.data<BFloat16>();
 
+#if defined(TENZOR_USE_MKL)
+            // Task 6.4: use MKL gemm_bf16bf16f32 (BF16 inputs, FP32 accumulation).
+            // MKL_BF16 is typedef'd as unsigned short, bit-compatible with BFloat16.
+            //
+            // Data is row-major. BLAS is column-major. The standard trick:
+            //   row-major C = A * B   ↔   col-major C^T = B^T * A^T
+            // So pass B as the first matrix and A as the second, both 'N' (no-transpose),
+            // with dimensions m=N, n=M, k=K and leading dims lda=N, ldb=K, ldc=N.
+            {
+                std::vector<float> c_fp32(static_cast<size_t>(M) * N);
+                const char transa = 'N', transb = 'N';
+                MKL_INT im = static_cast<MKL_INT>(M);
+                MKL_INT ik = static_cast<MKL_INT>(K);
+                MKL_INT in = static_cast<MKL_INT>(N);
+                float alpha = 1.0f, beta = 0.0f;
+                // col-major: C^T(N×M) = B^T(N×K) * A^T(K×M)
+                // m_arg=N, n_arg=M, k_arg=K, lda=N (leading dim of B), ldb=K, ldc=N
+                gemm_bf16bf16f32(&transa, &transb,
+                                 &in, &im, &ik,
+                                 &alpha,
+                                 reinterpret_cast<const MKL_BF16*>(b_data), &in,
+                                 reinterpret_cast<const MKL_BF16*>(a_data), &ik,
+                                 &beta, c_fp32.data(), &in);
+                // Narrow F32 → BF16
+                bfloat16_simd::convert_f32_to_bf16_batch(c_fp32.data(), c_data,
+                                                          static_cast<size_t>(M) * N);
+            }
+#else
             matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
+#endif
 
+        } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
+            const int16_t* a_data = a_contig.data<int16_t>();
+            const int16_t* b_data = b_contig.data<int16_t>();
+            int16_t* c_data = result.data<int16_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                int32_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<int32_t>(a_data[kk]) * static_cast<int32_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<int16_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::UInt16 && b_contig.dtype() == DType::UInt16) {
+            const uint16_t* a_data = a_contig.data<uint16_t>();
+            const uint16_t* b_data = b_contig.data<uint16_t>();
+            uint16_t* c_data = result.data<uint16_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint32_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<uint32_t>(a_data[kk]) * static_cast<uint32_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<uint16_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::Int64 && b_contig.dtype() == DType::Int64) {
+            const int64_t* a_data = a_contig.data<int64_t>();
+            const int64_t* b_data = b_contig.data<int64_t>();
+            int64_t* c_data = result.data<int64_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                int64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += a_data[kk] * b_data[kk * K + j];
+                c_data[j] = acc;
+            }
+        } else if (a_contig.dtype() == DType::UInt32 && b_contig.dtype() == DType::UInt32) {
+            const uint32_t* a_data = a_contig.data<uint32_t>();
+            const uint32_t* b_data = b_contig.data<uint32_t>();
+            uint32_t* c_data = result.data<uint32_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += static_cast<uint64_t>(a_data[kk]) * static_cast<uint64_t>(b_data[kk * K + j]);
+                c_data[j] = static_cast<uint32_t>(acc);
+            }
+        } else if (a_contig.dtype() == DType::UInt64 && b_contig.dtype() == DType::UInt64) {
+            const uint64_t* a_data = a_contig.data<uint64_t>();
+            const uint64_t* b_data = b_contig.data<uint64_t>();
+            uint64_t* c_data = result.data<uint64_t>();
+            for (int64_t j = 0; j < K; ++j) {
+                uint64_t acc = 0;
+                for (int64_t kk = 0; kk < N; ++kk)
+                    acc += a_data[kk] * b_data[kk * K + j];
+                c_data[j] = acc;
+            }
         } else {
             throw std::runtime_error(
                 "matmul unsupported dtype combination: " +
@@ -1684,10 +1773,30 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         const BFloat16* b_data = b_contig.data<BFloat16>();
         BFloat16* c_data = result.data<BFloat16>();
 
+#if defined(TENZOR_USE_MKL)
+        {
+            std::vector<float> c_fp32(static_cast<size_t>(M) * N);
+            const char transa = 'N', transb = 'N';
+            MKL_INT im = static_cast<MKL_INT>(M);
+            MKL_INT ik = static_cast<MKL_INT>(K);
+            MKL_INT in = static_cast<MKL_INT>(N);
+            float alpha = 1.0f, beta = 0.0f;
+            // col-major trick: C^T = B^T * A^T
+            gemm_bf16bf16f32(&transa, &transb,
+                             &in, &im, &ik,
+                             &alpha,
+                             reinterpret_cast<const MKL_BF16*>(b_data), &in,
+                             reinterpret_cast<const MKL_BF16*>(a_data), &ik,
+                             &beta, c_fp32.data(), &in);
+            bfloat16_simd::convert_f32_to_bf16_batch(c_fp32.data(), c_data,
+                                                      static_cast<size_t>(M) * N);
+        }
+#else
         matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
+#endif
 
     } else if (a_contig.dtype() == DType::Complex64 && b_contig.dtype() == DType::Complex64) {
-#ifdef TENZOR_HAS_MKL
+#ifdef TENZOR_USE_MKL
         MKL_Complex8 alpha = {1.0f, 0.0f};
         MKL_Complex8 beta = {0.0f, 0.0f};
         cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -1713,7 +1822,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #endif
 
     } else if (a_contig.dtype() == DType::Complex128 && b_contig.dtype() == DType::Complex128) {
-#ifdef TENZOR_HAS_MKL
+#ifdef TENZOR_USE_MKL
         MKL_Complex16 alpha = {1.0, 0.0};
         MKL_Complex16 beta = {0.0, 0.0};
         cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -1737,6 +1846,66 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 for (int64_t j = 0; j < N; ++j)
                     c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
 #endif
+
+    } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
+        const int16_t* a_data = a_contig.data<int16_t>();
+        const int16_t* b_data = b_contig.data<int16_t>();
+        int16_t* c_data = result.data<int16_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                int32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<int32_t>(a_data[i * K + k]) * static_cast<int32_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<int16_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::UInt16 && b_contig.dtype() == DType::UInt16) {
+        const uint16_t* a_data = a_contig.data<uint16_t>();
+        const uint16_t* b_data = b_contig.data<uint16_t>();
+        uint16_t* c_data = result.data<uint16_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<uint32_t>(a_data[i * K + k]) * static_cast<uint32_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<uint16_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::Int64 && b_contig.dtype() == DType::Int64) {
+        const int64_t* a_data = a_contig.data<int64_t>();
+        const int64_t* b_data = b_contig.data<int64_t>();
+        int64_t* c_data = result.data<int64_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                int64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += a_data[i * K + k] * b_data[k * N + j];
+                c_data[i * N + j] = acc;
+            }
+
+    } else if (a_contig.dtype() == DType::UInt32 && b_contig.dtype() == DType::UInt32) {
+        const uint32_t* a_data = a_contig.data<uint32_t>();
+        const uint32_t* b_data = b_contig.data<uint32_t>();
+        uint32_t* c_data = result.data<uint32_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += static_cast<uint64_t>(a_data[i * K + k]) * static_cast<uint64_t>(b_data[k * N + j]);
+                c_data[i * N + j] = static_cast<uint32_t>(acc);
+            }
+
+    } else if (a_contig.dtype() == DType::UInt64 && b_contig.dtype() == DType::UInt64) {
+        const uint64_t* a_data = a_contig.data<uint64_t>();
+        const uint64_t* b_data = b_contig.data<uint64_t>();
+        uint64_t* c_data = result.data<uint64_t>();
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) {
+                uint64_t acc = 0;
+                for (int64_t k = 0; k < K; ++k)
+                    acc += a_data[i * K + k] * b_data[k * N + j];
+                c_data[i * N + j] = acc;
+            }
 
     } else {
         throw std::runtime_error(
@@ -1968,10 +2137,22 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             c_data[i] = BFloat16(c_f32[i]);
         }
     } else {
-        throw std::runtime_error(
-            "bmm_kernel unsupported dtype: " +
-            std::string(dtype_name(a.dtype()))
-        );
+        // Generic fallback: loop matmul_kernel over batch dimension.
+        // Handles Complex64, Complex128, Int16, UInt16, Int64, UInt32, UInt64, etc.
+        size_t elem_bytes = output.element_size();
+        size_t slice_bytes = static_cast<size_t>(M * N) * elem_bytes;
+        char* out_base = static_cast<char*>(output.storage()->data());
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            auto a_slice = a_cont.narrow(0, batch, 1).reshape({M, K});
+            auto b_slice = b_cont.narrow(0, batch, 1).reshape({K, N});
+            auto c_slice = matmul_kernel(a_slice, b_slice);  // (M, N) contiguous result
+            // c_slice is a freshly-created contiguous tensor; copy into output batch slot.
+            std::memcpy(
+                out_base + static_cast<ptrdiff_t>(batch) * static_cast<ptrdiff_t>(slice_bytes),
+                c_slice.storage()->data(),
+                slice_bytes
+            );
+        }
     }
 
     return output;
@@ -2402,7 +2583,7 @@ auto abs_kernel(const Tensor& input) -> Tensor {
 }
 
 // Clamp kernel - clamps tensor values to [min_val, max_val]
-auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
+auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2410,13 +2591,15 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
 #ifdef TENZOR_HAS_AVX2
         // SIMD: Process 8 floats at a time with OpenMP
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 min_vec = _mm256_set1_ps(min_val);
-        const __m256 max_vec = _mm256_set1_ps(max_val);
+        const __m256 min_vec = _mm256_set1_ps(min_f);
+        const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2427,13 +2610,13 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         }
         // Handle remainder
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
+            out_data[i] = std::max(std::min(in_data[i], max_f), min_f);
         }
 #else
         // Scalar fallback with OpenMP
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
+            out_data[i] = std::max(std::min(in_data[i], max_f), min_f);
         }
 #endif
 
@@ -2441,8 +2624,8 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
-        double min_val_d = static_cast<double>(min_val);
-        double max_val_d = static_cast<double>(max_val);
+        double min_val_d = min_val;
+        double max_val_d = max_val;
 
 #ifdef TENZOR_HAS_AVX2
         // SIMD: Process 4 doubles at a time
@@ -2470,21 +2653,25 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
         // Convert to float, clamp, then convert back
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(std::min(val, max_val), min_val);
+            val = std::max(std::min(val, max_f), min_f);
             out_data[i] = Float16(val);
         }
 
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
+        float min_f = static_cast<float>(min_val);
+        float max_f = static_cast<float>(max_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(std::min(val, max_val), min_val);
+            val = std::max(std::min(val, max_f), min_f);
             out_data[i] = BFloat16(val);
         }
 
@@ -2496,7 +2683,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
 }
 
 // Clamp min kernel - clamps tensor values to min_val (x >= min_val)
-auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
+auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2504,11 +2691,12 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float min_f = static_cast<float>(min_val);
 
 #ifdef TENZOR_HAS_AVX2
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 min_vec = _mm256_set1_ps(min_val);
+        const __m256 min_vec = _mm256_set1_ps(min_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2517,19 +2705,19 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::max(in_data[i], min_val);
+            out_data[i] = std::max(in_data[i], min_f);
         }
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::max(in_data[i], min_val);
+            out_data[i] = std::max(in_data[i], min_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double min_val_d = static_cast<double>(min_val);
+        double min_val_d = min_val;
 
 #ifdef TENZOR_HAS_AVX2
         size_t simd_end = (n / 4) * 4;
@@ -2552,10 +2740,11 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float min_f = static_cast<float>(min_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::max(val, min_val);
+            val = std::max(val, min_f);
             out_data[i] = Float16(val);
         }
 
@@ -2567,7 +2756,7 @@ auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
 }
 
 // Clamp max kernel - clamps tensor values to max_val (x <= max_val)
-auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
+auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2575,11 +2764,12 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float max_f = static_cast<float>(max_val);
 
 #ifdef TENZOR_HAS_AVX2
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
-        const __m256 max_vec = _mm256_set1_ps(max_val);
+        const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += simd_width) {
@@ -2588,19 +2778,19 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::min(in_data[i], max_val);
+            out_data[i] = std::min(in_data[i], max_f);
         }
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::min(in_data[i], max_val);
+            out_data[i] = std::min(in_data[i], max_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double max_val_d = static_cast<double>(max_val);
+        double max_val_d = max_val;
 
 #ifdef TENZOR_HAS_AVX2
         size_t simd_end = (n / 4) * 4;
@@ -2623,10 +2813,11 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float max_f = static_cast<float>(max_val);
 
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            val = std::min(val, max_val);
+            val = std::min(val, max_f);
             out_data[i] = Float16(val);
         }
 
@@ -2647,6 +2838,10 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+#if defined(TENZOR_USE_MKL)
+        // MKL VML vsLn: IEEE log, internally vectorized + threaded
+        vsLn(static_cast<int>(n), in_data, out_data);
+#else
         // For small arrays, use single-threaded SIMD
         if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
@@ -2682,15 +2877,20 @@ auto log_kernel(const Tensor& input) -> Tensor {
                 }
             }
         }
+#endif // TENZOR_USE_MKL
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+#if defined(TENZOR_USE_MKL)
+        vdLn(static_cast<int>(n), in_data, out_data);
+#else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -2775,6 +2975,10 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+#if defined(TENZOR_USE_MKL)
+        // MKL VML vsExp: internally vectorized + threaded, beats AVX2 polynomial
+        vsExp(static_cast<int>(n), in_data, out_data);
+#else
         // For small arrays, use single-threaded SIMD
         if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
@@ -2810,15 +3014,20 @@ auto exp_kernel(const Tensor& input) -> Tensor {
                 }
             }
         }
+#endif // TENZOR_USE_MKL
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+#if defined(TENZOR_USE_MKL)
+        vdExp(static_cast<int>(n), in_data, out_data);
+#else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -2914,7 +3123,7 @@ auto exp_kernel(const Tensor& input) -> Tensor {
 }
 
 // Pow kernel - power function (SIMD + OpenMP optimized)
-auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
+auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2922,22 +3131,23 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        float exponent_f = static_cast<float>(exponent);
 
 #if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_data, out_data, n, exponent);
+        fast_math::pow_batch_avx512(in_data, out_data, n, exponent_f);
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_data, out_data, n, exponent);
+        fast_math::pow_batch_avx2(in_data, out_data, n, exponent_f);
 #else
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::pow(in_data[i], exponent);
+            out_data[i] = std::pow(in_data[i], exponent_f);
         }
 #endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        double exp_d = static_cast<double>(exponent);
+        double exp_d = exponent;
 
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
@@ -2947,6 +3157,7 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        float exponent_f = static_cast<float>(exponent);
 
         // Use temporary float buffer for SIMD
         std::vector<float> in_f32(n), out_f32(n);
@@ -2955,12 +3166,12 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
         }
 
 #if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent);
+        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent_f);
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent);
+        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent_f);
 #else
         for (size_t i = 0; i < n; ++i) {
-            out_f32[i] = std::pow(in_f32[i], exponent);
+            out_f32[i] = std::pow(in_f32[i], exponent_f);
         }
 #endif
         for (size_t i = 0; i < n; ++i) {
@@ -3840,13 +4051,77 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             output.data<double>()[0] = sum;
             break;
         }
+        case DType::Float16: {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            float sum = 0.0f;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]);
+            output.data<Float16>()[0] = Float16(sum);
+            break;
+        }
+        case DType::BFloat16: {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            float sum = 0.0f;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]);
+            output.data<BFloat16>()[0] = BFloat16(sum);
+            break;
+        }
+        case DType::Complex64: {
+            const std::complex<float>* a_data = a.data<std::complex<float>>();
+            const std::complex<float>* b_data = b.data<std::complex<float>>();
+            std::complex<float> sum{0.0f, 0.0f};
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<std::complex<float>>()[0] = sum;
+            break;
+        }
+        case DType::Complex128: {
+            const std::complex<double>* a_data = a.data<std::complex<double>>();
+            const std::complex<double>* b_data = b.data<std::complex<double>>();
+            std::complex<double> sum{0.0, 0.0};
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<std::complex<double>>()[0] = sum;
+            break;
+        }
+        case DType::UInt16: {
+            const uint16_t* a_data = a.data<uint16_t>();
+            const uint16_t* b_data = b.data<uint16_t>();
+            uint32_t sum = 0;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<uint32_t>(a_data[i]) * static_cast<uint32_t>(b_data[i]);
+            output.data<uint16_t>()[0] = static_cast<uint16_t>(sum);
+            break;
+        }
+        case DType::UInt32: {
+            const uint32_t* a_data = a.data<uint32_t>();
+            const uint32_t* b_data = b.data<uint32_t>();
+            uint64_t sum = 0;
+            for (int64_t i = 0; i < n; i++)
+                sum += static_cast<uint64_t>(a_data[i]) * static_cast<uint64_t>(b_data[i]);
+            output.data<uint32_t>()[0] = static_cast<uint32_t>(sum);
+            break;
+        }
+        case DType::UInt64: {
+            const uint64_t* a_data = a.data<uint64_t>();
+            const uint64_t* b_data = b.data<uint64_t>();
+            uint64_t sum = 0;
+            for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
+            output.data<uint64_t>()[0] = sum;
+            break;
+        }
         default:
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "dot", [&]() {
+                using acc_t = std::conditional_t<
+                    std::is_same_v<scalar_t, int64_t>, int64_t,
+                    std::conditional_t<std::is_unsigned_v<scalar_t>, uint64_t, int64_t>>;
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                scalar_t sum = 0;
-                for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
-                output.data<scalar_t>()[0] = sum;
+                acc_t sum = 0;
+                for (int64_t i = 0; i < n; i++)
+                    sum += static_cast<acc_t>(a_data[i]) * static_cast<acc_t>(b_data[i]);
+                output.data<scalar_t>()[0] = static_cast<scalar_t>(sum);
             });
             break;
     }
@@ -3870,7 +4145,9 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+#if defined(TENZOR_USE_MKL)
+            vsSin(static_cast<int>(n), in_data, out_data);
+#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
             fast_math::sin_batch_avx512(in_data, out_data, static_cast<size_t>(n));
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::sin_batch_avx2(in_data, out_data, static_cast<size_t>(n));
@@ -3885,10 +4162,14 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Float64: {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
+#if defined(TENZOR_USE_MKL)
+            vdSin(static_cast<int>(n), in_data, out_data);
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Complex64: {
@@ -3926,7 +4207,9 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+#if defined(TENZOR_USE_MKL)
+            vsCos(static_cast<int>(n), in_data, out_data);
+#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
             fast_math::cos_batch_avx512(in_data, out_data, static_cast<size_t>(n));
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::cos_batch_avx2(in_data, out_data, static_cast<size_t>(n));
@@ -3941,10 +4224,14 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Float64: {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
+#if defined(TENZOR_USE_MKL)
+            vdCos(static_cast<int>(n), in_data, out_data);
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Complex64: {
@@ -4649,6 +4936,69 @@ auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
     return result;
 }
 
+// Helper: apply a unary function via MKL VML (Float32/Float64) with scalar
+// fallback for Float16/BFloat16 and non-MKL builds.
+// VmlF32Fn: void(*)(int, const float*, float*)  — e.g. vsExp
+// VmlF64Fn: void(*)(int, const double*, double*) — e.g. vdExp
+// ScalarF32/ScalarF64: scalar fallbacks for tail/half types
+template<typename VmlF32Fn, typename VmlF64Fn, typename ScalarF32, typename ScalarF64>
+auto unary_vml_kernel(const Tensor& input,
+                      VmlF32Fn vml_f32, VmlF64Fn vml_f64,
+                      [[maybe_unused]] ScalarF32 scalar_f32, [[maybe_unused]] ScalarF64 scalar_f64,
+                      const char* op_name) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+#if defined(TENZOR_USE_MKL)
+        vml_f32(static_cast<int>(n), in_data, out_data);
+#else
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
+#endif
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+#if defined(TENZOR_USE_MKL)
+        vml_f64(static_cast<int>(n), in_data, out_data);
+#else
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
+#endif
+    } else if (input.dtype() == DType::Float16) {
+        // Widen to Float32, apply scalar op, narrow back
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+#if defined(TENZOR_USE_MKL)
+        std::vector<float> tmp_in(n), tmp_out(n);
+        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(tmp_out[i]);
+#else
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = Float16(scalar_f32(static_cast<float>(in_data[i])));
+#endif
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+#if defined(TENZOR_USE_MKL)
+        std::vector<float> tmp_in(n), tmp_out(n);
+        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(tmp_out[i]);
+#else
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = BFloat16(scalar_f32(static_cast<float>(in_data[i])));
+#endif
+    } else {
+        throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
+    }
+    return result;
+}
+
 // Helper: apply a unary function returning Bool tensor
 template<typename F32Fn, typename F64Fn>
 auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
@@ -4761,45 +5111,87 @@ auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f6
 } // anonymous namespace
 
 auto log2_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog2, vdLog2,
+        [](float x) { return std::log2(x); },
+        [](double x) { return std::log2(x); }, "log2");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log2(x); },
         [](double x) { return std::log2(x); }, "log2");
+#endif
 }
 
 auto log10_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog10, vdLog10,
+        [](float x) { return std::log10(x); },
+        [](double x) { return std::log10(x); }, "log10");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log10(x); },
         [](double x) { return std::log10(x); }, "log10");
+#endif
 }
 
 auto log1p_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsLog1p, vdLog1p,
+        [](float x) { return std::log1p(x); },
+        [](double x) { return std::log1p(x); }, "log1p");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::log1p(x); },
         [](double x) { return std::log1p(x); }, "log1p");
+#endif
 }
 
 auto exp2_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsExp2, vdExp2,
+        [](float x) { return std::exp2(x); },
+        [](double x) { return std::exp2(x); }, "exp2");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::exp2(x); },
         [](double x) { return std::exp2(x); }, "exp2");
+#endif
 }
 
 auto expm1_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsExpm1, vdExpm1,
+        [](float x) { return std::expm1(x); },
+        [](double x) { return std::expm1(x); }, "expm1");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::expm1(x); },
         [](double x) { return std::expm1(x); }, "expm1");
+#endif
 }
 
 auto erf_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsErf, vdErf,
+        [](float x) { return std::erf(x); },
+        [](double x) { return std::erf(x); }, "erf");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::erf(x); },
         [](double x) { return std::erf(x); }, "erf");
+#endif
 }
 
 auto erfc_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsErfc, vdErfc,
+        [](float x) { return std::erfc(x); },
+        [](double x) { return std::erfc(x); }, "erfc");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::erfc(x); },
         [](double x) { return std::erfc(x); }, "erfc");
+#endif
 }
 
 auto isnan_kernel(const Tensor& input) -> Tensor {
@@ -7019,9 +7411,15 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
 // --- Unary ops ---
 
 auto rsqrt_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsInvSqrt, vdInvSqrt,
+        [](float x) { return 1.0f / std::sqrt(x); },
+        [](double x) { return 1.0 / std::sqrt(x); }, "rsqrt");
+#else
     return unary_math_kernel(input,
         [](float x) { return 1.0f / std::sqrt(x); },
         [](double x) { return 1.0 / std::sqrt(x); }, "rsqrt");
+#endif
 }
 
 auto square_kernel(const Tensor& input) -> Tensor {
@@ -7031,21 +7429,39 @@ auto square_kernel(const Tensor& input) -> Tensor {
 }
 
 auto asinh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAsinh, vdAsinh,
+        [](float x) { return std::asinh(x); },
+        [](double x) { return std::asinh(x); }, "asinh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::asinh(x); },
         [](double x) { return std::asinh(x); }, "asinh");
+#endif
 }
 
 auto acosh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAcosh, vdAcosh,
+        [](float x) { return std::acosh(x); },
+        [](double x) { return std::acosh(x); }, "acosh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::acosh(x); },
         [](double x) { return std::acosh(x); }, "acosh");
+#endif
 }
 
 auto atanh_kernel(const Tensor& input) -> Tensor {
+#if defined(TENZOR_USE_MKL)
+    return unary_vml_kernel(input, vsAtanh, vdAtanh,
+        [](float x) { return std::atanh(x); },
+        [](double x) { return std::atanh(x); }, "atanh");
+#else
     return unary_math_kernel(input,
         [](float x) { return std::atanh(x); },
         [](double x) { return std::atanh(x); }, "atanh");
+#endif
 }
 
 // --- Binary floating-point ops ---

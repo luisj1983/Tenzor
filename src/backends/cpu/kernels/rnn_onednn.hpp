@@ -23,6 +23,8 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include "../cpu_thread_config.hpp"
+#include "onednn_cache.hpp"
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -36,53 +38,23 @@ namespace cpu {
 namespace rnn_onednn {
 
 // ============================================================================
-// Lazy-initialized thread-local engine and stream
+// oneDNN engine and stream — delegate to single per-thread instance
 // ============================================================================
 
+/// Returns the shared thread-local oneDNN engine (from onednn_cache.hpp).
 inline dnnl::engine& get_engine() {
-    static thread_local std::unique_ptr<dnnl::engine> engine;
+    // Ensure OMP thread count is configured before first use.
     static thread_local bool threads_configured = false;
-
     if (!threads_configured) {
         threads_configured = true;
-#ifdef _OPENMP
-        // Configure optimal thread count for oneDNN
-        // Use physical cores (not hyperthreaded) to avoid contention
-        unsigned int logical_cores = std::thread::hardware_concurrency();
-        unsigned int physical_cores = logical_cores;
-
-        // Detect physical cores via Linux sysfs
-        std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
-        if (siblings.good()) {
-            std::string line;
-            if (std::getline(siblings, line)) {
-                int threads_per_core = 1;
-                for (char c : line) {
-                    if (c == ',') threads_per_core++;
-                }
-                if (threads_per_core > 1) {
-                    physical_cores = logical_cores / threads_per_core;
-                }
-            }
-        }
-
-        int num_threads = std::max(1u, physical_cores);
-        omp_set_num_threads(num_threads);
-#endif
+        tenzor::backends::cpu::configure_omp_threads();
     }
-
-    if (!engine) {
-        engine = std::make_unique<dnnl::engine>(dnnl::engine::kind::cpu, 0);
-    }
-    return *engine;
+    return tenzor::cpu::get_onednn_engine();
 }
 
+/// Returns the shared thread-local oneDNN stream (from onednn_cache.hpp).
 inline dnnl::stream& get_stream() {
-    static thread_local std::unique_ptr<dnnl::stream> stream;
-    if (!stream) {
-        stream = std::make_unique<dnnl::stream>(get_engine());
-    }
-    return *stream;
+    return tenzor::cpu::get_onednn_stream();
 }
 
 // ============================================================================

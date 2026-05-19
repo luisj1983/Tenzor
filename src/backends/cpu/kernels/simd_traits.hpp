@@ -2,55 +2,26 @@
  * @file simd_traits.hpp
  * @brief SIMD dispatch traits for binary pointwise operations.
  *
- * Maps (Op, scalar_t) → best SIMD implementation at compile time.
- * Includes op tag types (AddOp, SubOp, MulOp, DivOp) and SimdTrait
- * specializations for Float32, Float64, Float16, BFloat16, and integer types.
+ * Maps (Op, scalar_t) → best SIMD implementation via runtime dispatch.
+ *
+ * For Float32 and Float64, SimdTrait specializations call through
+ * tenzor::cpu::dispatch::g_dispatch (the runtime function-pointer table
+ * populated by simd_dispatch.cpp at startup based on CPU feature detection).
+ * This ensures a binary built with -march=native on an AVX-512 host will
+ * NOT SIGILL on AVX2-only hardware when distributed.
+ *
+ * For integer types, Float16, and BFloat16 the compile-time paths are
+ * retained (integer SIMD is broadly available; Float16 uses F16C widen/narrow
+ * which is already guarded by __F16C__ at call-site).
  */
 
 #pragma once
 
+#include "simd_dispatch.hpp"      // tenzor::cpu::dispatch::g_dispatch
 #include "tenzor/core/dtype.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <complex>
-
-// Forward declarations for SIMD functions used by traits
-namespace tenzor::cpu::detail {
-    // These are defined in simd_fast_math.hpp / int_simd.hpp / float16_simd.hpp
-    void add_avx512_f32(const float*, const float*, float*, size_t);
-    void add_avx2_f32(const float*, const float*, float*, size_t);
-    void add_scalar(const float*, const float*, float*, size_t);
-    void add_avx512_f64(const double*, const double*, double*, size_t);
-    void add_avx2_f64(const double*, const double*, double*, size_t);
-    void add_scalar(const double*, const double*, double*, size_t);
-    void add_avx512_i32(const int32_t*, const int32_t*, int32_t*, size_t);
-    void add_avx512_i64(const int64_t*, const int64_t*, int64_t*, size_t);
-
-    void sub_avx512_f32(const float*, const float*, float*, size_t);
-    void sub_avx2_f32(const float*, const float*, float*, size_t);
-    void sub_scalar(const float*, const float*, float*, size_t);
-    void sub_avx512_f64(const double*, const double*, double*, size_t);
-    void sub_avx2_f64(const double*, const double*, double*, size_t);
-    void sub_scalar(const double*, const double*, double*, size_t);
-    void sub_avx512_i32(const int32_t*, const int32_t*, int32_t*, size_t);
-    void sub_avx512_i64(const int64_t*, const int64_t*, int64_t*, size_t);
-
-    void mul_avx512_f32(const float*, const float*, float*, size_t);
-    void mul_avx2_f32(const float*, const float*, float*, size_t);
-    void mul_scalar(const float*, const float*, float*, size_t);
-    void mul_avx512_f64(const double*, const double*, double*, size_t);
-    void mul_avx2_f64(const double*, const double*, double*, size_t);
-    void mul_scalar(const double*, const double*, double*, size_t);
-    void mul_avx512_i32(const int32_t*, const int32_t*, int32_t*, size_t);
-    void mul_avx512_i64(const int64_t*, const int64_t*, int64_t*, size_t);
-
-    void div_avx512_f32(const float*, const float*, float*, size_t);
-    void div_avx2_f32(const float*, const float*, float*, size_t);
-    void div_scalar(const float*, const float*, float*, size_t);
-    void div_avx512_f64(const double*, const double*, double*, size_t);
-    void div_avx2_f64(const double*, const double*, double*, size_t);
-    void div_scalar(const double*, const double*, double*, size_t);
-}
 
 namespace tenzor::cpu::int_simd {
     void add_i32(const int32_t*, const int32_t*, int32_t*, size_t);
@@ -166,45 +137,28 @@ struct SimdTrait<Op, BFloat16> {
 
 template<> struct SimdTrait<AddOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::add_avx512_f32(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::add_avx2_f32(a, b, c, n);
-#else
-        detail::add_scalar(a, b, c, n);
-#endif
+        // Runtime dispatch: table populated at startup by simd_dispatch.cpp
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.add(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<AddOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::add_avx512_f64(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::add_avx2_f64(a, b, c, n);
-#else
-        detail::add_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.add_f64(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<AddOp, int32_t> {
     static void apply(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::add_avx512_i32(a, b, c, n);
-#else
         int_simd::add_i32(a, b, c, n);
-#endif
     }
 };
 
 template<> struct SimdTrait<AddOp, int64_t> {
     static void apply(const int64_t* a, const int64_t* b, int64_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::add_avx512_i64(a, b, c, n);
-#else
         for (size_t i = 0; i < n; ++i) c[i] = a[i] + b[i];
-#endif
     }
 };
 
@@ -239,25 +193,15 @@ template<> struct SimdTrait<AddOp, Float16> {
 
 template<> struct SimdTrait<SubOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::sub_avx512_f32(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::sub_avx2_f32(a, b, c, n);
-#else
-        detail::sub_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.sub(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<SubOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::sub_avx512_f64(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::sub_avx2_f64(a, b, c, n);
-#else
-        detail::sub_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.sub_f64(a, b, c, n);
     }
 };
 
@@ -272,27 +216,29 @@ template<> struct SimdTrait<SubOp, Float16> {
 
 // --- MulOp specializations ---
 
+template<> struct SimdTrait<MulOp, int8_t> {
+    static void apply(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
+        int_simd::mul_i8(a, b, c, n);
+    }
+};
+
+template<> struct SimdTrait<MulOp, uint8_t> {
+    static void apply(const uint8_t* a, const uint8_t* b, uint8_t* c, size_t n) {
+        int_simd::mul_u8(a, b, c, n);
+    }
+};
+
 template<> struct SimdTrait<MulOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::mul_avx512_f32(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::mul_avx2_f32(a, b, c, n);
-#else
-        detail::mul_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.mul(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<MulOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::mul_avx512_f64(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::mul_avx2_f64(a, b, c, n);
-#else
-        detail::mul_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.mul_f64(a, b, c, n);
     }
 };
 
@@ -309,25 +255,15 @@ template<> struct SimdTrait<MulOp, Float16> {
 
 template<> struct SimdTrait<DivOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::div_avx512_f32(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::div_avx2_f32(a, b, c, n);
-#else
-        detail::div_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.div(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<DivOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-#ifdef TENZOR_HAS_AVX512
-        detail::div_avx512_f64(a, b, c, n);
-#elif defined(TENZOR_HAS_AVX2)
-        detail::div_avx2_f64(a, b, c, n);
-#else
-        detail::div_scalar(a, b, c, n);
-#endif
+        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        dispatch::g_dispatch.div_f64(a, b, c, n);
     }
 };
 

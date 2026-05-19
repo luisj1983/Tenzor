@@ -62,21 +62,12 @@ using gemm_int = MKL_INT;
 // No MKL - check for oneDNN or fall back to generic CBLAS
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #define TENZOR_LSTM_USE_ONEDNN_GEMM 1
 
-// Thread-local oneDNN engine and stream for LSTM GEMM operations.
-// Safe: LSTM sequence processing is single-threaded (OMP parallelism is at batch
-// dimension in the caller, not inside these GEMM calls).
+// Use shared per-thread oneDNN engine/stream from onednn_cache.hpp
+// (eliminates a duplicate engine per thread).
 namespace {
-static thread_local dnnl::engine* g_lstm_engine = nullptr;
-static thread_local dnnl::stream* g_lstm_stream = nullptr;
-
-inline void ensure_lstm_dnnl_engine() {
-    if (!g_lstm_engine) {
-        g_lstm_engine = new dnnl::engine(dnnl::engine::kind::cpu, 0);
-        g_lstm_stream = new dnnl::stream(*g_lstm_engine);
-    }
-}
 
 inline void onednn_sgemm_nt(
     int64_t M, int64_t N, int64_t K,
@@ -85,9 +76,8 @@ inline void onednn_sgemm_nt(
     float beta, float* C, int64_t ldc
 ) {
     (void)alpha; (void)beta;
-    ensure_lstm_dnnl_engine();
-    auto& engine = *g_lstm_engine;
-    auto& stream = *g_lstm_stream;
+    auto& engine = tenzor::cpu::get_onednn_engine();
+    auto& stream = tenzor::cpu::get_onednn_stream();
 
     try {
         dnnl::memory::dims a_dims = {M, K};
@@ -601,6 +591,25 @@ inline void lstm_forward(
     // Workspace buffers are cached in thread-local storage, no cleanup needed
 }
 
+// RAII guard that sets MKL's per-thread count to `n` for the duration of its
+// lifetime and restores the previous value on destruction. Used to prevent
+// 2*N MKL over-subscription when two lstm_forward calls run concurrently in
+// #pragma omp parallel sections.
+#ifdef TENZOR_USE_MKL
+struct MklLocalThreads {
+    int saved;
+    explicit MklLocalThreads(int n) : saved(mkl_get_max_threads()) {
+        mkl_set_num_threads_local(n);
+    }
+    ~MklLocalThreads() { mkl_set_num_threads_local(saved); }
+};
+#else
+// No-op when MKL is not present
+struct MklLocalThreads {
+    explicit MklLocalThreads(int) {}
+};
+#endif
+
 /**
  * @brief Bidirectional LSTM forward pass
  */
@@ -624,7 +633,14 @@ inline void lstm_forward_bidirectional(
     float* fwd_output = fwd_output_buf.data();
     float* bwd_output = bwd_output_buf.data();
 
-    // Run forward and backward LSTMs in parallel
+    // Run forward and backward LSTMs in parallel.
+    // Each section calls lstm_forward which internally uses MKL GEMM.  Without
+    // throttling, two concurrent sections each use mkl_get_max_threads() worker
+    // threads, creating 2*N oversubscription.  Restrict each MKL call to 1
+    // thread for the duration of the parallel region so total = 2 * 1 = 2 threads
+    // (the two OMP sections) instead of 2 * N.
+    {
+        MklLocalThreads _mkl_guard(1);
     #pragma omp parallel sections if(batch >= 2)
     {
         #pragma omp section
@@ -651,6 +667,7 @@ inline void lstm_forward_bidirectional(
                         seq_len, batch, input_size, hidden);
         }
     }
+    } // end MklLocalThreads scope — restores MKL thread count
 
     // Concatenate forward and backward outputs
     #pragma omp parallel for if(seq_len * batch > 16)

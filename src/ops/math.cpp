@@ -366,7 +366,7 @@ auto baddbmm(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
     return dispatch_single(OpId::Baddbmm, inputs, attrs);
 }
 
-auto pow(const Tensor& input, float exponent) -> Tensor {
+auto pow(const Tensor& input, double exponent) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Exponent, static_cast<double>(exponent));
     std::vector<Tensor> inputs = {input};
@@ -398,7 +398,7 @@ auto floor(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Floor>
 auto ceil(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Ceil>(input); }
 auto round(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Round>(input); }
 
-auto clamp(const Tensor& input, float min, float max) -> Tensor {
+auto clamp(const Tensor& input, double min, double max) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Min, static_cast<double>(min));
     attrs.set(AttrKey::Max, static_cast<double>(max));
@@ -406,14 +406,14 @@ auto clamp(const Tensor& input, float min, float max) -> Tensor {
     return dispatch(OpId::Clamp, inputs, attrs)[0];
 }
 
-auto clamp_min(const Tensor& input, float min) -> Tensor {
+auto clamp_min(const Tensor& input, double min) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Min, static_cast<double>(min));
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ClampMin, inputs, attrs)[0];
 }
 
-auto clamp_max(const Tensor& input, float max) -> Tensor {
+auto clamp_max(const Tensor& input, double max) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Max, static_cast<double>(max));
     std::vector<Tensor> inputs = {input};

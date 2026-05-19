@@ -1,6 +1,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/generator.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/distributions/distribution.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -96,6 +97,19 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     return Tensor(std::move(shape), dtype, device);
 }
 
+// Helper: fill n elements in parallel if n >= threshold, else serial.
+// Matches the OMP_THRESHOLD=65536 convention used in the CPU kernel files.
+template <typename T>
+static inline void parallel_fill_n(T* dst, int64_t n, T value,
+                                    int64_t threshold = 65536) {
+    if (n < threshold) {
+        std::fill_n(dst, static_cast<size_t>(n), value);
+    } else {
+#pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) dst[i] = value;
+    }
+}
+
 auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
@@ -117,64 +131,79 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.storage()) return tensor;
 
-    size_t numel = tensor.numel();
+    int64_t numel = static_cast<int64_t>(tensor.numel());
     void* data = tensor.storage()->data();
 
-    // Fill with ones based on dtype
+    // Fill with ones based on dtype (OMP-parallel for large tensors)
     switch (dtype) {
         case DType::Float16: {
-            Float16* ptr = static_cast<Float16*>(data);
-            std::fill(ptr, ptr + numel, Float16(1.0f));
+            parallel_fill_n(static_cast<Float16*>(data), numel, Float16(1.0f));
             break;
         }
         case DType::BFloat16: {
-            BFloat16* ptr = static_cast<BFloat16*>(data);
-            std::fill(ptr, ptr + numel, BFloat16(1.0f));
+            parallel_fill_n(static_cast<BFloat16*>(data), numel, BFloat16(1.0f));
             break;
         }
         case DType::Float32: {
-            float* ptr = static_cast<float*>(data);
-            std::fill(ptr, ptr + numel, 1.0f);
+            parallel_fill_n(static_cast<float*>(data), numel, 1.0f);
             break;
         }
         case DType::Float64: {
-            double* ptr = static_cast<double*>(data);
-            std::fill(ptr, ptr + numel, 1.0);
+            parallel_fill_n(static_cast<double*>(data), numel, 1.0);
             break;
         }
         case DType::Int32: {
-            int32_t* ptr = static_cast<int32_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            parallel_fill_n(static_cast<int32_t*>(data), numel, static_cast<int32_t>(1));
             break;
         }
         case DType::Int64: {
-            int64_t* ptr = static_cast<int64_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            parallel_fill_n(static_cast<int64_t*>(data), numel, static_cast<int64_t>(1));
             break;
         }
         case DType::UInt8: {
-            uint8_t* ptr = static_cast<uint8_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            parallel_fill_n(static_cast<uint8_t*>(data), numel, static_cast<uint8_t>(1));
+            break;
+        }
+        case DType::UInt16: {
+            parallel_fill_n(static_cast<uint16_t*>(data), numel, static_cast<uint16_t>(1));
+            break;
+        }
+        case DType::UInt32: {
+            parallel_fill_n(static_cast<uint32_t*>(data), numel, static_cast<uint32_t>(1));
+            break;
+        }
+        case DType::UInt64: {
+            parallel_fill_n(static_cast<uint64_t*>(data), numel, static_cast<uint64_t>(1));
             break;
         }
         case DType::Int8: {
-            int8_t* ptr = static_cast<int8_t*>(data);
-            std::fill(ptr, ptr + numel, 1);
+            parallel_fill_n(static_cast<int8_t*>(data), numel, static_cast<int8_t>(1));
+            break;
+        }
+        case DType::Int16: {
+            parallel_fill_n(static_cast<int16_t*>(data), numel, static_cast<int16_t>(1));
             break;
         }
         case DType::Bool: {
-            bool* ptr = static_cast<bool*>(data);
-            std::fill(ptr, ptr + numel, true);
+            parallel_fill_n(static_cast<bool*>(data), numel, true);
             break;
         }
         case DType::Complex64: {
-            auto* ptr = static_cast<std::complex<float>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<float>(1.0f, 0.0f));
+            parallel_fill_n(static_cast<std::complex<float>*>(data), numel,
+                            std::complex<float>(1.0f, 0.0f));
             break;
         }
         case DType::Complex128: {
-            auto* ptr = static_cast<std::complex<double>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<double>(1.0, 0.0));
+            parallel_fill_n(static_cast<std::complex<double>*>(data), numel,
+                            std::complex<double>(1.0, 0.0));
+            break;
+        }
+        case DType::FP8_E4M3: {
+            parallel_fill_n(static_cast<FP8_E4M3*>(data), numel, FP8_E4M3(1.0f));
+            break;
+        }
+        case DType::FP8_E5M2: {
+            parallel_fill_n(static_cast<FP8_E5M2*>(data), numel, FP8_E5M2(1.0f));
             break;
         }
         default:
@@ -183,87 +212,10 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     return tensor;
 }
 
-auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -> Tensor {
-    // Use OpId dispatch for non-CPU devices
-    if (device.type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-        attrs.set(AttrKey::Value, static_cast<double>(value));
-        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
-        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
-
-        return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
-    }
-
-    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
-    if (!tensor.impl() || !tensor.storage()) return tensor;
-
-    size_t numel = tensor.numel();
-    void* data = tensor.storage()->data();
-
-    // Fill with value based on dtype
-    switch (dtype) {
-        case DType::Float16: {
-            Float16* ptr = static_cast<Float16*>(data);
-            std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
-            break;
-        }
-        case DType::BFloat16: {
-            BFloat16* ptr = static_cast<BFloat16*>(data);
-            std::fill(ptr, ptr + numel, BFloat16(static_cast<float>(value)));
-            break;
-        }
-        case DType::Float32: {
-            float* ptr = static_cast<float*>(data);
-            std::fill(ptr, ptr + numel, static_cast<float>(value));
-            break;
-        }
-        case DType::Float64: {
-            double* ptr = static_cast<double*>(data);
-            std::fill(ptr, ptr + numel, static_cast<double>(value));
-            break;
-        }
-        case DType::Int32: {
-            int32_t* ptr = static_cast<int32_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int32_t>(value));
-            break;
-        }
-        case DType::Int64: {
-            int64_t* ptr = static_cast<int64_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int64_t>(value));
-            break;
-        }
-        case DType::UInt8: {
-            uint8_t* ptr = static_cast<uint8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
-            break;
-        }
-        case DType::Int8: {
-            int8_t* ptr = static_cast<int8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
-            break;
-        }
-        case DType::Bool: {
-            bool* ptr = static_cast<bool*>(data);
-            std::fill(ptr, ptr + numel, value != 0.0f);
-            break;
-        }
-        case DType::Complex64: {
-            auto* ptr = static_cast<std::complex<float>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<float>(static_cast<float>(value), 0.0f));
-            break;
-        }
-        case DType::Complex128: {
-            auto* ptr = static_cast<std::complex<double>*>(data);
-            std::fill(ptr, ptr + numel, std::complex<double>(static_cast<double>(value), 0.0));
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported dtype for full()");
-    }
-    return tensor;
-}
+// full(..., float value, ...) collapsed into full(..., double value, ...)
+// per 2026-05-19 cleanup. float→double promotion + the dtype-cast happen
+// downstream so no behaviour changes; the two-overload ambiguity that broke
+// `full({3}, 42, ...)` (with an int literal) is gone.
 
 auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
@@ -321,9 +273,29 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
             std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
             break;
         }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint16_t>(value));
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint32_t>(value));
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint64_t>(value));
+            break;
+        }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
             std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int16_t>(value));
             break;
         }
         case DType::Bool: {
@@ -656,6 +628,27 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
             }
             break;
         }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint16_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint32_t>(start + i * step);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint64_t>(start + i * step);
+            }
+            break;
+        }
         case DType::Bool: {
             bool* ptr = static_cast<bool*>(data);
             for (int64_t i = 0; i < numel; ++i) {
@@ -683,7 +676,11 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
     return tensor;
 }
 
-auto linspace(float start, float end, int64_t steps, DType dtype, Device device) -> Tensor {
+// linspace(float, float, ...) collapsed into linspace(double, double, ...)
+// per 2026-05-19 cleanup: float→double promotion is implicit, eliminating
+// the int-literal ambiguity for callers like linspace(0, 1, 5, ...).
+
+auto linspace(double start, double end, int64_t steps, DType dtype, Device device) -> Tensor {
     if (steps <= 0) {
         throw std::invalid_argument("steps must be positive");
     }
@@ -691,8 +688,8 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs.set(AttrKey::Start, static_cast<double>(start));
-        attrs.set(AttrKey::End, static_cast<double>(end));
+        attrs.set(AttrKey::Start, start);
+        attrs.set(AttrKey::End, end);
         attrs.set(AttrKey::Steps, steps);
         attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
         attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
@@ -706,21 +703,20 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
 
     void* data = tensor.storage()->data();
 
-    // Calculate step size
-    double step_size = (steps > 1) ? (static_cast<double>(end) - static_cast<double>(start)) / (steps - 1) : 0.0;
+    // Calculate step size in double precision — preserves all significant digits.
+    double step_size = (steps > 1) ? (end - start) / static_cast<double>(steps - 1) : 0.0;
 
     // Fill with linearly spaced values based on dtype
     switch (dtype) {
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
             if (steps == 1) {
-                ptr[0] = start;
+                ptr[0] = static_cast<float>(start);
             } else {
                 for (int64_t i = 0; i < steps; ++i) {
                     ptr[i] = static_cast<float>(start + i * step_size);
                 }
-                // Ensure the last element is exactly 'end' to avoid floating point errors
-                ptr[steps - 1] = end;
+                ptr[steps - 1] = static_cast<float>(end);
             }
             break;
         }
@@ -732,7 +728,7 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
                 for (int64_t i = 0; i < steps; ++i) {
                     ptr[i] = start + i * step_size;
                 }
-                // Ensure the last element is exactly 'end' to avoid floating point errors
+                // Pin exact endpoints to avoid accumulated fp error.
                 ptr[steps - 1] = end;
             }
             break;
@@ -740,27 +736,57 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         case DType::Float16: {
             Float16* ptr = static_cast<Float16*>(data);
             if (steps == 1) {
-                ptr[0] = Float16(start);
+                ptr[0] = Float16(static_cast<float>(start));
             } else {
                 for (int64_t i = 0; i < steps; ++i) {
                     ptr[i] = Float16(static_cast<float>(start + i * step_size));
                 }
-                // Ensure the last element is exactly 'end' to avoid floating point errors
-                ptr[steps - 1] = Float16(end);
+                ptr[steps - 1] = Float16(static_cast<float>(end));
             }
             break;
         }
         case DType::BFloat16: {
             BFloat16* ptr = static_cast<BFloat16*>(data);
             if (steps == 1) {
-                ptr[0] = BFloat16(start);
+                ptr[0] = BFloat16(static_cast<float>(start));
             } else {
                 for (int64_t i = 0; i < steps; ++i) {
                     ptr[i] = BFloat16(static_cast<float>(start + i * step_size));
                 }
-                // Ensure the last element is exactly 'end' to avoid floating point errors
-                ptr[steps - 1] = BFloat16(end);
+                ptr[steps - 1] = BFloat16(static_cast<float>(end));
             }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int8_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int8_t>(end);
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int16_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int16_t>(end);
+            break;
+        }
+        case DType::Int32: {
+            int32_t* ptr = static_cast<int32_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int32_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int32_t>(end);
+            break;
+        }
+        case DType::Int64: {
+            int64_t* ptr = static_cast<int64_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = static_cast<int64_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = static_cast<int64_t>(end);
             break;
         }
         default:
@@ -994,6 +1020,58 @@ auto exponential(const Tensor& rate) -> Tensor {
     auto r = rate.contiguous();
     std::array<Tensor, 1> inputs = {r};
     return dispatch<OpId::ExponentialSample>(inputs)[0];
+}
+
+// ============================================================================
+// Phase 11: New distribution samplers — delegate to C++ distribution classes
+// ============================================================================
+
+auto weibull(const Tensor& scale, const Tensor& concentration,
+             std::vector<int64_t> shape) -> Tensor {
+    distributions::Weibull dist(scale.contiguous(), concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto laplace(const Tensor& loc, const Tensor& scale,
+             std::vector<int64_t> shape) -> Tensor {
+    distributions::Laplace dist(loc.contiguous(), scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto dirichlet(const Tensor& concentration,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::Dirichlet dist(concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto half_normal(const Tensor& scale,
+                 std::vector<int64_t> shape) -> Tensor {
+    distributions::HalfNormal dist(scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto von_mises(const Tensor& loc, const Tensor& concentration,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::VonMises dist(loc.contiguous(), concentration.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto student_t(const Tensor& df, const Tensor& loc, const Tensor& scale,
+               std::vector<int64_t> shape) -> Tensor {
+    distributions::StudentT dist(df.contiguous(), loc.contiguous(), scale.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto negative_binomial(const Tensor& total_count, const Tensor& probs,
+                       std::vector<int64_t> shape) -> Tensor {
+    distributions::NegativeBinomial dist(total_count.contiguous(), probs.contiguous());
+    return dist.sample(std::move(shape));
+}
+
+auto binomial(int64_t total_count, const Tensor& probs,
+              std::vector<int64_t> shape) -> Tensor {
+    distributions::Binomial dist(total_count, probs.contiguous());
+    return dist.sample(std::move(shape));
 }
 
 // ============================================================================

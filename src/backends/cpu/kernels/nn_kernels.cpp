@@ -6,6 +6,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include <bit>
 #include <random>
 #include <cmath>
 #include <iostream>
@@ -16,6 +17,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include "../cpu_thread_config.hpp"
 
 // Intel oneDNN for optimized layer operations
 #ifdef TENZOR_USE_ONEDNN
@@ -45,57 +47,25 @@ namespace cpu {
 // Thread-local RNG for dropout
 static thread_local std::mt19937 tl_rng(std::random_device{}());
 
-// Configure optimal thread count once per thread
-// Uses physical cores (not hyperthreaded) to avoid contention
+// Delegate to single source of truth for OMP thread count.
 inline void configure_threads() {
-    static thread_local bool configured = false;
-    if (configured) return;
-    configured = true;
-
-#ifdef _OPENMP
-    unsigned int logical_cores = std::thread::hardware_concurrency();
-    unsigned int physical_cores = logical_cores;
-
-    // Detect physical cores via Linux sysfs
-    std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
-    if (siblings.good()) {
-        std::string line;
-        if (std::getline(siblings, line)) {
-            int threads_per_core = 1;
-            for (char c : line) {
-                if (c == ',') threads_per_core++;
-            }
-            if (threads_per_core > 1) {
-                physical_cores = logical_cores / threads_per_core;
-            }
-        }
-    }
-
-    int num_threads = std::max(1u, physical_cores);
-    omp_set_num_threads(num_threads);
-#endif
+    tenzor::backends::cpu::configure_omp_threads();
 }
 
 #ifdef TENZOR_USE_ONEDNN
-// Thread-local oneDNN engine and stream with proper thread configuration
+// Engine/stream accessors — delegate to single per-thread instance in onednn_cache.hpp.
 inline dnnl::engine& get_nn_engine() {
-    static thread_local std::unique_ptr<dnnl::engine> engine;
-
-    // Ensure threads are configured before using oneDNN
-    configure_threads();
-
-    if (!engine) {
-        engine = std::make_unique<dnnl::engine>(dnnl::engine::kind::cpu, 0);
+    // Ensure OMP thread count is configured before first use.
+    static thread_local bool threads_configured = false;
+    if (!threads_configured) {
+        threads_configured = true;
+        configure_threads();
     }
-    return *engine;
+    return tenzor::cpu::get_onednn_engine();
 }
 
 inline dnnl::stream& get_nn_stream() {
-    static thread_local std::unique_ptr<dnnl::stream> stream;
-    if (!stream) {
-        stream = std::make_unique<dnnl::stream>(get_nn_engine());
-    }
-    return *stream;
+    return tenzor::cpu::get_onednn_stream();
 }
 
 // --------------------------------------------------------------------------
@@ -104,16 +74,23 @@ inline dnnl::stream& get_nn_stream() {
 struct LayerNormCacheKey {
     int64_t batch_size;
     int64_t norm_size;
+    uint32_t eps_bits;  // bit-cast of float eps — avoids NaN-equality concerns
+    int32_t  dtype_id;  // static_cast<int>(DType) — future-proofs multi-dtype LN
 
     bool operator==(const LayerNormCacheKey& other) const {
-        return batch_size == other.batch_size && norm_size == other.norm_size;
+        return batch_size == other.batch_size
+            && norm_size  == other.norm_size
+            && eps_bits   == other.eps_bits
+            && dtype_id   == other.dtype_id;
     }
 };
 
 struct LayerNormCacheKeyHash {
     size_t operator()(const LayerNormCacheKey& k) const {
         size_t h = std::hash<int64_t>{}(k.batch_size);
-        h ^= std::hash<int64_t>{}(k.norm_size) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.norm_size)  + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.eps_bits)  + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int32_t>{}(k.dtype_id)   + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -141,19 +118,27 @@ static bool linear_onednn(
         auto& engine = get_nn_engine();
         auto& stream = get_nn_stream();
 
-        // Create memory descriptors
-        dnnl::memory::dims src_dims = {batch_size, in_features};
+        // Task 6.6: user-facing (plain) memory descriptors for src, weights, dst.
+        dnnl::memory::dims src_dims     = {batch_size, in_features};
         dnnl::memory::dims weights_dims = {out_features, in_features};
-        dnnl::memory::dims dst_dims = {batch_size, out_features};
+        dnnl::memory::dims dst_dims     = {batch_size, out_features};
 
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
-        auto weights_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
-                                              dnnl::memory::format_tag::oi);
-        auto dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
+        auto src_user_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::nc);
+        auto weights_user_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
+                                                   dnnl::memory::format_tag::oi);
+        auto dst_user_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::nc);
 
-        // Create inner product primitive descriptor
+        // Use format_tag::any so oneDNN picks the optimal weight layout.
+        auto src_any_md     = dnnl::memory::desc(src_dims,     dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+        auto weights_any_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+        auto dst_any_md     = dnnl::memory::desc(dst_dims,     dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::any);
+
+        // Create inner product primitive descriptor.
         dnnl::inner_product_forward::primitive_desc ip_pd;
 
         if (bias != nullptr) {
@@ -161,44 +146,67 @@ static bool linear_onednn(
             auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
                                                dnnl::memory::format_tag::a);
             ip_pd = dnnl::inner_product_forward::primitive_desc(
-                engine,
-                dnnl::prop_kind::forward_inference,
-                src_md, weights_md, bias_md, dst_md
-            );
+                engine, dnnl::prop_kind::forward_inference,
+                src_any_md, weights_any_md, bias_md, dst_any_md);
         } else {
             ip_pd = dnnl::inner_product_forward::primitive_desc(
-                engine,
-                dnnl::prop_kind::forward_inference,
-                src_md, weights_md, dst_md
-            );
+                engine, dnnl::prop_kind::forward_inference,
+                src_any_md, weights_any_md, dst_any_md);
         }
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input));
-        auto weights_mem = dnnl::memory(weights_md, engine, const_cast<float*>(weight));
-        auto dst_mem = dnnl::memory(dst_md, engine, output);
+        // Retrieve the optimal descriptors chosen by oneDNN.
+        auto src_opt_md     = ip_pd.src_desc();
+        auto weights_opt_md = ip_pd.weights_desc();
+        auto dst_opt_md     = ip_pd.dst_desc();
 
-        // Create and execute primitive
+        // Create user-format memory and reorder to optimal format if needed.
+        auto src_user_mem = dnnl::memory(src_user_md, engine, const_cast<float*>(input));
+        dnnl::memory src_mem = src_user_mem;
+        if (src_opt_md != src_user_md) {
+            src_mem = dnnl::memory(src_opt_md, engine);
+            dnnl::reorder(src_user_mem, src_mem).execute(stream, src_user_mem, src_mem);
+        }
+
+        auto weights_user_mem = dnnl::memory(weights_user_md, engine, const_cast<float*>(weight));
+        dnnl::memory weights_mem = weights_user_mem;
+        if (weights_opt_md != weights_user_md) {
+            weights_mem = dnnl::memory(weights_opt_md, engine);
+            dnnl::reorder(weights_user_mem, weights_mem).execute(stream, weights_user_mem, weights_mem);
+        }
+
+        auto dst_user_mem = dnnl::memory(dst_user_md, engine, output);
+        dnnl::memory dst_mem = dst_user_mem;
+        if (dst_opt_md != dst_user_md) {
+            dst_mem = dnnl::memory(dst_opt_md, engine);
+        }
+
+        // Create and execute primitive.
         auto ip_prim = dnnl::inner_product_forward(ip_pd);
 
         if (bias != nullptr) {
             dnnl::memory::dims bias_dims = {out_features};
-            auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
-                                               dnnl::memory::format_tag::a);
+            auto bias_md  = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
+                                                dnnl::memory::format_tag::a);
             auto bias_mem = dnnl::memory(bias_md, engine, const_cast<float*>(bias));
             ip_prim.execute(stream, {
-                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_SRC,     src_mem},
                 {DNNL_ARG_WEIGHTS, weights_mem},
-                {DNNL_ARG_BIAS, bias_mem},
-                {DNNL_ARG_DST, dst_mem}
+                {DNNL_ARG_BIAS,    bias_mem},
+                {DNNL_ARG_DST,     dst_mem}
             });
         } else {
             ip_prim.execute(stream, {
-                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_SRC,     src_mem},
                 {DNNL_ARG_WEIGHTS, weights_mem},
-                {DNNL_ARG_DST, dst_mem}
+                {DNNL_ARG_DST,     dst_mem}
             });
         }
+
+        // Reorder dst back to user format if needed.
+        if (dst_opt_md != dst_user_md) {
+            dnnl::reorder(dst_mem, dst_user_mem).execute(stream, dst_mem, dst_user_mem);
+        }
+
         stream.wait();
         return true;
     } catch (...) {
@@ -780,7 +788,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     return grad_input;
 }
 
-auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
+auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx = -1) -> Tensor {
     // weight: [num_embeddings, embedding_dim]
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
@@ -812,12 +820,20 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     }
 
     auto do_embedding = [&](auto* w_data, auto* out_data) {
+        using elem_t = std::remove_pointer_t<decltype(out_data)>;
         #pragma omp parallel for if(num_indices * embedding_dim > 10000)
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += num_embeddings;
-            for (int64_t j = 0; j < embedding_dim; ++j) {
-                out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+            if (padding_idx >= 0 && idx == padding_idx) {
+                // PaddingIdx: zero the output row (matches PyTorch semantics).
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    out_data[i * embedding_dim + j] = elem_t{};
+                }
+            } else {
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+                }
             }
         }
     };
@@ -1128,7 +1144,12 @@ static bool layer_norm_onednn(
         auto& stream = get_nn_stream();
 
         // Create cache key
-        LayerNormCacheKey cache_key{batch_size, norm_size};
+        LayerNormCacheKey cache_key{
+            batch_size,
+            norm_size,
+            std::bit_cast<uint32_t>(eps),
+            static_cast<int32_t>(DType::Float32)  // oneDNN LN path is float32-only
+        };
 
         // Try to get cached primitive
         auto cached = g_layernorm_cache.get(cache_key);

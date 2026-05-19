@@ -139,7 +139,19 @@ enum class OpType {
 
     // Layout and type conversion (inserted by optimization passes)
     LayoutConvert, ///< Convert memory format (e.g., NCHW -> NHWC)
-    Cast           ///< Convert dtype (e.g., Float32 -> Float16)
+    Cast,          ///< Convert dtype (e.g., Float32 -> Float16)
+
+    // ── Phase 13 / MVP-1 additions ──
+    SiLU,             ///< x * sigmoid(x)
+    Where,            ///< Elementwise select: where(cond, a, b)
+    Stack,            ///< Cat along a new dim
+    Broadcast,        ///< Explicit broadcast (shape-only)
+    IndexSelect,      ///< Select along a dim by index tensor
+    RMSNorm,          ///< Tenzor dialect op
+    GQA,              ///< Grouped-Query Attention — Tenzor dialect op
+    RoPE,             ///< Rotary positional embedding — Tenzor dialect op
+    Padding,          ///< Constant/reflect/replicate padding
+    Interpolate       ///< Bilinear/nearest spatial resize
 };
 
 /**
@@ -282,6 +294,23 @@ public:
      * @return Unique tensor ID
      */
     auto register_tensor(const Variable& var) -> std::string;
+
+    /**
+     * @brief Force-register a tensor under a fresh unique ID.
+     *
+     * Unlike `register_tensor`, this does NOT dedup on `data_ptr()` — it
+     * always allocates a new ID and stores fresh `TensorInfo` and a
+     * (shallow) copy of the tensor. This is the right primitive for
+     * recording the OUTPUT of view-creating ops (reshape, transpose,
+     * permute, slice, cat) where the output shares `data_ptr()` with
+     * an input but has a different logical shape/strides; without it
+     * the tracer would alias the output to its input and lose the
+     * shape change.
+     *
+     * @param tensor Tensor to register
+     * @return Newly-allocated unique tensor ID
+     */
+    auto register_new_tensor(const Tensor& tensor) -> std::string;
 
     /**
      * @brief Get metadata for a tensor ID.

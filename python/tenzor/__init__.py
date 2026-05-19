@@ -61,6 +61,20 @@ if 'OMP_NUM_THREADS' not in _os.environ:
 # NOTE: This will also register tenzor.nn in sys.modules pointing to C++ nn
 from .tenzor_core import *
 
+# _foreach_* names start with '_' so are not pulled in by import *; import explicitly.
+from .tenzor_core import (
+    _foreach_add, _foreach_add_,
+    _foreach_sub, _foreach_sub_,
+    _foreach_mul, _foreach_mul_,
+    _foreach_div, _foreach_div_,
+    _foreach_neg, _foreach_neg_,
+    _foreach_abs, _foreach_abs_,
+    _foreach_sqrt, _foreach_sqrt_,
+    _foreach_zero_, _foreach_copy,
+    _foreach_addcdiv_, _foreach_addcmul_,
+    _foreach_lerp_, _foreach_norm,
+)
+
 # Import the nn submodule from C++ (keep reference for internal use)
 from .tenzor_core import nn as _cpp_nn
 
@@ -120,6 +134,82 @@ if _os.path.exists(_autograd_path):
 # Expose linalg submodule from C++ bindings (det, inv, solve, svd, qr, etc.)
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
+
+# Load special functions submodule (Bessel, Erf, Gamma, Ndtr, ...)
+# Manually load to bypass the wildcard-import binding of `special` if
+# tenzor_core ever grows a `special` submodule (currently it does not, so
+# `from . import special` works, but the manual load is robust either way).
+_special_path = _os.path.join(_os.path.dirname(__file__), 'special', '__init__.py')
+if _os.path.exists(_special_path):
+    _special_spec = _importlib_util.spec_from_file_location(
+        'tenzor.special', _special_path,
+        submodule_search_locations=[_os.path.dirname(_special_path)])
+    _special_module = _importlib_util.module_from_spec(_special_spec)
+    _sys.modules['tenzor.special'] = _special_module
+    _special_spec.loader.exec_module(_special_module)
+    special = _special_module
+else:  # pragma: no cover — defensive only.
+    from . import special as special  # type: ignore
+    _sys.modules['tenzor.special'] = special
+
+# Phase 13: MLIR/StableHLO/IREE JIT pipeline.
+#
+# `from .tenzor_core import *` above bound `tenzor.jit` to the C++ submodule
+# `tenzor_core.jit` (a pybind11 module exposing show_graph/show_mlir/... and
+# compile_function). The Python user-facing API is the sibling
+# `python/tenzor/jit.py` module, which wraps `tenzor_core.jit.compile_function`
+# in a @tz.jit decorator plus show_* helpers that accept either a raw fn or
+# a wrapped fn. We load the Python module explicitly and re-bind:
+#   tz.jit  -> the @tz.jit decorator (callable)
+# while `tenzor.jit` as a sys.modules entry points at the Python wrapper so
+# `tz.jit.show_graph(fn)` etc. resolve through it.
+_jit_path = _os.path.join(_os.path.dirname(__file__), 'jit.py')
+if _os.path.exists(_jit_path):
+    _jit_spec = _importlib_util.spec_from_file_location('tenzor.jit', _jit_path)
+    _jit_mod = _importlib_util.module_from_spec(_jit_spec)
+    _sys.modules['tenzor.jit'] = _jit_mod
+    _jit_spec.loader.exec_module(_jit_mod)
+    jit = _jit_mod.jit  # the decorator (callable)
+    # Expose show_* / cache_stats helpers as attributes of the decorator so
+    # `tz.jit.show_graph(fn)` works (in addition to `tz._jit_mod.show_graph`).
+    for _attr in ('show_graph', 'show_mlir', 'show_stablehlo', 'show_iree',
+                  'cache_stats', 'JitNotEnabledError'):
+        if hasattr(_jit_mod, _attr):
+            setattr(jit, _attr, getattr(_jit_mod, _attr))
+    # Pre-Phase-13 tests use `tz.jit.trace`, `tz.jit.Compiler`,
+    # `tz.jit.export_graph_text`, etc. — these are pybind11 attributes on
+    # the C++ submodule `tenzor_core.jit`. To keep both APIs working we
+    # also copy every non-private attribute from the C++ submodule onto
+    # the Python decorator.
+    try:
+        from .tenzor_core import jit as _cpp_jit_mod  # type: ignore[import]
+        for _attr in dir(_cpp_jit_mod):
+            if not _attr.startswith('_') and not hasattr(jit, _attr):
+                setattr(jit, _attr, getattr(_cpp_jit_mod, _attr))
+    except (ImportError, AttributeError):
+        pass
+else:  # pragma: no cover — defensive only; jit.py is always shipped.
+    from . import jit as _jit_mod  # type: ignore
+    jit = _jit_mod.jit
+    _sys.modules['tenzor.jit'] = _jit_mod
+
+# Load distributions submodule (pure Python — numpy/scipy backend).
+# Manually load because `from . import distributions` would resolve through
+# the wildcard-import binding of the C++ submodule `tenzor_core.distributions`
+# rather than the sibling Python package `python/tenzor/distributions/`.
+_dist_path = _os.path.join(_os.path.dirname(__file__), 'distributions',
+                           '__init__.py')
+if _os.path.exists(_dist_path):
+    _dist_spec = _importlib_util.spec_from_file_location(
+        'tenzor.distributions', _dist_path,
+        submodule_search_locations=[_os.path.dirname(_dist_path)])
+    _dist_module = _importlib_util.module_from_spec(_dist_spec)
+    _sys.modules['tenzor.distributions'] = _dist_module
+    _dist_spec.loader.exec_module(_dist_module)
+    distributions = _dist_module
+else:  # pragma: no cover — defensive only.
+    from . import distributions as distributions  # type: ignore
+    _sys.modules['tenzor.distributions'] = distributions
 
 # ----------------------------------------------------------------
 # Phase 2.6 — __tensor_function__ subclass override protocol.
@@ -393,6 +483,120 @@ __all__ = [
     "compute_fp8_scale",
     "quantize_to_fp8",
     "dequantize_from_fp8",
+
+    # Special functions submodule
+    "special",
+
+    # Probability distributions submodule
+    "distributions",
+    "jit",      # @tz.jit decorator (Phase 13 MLIR pipeline)
+    "_jit_mod", # full jit submodule for show_*/cache_stats helpers
+
+    # Special functions (also accessible via tz.special.*)
+    "erf",
+    "erfc",
+    "erfinv",
+    "lgamma",
+    "digamma",
+    "polygamma",
+    "sinc",
+    "zeta",
+    "ndtri",
+    "xlogy",
+    "xlog1py",
+    "bessel_j0",
+    "bessel_j1",
+    "bessel_y0",
+    "bessel_y1",
+    "bessel_i0",
+    "bessel_i1",
+
+    # Tensor utilities (previously missing)
+    "allclose",
+    "aminmax",
+    "bitwise_and",
+    "bitwise_or",
+    "bitwise_xor",
+    "bitwise_not",
+    "bitwise_left_shift",
+    "bitwise_right_shift",
+    "block_diag",
+    "broadcast_tensors",
+    "broadcast_to",
+    "cartesian_prod",
+    "column_stack",
+    "combinations",
+    "count_nonzero",
+    "cuda_device_count",
+    "current_device",
+    "deg2rad",
+    "dsplit",
+    "dstack",
+    "enable_auto_checkpoint",
+    "expand",
+    "float_power",
+    "frac",
+    "frexp",
+    "heaviside",
+    "histogramdd",
+    "hsplit",
+    "hstack",
+    "index_add",
+    "index_copy",
+    "index_fill",
+    "isclose",
+    "isneginf",
+    "isposinf",
+    "isreal",
+    "kl_divergence",
+    "kron",
+    "ldexp",
+    "logit",
+    "logspace",
+    "moveaxis",
+    "movedim",
+    "nanmean",
+    "nanstd",
+    "nansum",
+    "nan_to_num",
+    "nanvar",
+    "narrow_copy",
+    "one_hot",
+    "oneapi_device_count",
+    "oneapi_is_available",
+    "pairwise_distance",
+    "pdist",
+    "pixel_shuffle",
+    "pixel_unshuffle",
+    "put",
+    "rad2deg",
+    "randn_with_generator",
+    "rand_with_generator",
+    "repeat",
+    "repeat_interleave",
+    "rocm_device_count",
+    "rocm_is_available",
+    "row_stack",
+    "signbit",
+    "slice",
+    "swapaxes",
+    "take",
+    "tensor_split",
+    "tile",
+    "vander",
+    "view_as_complex",
+    "view_as_real",
+    "vsplit",
+    "vstack",
+    "vulkan_device_count",
+    "vulkan_is_available",
+
+    # Multi-tensor foreach optimizer primitives (Phase 9-W2)
+    "_foreach_add", "_foreach_add_", "_foreach_sub", "_foreach_sub_",
+    "_foreach_mul", "_foreach_mul_", "_foreach_div", "_foreach_div_",
+    "_foreach_neg", "_foreach_neg_", "_foreach_abs", "_foreach_abs_",
+    "_foreach_sqrt", "_foreach_sqrt_", "_foreach_zero_", "_foreach_copy",
+    "_foreach_addcdiv_", "_foreach_addcmul_", "_foreach_lerp_", "_foreach_norm",
 ]
 
 # Quantized dtype aliases (PyTorch-compatible names)

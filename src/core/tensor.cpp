@@ -1243,6 +1243,49 @@ auto Tensor::fill_(double value) -> Tensor& {
                 case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
                 case DType::Complex64: *reinterpret_cast<std::complex<float>*>(base + offset) = std::complex<float>(value, 0.0f); break;
                 case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
+                case DType::FP8_E4M3: *reinterpret_cast<FP8_E4M3*>(base + offset) = FP8_E4M3(static_cast<float>(value)); break;
+                case DType::FP8_E5M2: *reinterpret_cast<FP8_E5M2*>(base + offset) = FP8_E5M2(static_cast<float>(value)); break;
+                case DType::QInt8:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(
+                            std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+                    }
+                    break;
+                case DType::QUInt8:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        *reinterpret_cast<uint8_t*>(base + offset) = static_cast<uint8_t>(
+                            std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+                    }
+                    break;
+                case DType::QInt4x2:
+                    if (q_scale() == 0.0) {
+                        throw std::runtime_error(
+                            "fill_ on quantized tensor requires quantization params: "
+                            "call set_quantization_params(scale, zero_point) first");
+                    } else {
+                        // QInt4x2 packs two 4-bit signed values per byte. Strides are at
+                        // byte granularity (the packed shape halves the last dimension),
+                        // so each element visited by this stride loop IS a whole byte.
+                        // Writing both nibbles is correct: both logical values in a
+                        // visited byte belong to the view. Sub-byte strides are not
+                        // supported, so adjacent-nibble corruption is structurally
+                        // impossible via the public API.
+                        const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                        const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                        *reinterpret_cast<uint8_t*>(base + offset) =
+                            static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                    }
+                    break;
                 default: throw std::runtime_error("fill_ not supported for this dtype");
             }
             // Increment indices (row-major order)
@@ -1261,8 +1304,10 @@ auto Tensor::fill_(double value) -> Tensor& {
     if (device().type != Device::Type::CPU) {
         auto* backend = backend_registry().get_backend(device().type);
         const size_t size_bytes = static_cast<size_t>(n) * dtype_size();
-        if (value == 0.0f) {
-            // Fast path: memset to zero directly on device
+        if (value == 0.0f && (!is_quantized() || q_zero_point() == 0)) {
+            // Fast path: memset to zero directly on device.
+            // Guard: quantized tensors with non-zero zero_point encode 0.0 as
+            // q_zero_point bytes, not 0x00, so we must NOT memset in that case.
             backend->memset(data_ptr(), 0, size_bytes, device().index);
         } else {
             // Use in-place StridedFill to preserve tensor identity (version tracking, views)
@@ -1286,8 +1331,10 @@ auto Tensor::fill_(double value) -> Tensor& {
         return *this;
     }
 
-    // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00)
-    if (value == 0.0f) {
+    // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00).
+    // Guard: quantized tensors with non-zero zero_point encode 0.0 as the zero_point
+    // byte value, NOT 0x00, so the memset would silently produce the wrong result.
+    if (value == 0.0f && (!is_quantized() || q_zero_point() == 0)) {
         std::memset(data_ptr(), 0, static_cast<size_t>(n) * dtype_size());
         bump_version();
         return *this;
@@ -1310,8 +1357,50 @@ auto Tensor::fill_(double value) -> Tensor& {
         case DType::Bool: std::fill_n(data<bool>(), n, value != 0.0f); break;
         case DType::Complex64: std::fill_n(data<std::complex<float>>(), n, std::complex<float>(value, 0.0f)); break;
         case DType::Complex128: std::fill_n(data<std::complex<double>>(), n, std::complex<double>(static_cast<double>(value), 0.0)); break;
+        case DType::FP8_E4M3: std::fill_n(data<FP8_E4M3>(), n, FP8_E4M3(static_cast<float>(value))); break;
+        case DType::FP8_E5M2: std::fill_n(data<FP8_E5M2>(), n, FP8_E5M2(static_cast<float>(value))); break;
+        case DType::QInt8:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // quantized value = round(value / scale) + zero_point, clamped to int8 range
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                std::fill_n(data<int8_t>(), n, static_cast<int8_t>(
+                    std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127))));
+            }
+            break;
+        case DType::QUInt8:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // quantized value = round(value / scale) + zero_point, clamped to uint8 range [0, 255]
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                std::fill_n(data<uint8_t>(), n, static_cast<uint8_t>(
+                    std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255))));
+            }
+            break;
+        case DType::QInt4x2:
+            if (q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            } else {
+                // Two 4-bit signed values per byte; clamp to [-8, 7] and pack nibbles.
+                // For a uniform fill both nibbles equal qval:
+                //   byte = (qval & 0xF) | ((qval & 0xF) << 4)
+                const int64_t qval = static_cast<int64_t>(std::round(value / q_scale())) + q_zero_point();
+                const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
+                const uint8_t qbyte = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                std::fill_n(reinterpret_cast<uint8_t*>(data<int8_t>()), n, qbyte);
+            }
+            break;
         default:
-            throw std::runtime_error("fill_ not supported for this dtype");
+            throw std::runtime_error(std::string("fill_: unsupported dtype ") +
+                                     std::string(dtype_name(impl_->dtype)));
     }
 
     bump_version();
