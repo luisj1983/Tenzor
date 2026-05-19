@@ -84,4 +84,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_shape
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.6 — Cast / Index ops (Cast, Embedding, IndexSelect).
+    add_executable(test_op_cast_index test_op_cast_index.cpp)
+    target_link_libraries(test_op_cast_index
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_cast_index
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()

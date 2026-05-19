@@ -81,6 +81,12 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // Dropout
         case OpId::Dropout:    return OpType::Dropout;
 
+        // Cast (GPU dispatch path; CPU rewrites in Tensor::to(dtype)).
+        case OpId::Cast:       return OpType::Cast;
+
+        // Index ops
+        case OpId::IndexSelect: return OpType::IndexSelect;
+
         default:
             return std::nullopt;
     }
@@ -173,6 +179,8 @@ auto make_tracing_interceptor(
         copy_int(AttrKey::Start, "start");
         copy_int(AttrKey::End,   "end");
         copy_int(AttrKey::Step,  "step");
+        // Cast op target dtype (stored as uint8 cast to int64).
+        copy_int(AttrKey::TargetDtype, "target_dtype");
         // Reshape stores its target shape as a comma-separated string under
         // AttrKey::Shape; parse to an int-list so consumers don't have to.
         auto copy_int_list_to_vec = [&](AttrKey k, const char* name) {

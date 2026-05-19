@@ -189,6 +189,18 @@ auto normalize_dim(int64_t d, int64_t rank) -> int64_t {
     return d < 0 ? d + rank : d;
 }
 
+/// Emit `tensor<DxDx...xT>` to the stream — same logic as the private
+/// helper in mlir_text_emit.cpp, replicated here so handlers in this
+/// translation unit can render types in custom forms that the focused
+/// emitters don't cover (e.g. stablehlo.gather's operand-tuple syntax).
+auto write_tensor_type_for_emit(std::ostream& os,
+                                const std::vector<int64_t>& shape,
+                                ::tenzor::DType d) -> void {
+    os << "tensor<";
+    for (auto dim : shape) os << dim << 'x';
+    os << mlir_type_name(d) << '>';
+}
+
 // ─── Handler helpers ────────────────────────────────────────────────────────
 
 /// Extract a scalar value from a rank-0 (or numel==1) tensor.
@@ -1191,6 +1203,157 @@ auto handle_broadcast(LoweringContext& ctx,
     body << '\n';
 }
 
+// ── Cast / Index ────────────────────────────────────────────────────────────
+
+auto handle_cast(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Cast expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_convert(body, out_name, ctx.name_for(in_val->id()),
+                           in_val->shape(), in_val->dtype(),
+                           out_val->dtype());
+    body << '\n';
+}
+
+/// Embedding: `out[i, ...] = weight[indices[i], ...]`.
+///   weight: (V, E)        — operand 0
+///   indices: (..., L)      — operand 1, integer
+///   out:    (..., L, E)
+/// Lower to stablehlo.gather. Per the StableHLO `gather` spec, with
+/// `start_indices` = indices_with_one_extra_trailing_size_1_dim and
+/// gather index_dim = -1, the result is gathered along the embedding's
+/// first axis.
+auto handle_embedding(LoweringContext& ctx,
+                      const ::tenzor::jit::Node& node,
+                      std::ostream& body) -> void {
+    if (node.inputs().size() != 2 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Embedding expects 2 inputs (weight, indices) and "
+            "1 output");
+    }
+    const auto& w_val  = node.inputs()[0];
+    const auto& i_val  = node.inputs()[1];
+    const auto& out_val = node.outputs()[0];
+    const auto w_shape = w_val->shape();
+    const auto i_shape = i_val->shape();
+    const auto out_shape = out_val->shape();
+    const auto d = out_val->dtype();
+
+    // Use stablehlo.gather. Operand: weight (V, E). Start indices:
+    // indices reshaped to (i_shape..., 1) — adding a trailing size-1 dim
+    // so the index vector index has length 1 (we gather along weight's
+    // dim 0).
+    auto i_reshaped_shape = i_shape;
+    i_reshaped_shape.push_back(1);
+    auto idx_name = ctx.fresh_name();
+    emit_stablehlo_reshape(body, idx_name, ctx.name_for(i_val->id()),
+                           i_shape, i_reshaped_shape, i_val->dtype());
+    body << '\n';
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+
+    // Emit gather: offset_dims = [rank(indices)..rank(out)-1],
+    // collapsed_slice_dims = [0], start_index_map = [0],
+    // index_vector_dim = rank(indices), slice_sizes = [1, E].
+    const int64_t ir = static_cast<int64_t>(i_shape.size());
+    const int64_t er = static_cast<int64_t>(w_shape.size()) - 1;  // E dims
+    body << '%' << out_name << " = \"stablehlo.gather\"(%"
+         << ctx.name_for(w_val->id()) << ", %" << idx_name << ") <{"
+         << "dimension_numbers = #stablehlo.gather<offset_dims = [";
+    for (int64_t k = 0; k < er; ++k) {
+        if (k != 0) body << ", ";
+        body << (ir + k);
+    }
+    body << "], collapsed_slice_dims = [0], "
+         << "start_index_map = [0], index_vector_dim = " << ir << ">, "
+         << "slice_sizes = array<i64: 1";
+    for (int64_t k = 1; k < static_cast<int64_t>(w_shape.size()); ++k) {
+        body << ", " << w_shape[k];
+    }
+    body << ">, indices_are_sorted = false}> : (";
+    write_tensor_type_for_emit(body, w_shape, w_val->dtype());
+    body << ", ";
+    write_tensor_type_for_emit(body, i_reshaped_shape, i_val->dtype());
+    body << ") -> ";
+    write_tensor_type_for_emit(body, out_shape, d);
+    body << '\n';
+}
+
+auto handle_index_select(LoweringContext& ctx,
+                         const ::tenzor::jit::Node& node,
+                         std::ostream& body) -> void {
+    if (node.inputs().size() != 2 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: IndexSelect expects 2 inputs (input, index) and "
+            "1 output");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& i_val   = node.inputs()[1];
+    const auto& out_val = node.outputs()[0];
+    const auto x_shape = x_val->shape();
+    const auto i_shape = i_val->shape();
+    const auto out_shape = out_val->shape();
+    const auto d = out_val->dtype();
+    const int64_t rank = static_cast<int64_t>(x_shape.size());
+    const int64_t dim = node.has_attr("dim")
+                            ? normalize_dim(node.get_int_attr("dim"), rank)
+                            : 0;
+
+    // index is 1-D of length L. Reshape to (L, 1) so the gather operand
+    // form (start_indices, index_vector_dim) is well-formed.
+    auto i_reshaped_shape = i_shape;
+    i_reshaped_shape.push_back(1);
+    auto idx_name = ctx.fresh_name();
+    emit_stablehlo_reshape(body, idx_name, ctx.name_for(i_val->id()),
+                           i_shape, i_reshaped_shape, i_val->dtype());
+    body << '\n';
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+
+    // slice_sizes: same as x_shape but with dim `dim` set to 1.
+    std::vector<int64_t> slice_sizes(x_shape);
+    slice_sizes[dim] = 1;
+    // offset_dims: every dim of out EXCEPT the gather index dims. With
+    // index of rank 1 and result shape inserting the index dim at `dim`,
+    // offset_dims = all dims of out except dim.
+    std::vector<int64_t> offset_dims;
+    for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
+        if (i != dim) offset_dims.push_back(i);
+    }
+
+    body << '%' << out_name << " = \"stablehlo.gather\"(%"
+         << ctx.name_for(x_val->id()) << ", %" << idx_name << ") <{"
+         << "dimension_numbers = #stablehlo.gather<offset_dims = [";
+    for (std::size_t k = 0; k < offset_dims.size(); ++k) {
+        if (k != 0) body << ", ";
+        body << offset_dims[k];
+    }
+    body << "], collapsed_slice_dims = [" << dim << "], "
+         << "start_index_map = [" << dim << "], index_vector_dim = "
+         << static_cast<int64_t>(i_shape.size()) << ">, "
+         << "slice_sizes = array<i64: ";
+    for (std::size_t k = 0; k < slice_sizes.size(); ++k) {
+        if (k != 0) body << ", ";
+        body << slice_sizes[k];
+    }
+    body << ">, indices_are_sorted = false}> : (";
+    write_tensor_type_for_emit(body, x_shape, d);
+    body << ", ";
+    write_tensor_type_for_emit(body, i_reshaped_shape, i_val->dtype());
+    body << ") -> ";
+    write_tensor_type_for_emit(body, out_shape, d);
+    body << '\n';
+}
+
 auto handle_pow(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -1323,6 +1486,11 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Unsqueeze:    handle_unsqueeze(ctx, *node, body); break;
             case OpType::Flatten:      handle_flatten(ctx, *node, body);   break;
             case OpType::Broadcast:    handle_broadcast(ctx, *node, body); break;
+
+            // ── Cast / Index ──
+            case OpType::Cast:         handle_cast(ctx, *node, body);         break;
+            case OpType::Embedding:    handle_embedding(ctx, *node, body);    break;
+            case OpType::IndexSelect:  handle_index_select(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
