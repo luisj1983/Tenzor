@@ -41,6 +41,17 @@ if(IREE_RUN_MODULE_EXECUTABLE)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_IREE_RUN_MODULE_PATH="${IREE_RUN_MODULE_EXECUTABLE}")
 endif()
+# Propagate the ROCm runtime LD path so the IREE HIP HAL can dlopen
+# libamdhip64.so on hosts where /opt/rocm is corrupt — see the long
+# discovery block in the top-level CMakeLists.txt.
+if(TENZOR_ROCM_RUNTIME_LIB_DIR)
+    target_compile_definitions(tenzor_jit_mlir PRIVATE
+        TENZOR_ROCM_RUNTIME_LIB_DIR="${TENZOR_ROCM_RUNTIME_LIB_DIR}")
+endif()
+if(TENZOR_DEFAULT_ROCM_TARGET)
+    target_compile_definitions(tenzor_jit_mlir PRIVATE
+        TENZOR_DEFAULT_ROCM_TARGET="${TENZOR_DEFAULT_ROCM_TARGET}")
+endif()
 
 # OBJECT library is spliced into the shared tenzor_core; PIC required.
 set_target_properties(tenzor_jit_mlir PROPERTIES POSITION_INDEPENDENT_CODE ON)

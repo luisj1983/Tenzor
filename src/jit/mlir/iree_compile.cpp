@@ -244,9 +244,20 @@ auto compile_via_subprocess(const std::string& mlir_text,
         "--iree-hal-target-backends=" + target,
         "--iree-input-type=stablehlo",
         "--output-format=vm-bytecode",
-        "-o", vmfb_path.string(),
-        "-",  // read MLIR from stdin
     };
+    // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. Mirror
+    // the in-process path's logic (see ireeCompilerSessionSetFlags above)
+    // so subprocess and in-process behaviour stay aligned.
+    if (target == "rocm") {
+#ifdef TENZOR_DEFAULT_ROCM_TARGET
+        args.push_back("--iree-rocm-target=" TENZOR_DEFAULT_ROCM_TARGET);
+#else
+        args.push_back("--iree-rocm-target=gfx1150");
+#endif
+    }
+    args.push_back("-o");
+    args.push_back(vmfb_path.string());
+    args.push_back("-");  // read MLIR from stdin
     std::string stderr_text, vmfb_unused;
     const int rc = run_iree_compile_subprocess(bin, args, mlir_text,
                                                stderr_text, vmfb_unused);
@@ -440,8 +451,22 @@ auto compile_mlir(const std::string& mlir_text,
     const std::string target_flag =
         "--iree-hal-target-backends=" + opts.target;
     const std::string input_flag = "--iree-input-type=stablehlo";
-    const char* flags[] = {target_flag.c_str(), input_flag.c_str()};
-    if (auto* set_err = ireeCompilerSessionSetFlags(session, /*argc=*/2, flags);
+    // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. CUDA
+    // has a sensible default in iree-compile; Vulkan/CPU are
+    // chip-independent.
+    std::string rocm_target_flag;
+    std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str()};
+    if (opts.target == "rocm") {
+#ifdef TENZOR_DEFAULT_ROCM_TARGET
+        rocm_target_flag = std::string("--iree-rocm-target=")
+                           + TENZOR_DEFAULT_ROCM_TARGET;
+#else
+        rocm_target_flag = std::string("--iree-rocm-target=gfx1150");
+#endif
+        flags.push_back(rocm_target_flag.c_str());
+    }
+    if (auto* set_err = ireeCompilerSessionSetFlags(
+            session, /*argc=*/static_cast<int>(flags.size()), flags.data());
         set_err != nullptr) {
         CompilerError err{set_err};
         throw JitCompileError(

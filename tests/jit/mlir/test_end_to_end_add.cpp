@@ -15,6 +15,7 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -50,7 +51,15 @@ auto backend_present(const std::string& name) -> bool {
 auto target_hw_present(const std::string& target) -> bool {
     if (target == "llvm-cpu")     return true;
     if (target == "cuda")         return backend_present("cuda");
-    if (target == "rocm")         return backend_present("rocm");
+    // rocm gating: Path C.2 (see docs/superpowers/plans/
+    // 2026-05-19-tz-jit-mlir-phase1a.md). We don't require the Tenzor
+    // ROCm backend to be loaded — IREE drives the GPU directly via its
+    // HIP HAL driver. As long as the IREE runtime can dlopen libamdhip64
+    // and create a default device, the JIT path works end-to-end on real
+    // ROCm hardware. The compile-time-discovered ROCm runtime library
+    // directory is auto-prepended to LD_LIBRARY_PATH inside the probe.
+    if (target == "rocm")
+        return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("hip");
     if (target == "vulkan-spirv") return backend_present("vulkan");
     return false;
 }
@@ -100,7 +109,17 @@ void run_add_on_target(const std::string& target) {
     auto compiled =
         ::tenzor::jit::CompiledFunction(add_self_fn(), cfg);
 
-    const auto dev = device_for_target(target);
+    // Path C.2: if the Tenzor backend for this target isn't loaded
+    // (e.g. rocm on a host with corrupt /opt/rocm), allocate the
+    // eager input on CPU. IREE copies the host buffer into its own
+    // device-side buffer during marshaling regardless of where the
+    // input lives, so the JIT path still runs on the GPU. The eager
+    // x+x evaluation then runs on CPU — identical numerics for Add.
+    const std::string be_name =
+        target == "vulkan-spirv" ? "vulkan" : target;
+    const auto dev = (target != "llvm-cpu" && backend_present(be_name))
+                         ? device_for_target(target)
+                         : ::tenzor::Device::cpu();
     auto x_tensor = ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32, dev);
     auto x = ::tenzor::Variable(x_tensor, /*requires_grad=*/false);
 

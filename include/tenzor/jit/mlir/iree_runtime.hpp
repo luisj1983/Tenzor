@@ -100,6 +100,24 @@ private:
 
 /// Thrown when iree-run-module reports a runtime failure. Carries the full
 /// stderr text for debugging.
+/// Probe whether the IREE runtime can create a default device for the
+/// given driver (e.g. "hip", "cuda", "vulkan"). On hosts where the
+/// Tenzor backend for a target isn't loaded but the IREE runtime can
+/// still dlopen the driver's underlying vendor library (libamdhip64,
+/// libcuda, libvulkan), this returns true and the JIT-test gating in
+/// test_end_to_end_add.cpp / test_model_resnet.cpp / test_model_llama
+/// .cpp uses it in place of `backend_present(...)`.
+///
+/// Side effects: on first call for "hip", if the compile-time
+/// `TENZOR_ROCM_RUNTIME_LIB_DIR` was set, this prepends that directory
+/// to LD_LIBRARY_PATH (via setenv) so the IREE HIP HAL driver's
+/// dlopen("libamdhip64.so") finds the working library set.
+///
+/// Caches the result per-driver to avoid repeated dlopen+device-create
+/// probes (each takes ~30ms on a warm laptop).
+auto iree_can_initialize_default_device(const std::string& driver_name)
+    -> bool;
+
 class JitInvokeError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

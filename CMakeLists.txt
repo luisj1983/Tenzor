@@ -181,6 +181,81 @@ if(TENZOR_USE_MLIR_JIT)
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")
+
+    # ROCm runtime library discovery for the IREE HIP HAL driver.
+    #
+    # The IREE runtime dlopens libamdhip64.so + dependents (libhsa-runtime64,
+    # libamd_comgr, librocm-core, librocprofiler-register, libroctracer64,
+    # libhiprtc, libnuma) when an `hip` device is requested. Tenzor's Path C.2
+    # (see docs/superpowers/plans/2026-05-19-tz-jit-mlir-phase1a.md) decouples
+    # the JIT-test rocm gating from the Tenzor ROCm BACKEND being loaded — what
+    # matters at runtime is that the IREE runtime can dlopen a working set of
+    # ROCm libs.
+    #
+    # Discovery priority:
+    #   1. $TENZOR_ROCM_RUNTIME_LIB_DIR  — explicit override
+    #   2. ${TENZOR_ROCM_RUNTIME_LIB_DIR} — CMake-level override
+    #   3. /opt/rocm/lib                 — host ROCm install (only if intact)
+    #   4. /home/lee/rocm-recovered/opt/rocm/lib — user-recovered fallback on
+    #      hosts where /opt/rocm is zero-byte-corrupted (the lee@archlinux
+    #      box's state circa 2026-05-19).
+    #
+    # The discovery probes one canonical .so (libamdhip64.so) and rejects
+    # zero-byte files outright.
+    set(_tenzor_rocm_runtime_lib_dir "")
+    set(_rocm_candidate_dirs "")
+    if(DEFINED ENV{TENZOR_ROCM_RUNTIME_LIB_DIR})
+        list(APPEND _rocm_candidate_dirs "$ENV{TENZOR_ROCM_RUNTIME_LIB_DIR}")
+    endif()
+    if(TENZOR_ROCM_RUNTIME_LIB_DIR)
+        list(APPEND _rocm_candidate_dirs "${TENZOR_ROCM_RUNTIME_LIB_DIR}")
+    endif()
+    list(APPEND _rocm_candidate_dirs "/opt/rocm/lib")
+    list(APPEND _rocm_candidate_dirs "/home/lee/rocm-recovered/opt/rocm/lib")
+    foreach(_d IN LISTS _rocm_candidate_dirs)
+        if(EXISTS "${_d}/libamdhip64.so")
+            file(SIZE "${_d}/libamdhip64.so" _hip_so_size)
+            # Follow one level of symlinks to detect truncated targets.
+            get_filename_component(_real_hip_so "${_d}/libamdhip64.so" REALPATH)
+            if(EXISTS "${_real_hip_so}")
+                file(SIZE "${_real_hip_so}" _hip_so_size)
+            endif()
+            if(_hip_so_size GREATER 1024)
+                set(_tenzor_rocm_runtime_lib_dir "${_d}")
+                break()
+            endif()
+        endif()
+    endforeach()
+    if(_tenzor_rocm_runtime_lib_dir)
+        message(STATUS "  ROCm runtime libs (for IREE HIP HAL): "
+                "${_tenzor_rocm_runtime_lib_dir}")
+        set(TENZOR_ROCM_RUNTIME_LIB_DIR "${_tenzor_rocm_runtime_lib_dir}"
+            CACHE PATH "ROCm runtime libs for IREE HIP HAL dlopen." FORCE)
+    else()
+        message(STATUS "  ROCm runtime libs: none found "
+                "(rocm IREE-target tests will skip via "
+                "iree_can_initialize_default_device(\"hip\"))")
+        set(TENZOR_ROCM_RUNTIME_LIB_DIR ""
+            CACHE PATH "ROCm runtime libs for IREE HIP HAL dlopen." FORCE)
+    endif()
+
+    # IREE's iree-compile rocm target requires an explicit `--iree-rocm-target
+    # =<chip>` flag (gfx1150/gfx942/...); there is no default. Mirror the
+    # `CMAKE_HIP_ARCHITECTURES` value (auto-detected by the top-of-file ROCm
+    # block via rocm_agent_enumerator) into a separate cache var so the
+    # iree_compile.cpp subprocess invocation picks it up via the
+    # TENZOR_DEFAULT_ROCM_TARGET compile-time define. If no chip is
+    # detected, default to gfx1150 (the lee@archlinux box's Radeon 890M).
+    set(_tenzor_default_rocm_target "")
+    if(CMAKE_HIP_ARCHITECTURES)
+        list(GET CMAKE_HIP_ARCHITECTURES 0 _tenzor_default_rocm_target)
+    endif()
+    if(NOT _tenzor_default_rocm_target)
+        set(_tenzor_default_rocm_target "gfx1150")
+    endif()
+    set(TENZOR_DEFAULT_ROCM_TARGET "${_tenzor_default_rocm_target}"
+        CACHE STRING "Default --iree-rocm-target chip for iree-compile." FORCE)
+    message(STATUS "  Default IREE rocm target chip: ${TENZOR_DEFAULT_ROCM_TARGET}")
 endif()
 
 # Link-Time Optimization

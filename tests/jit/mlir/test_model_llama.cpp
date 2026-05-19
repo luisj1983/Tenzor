@@ -14,6 +14,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
@@ -53,6 +54,19 @@ auto backend_present(const std::string& name) -> bool {
 
 auto target_hw_present(const std::string& target) -> bool {
     if (target == "llvm-cpu")     return true;
+    if (target == "cuda")         return backend_present("cuda");
+    // rocm gating: Path C.2 (see docs/superpowers/plans/
+    // 2026-05-19-tz-jit-mlir-phase1a.md). Probe IREE's HIP HAL directly
+    // — the Tenzor ROCm backend isn't required, only working ROCm libs
+    // that the IREE runtime can dlopen.
+    if (target == "rocm")
+        return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("hip");
+    if (target == "vulkan-spirv") return backend_present("vulkan");
+    return false;
+}
+
+auto tenzor_backend_for_target_loaded(const std::string& target) -> bool {
+    if (target == "llvm-cpu")     return backend_present("cpu");
     if (target == "cuda")         return backend_present("cuda");
     if (target == "rocm")         return backend_present("rocm");
     if (target == "vulkan-spirv") return backend_present("vulkan");
@@ -359,7 +373,13 @@ void run_jit_match(const std::string& target) {
     }
 
     MiniLlama m(MiniLlamaConfig{});
-    const auto dev = device_for_target(target);
+    // Path C.2: when the Tenzor backend for this target isn't loaded
+    // (rocm on a host with corrupt /opt/rocm) keep eager on CPU. IREE
+    // marshals host buffers into its own device-side allocations
+    // during invoke so the JIT path still runs on the GPU.
+    const bool tenzor_be = tenzor_backend_for_target_loaded(target);
+    const auto dev = tenzor_be ? device_for_target(target)
+                               : ::tenzor::Device::cpu();
     if (dev.type != ::tenzor::Device::Type::CPU) {
         m.to(dev);
     }

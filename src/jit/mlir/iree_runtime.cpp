@@ -31,9 +31,11 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <sys/wait.h>
@@ -560,6 +562,130 @@ IreeInvoker::~IreeInvoker() {
             static_cast<iree_runtime_instance_t*>(instance_));
         instance_ = nullptr;
     }
+}
+
+namespace {
+
+// Prepend `dir` to LD_LIBRARY_PATH (or set it if unset). Called before
+// the first IREE HIP HAL device probe so dlopen("libamdhip64.so") finds
+// a working copy on hosts where /opt/rocm is corrupt. setenv() during
+// process startup is safe; LD_LIBRARY_PATH is only consulted by
+// dlopen, which the IREE HIP HAL driver does lazily on first use.
+auto prepend_to_ld_library_path(const std::string& dir) -> void {
+    const char* current = std::getenv("LD_LIBRARY_PATH");
+    std::string merged = dir;
+    if (current && *current) {
+        merged += ':';
+        merged += current;
+    }
+    ::setenv("LD_LIBRARY_PATH", merged.c_str(), /*overwrite=*/1);
+}
+
+}  // namespace
+
+auto iree_can_initialize_default_device(const std::string& driver_name)
+    -> bool {
+    // Per-driver cache: dlopen + device-create costs ~30ms on a warm
+    // laptop and tests may probe the same driver dozens of times.
+    static std::mutex cache_mu;
+    static std::unordered_map<std::string, bool> cache;
+    {
+        std::lock_guard<std::mutex> g(cache_mu);
+        auto it = cache.find(driver_name);
+        if (it != cache.end()) return it->second;
+    }
+
+    // For the HIP driver: prepend the compile-time-discovered ROCm runtime
+    // library directory to LD_LIBRARY_PATH so dlopen("libamdhip64.so")
+    // resolves to a working library on hosts where /opt/rocm is corrupt.
+    // No-op if TENZOR_ROCM_RUNTIME_LIB_DIR wasn't defined at build time.
+    // Must be set before the iree-run-module subprocess fork+exec below
+    // and before the in-process HAL driver attempts dlopen.
+#ifdef TENZOR_ROCM_RUNTIME_LIB_DIR
+    if (driver_name == "hip") {
+        prepend_to_ld_library_path(TENZOR_ROCM_RUNTIME_LIB_DIR);
+    }
+#endif
+
+    // First try the in-process path (cheap when the driver is linked in).
+    iree_runtime_instance_options_t opts;
+    iree_runtime_instance_options_initialize(&opts);
+    iree_runtime_instance_options_use_all_available_drivers(&opts);
+    iree_runtime_instance_t* instance = nullptr;
+    iree_status_t s = iree_runtime_instance_create(
+        &opts, iree_allocator_system(), &instance);
+    bool inproc_ok = false;
+    if (iree_status_is_ok(s)) {
+        iree_hal_device_t* device = nullptr;
+        iree_string_view_t driver_sv =
+            iree_make_string_view(driver_name.data(), driver_name.size());
+        iree_status_t ds = iree_runtime_instance_try_create_default_device(
+            instance, driver_sv, &device);
+        inproc_ok = iree_status_is_ok(ds);
+        if (!inproc_ok) {
+            iree_status_ignore(ds);
+        }
+        if (device) {
+            iree_hal_device_release(device);
+        }
+        iree_runtime_instance_release(instance);
+    } else {
+        iree_status_ignore(s);
+    }
+
+    if (inproc_ok) {
+        std::lock_guard<std::mutex> g(cache_mu);
+        cache[driver_name] = true;
+        return true;
+    }
+
+    // The linked-in IREE runtime distributions Tenzor uses commonly omit
+    // cuda/hip drivers (they're not in the IREE_HAVE_HAL_*_DRIVER_MODULE
+    // defines list at build time). For those targets, IreeInvoker
+    // automatically falls back to Mode::Subprocess via iree-run-module —
+    // which is a separate binary built with all drivers. To match that
+    // gating we probe the subprocess path here too: run `iree-run-module
+    // --list_devices=<driver>` and treat any non-empty device line as
+    // success.
+    //
+    // Use popen() with a short pipe; the binary returns within a few
+    // hundred ms even on a cold ROCm load.
+    std::string run_module;
+    try {
+        run_module = resolve_iree_run_module();
+    } catch (...) {
+        std::lock_guard<std::mutex> g(cache_mu);
+        cache[driver_name] = false;
+        return false;
+    }
+    std::string cmd = run_module + " --list_devices=" + driver_name +
+                      " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        std::lock_guard<std::mutex> g(cache_mu);
+        cache[driver_name] = false;
+        return false;
+    }
+    char buf[1024];
+    std::string out;
+    while (std::fgets(buf, sizeof(buf), pipe)) {
+        out += buf;
+    }
+    int rc = pclose(pipe);
+    bool subproc_ok = false;
+    if (rc == 0) {
+        // Any line containing "://" denotes a device URI; an empty list
+        // implies no devices, "FLAGS ERROR" implies the driver couldn't
+        // load its underlying vendor library.
+        if (out.find("://") != std::string::npos &&
+            out.find("FLAGS ERROR") == std::string::npos) {
+            subproc_ok = true;
+        }
+    }
+
+    std::lock_guard<std::mutex> g(cache_mu);
+    cache[driver_name] = subproc_ok;
+    return subproc_ok;
 }
 
 }  // namespace tenzor::jit::mlir_jit
