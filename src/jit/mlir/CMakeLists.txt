@@ -37,6 +37,11 @@ if(IREE_COMPILE_EXECUTABLE)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_IREE_COMPILE_PATH="${IREE_COMPILE_EXECUTABLE}")
 endif()
+# Propagate the project source dir so iree_paths.cpp can find the
+# project-local .venv-iree/ at runtime (the venv pip-installs the
+# full-GPU iree-compile with cuda + rocm + vulkan-spirv targets).
+target_compile_definitions(tenzor_jit_mlir PRIVATE
+    TENZOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 if(IREE_RUN_MODULE_EXECUTABLE)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_IREE_RUN_MODULE_PATH="${IREE_RUN_MODULE_EXECUTABLE}")

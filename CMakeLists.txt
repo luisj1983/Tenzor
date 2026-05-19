@@ -188,7 +188,7 @@ if(TENZOR_USE_MLIR_JIT)
     find_program(IREE_COMPILE_EXECUTABLE iree-compile
         HINTS
             $ENV{TENZOR_IREE_COMPILE}
-            /home/lee/.venvs/tenzor-jit/bin
+            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
@@ -220,7 +220,7 @@ if(TENZOR_USE_MLIR_JIT)
     find_program(IREE_RUN_MODULE_EXECUTABLE iree-run-module
         HINTS
             $ENV{TENZOR_IREE_RUN_MODULE}
-            /home/lee/.venvs/tenzor-jit/bin
+            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")

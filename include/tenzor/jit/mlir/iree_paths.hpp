@@ -5,7 +5,7 @@
 // is:
 //
 //   1. $TENZOR_IREE_COMPILE / $TENZOR_IREE_RUN_MODULE   (explicit user override)
-//   2. /home/lee/.venvs/tenzor-jit/bin/<binary>          (pip venv with full GPU)
+//   2. ${CMAKE_SOURCE_DIR}/.venv-iree/bin/<binary>       (project-local pip venv with full GPU)
 //   3. ${IREE_COMPILE_EXECUTABLE} / its sibling          (CMake-found build dist)
 //   4. `<binary>` on $PATH                                (last resort)
 //

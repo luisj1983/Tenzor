@@ -60,10 +60,13 @@ auto resolve_iree_binary(const char* env_var,
                                  env + "' but it is not an executable file.");
     }
 
-    // 2. Known full-GPU pip-installed IREE venv, preferred over the
-    // CMake-found dist when both are present.
+    // 2. Project-local pip venv at .venv-iree/, the full-GPU iree-compile
+    //    that the project's CMake configure tells users to install. Lives
+    //    inside the source tree (gitignored). Preferred over the
+    //    CMake-found dist when both are present because the dist often
+    //    ships without cuda/rocm backends.
     {
-        const std::string cand = "/home/lee/.venvs/tenzor-jit/bin/" + binary;
+        const std::string cand = std::string(TENZOR_SOURCE_DIR) + "/.venv-iree/bin/" + binary;
         if (is_executable(cand)) {
             return cand;
         }

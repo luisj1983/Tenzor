@@ -167,6 +167,17 @@ auto run_iree_compile_subprocess(const std::string& binary,
             argv.push_back(const_cast<char*>(a.c_str()));
         }
         argv.push_back(nullptr);
+        // Scrub LD_LIBRARY_PATH before exec. The parent process loads ROCm
+        // (/opt/rocm/lib) and OneAPI (/opt/intel/oneapi/.../lib) shared
+        // libraries to register its own backends. If we inherit that
+        // LD_LIBRARY_PATH, the child iree-compile picks up MLIR-shaped
+        // libraries from /opt/intel/oneapi at dlopen time that don't
+        // include the StableHLO dialect — producing a silent
+        // "Dialect 'stablehlo' not found" failure on any non-trivial IR.
+        // iree-compile bundles its own MLIR in the pip wheel's
+        // _mlir_libs/ via rpath, so it doesn't need LD_LIBRARY_PATH to
+        // resolve its own dependencies. Unsetting is the correct fix.
+        unsetenv("LD_LIBRARY_PATH");
         execv(binary.c_str(), argv.data());
         // execv failed.
         const std::string msg =
@@ -242,7 +253,12 @@ auto compile_via_subprocess(const std::string& mlir_text,
     const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
     std::vector<std::string> args{
         "--iree-hal-target-backends=" + target,
-        "--iree-input-type=stablehlo",
+        // --iree-input-type=auto explicitly enables StableHLO dialect
+        // detection. Older IREE accepted "stablehlo"; IREE 3.11+ replaced
+        // it with "auto" (analyze-and-pick). "auto" works on both. Without
+        // it, complex stablehlo IR fails with "Dialect 'stablehlo' not
+        // found for custom op 'stablehlo.constant'".
+        "--iree-input-type=auto",
         "--output-format=vm-bytecode",
     };
     // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. Mirror
@@ -255,12 +271,43 @@ auto compile_via_subprocess(const std::string& mlir_text,
         args.push_back("--iree-rocm-target=gfx1150");
 #endif
     }
+    // Write MLIR text to a temp file rather than piping via stdin. The
+    // stdin pipe path was hitting auto-input-type detection failures on
+    // larger modules (>32 KB) in IREE 3.11+ — the parser couldn't decide
+    // the dialect from a partial pipe read. Passing a file path lets
+    // iree-compile mmap the whole thing and sniff dialects reliably.
+    char mlir_tmp_template[] = "/tmp/tenzor_mlir_XXXXXX.mlir";
+    int mlir_fd = mkstemps(mlir_tmp_template, /*suffixlen=*/5);
+    if (mlir_fd < 0) {
+        throw JitCompileError(
+            std::string("mkstemps for MLIR input failed: ") + std::strerror(errno),
+            mlir_path);
+    }
+    {
+        std::size_t total = 0;
+        while (total < mlir_text.size()) {
+            const ssize_t n = ::write(mlir_fd, mlir_text.data() + total,
+                                      mlir_text.size() - total);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                ::close(mlir_fd);
+                ::unlink(mlir_tmp_template);
+                throw JitCompileError(
+                    std::string("write to MLIR temp failed: ") + std::strerror(errno),
+                    mlir_path);
+            }
+            total += static_cast<std::size_t>(n);
+        }
+    }
+    ::close(mlir_fd);
     args.push_back("-o");
     args.push_back(vmfb_path.string());
-    args.push_back("-");  // read MLIR from stdin
+    args.push_back(mlir_tmp_template);  // path; iree-compile mmaps it
     std::string stderr_text, vmfb_unused;
-    const int rc = run_iree_compile_subprocess(bin, args, mlir_text,
+    // Pass empty stdin since we're using a file path.
+    const int rc = run_iree_compile_subprocess(bin, args, std::string{},
                                                stderr_text, vmfb_unused);
+    ::unlink(mlir_tmp_template);
     if (rc != 0) {
         throw JitCompileError(
             "iree-compile subprocess (target=" + target + ") exit=" +
@@ -447,10 +494,16 @@ auto compile_mlir(const std::string& mlir_text,
 
     // Configure target via the standard flag. Tenzor exposes a small enum
     // (target field) and we translate it 1:1 to IREE's --iree-hal-target-backends
-    // string. Additional --iree-input-type=stablehlo signals the input dialect.
+    // string. StableHLO is the default input form on IREE 3.11+ (auto-detected).
     const std::string target_flag =
         "--iree-hal-target-backends=" + opts.target;
-    const std::string input_flag = "--iree-input-type=stablehlo";
+    // IREE 3.11+ dropped the explicit "stablehlo" input-type alias in
+    // favour of "auto" (analyze-and-pick). "auto" is the right value on
+    // both old (3.0–3.10, where it was already accepted alongside
+    // "stablehlo") and new (3.11+, where it's the standard).
+    // We CAN'T leave this empty — ireeCompilerSessionSetFlags treats an
+    // empty string as a positional arg and rejects it.
+    const std::string input_flag = "--iree-input-type=auto";
     // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. CUDA
     // has a sensible default in iree-compile; Vulkan/CPU are
     // chip-independent.
