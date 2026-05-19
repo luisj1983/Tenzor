@@ -159,6 +159,10 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
         s << static_cast<long long>(value);
         return s.str();
     }
+    if (d == DType::Bool) {
+        // MLIR dense<> i1 splat constants use 'true'/'false'.
+        return value != 0.0 ? "true" : "false";
+    }
     throw std::runtime_error(
         "GraphToMLIR: scalar_literal: unsupported DType");
 }
@@ -330,6 +334,15 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
                     case DType::Int64:
                         render_one(payload, cpu.data<int64_t>()[flat_idx++]);
                         break;
+                    case DType::Bool: {
+                        // MLIR `dense<>` Bool payloads use 'true'/'false'
+                        // literals, not numeric 0/1. The underlying storage is
+                        // one byte per element on the CPU side; cast to bool
+                        // for correctness against any non-canonical 0/1.
+                        const auto* bp = cpu.data<bool>();
+                        payload << (bp[flat_idx++] ? "true" : "false");
+                        break;
+                    }
                     default:
                         throw std::runtime_error(
                             "GraphToMLIR: emit_tensor_constant: "
@@ -459,14 +472,33 @@ auto handle_where(LoweringContext& ctx,
         throw std::runtime_error(
             "GraphToMLIR: Where expects 3 inputs and 1 output");
     }
-    const auto& cond = ctx.name_for(node.inputs()[0]->id());
-    const auto& on_true = ctx.name_for(node.inputs()[1]->id());
-    const auto& on_false = ctx.name_for(node.inputs()[2]->id());
+    const auto& cond_in = node.inputs()[0];
+    const auto& on_true_in = node.inputs()[1];
+    const auto& on_false_in = node.inputs()[2];
+    const auto& cond = ctx.name_for(cond_in->id());
+    const auto& on_true = ctx.name_for(on_true_in->id());
+    const auto& on_false = ctx.name_for(on_false_in->id());
     const auto& out = node.outputs()[0];
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
-    emit_stablehlo_ternary(body, "select", out_name, cond, on_true, on_false,
-                           out->shape(), out->dtype());
+
+    // The predicate operand of stablehlo.select must be i1. The tracer
+    // surfaces the cond as a Bool tensor (eager comparisons return
+    // DType::Bool). Use the long-form select syntax so the predicate
+    // type and value type can differ:
+    //   %out = "stablehlo.select"(%pred, %a, %b)
+    //       : (tensor<NxNxi1>, tensor<NxNxf32>, tensor<NxNxf32>)
+    //       -> tensor<NxNxf32>
+    body << '%' << out_name
+         << " = \"stablehlo.select\"(%" << cond << ", %" << on_true
+         << ", %" << on_false << ") : (";
+    write_tensor_type_for_emit(body, cond_in->shape(), cond_in->dtype());
+    body << ", ";
+    write_tensor_type_for_emit(body, on_true_in->shape(), on_true_in->dtype());
+    body << ", ";
+    write_tensor_type_for_emit(body, on_false_in->shape(), on_false_in->dtype());
+    body << ") -> ";
+    write_tensor_type_for_emit(body, out->shape(), out->dtype());
     body << '\n';
 }
 

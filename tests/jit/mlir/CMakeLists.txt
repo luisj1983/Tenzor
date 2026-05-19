@@ -56,6 +56,13 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_elementwise
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 
+    # Task C.1 (continued) — `tz.where` end-to-end via stablehlo.select.
+    add_executable(test_op_where test_op_where.cpp)
+    target_link_libraries(test_op_where
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_where
+        DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task C.2 — Activations (ReLU / Sigmoid / SiLU / GELU).
     add_executable(test_op_activations test_op_activations.cpp)
     target_link_libraries(test_op_activations

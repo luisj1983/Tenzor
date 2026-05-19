@@ -68,10 +68,16 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Squeeze:    return OpType::Squeeze;
         case OpId::Unsqueeze:  return OpType::Unsqueeze;
         case OpId::Flatten:    return OpType::Flatten;
+        case OpId::Stack:      return OpType::Stack;
+        // Eager broadcast_to dispatches OpId::Expand; the IR represents
+        // it with OpType::Broadcast (handled by handle_broadcast which
+        // lowers to stablehlo.broadcast_in_dim).
+        case OpId::Expand:     return OpType::Broadcast;
 
         // Indexing
         case OpId::Slice:      return OpType::Slice;
         case OpId::Cat:        return OpType::Cat;
+        case OpId::Where:      return OpType::Where;
 
         // Linear
         case OpId::Linear:     return OpType::Linear;
@@ -87,6 +93,9 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
 
         // Index ops
         case OpId::IndexSelect: return OpType::IndexSelect;
+
+        // Vision
+        case OpId::Interpolate: return OpType::Interpolate;
 
         default:
             return std::nullopt;
