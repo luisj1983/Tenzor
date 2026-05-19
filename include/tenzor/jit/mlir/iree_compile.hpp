@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -75,5 +76,38 @@ auto compute_cache_key(const std::string& mlir_text,
 /// `ireeCompilerGetRevision()`. Result is the empty string only if the
 /// compiler library is broken; otherwise it is some non-empty identifier.
 auto iree_compiler_version() -> std::string;
+
+
+/// Counters reported by `cache_stats()`. All values are sticky for the
+/// lifetime of the process unless `reset_cache_stats()` is called.
+struct CacheStats {
+    /// In-process IreeInvoker cache hits (same shape+dtype+device seen).
+    std::uint64_t hits = 0;
+    /// In-process IreeInvoker cache misses (forced a trace+compile).
+    std::uint64_t misses = 0;
+    /// Number of times a function was re-traced because the shape signature
+    /// changed (a miss that landed on an already-populated CompiledFunction).
+    std::uint64_t retraces = 0;
+    /// Number of cache evictions (max_retraces ceiling hit).
+    std::uint64_t evictions = 0;
+    /// Cumulative wall-clock time spent inside compile_mlir(), milliseconds.
+    double total_compile_ms = 0.0;
+};
+
+/// Snapshot the cache stats. Thread-safe — reads atomics under the hood.
+auto cache_stats() -> CacheStats;
+
+/// Reset all counters back to zero. Test-only helper; production builds may
+/// call it after warmup to measure steady-state behavior.
+auto reset_cache_stats() -> void;
+
+/// Internal: bump counters from the compile/invoker paths.
+namespace internal {
+auto record_cache_hit() -> void;
+auto record_cache_miss() -> void;
+auto record_retrace() -> void;
+auto record_eviction() -> void;
+auto record_compile_ms(double ms) -> void;
+}  // namespace internal
 
 }  // namespace tenzor::jit::mlir_jit

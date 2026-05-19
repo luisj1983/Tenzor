@@ -20,6 +20,10 @@
 #include <tenzor/lazy/lazy_tensor.hpp>
 #include <tenzor/nn/module.hpp>
 
+#ifdef TENZOR_HAS_MLIR_JIT
+#include <tenzor/jit/mlir/iree_compile.hpp>
+#endif
+
 namespace py = pybind11;
 
 namespace tenzor::python {
@@ -343,6 +347,26 @@ void register_jit(py::module_& m) {
         py::arg("compiled"), py::arg("example"),
         "Run iree-compile --mlir-print-ir-after-all on the lowered MLIR "
         "and return the captured pipeline trace.");
+
+#ifdef TENZOR_HAS_MLIR_JIT
+    jit.def("cache_stats", []() {
+        const auto s = tenzor::jit::mlir_jit::cache_stats();
+        py::dict d;
+        d["hits"]             = s.hits;
+        d["misses"]           = s.misses;
+        d["retraces"]         = s.retraces;
+        d["evictions"]        = s.evictions;
+        d["total_compile_ms"] = s.total_compile_ms;
+        return d;
+    },
+    "Return a dict of JIT cache counters: hits, misses, retraces, "
+    "evictions, total_compile_ms.");
+
+    jit.def("reset_cache_stats", []() {
+        tenzor::jit::mlir_jit::reset_cache_stats();
+    },
+    "Reset all JIT cache counters back to zero. Mainly for tests.");
+#endif
 
     // =========================================================================
     // Lazy Tensor API

@@ -6,6 +6,9 @@
 
 #include <openssl/sha.h>
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +82,72 @@ struct CompilerError {
 
 }  // namespace
 
+// ============================================================================
+// Cache stats (Group F.5)
+// ============================================================================
+
+namespace {
+
+// Process-wide counters. Wrapped in a struct to keep all the atomics
+// together and to make reset trivially correct.
+struct GlobalCacheCounters {
+    std::atomic<std::uint64_t> hits{0};
+    std::atomic<std::uint64_t> misses{0};
+    std::atomic<std::uint64_t> retraces{0};
+    std::atomic<std::uint64_t> evictions{0};
+    // Total compile time is stored as integer nanoseconds for lock-free
+    // accumulation; converted to milliseconds in the snapshot.
+    std::atomic<std::uint64_t> total_compile_ns{0};
+};
+
+auto counters() -> GlobalCacheCounters& {
+    static GlobalCacheCounters c;
+    return c;
+}
+
+}  // namespace
+
+auto cache_stats() -> CacheStats {
+    const auto& c = counters();
+    CacheStats s;
+    s.hits             = c.hits.load(std::memory_order_relaxed);
+    s.misses           = c.misses.load(std::memory_order_relaxed);
+    s.retraces         = c.retraces.load(std::memory_order_relaxed);
+    s.evictions        = c.evictions.load(std::memory_order_relaxed);
+    s.total_compile_ms =
+        static_cast<double>(c.total_compile_ns.load(std::memory_order_relaxed))
+        / 1.0e6;
+    return s;
+}
+
+auto reset_cache_stats() -> void {
+    auto& c = counters();
+    c.hits.store(0, std::memory_order_relaxed);
+    c.misses.store(0, std::memory_order_relaxed);
+    c.retraces.store(0, std::memory_order_relaxed);
+    c.evictions.store(0, std::memory_order_relaxed);
+    c.total_compile_ns.store(0, std::memory_order_relaxed);
+}
+
+namespace internal {
+auto record_cache_hit() -> void {
+    counters().hits.fetch_add(1, std::memory_order_relaxed);
+}
+auto record_cache_miss() -> void {
+    counters().misses.fetch_add(1, std::memory_order_relaxed);
+}
+auto record_retrace() -> void {
+    counters().retraces.fetch_add(1, std::memory_order_relaxed);
+}
+auto record_eviction() -> void {
+    counters().evictions.fetch_add(1, std::memory_order_relaxed);
+}
+auto record_compile_ms(double ms) -> void {
+    auto ns = static_cast<std::uint64_t>(ms * 1.0e6);
+    counters().total_compile_ns.fetch_add(ns, std::memory_order_relaxed);
+}
+}  // namespace internal
+
 auto iree_compiler_version() -> std::string {
     ensure_global_init();
     const char* rev = ireeCompilerGetRevision();
@@ -131,6 +200,10 @@ auto compile_mlir(const std::string& mlir_text,
     if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0) {
         return CompiledArtifact{vmfb_path, opts.target};
     }
+
+    // Cache miss — measure the actual compile time end-to-end so that
+    // cache_stats().total_compile_ms reflects only real iree-compile work.
+    const auto compile_t0 = std::chrono::steady_clock::now();
 
     iree_compiler_session_t* session = ireeCompilerSessionCreate();
     if (session == nullptr) {
@@ -236,6 +309,12 @@ auto compile_mlir(const std::string& mlir_text,
             mlir_path);
     }
     ireeCompilerOutputKeep(output);
+
+    const auto compile_t1 = std::chrono::steady_clock::now();
+    const double compile_ms =
+        std::chrono::duration<double, std::milli>(compile_t1 - compile_t0)
+            .count();
+    internal::record_compile_ms(compile_ms);
 
     return CompiledArtifact{vmfb_path, opts.target};
 }

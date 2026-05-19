@@ -311,6 +311,7 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = mlir_cache_->invokers.find(key);
         if (it != mlir_cache_->invokers.end()) {
+            mj::internal::record_cache_hit();
             auto outs = it->second->invoke({input.tensor()});
             if (outs.size() != 1) {
                 throw std::runtime_error(
@@ -319,6 +320,12 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
                     std::to_string(outs.size()));
             }
             return Variable(std::move(outs[0]), input.requires_grad());
+        }
+        // Miss. If we've already compiled something else for a different
+        // shape, this counts as a retrace (a new shape forces a fresh trace).
+        mj::internal::record_cache_miss();
+        if (!mlir_cache_->invokers.empty()) {
+            mj::internal::record_retrace();
         }
     }
 
@@ -346,6 +353,89 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     auto artifact = mj::compile_mlir(mlir_text, opts);
     auto invoker  = mj::IreeInvoker::load(artifact);
 
+    // Optional artifact dumping: when TENZOR_JIT_DUMP=<dir> is set, write the
+    // full pipeline (graph text + MLIR + expanded StableHLO + iree-compile
+    // pipeline dump + path to the vmfb) into a hash-keyed subdirectory.
+    if (const char* dump_dir = std::getenv("TENZOR_JIT_DUMP"); dump_dir && *dump_dir) {
+        try {
+            namespace fs = std::filesystem;
+            const std::string key = mj::compute_cache_key(mlir_text, opts.target);
+            const fs::path subdir = fs::path(dump_dir) / key;
+            fs::create_directories(subdir);
+
+            {
+                std::ofstream f(subdir / "graph.txt", std::ios::trunc);
+                f << graph->to_string();
+            }
+            {
+                std::ofstream f(subdir / "mlir.txt",
+                                std::ios::binary | std::ios::trunc);
+                f.write(mlir_text.data(),
+                        static_cast<std::streamsize>(mlir_text.size()));
+            }
+            {
+                // Re-lower with plugin_enabled=false to dump the deploy form.
+                mj::GraphToMLIR sh_lowerer;
+                sh_lowerer.set_plugin_enabled(false);
+                const std::string sh_text = sh_lowerer.lower(*graph);
+                std::ofstream f(subdir / "stablehlo.txt",
+                                std::ios::binary | std::ios::trunc);
+                f.write(sh_text.data(),
+                        static_cast<std::streamsize>(sh_text.size()));
+            }
+            {
+                // Best-effort iree-compile pipeline dump. Shares the same
+                // logic as dump_iree() but inlined so a single compile
+                // produces the complete dump set without an extra trace.
+                std::string iree_compile = "iree-compile";
+                if (const char* env = std::getenv("IREE_BIN_DIR");
+                    env && *env) {
+                    iree_compile = std::string(env) + "/iree-compile";
+                }
+                const fs::path tmp_in =
+                    fs::temp_directory_path() /
+                    ("tz_jit_dump_iree_" +
+                     std::to_string(::getpid()) + "_" + key.substr(0, 8) +
+                     ".mlir");
+                {
+                    std::ofstream f(tmp_in,
+                                    std::ios::binary | std::ios::trunc);
+                    f.write(mlir_text.data(),
+                            static_cast<std::streamsize>(mlir_text.size()));
+                }
+                const std::string cmd =
+                    iree_compile + " --iree-input-type=stablehlo" +
+                    " --iree-hal-target-backends=" + opts.target +
+                    " --mlir-disable-threading" +
+                    " --mlir-print-ir-after-all" +
+                    " --compile-to=vm" +
+                    " -o /dev/null " + tmp_in.string() + " 2>&1";
+                std::string captured;
+                if (FILE* pipe = ::popen(cmd.c_str(), "r")) {
+                    char buf[4096];
+                    while (auto n = std::fread(buf, 1, sizeof(buf), pipe)) {
+                        captured.append(buf, n);
+                    }
+                    ::pclose(pipe);
+                }
+                std::ofstream f(subdir / "iree.log",
+                                std::ios::binary | std::ios::trunc);
+                f.write(captured.data(),
+                        static_cast<std::streamsize>(captured.size()));
+                std::error_code _ec;
+                fs::remove(tmp_in, _ec);
+            }
+            {
+                // Record where the cached vmfb lives so the dump dir is
+                // self-describing without copying the bytecode itself.
+                std::ofstream f(subdir / "vmfb.path", std::ios::trunc);
+                f << artifact.vmfb_path.string() << "\n";
+            }
+        } catch (const std::exception&) {
+            // Dumping is best-effort: never fail compilation because of it.
+        }
+    }
+
     auto outs = invoker->invoke({input.tensor()});
     if (outs.size() != 1) {
         throw std::runtime_error(
@@ -359,6 +449,11 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
         if (mlir_cache_->invokers.size() <
             static_cast<size_t>(config_.max_retraces)) {
             mlir_cache_->invokers.emplace(key, std::move(invoker));
+        } else {
+            // Hit the per-function cache ceiling — count this insertion
+            // attempt as an eviction (the new shape's invoker is dropped on
+            // the floor, so the next call for it will re-trace).
+            mj::internal::record_eviction();
         }
     }
     return result;
