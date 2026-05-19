@@ -2119,6 +2119,47 @@ auto handle_rope_apply_custom_call(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// RMSNorm. Inputs: (x, weight). `weight` is optional in the eager API but
+/// the lowering requires it as a second input value (use an all-ones
+/// constant when the layer was constructed without weight). Attrs: `eps`
+/// (float, default 1e-6).
+auto handle_rms_norm_custom_call(LoweringContext& ctx,
+                                 const ::tenzor::jit::Node& node,
+                                 std::ostream& body) -> void {
+    if (node.inputs().size() < 1 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: RMSNorm expects 1+ inputs and 1+ outputs");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+
+    const float eps = get_attr_float(node, {"eps"}, 1e-6f);
+
+    std::ostringstream cfg;
+    cfg << "eps=" << std::scientific << std::setprecision(9) << eps;
+
+    std::vector<std::string>                 names;
+    std::vector<std::vector<int64_t>>        shapes;
+    std::vector<::tenzor::DType>             dtypes;
+    names.push_back (ctx.name_for(x_val->id()));
+    shapes.push_back(x_val->shape());
+    dtypes.push_back(x_val->dtype());
+    if (node.inputs().size() >= 2) {
+        const auto& w_val = node.inputs()[1];
+        names.push_back (ctx.name_for(w_val->id()));
+        shapes.push_back(w_val->shape());
+        dtypes.push_back(w_val->dtype());
+    }
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_custom_call(body, "tenzor_rms_norm", out_name,
+                     names, shapes, dtypes,
+                     out_val->shape(), out_val->dtype(), cfg.str());
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2246,6 +2287,8 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
                 handle_gqa_custom_call(ctx, *node, body); break;
             case OpType::RoPE:
                 handle_rope_apply_custom_call(ctx, *node, body); break;
+            case OpType::RMSNorm:
+                handle_rms_norm_custom_call(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
