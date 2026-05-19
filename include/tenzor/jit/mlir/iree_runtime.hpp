@@ -16,7 +16,7 @@
 //
 // The in-process path uses the authentic IREE 3.11.0 headers staged in
 // third_party/iree_compat (see CMakeLists.txt). The runtime static
-// archives at /home/lee/iree-dist/lib/libiree_runtime_unified.a (and
+// archives at third_party/iree_dist/lib/libiree_runtime_unified.a (and
 // friends) are the actual implementation; the headers and archives ship
 // from the same upstream tag so ABI matches.
 //

@@ -1,177 +1,147 @@
 # MLIR JIT setup (Phase 13)
 
-Phase 13's `TENZOR_USE_MLIR_JIT=ON` requires three system dependencies:
-MLIR (build-time C++ API), StableHLO (dialect library), and the IREE runtime
-(for in-process execution) plus the `iree-compile` binary (invoked as a
-subprocess at runtime).
+Phase 13's `@tz.jit` decorator goes through an MLIR/StableHLO/IREE pipeline.
+Building Tenzor with `-DTENZOR_USE_MLIR_JIT=ON` requires IREE 3.x.
 
-## Tested platform: Arch Linux x86_64
+The default build (`TENZOR_USE_MLIR_JIT=OFF`) does **not** depend on any
+of this — only the JIT pipeline does.
 
-### IREE 3.x (runtime + iree-compile binary)
+## Architecture
 
-The IREE distribution tarball from GitHub releases is the recommended path on
-Arch. It bundles `iree-compile`, the IREE C runtime headers, and static libs:
+| Component | Source | License |
+|---|---|---|
+| IREE public C-API headers (`iree/{base,hal,vm,runtime,io}`) | Vendored in-repo at `third_party/iree_compat/` (363 files from authentic IREE 3.11.0 upstream) | Apache 2.0 WITH LLVM-exception |
+| IREE Compiler + Runtime static libs + CMake config | External; resolved via the discovery chain below | Apache 2.0 WITH LLVM-exception |
+| `iree-compile` binary (for subprocess compile path and debug dumping) | External; resolved via the discovery chain below | Apache 2.0 WITH LLVM-exception |
+| Tenzor's text-MLIR emitter + custom_call plugin glue | `src/jit/mlir/` | MIT (Tenzor's license) |
 
-```bash
-mkdir -p ~/iree-dist
-curl -L https://github.com/iree-org/iree/releases/download/iree-3.12.0rc20260518/iree-dist-3.12.0rc20260518-linux-x86_64.tar.xz \
-     -o ~/iree-dist/iree-dist.tar.xz
-tar -xf ~/iree-dist/iree-dist.tar.xz -C ~/iree-dist
-# iree-compile is at ~/iree-dist/bin/iree-compile
-# cmake config is at ~/iree-dist/lib/cmake/IREE/IREERuntimeConfig.cmake
-```
+MLIR and StableHLO are bundled **inside** IREE — Tenzor consumes IREE's
+C APIs only, so there's no separate `find_package(MLIR)` /
+`find_package(StableHLO)` step.
 
-Set environment variables:
-```bash
-export IREE_RUNTIME_DIR=~/iree-dist/lib/cmake/IREE
-export TENZOR_IREE_COMPILE=~/iree-dist/bin/iree-compile
-```
+## Discovery chain for IREE binaries
 
-### MLIR 18 (C++ headers + mlir-tblgen)
+When you run `cmake -DTENZOR_USE_MLIR_JIT=ON ..`, CMake looks for IREE
+in this order. The first match wins:
 
-The LLVM 18 pre-built release from llvm.org requires `libtinfo.so.5`
-(Ubuntu ABI) which conflicts with Arch's `libtinfo.so.6`. Build mlir-tblgen
-and MLIR libraries from the LLVM 22.x source instead:
+1. **`$IREE_DIR` / `$TENZOR_IREE_DIR` environment variable** — explicit
+   override. Set to the dir containing
+   `lib/cmake/IREE/IREE{Compiler,Runtime}Config.cmake`.
+2. **`third_party/iree_dist/` inside the project tree** — gitignored;
+   not committed. See "Installing the IREE distribution" below.
+3. **System-installed IREE** via `find_package`'s default search paths.
+4. **`FetchContent` source build** — last resort. Builds IREE (with
+   its bundled LLVM + StableHLO) from pinned git tag `iree-3.11.0`.
+   **First build is ~30–60 minutes and produces ~10 GB of intermediate
+   artifacts.** Subsequent builds are incremental.
 
-```bash
-# Sparse-checkout LLVM 22 source (mlir + llvm subdirs only)
-mkdir -p ~/llvm22-src && cd ~/llvm22-src
-git init && git remote add origin https://github.com/llvm/llvm-project.git
-git sparse-checkout init
-git sparse-checkout set llvm mlir cmake third-party
-git fetch --depth=1 origin llvmorg-22.1.5
-git checkout FETCH_HEAD -- llvm mlir cmake third-party
+Skip step 4 by satisfying any of 1–3.
 
-# Build mlir-tblgen + required MLIR libraries
-cmake -B build -S llvm -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS="mlir" \
-  -DLLVM_TARGETS_TO_BUILD="X86" \
-  -DLLVM_INCLUDE_TESTS=OFF \
-  -DLLVM_INCLUDE_EXAMPLES=OFF \
-  -DLLVM_INCLUDE_BENCHMARKS=OFF \
-  -DMLIR_INCLUDE_TESTS=OFF \
-  -DCMAKE_INSTALL_PREFIX=~/mlir-install
+## Installing the IREE distribution
 
-cd build && ninja mlir-tblgen MLIRIR MLIRSupport MLIRPass MLIRTransforms \
-    MLIRFuncDialect MLIRBuiltinToLLVMIRTranslation
-ninja install
-```
+### Option A: project-local `third_party/iree_dist/` (recommended)
 
-Set environment variables:
-```bash
-export MLIR_DIR=~/mlir-install/lib/cmake/mlir
-```
-
-### StableHLO 1.5.0
-
-Build from source against the MLIR installation above. Patch the CMakeLists to
-remove test and integration subdirs that require `FileCheck` as a CMake target:
+Drop a complete IREE C++ distribution into `third_party/iree_dist/`.
+The path is gitignored — no risk of committing 446 MB of binaries.
+CMake auto-discovers it (step 2 above).
 
 ```bash
-git clone --branch v1.5.0 --depth 1 https://github.com/openxla/stablehlo ~/stablehlo-src
+# After obtaining a complete IREE 3.x dist (built from source or from
+# an official binary release once available), extract such that:
+ls third_party/iree_dist/
+# bin/  include/  lib/  share/
+ls third_party/iree_dist/lib/cmake/IREE/
+# IREECompilerConfig.cmake  IREERuntimeConfig.cmake  ...
 
-# Minimal build (dialect only)
-cmake -B ~/stablehlo-src/build -S ~/stablehlo-src -G Ninja \
-  -DMLIR_DIR=~/mlir-install/lib/cmake/mlir \
-  -DLLVM_DIR=~/mlir-install/lib/cmake/llvm \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=~/stablehlo-install \
-  -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
-  -DSTABLEHLO_BUILD_EMBEDDED=OFF
-
-cmake --build ~/stablehlo-src/build --target StablehloOps
-cmake --install ~/stablehlo-src/build
+# CMake will print on configure:
+#   Using project-local IREE at: <path>/third_party/iree_dist
 ```
 
-Set environment variables:
-```bash
-export STABLEHLO_DIR=~/stablehlo-install/lib/cmake/stablehlo
-```
+### Option B: pip `iree-base-compiler` wheel (compile path only)
 
-### Ubuntu 24.04 (alternative)
+The PyPI wheel ships `iree-compile` and Python runtime modules but **not**
+the C++ static libs or headers — sufficient for the subprocess compile
+path. Insufficient for the in-process custom_call plugin (Group D of the
+Phase 1A plan). Use this when subprocess invocation is acceptable.
 
 ```bash
-# MLIR + LLVM 18 (includes mlir-tblgen and CMake configs)
-sudo apt install llvm-18-dev libmlir-18-dev mlir-18-tools
-
-# StableHLO 1.5.0 (same as above, but using apt-installed MLIR)
-git clone https://github.com/openxla/stablehlo --branch v1.5.0 ~/stablehlo-src
-cmake -B ~/stablehlo-src/build -S ~/stablehlo-src \
-  -DMLIR_DIR=/usr/lib/llvm-18/lib/cmake/mlir
-cmake --build ~/stablehlo-src/build --target install
-
-# IREE 3.0 (runtime + iree-compile binary)
-pip install iree-base-compiler iree-base-runtime
-# OR use the iree-dist tarball (see Arch section above)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install iree-base-compiler==3.11.0 iree-base-runtime==3.11.0
+export TENZOR_IREE_COMPILE=$(which iree-compile)
 ```
 
-## Configuring Tenzor with MLIR JIT enabled
+CMake `find_program` also searches `.venvs/tenzor-jit/bin/` (a common
+project-local venv path) automatically.
+
+### Option C: FetchContent source build (no install)
+
+Don't install anything. CMake's `FetchContent` (step 4 above) will
+clone IREE 3.11.0, build it from source against its bundled LLVM and
+StableHLO, and consume the result.
+
+- **Cold-build cost**: ~30–60 min, ~10 GB intermediate artifacts.
+- **Subsequent builds**: incremental, fast.
+- **Network required** on first configure (one-time clone).
+
+Recommended for new contributors who don't already have IREE installed.
+
+## Verifying the install
 
 ```bash
-cmake -B build -G Ninja \
-  -DTENZOR_USE_MLIR_JIT=ON \
-  -DMLIR_DIR=$MLIR_DIR \
-  -DSTABLEHLO_DIR=$STABLEHLO_DIR \
-  -DIREE_RUNTIME_DIR=$IREE_RUNTIME_DIR \
-  -DTENZOR_IREE_COMPILE=$TENZOR_IREE_COMPILE
+cmake -B build -G Ninja -DTENZOR_USE_MLIR_JIT=ON
 ```
 
-## Version-matching caveat (read this before building StableHLO)
-
-StableHLO is tightly coupled to a *specific LLVM commit* (recorded in
-`stablehlo-src/build_tools/llvm_version.txt`), not to LLVM major.minor
-versions. Building StableHLO against the wrong LLVM commit produces
-compile errors like:
-
+Expected output:
 ```
-error: cannot declare variable 'instance' to be of abstract type
-  'mlir::stablehlo::side_effects::RecvResource'
-note: 'virtual llvm::StringRef mlir::SideEffects::Resource::getName()'
-  is pure within 'RecvResource'
+Tenzor: MLIR JIT enabled (text-based, IREE-driven per 2026-05-19 amendment)
+  IREE 3.0
+  Using project-local IREE at: <path>/third_party/iree_dist     # if option A
+  iree-compile: <path>/iree-compile
+  iree-compile HAL targets:
+    - cuda
+    - llvm-cpu
+    - metal-spirv
+    - rocm
+    - vmvx
+    - vmvx-inline
+    - vulkan-spirv
 ```
 
-This indicates the MLIR `Resource` base class has changed between the
-LLVM you built and the LLVM commit StableHLO was integrated against.
+If your HAL target list is shorter than expected, your IREE build
+disabled those backends. The official `iree-base-compiler` PyPI wheel
+ships with all 7. Custom builds often drop CUDA/ROCm to reduce size.
 
-**Resolution**: check out the exact LLVM commit StableHLO targets, then
-rebuild MLIR:
+## ROCm runtime libraries (for IREE HIP HAL)
+
+The IREE runtime dlopens `libamdhip64.so` and several siblings when an
+`hip` device is requested. CMake auto-detects `/opt/rocm/lib`; override
+with:
 
 ```bash
-cat ~/stablehlo-src/build_tools/llvm_version.txt
-# e.g. 87d42c13cd6b119240781f31e5869981d500a186
-
-cd ~/llvm22-src
-git fetch --depth=1 origin 87d42c13cd6b119240781f31e5869981d500a186
-git checkout FETCH_HEAD -- llvm mlir cmake third-party
-# rebuild MLIR libs as in the section above
+export TENZOR_ROCM_RUNTIME_LIB_DIR=/opt/rocm/lib
 ```
 
-If you instead want to stay on a released LLVM tag (e.g. `llvmorg-22.1.5`),
-check out the matching StableHLO release tag — StableHLO publishes a
-release for each LLVM integrate point.
+CMake's discovery rejects zero-byte ROCm libs (symptom of a broken
+ROCm package install) and falls back to skipping the HIP HAL.
 
-## Tenzor MLIR/IREE version pin overrides
+## Licensing notes
 
-`CMakeLists.txt` defaults `TENZOR_MLIR_VERSION` to 18.0, `TENZOR_IREE_VERSION`
-to 3.0. These are cache-string defaults — override at configure time
-if you are using a different installed version:
-
-```bash
-cmake -B build -G Ninja \
-  -DTENZOR_USE_MLIR_JIT=ON \
-  -DTENZOR_MLIR_VERSION=22.1.5 \
-  -DTENZOR_IREE_VERSION=3.11.0 \
-  -DMLIR_DIR=/home/me/llvm22-src/build/lib/cmake/mlir \
-  -DIREE_RUNTIME_DIR=/home/me/iree-dist/lib/cmake/IREE \
-  -DTENZOR_IREE_COMPILE=/home/me/iree-dist/bin/iree-compile
-```
+- **Vendored headers** at `third_party/iree_compat/` are authentic IREE
+  3.11.0 source: Apache 2.0 WITH LLVM-exception. Each file preserves
+  its original SPDX header. See `third_party/iree_compat/LICENSE` and
+  `third_party/iree_compat/NOTICE`.
+- **IREE binaries** (when installed at `third_party/iree_dist/`) are
+  not part of this repository (the path is gitignored). If you
+  redistribute a built Tenzor binary that links statically against
+  IREE, include IREE's LICENSE and NOTICE files alongside.
+- **Tenzor itself** is MIT (see `LICENSE` at the repo root).
 
 ## Environment variable overrides
 
 | Variable | Purpose |
 |---|---|
-| `MLIR_DIR` | Path to MLIR's `cmake/mlir/` directory |
-| `STABLEHLO_DIR` | Path to StableHLO's CMake config |
-| `IREE_RUNTIME_DIR` | Path to IREE runtime's CMake config |
-| `TENZOR_IREE_COMPILE` | Full path to `iree-compile` executable |
+| `IREE_DIR` / `TENZOR_IREE_DIR` | Override discovery for the IREE CMake config dir |
+| `TENZOR_IREE_COMPILE` | Full path to a specific `iree-compile` executable |
+| `TENZOR_IREE_RUN_MODULE` | Full path to a specific `iree-run-module` executable |
+| `TENZOR_ROCM_RUNTIME_LIB_DIR` | Override `/opt/rocm/lib` autodetect |

@@ -112,7 +112,7 @@ option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
 # MLIR/StableHLO/IREE JIT pipeline (Phase 13)
-option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" OFF)
+option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" ON)
 option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
 
 # Pinned version — IREE distribution bundles MLIR + StableHLO. The 2026-05-19
@@ -127,9 +127,54 @@ if(TENZOR_USE_MLIR_JIT)
 
     # IREE Compiler (embedding API) and Runtime — single dependency surface per
     # the 2026-05-19 spec amendment. MLIR/StableHLO come bundled inside IREE.
-    list(APPEND CMAKE_PREFIX_PATH $ENV{IREE_DIR})
-    find_package(IREECompiler REQUIRED CONFIG)
-    find_package(IREERuntime REQUIRED CONFIG)
+    #
+    # Discovery (D + B hybrid):
+    #   1. $IREE_DIR / $TENZOR_IREE_DIR env var (explicit override)
+    #   2. third_party/iree_dist/lib/cmake/IREE inside the project tree
+    #      (gitignored; lives outside source control. See docs/jit-mlir-setup.md
+    #      for what should live here.)
+    #   3. System-installed IREE via find_package's default search
+    #   4. FetchContent source build (heavy: ~30-60 min cold, ~10 GB build dir
+    #      because IREE bundles LLVM/StableHLO). Triggered only when 1-3 fail.
+    set(_iree_local_dist "${CMAKE_SOURCE_DIR}/third_party/iree_dist")
+    if(DEFINED ENV{IREE_DIR})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{IREE_DIR}")
+    elseif(DEFINED ENV{TENZOR_IREE_DIR})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{TENZOR_IREE_DIR}")
+    elseif(EXISTS "${_iree_local_dist}/lib/cmake/IREE/IREECompilerConfig.cmake")
+        list(APPEND CMAKE_PREFIX_PATH "${_iree_local_dist}/lib/cmake/IREE")
+        message(STATUS "  Using project-local IREE at: ${_iree_local_dist}")
+    endif()
+
+    # Try find_package first; if that fails, FetchContent a source build.
+    # FIND_PACKAGE_ARGS isn't supported on some CMake variants so probe
+    # explicitly: try the find_package, fall through to fetch on failure.
+    find_package(IREECompiler CONFIG QUIET)
+    find_package(IREERuntime  CONFIG QUIET)
+    if(NOT IREECompiler_FOUND OR NOT IREERuntime_FOUND)
+        message(STATUS "  IREE not found locally — falling back to FetchContent")
+        message(WARNING
+            "  Building IREE from source. First build is ~30-60 min and "
+            "produces ~10 GB of intermediate artifacts (IREE bundles its own "
+            "LLVM + StableHLO). Subsequent builds are incremental. To skip "
+            "this, install IREE binaries to third_party/iree_dist/ or point "
+            "TENZOR_IREE_DIR at an existing install. See docs/jit-mlir-setup.md.")
+        include(FetchContent)
+        FetchContent_Declare(iree_src
+            GIT_REPOSITORY https://github.com/iree-org/iree.git
+            GIT_TAG iree-3.11.0
+            GIT_SUBMODULES_RECURSE TRUE)
+        set(IREE_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_SAMPLES         OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_TESTS           OFF CACHE BOOL "" FORCE)
+        set(IREE_BUILD_DOCS            OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(iree_src)
+        # Re-find_package after the source build installs configs into
+        # ${iree_src_BINARY_DIR}/lib/cmake/IREE.
+        list(APPEND CMAKE_PREFIX_PATH "${iree_src_BINARY_DIR}")
+        find_package(IREECompiler REQUIRED CONFIG)
+        find_package(IREERuntime  REQUIRED CONFIG)
+    endif()
 
     # Verify iree-compile binary too — needed by tests that prefer subprocess for
     # debug-dumping AND by the GPU-target subprocess fallback in iree_paths.cpp
