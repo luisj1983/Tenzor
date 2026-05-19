@@ -1,13 +1,22 @@
 // Phase 13 / Task A.8 — IREE Runtime invocation wrapper.
 //
 // Environmental note (2026-05-19 amendment, item §):
-// The IREE distribution at /home/lee/iree-dist ships a complete `iree-compile`
-// binary AND embedding API, but its include/ tree is missing several headers
-// that the runtime C API depends on (iree/base/allocator.h, hal/buffer.h, etc.).
-// Until a complete dist is available, IreeInvoker drives the runtime via the
-// `iree-run-module` subprocess that the same dist provides. This is a real
-// invocation — the subprocess loads the same .vmfb bytecode our embedding-API
-// compile produced and runs it on the same HAL backends — not a stub.
+// The local IREE distributions on this host (iree-dist + pip-installed
+// iree-base-{compiler,runtime}) ship complete iree-compile / iree-run-module
+// binaries but neither ships the full iree/base/*.h header set that the
+// in-process iree/runtime/api.h depends on (9 missing base headers — see
+// src/jit/mlir/iree_customcalls.cpp for the list). IreeInvoker therefore
+// drives the runtime via the `iree-run-module` subprocess discovered by
+// tenzor::jit::mlir_jit::resolve_iree_run_module() (env override → pip venv
+// → CMake-found dist → $PATH). This is a real invocation — the subprocess
+// loads the same .vmfb bytecode the embedding-API compile produced and runs
+// it on the same HAL backends — not a stub.
+//
+// The in-process runtime + custom_call plugin (Path A of the 2026-05-19
+// amendment) lights up automatically once a header-complete IREE C SDK is
+// installed; the runtime callbacks in iree_customcalls.cpp are wired up to
+// dispatch into existing kernels, but currently return UNIMPLEMENTED
+// because the C glue cannot compile without the base headers.
 
 #pragma once
 
