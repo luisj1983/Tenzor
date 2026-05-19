@@ -115,4 +115,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_flash_attention
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
+
+    # Task D.2.1 — GQA dialect op lowers to stablehlo.custom_call @tenzor_gqa.
+    add_executable(test_op_gqa test_op_gqa.cpp)
+    target_link_libraries(test_op_gqa
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_gqa
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 endif()

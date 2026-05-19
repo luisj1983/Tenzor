@@ -2048,6 +2048,41 @@ auto handle_flash_attention_custom_call(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// Grouped-Query Attention (GQA). Inputs: (Q, K, V) where K/V may have
+/// fewer heads than Q (the kernel broadcasts KV-heads to Q-heads). Attrs:
+/// `causal` (bool), `scale` (float). Output shape matches Q.
+auto handle_gqa_custom_call(LoweringContext& ctx,
+                            const ::tenzor::jit::Node& node,
+                            std::ostream& body) -> void {
+    if (node.inputs().size() != 3 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: GQA expects 3 inputs (Q,K,V) and 1+ outputs");
+    }
+    const auto& q_val   = node.inputs()[0];
+    const auto& k_val   = node.inputs()[1];
+    const auto& v_val   = node.inputs()[2];
+    const auto& out_val = node.outputs()[0];
+
+    const bool  causal = get_attr_bool (node, {"causal"}, false);
+    const float scale  = get_attr_float(node, {"scale"},  0.0f);
+
+    std::ostringstream cfg;
+    cfg << "causal=" << (causal ? "true" : "false")
+        << ",scale=" << std::setprecision(9) << scale;
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_custom_call(body, "tenzor_gqa", out_name,
+                     {ctx.name_for(q_val->id()),
+                      ctx.name_for(k_val->id()),
+                      ctx.name_for(v_val->id())},
+                     {q_val->shape(), k_val->shape(), v_val->shape()},
+                     {q_val->dtype(), k_val->dtype(), v_val->dtype()},
+                     out_val->shape(), out_val->dtype(), cfg.str());
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2171,6 +2206,8 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             // ── Tenzor dialect ops (Group D) ──
             case OpType::FlashAttention:
                 handle_flash_attention_custom_call(ctx, *node, body); break;
+            case OpType::GQA:
+                handle_gqa_custom_call(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
