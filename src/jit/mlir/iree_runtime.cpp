@@ -48,6 +48,7 @@ namespace fs = std::filesystem;
 // "tenzor_plugin" providing the 4 dialect-op callbacks.
 auto create_tenzor_plugin_module(iree_vm_instance_t* instance,
                                  iree_allocator_t allocator,
+                                 iree_hal_device_t* device,
                                  iree_vm_module_t** out_module)
     -> iree_status_t;
 
@@ -403,7 +404,8 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode)
     TENZOR_IREE_CHECK(
         create_tenzor_plugin_module(
             iree_runtime_instance_vm_instance(instance),
-            iree_runtime_session_host_allocator(session), &plugin_module),
+            iree_runtime_session_host_allocator(session), device,
+            &plugin_module),
         "create_tenzor_plugin_module");
     inv->plugin_module_ = plugin_module;
     TENZOR_IREE_CHECK(

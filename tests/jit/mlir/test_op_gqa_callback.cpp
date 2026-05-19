@@ -8,12 +8,20 @@
 
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/jit/graph.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_customcalls.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
+#include "tenzor/jit/mlir/lowering.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/tenzor.hpp"
+
+#include <filesystem>
+#include <random>
 
 #include <gtest/gtest.h>
 
@@ -140,4 +148,87 @@ TEST(GQACallback, RejectsBadHeadsRatio) {
     auto v = ::tenzor::full({1, 2, 4, 8}, 0.3f, ::tenzor::DType::Float32);
     EXPECT_THROW(cc::dispatch_gqa({q, k, v}, "causal=false"),
                  std::runtime_error);
+}
+
+// ─── End-to-end plugin path: lower → compile → invoke in-process ──────────
+
+namespace {
+namespace tzj = ::tenzor::jit;
+namespace tzm = ::tenzor::jit::mlir_jit;
+
+auto make_tmp_cache_dir_gqa() -> std::filesystem::path {
+    auto now =
+        std::chrono::system_clock::now().time_since_epoch().count();
+    std::mt19937_64 rng(static_cast<std::uint64_t>(now));
+    std::filesystem::path d = std::filesystem::temp_directory_path() /
+        ("tenzor_jit_plugin_gqa_" + std::to_string(rng()));
+    std::filesystem::create_directories(d);
+    return d;
+}
+}  // namespace
+
+TEST(OpGQACallback, EndToEndPluginPathMatchesEager) {
+    ensure_core_init();
+    // 4 Q heads, 2 KV heads (group size 2).
+    const std::vector<int64_t> q_shape{1, 4, 4, 16};
+    const std::vector<int64_t> kv_shape{1, 2, 4, 16};
+
+    auto q_t = ::tenzor::full(q_shape,  0.0f, ::tenzor::DType::Float32);
+    auto k_t = ::tenzor::full(kv_shape, 0.0f, ::tenzor::DType::Float32);
+    auto v_t = ::tenzor::full(kv_shape, 0.0f, ::tenzor::DType::Float32);
+    {
+        auto* qp = q_t.data<float>();
+        auto* kp = k_t.data<float>();
+        auto* vp = v_t.data<float>();
+        for (int64_t i = 0; i < q_t.numel(); ++i)
+            qp[i] = 0.01f * static_cast<float>(i % 23);
+        for (int64_t i = 0; i < k_t.numel(); ++i)
+            kp[i] = 0.02f * static_cast<float>(i % 19);
+        for (int64_t i = 0; i < v_t.numel(); ++i)
+            vp[i] = 0.03f * static_cast<float>(i % 17);
+    }
+
+    // Eager reference: broadcast KV manually then call flash_attention.
+    auto eager_out = cc::dispatch_gqa({q_t, k_t, v_t}, "causal=false,scale=0");
+
+    // Build graph: GQA(Q,K,V) {causal=false}.
+    tzj::Graph g;
+    auto q = g.create_value("q", q_shape,  ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto k = g.create_value("k", kv_shape, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto v = g.create_value("v", kv_shape, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({q, k, v});
+    auto node = g.create_node(tzj::OpType::GQA);
+    node->add_input(q); node->add_input(k); node->add_input(v);
+    auto out = g.create_value("o", q_shape, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(true);
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("call @tenzor_plugin.gqa"),
+              std::string::npos) << mlir;
+
+    tzm::CompileOptions opts;
+    opts.target         = "llvm-cpu";
+    opts.plugin_enabled = true;
+    opts.cache_dir      = make_tmp_cache_dir_gqa();
+    auto artifact = tzm::compile_mlir(mlir, opts);
+    auto invoker  = tzm::IreeInvoker::load(
+        artifact, tzm::IreeInvoker::Mode::InProcess);
+
+    auto outs = invoker->invoke({q_t, k_t, v_t});
+    ASSERT_EQ(outs.size(), 1u);
+    auto diff = ::tenzor::max(::tenzor::abs(eager_out - outs[0]))
+                    .item<float>();
+    EXPECT_LT(diff, 1e-4f)
+        << "plugin-path GQA diverged from eager-dispatcher by " << diff;
+
+    std::error_code _ec;
+    std::filesystem::remove_all(opts.cache_dir, _ec);
 }

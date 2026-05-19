@@ -12,11 +12,19 @@
 
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/jit/graph.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_customcalls.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
+#include "tenzor/jit/mlir/lowering.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/tenzor.hpp"
+
+#include <filesystem>
+#include <random>
 
 #include <gtest/gtest.h>
 
@@ -118,4 +126,89 @@ TEST(FlashAttentionCallback, BackendConfigParserHandlesWhitespaceFreeForm) {
     // changes the attention pattern at every non-final row.
     auto diff = ::tenzor::max(::tenzor::abs(r1 - r2)).item<float>();
     EXPECT_GT(diff, 1e-4f) << "causal vs non-causal results should differ";
+}
+
+// ─── End-to-end plugin path: lower → compile → invoke in-process ──────────
+// Validates the *full* MVP-1 Path A pipeline: a Graph containing a
+// FlashAttention dialect node is lowered to `call @tenzor_plugin.flash_attention`
+// MLIR text, compiled to .vmfb by iree-compile, and invoked through the
+// in-process IreeInvoker. The plugin VM module satisfies the import at
+// session load time, so the callback runs and the output must match eager.
+
+namespace {
+
+namespace tzj = ::tenzor::jit;
+namespace tzm = ::tenzor::jit::mlir_jit;
+
+auto make_tmp_cache_dir() -> std::filesystem::path {
+    auto now =
+        std::chrono::system_clock::now().time_since_epoch().count();
+    std::mt19937_64 rng(static_cast<std::uint64_t>(now));
+    std::filesystem::path d = std::filesystem::temp_directory_path() /
+        ("tenzor_jit_plugin_fa_" + std::to_string(rng()));
+    std::filesystem::create_directories(d);
+    return d;
+}
+
+}  // namespace
+
+TEST(OpFlashAttentionCallback, EndToEndPluginPathMatchesEager) {
+    ensure_core_init();
+    const std::vector<int64_t> shape{1, 2, 4, 16};
+
+    auto q_t = make_filled(shape, 0.05f, 0.7f);
+    auto k_t = make_filled(shape, 0.1f,  0.9f);
+    auto v_t = make_filled(shape, 0.15f, 1.1f);
+
+    // Eager reference. scale=0 -> autograd op picks 1/sqrt(D).
+    const float scale = 1.0f / std::sqrt(static_cast<float>(shape.back()));
+    auto eager_out = ::tenzor::flash_attention(
+        ::tenzor::Variable(q_t, false),
+        ::tenzor::Variable(k_t, false),
+        ::tenzor::Variable(v_t, false),
+        scale, /*causal=*/true);
+
+    // Build graph: FlashAttention(Q,K,V) {causal=true}.
+    tzj::Graph g;
+    auto q = g.create_value("q", shape, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto k = g.create_value("k", shape, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto v = g.create_value("v", shape, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({q, k, v});
+    auto node = g.create_node(tzj::OpType::FlashAttention);
+    node->add_input(q); node->add_input(k); node->add_input(v);
+    auto out = g.create_value("o", shape, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    node->set_bool_attr("causal", true);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    // Plugin-path lower → compile → in-process invoke.
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(true);
+    const std::string mlir = lowerer.lower(g);
+    // Sanity: the call site went through the plugin path.
+    ASSERT_NE(mlir.find("call @tenzor_plugin.flash_attention"),
+              std::string::npos) << mlir;
+
+    tzm::CompileOptions opts;
+    opts.target         = "llvm-cpu";
+    opts.plugin_enabled = true;
+    opts.cache_dir      = make_tmp_cache_dir();
+    auto artifact = tzm::compile_mlir(mlir, opts);
+    auto invoker  = tzm::IreeInvoker::load(
+        artifact, tzm::IreeInvoker::Mode::InProcess);
+
+    auto outs = invoker->invoke({q_t, k_t, v_t});
+    ASSERT_EQ(outs.size(), 1u);
+    auto diff = ::tenzor::max(::tenzor::abs(eager_out.tensor() - outs[0]))
+                    .item<float>();
+    EXPECT_LT(diff, 1e-4f)
+        << "plugin-path FA diverged from eager by " << diff;
+
+    std::error_code _ec;
+    std::filesystem::remove_all(opts.cache_dir, _ec);
 }

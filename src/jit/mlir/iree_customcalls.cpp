@@ -330,21 +330,21 @@ static iree_status_t deref_buffer_view(const iree_vm_ref_t& ref,
 // The active device for this call is captured from `template_view`'s
 // underlying allocation placement — all inputs to a call share the same
 // device, so any one of them suffices.
-static iree_status_t tensor_to_result_ref(iree_hal_buffer_view_t* template_view,
+// Helper: convert a tensor result into a buffer_view ref to be returned.
+// The active device for this call is passed in explicitly — it is recovered
+// by each shim from the `module` parameter (set by
+// create_tenzor_plugin_module via interface.self).
+static iree_status_t tensor_to_result_ref(iree_hal_device_t* device,
                                           const ::tenzor::Tensor& out,
                                           iree_vm_ref_t* out_ref) {
-    iree_hal_buffer_t* template_buffer =
-        iree_hal_buffer_view_buffer(template_view);
-    iree_hal_buffer_t* allocated =
-        iree_hal_buffer_allocated_buffer(template_buffer);
-    iree_hal_buffer_placement_t placement =
-        iree_hal_buffer_allocation_placement(allocated);
-    iree_hal_device_t* device = placement.device;
-    iree_hal_allocator_t* allocator =
-        device ? iree_hal_device_allocator(device) : nullptr;
+    if (!device) {
+        return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+            "tenzor_plugin: no active HAL device for result marshalling");
+    }
+    iree_hal_allocator_t* allocator = iree_hal_device_allocator(device);
     if (!allocator) {
         return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-            "tenzor_plugin: input buffer_view has no allocated device/allocator");
+            "tenzor_plugin: HAL device has no allocator");
     }
 
     const ::tenzor::Tensor cpu = out.cpu().contiguous();
@@ -394,8 +394,9 @@ static iree_status_t IREE_API_PTR call_shim_flash_attention(
     iree_byte_span_t args_storage,
     iree_byte_span_t rets_storage,
     iree_vm_native_function_target_t /*target_fn*/,
-    void* /*module*/,
+    void* module,
     void* /*module_state*/) {
+    auto* device = reinterpret_cast<iree_hal_device_t*>(module);
     const auto* args = reinterpret_cast<const FlashAttentionArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -419,7 +420,7 @@ static iree_status_t IREE_API_PTR call_shim_flash_attention(
         auto out = cc::dispatch_flash_attention({qt, kt, vt}, cfg.str());
 
         std::memset(&rets->r0, 0, sizeof(rets->r0));
-        IREE_RETURN_IF_ERROR(tensor_to_result_ref(q_bv, out, &rets->r0));
+        IREE_RETURN_IF_ERROR(tensor_to_result_ref(device, out, &rets->r0));
     } catch (const std::exception& e) {
         return iree_make_status(IREE_STATUS_INTERNAL,
                                 "tenzor_plugin.flash_attention: %s", e.what());
@@ -434,8 +435,9 @@ static iree_status_t IREE_API_PTR call_shim_gqa(
     iree_byte_span_t args_storage,
     iree_byte_span_t rets_storage,
     iree_vm_native_function_target_t /*target_fn*/,
-    void* /*module*/,
+    void* module,
     void* /*module_state*/) {
+    auto* device = reinterpret_cast<iree_hal_device_t*>(module);
     const auto* args = reinterpret_cast<const FlashAttentionArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -459,7 +461,7 @@ static iree_status_t IREE_API_PTR call_shim_gqa(
         auto out = cc::dispatch_gqa({qt, kt, vt}, cfg.str());
 
         std::memset(&rets->r0, 0, sizeof(rets->r0));
-        IREE_RETURN_IF_ERROR(tensor_to_result_ref(q_bv, out, &rets->r0));
+        IREE_RETURN_IF_ERROR(tensor_to_result_ref(device, out, &rets->r0));
     } catch (const std::exception& e) {
         return iree_make_status(IREE_STATUS_INTERNAL,
                                 "tenzor_plugin.gqa: %s", e.what());
@@ -481,8 +483,9 @@ static iree_status_t IREE_API_PTR call_shim_rope_apply(
     iree_byte_span_t args_storage,
     iree_byte_span_t rets_storage,
     iree_vm_native_function_target_t /*target_fn*/,
-    void* /*module*/,
+    void* module,
     void* /*module_state*/) {
+    auto* device = reinterpret_cast<iree_hal_device_t*>(module);
     const auto* args = reinterpret_cast<const RopeArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -498,7 +501,7 @@ static iree_status_t IREE_API_PTR call_shim_rope_apply(
         auto out  = cc::dispatch_rope_apply({xt, cost, sint}, "offset=0");
 
         std::memset(&rets->r0, 0, sizeof(rets->r0));
-        IREE_RETURN_IF_ERROR(tensor_to_result_ref(x_bv, out, &rets->r0));
+        IREE_RETURN_IF_ERROR(tensor_to_result_ref(device, out, &rets->r0));
     } catch (const std::exception& e) {
         return iree_make_status(IREE_STATUS_INTERNAL,
                                 "tenzor_plugin.rope_apply: %s", e.what());
@@ -520,8 +523,9 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
     iree_byte_span_t args_storage,
     iree_byte_span_t rets_storage,
     iree_vm_native_function_target_t /*target_fn*/,
-    void* /*module*/,
+    void* module,
     void* /*module_state*/) {
+    auto* device = reinterpret_cast<iree_hal_device_t*>(module);
     const auto* args = reinterpret_cast<const RmsNormArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -541,7 +545,7 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
         auto out = cc::dispatch_rms_norm({xt, wt}, cfg.str());
 
         std::memset(&rets->r0, 0, sizeof(rets->r0));
-        IREE_RETURN_IF_ERROR(tensor_to_result_ref(x_bv, out, &rets->r0));
+        IREE_RETURN_IF_ERROR(tensor_to_result_ref(device, out, &rets->r0));
     } catch (const std::exception& e) {
         return iree_make_status(IREE_STATUS_INTERNAL,
                                 "tenzor_plugin.rms_norm: %s", e.what());
@@ -597,10 +601,15 @@ static const iree_vm_native_module_descriptor_t kDescriptor = {
 /// after the session takes its own reference.
 auto create_tenzor_plugin_module(iree_vm_instance_t* instance,
                                  iree_allocator_t allocator,
+                                 iree_hal_device_t* device,
                                  iree_vm_module_t** out_module)
     -> iree_status_t {
     iree_vm_module_t interface;
     IREE_RETURN_IF_ERROR(iree_vm_module_initialize(&interface, nullptr));
+    // Stash the device on the module so each shim can recover it as the
+    // `module` parameter to `iree_vm_native_function_shim_t` (IREE assigns
+    // `module->self = user_interface.self` at create time).
+    interface.self        = device;
     interface.destroy     = plugin::plugin_destroy;
     interface.alloc_state = plugin::plugin_alloc_state;
     interface.free_state  = plugin::plugin_free_state;
