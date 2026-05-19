@@ -205,4 +205,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_model_llama
         DISCOVERY_TIMEOUT 600 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task E.4 / E.5 / E.6 — ResNet18 eager + @tz.jit forward across
+    # IREE targets (using the project's built-in models::resnet18).
+    add_executable(test_model_resnet test_model_resnet.cpp)
+    target_link_libraries(test_model_resnet
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_model_resnet
+        DISCOVERY_TIMEOUT 600 BACKENDS none LABELS "jit;mlir;iree")
 endif()
