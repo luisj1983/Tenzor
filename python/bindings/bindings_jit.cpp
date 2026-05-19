@@ -316,6 +316,20 @@ void register_jit(py::module_& m) {
         "Lower the traced graph and return the StableHLO text "
         "(plugin-enabled).");
 
+    jit.def("show_stablehlo",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_stablehlo: passed object is not a tz.jit-compiled "
+                    "function");
+            }
+            return cf->dump_stablehlo(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Lower the traced graph with plugin_enabled=false (custom_call ops "
+        "decomposed).");
+
     // =========================================================================
     // Lazy Tensor API
     // =========================================================================

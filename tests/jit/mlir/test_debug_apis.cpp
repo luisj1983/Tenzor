@@ -72,3 +72,33 @@ TEST(DebugAPIs, ShowMlirContainsStablehlo) {
     EXPECT_NE(text.find("stablehlo.add"), std::string::npos) << text;
     EXPECT_NE(text.find("func.func @main"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// F.3 — show_stablehlo: pure-StableHLO output decomposes Tenzor custom_calls
+// ---------------------------------------------------------------------------
+//
+// For an Add-only graph there are no @tenzor_* custom_calls in either the
+// plugin-on or plugin-off form, so the pure-StableHLO assertion is that
+// the expanded text NEVER contains "@tenzor_". We also confirm that the
+// underlying stablehlo.add op is still present.
+
+TEST(DebugAPIs, ShowStableHLODecomposesCustomCalls) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x)
+        -> ::tenzor::Variable { return x + x; };
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 1.5f, ::tenzor::DType::Float32),
+        /*requires_grad=*/false);
+
+    auto _trigger = compiled(x);
+    auto sh = compiled.dump_stablehlo(x);
+    EXPECT_EQ(sh.find("@tenzor_"), std::string::npos)
+        << "expanded StableHLO must not contain any @tenzor_* custom_calls\n"
+        << sh;
+    EXPECT_NE(sh.find("stablehlo.add"), std::string::npos) << sh;
+}

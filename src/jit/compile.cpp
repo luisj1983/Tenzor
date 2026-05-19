@@ -359,7 +359,7 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
 }
 
 // ============================================================================
-// Debug / introspection APIs (Group F.2 — show_mlir)
+// Debug / introspection APIs (Group F.2 / F.3 — show_mlir / show_stablehlo)
 // ============================================================================
 
 auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
@@ -377,6 +377,24 @@ auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
     return lowerer.lower(*graph);
 }
 
+auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
+    namespace mj = ::tenzor::jit::mlir_jit;
+    auto graph = trace_single_input_graph(fn_, input);
+    if (!graph || graph->num_nodes() == 0) {
+        return "<empty graph: nothing to lower>\n";
+    }
+    if (config_.enable_fusion) {
+        Compiler compiler(true);
+        compiler.optimize(*graph);
+    }
+    mj::GraphToMLIR lowerer;
+    // The defining difference vs. dump_mlir: expand all `tenzor.*` custom_call
+    // ops into pure StableHLO primitives. The text returned here is the form
+    // shipped to deploy targets that do not link the Tenzor runtime plugin.
+    lowerer.set_plugin_enabled(false);
+    return lowerer.lower(*graph);
+}
+
 #else  // TENZOR_HAS_MLIR_JIT
 
 auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
@@ -388,6 +406,12 @@ auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
 auto CompiledFunction::dump_mlir(const Variable& /*input*/) -> std::string {
     throw std::runtime_error(
         "CompiledFunction::dump_mlir: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
+auto CompiledFunction::dump_stablehlo(const Variable& /*input*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_stablehlo: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
 }
 

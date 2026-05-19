@@ -157,6 +157,13 @@ public:
      */
     auto dump_mlir(const Variable& input) -> std::string;
 
+    /**
+     * @brief Like dump_mlir, but lowers with plugin_enabled=false so all
+     *        Tenzor custom_call ops are expanded to pure StableHLO. Used by
+     *        tz.jit.show_stablehlo().
+     */
+    auto dump_stablehlo(const Variable& input) -> std::string;
+
 private:
     FnType fn_;
     CompileConfig config_;
