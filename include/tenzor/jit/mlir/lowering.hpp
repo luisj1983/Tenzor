@@ -26,6 +26,15 @@ class GraphToMLIR {
 public:
     GraphToMLIR();
 
+    /// When true (the default), the 4 Tenzor dialect ops (FlashAttention,
+    /// GQA, RoPE, RMSNorm) are lowered to `stablehlo.custom_call
+    /// @tenzor_<name>` text. When false, they are decomposed into pure
+    /// StableHLO primitives (the "expand" path used for deploy targets
+    /// without the Tenzor runtime plugin). All non-dialect ops are
+    /// unaffected.
+    auto set_plugin_enabled(bool enabled) -> void { plugin_enabled_ = enabled; }
+    auto plugin_enabled() const -> bool { return plugin_enabled_; }
+
     /// Walk the topologically-sorted Graph and emit a complete MLIR module
     /// (module { func.func @main(...) -> ... { ... } }) as text.
     ///
@@ -33,6 +42,9 @@ public:
     /// not yet been wired into this lowerer. The exception message includes
     /// the unsupported `OpType` name so callers can route to the eager path.
     auto lower(const ::tenzor::jit::Graph& g) -> std::string;
+
+private:
+    bool plugin_enabled_ = true;
 };
 
 }  // namespace tenzor::jit::mlir_jit

@@ -7,6 +7,7 @@
 #include "tenzor/jit/tracer.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -2160,6 +2161,207 @@ auto handle_rms_norm_custom_call(LoweringContext& ctx,
     body << '\n';
 }
 
+
+// ── Tenzor dialect ops: expand-to-stablehlo decomposition (Group D) ──────
+//
+// When `GraphToMLIR::plugin_enabled() == false`, the 4 dialect ops are
+// decomposed to pure StableHLO primitives so the resulting MLIR module
+// is consumable by stock iree-compile without the Tenzor plugin.
+
+namespace expand {
+
+/// Emit a `softmax(x, dim=last)` decomposition over a tensor of `shape`
+/// and dtype `d`. Returns the SSA name of the result. Implements the
+/// standard max-stabilized softmax (subtract max, exp, divide by sum).
+auto emit_softmax_last_dim(LoweringContext& ctx, std::ostream& body,
+                           const std::string& x,
+                           const std::vector<int64_t>& shape,
+                           ::tenzor::DType d) -> std::string {
+    const int64_t rank = static_cast<int64_t>(shape.size());
+    const int64_t dim  = rank - 1;
+    std::vector<int64_t> reduce_dims = {dim};
+    std::vector<int64_t> reduced_shape;
+    std::vector<int64_t> bcast_dims;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (i != dim) { reduced_shape.push_back(shape[i]); bcast_dims.push_back(i); }
+    }
+
+    std::string init_max = "0xFF800000";
+    if (d == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
+    else if (d == ::tenzor::DType::Float16)  init_max = "0xFC00";
+    else if (d == ::tenzor::DType::BFloat16) init_max = "0xFF80";
+
+    auto init_m = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_m, init_max, {}, d); body << '\n';
+    auto m = ctx.fresh_name();
+    emit_stablehlo_reduce(body, m, x, init_m, "maximum", reduce_dims, shape,
+                          reduced_shape, d); body << '\n';
+    auto m_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, m_b, m, bcast_dims, reduced_shape,
+                                    shape, d); body << '\n';
+    auto z = ctx.fresh_name();
+    emit_stablehlo_binary(body, "subtract", z, x, m_b, shape, d); body << '\n';
+    auto e = ctx.fresh_name();
+    emit_stablehlo_unary(body, "exponential", e, z, shape, d); body << '\n';
+    auto init_s = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto s = ctx.fresh_name();
+    emit_stablehlo_reduce(body, s, e, init_s, "add", reduce_dims, shape,
+                          reduced_shape, d); body << '\n';
+    auto s_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, s_b, s, bcast_dims, reduced_shape,
+                                    shape, d); body << '\n';
+    auto out = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", out, e, s_b, shape, d); body << '\n';
+    return out;
+}
+
+/// Build the upper-triangular -inf mask iota for causal attention, of
+/// shape (Sq, Sk) where Sq=Sk=`S`, broadcast across batch+head dims.
+/// `attn_shape` is the QK shape (B, H, Sq, Sk).
+auto emit_causal_mask_and_add(LoweringContext& ctx, std::ostream& body,
+                              const std::string& qk_scaled,
+                              const std::vector<int64_t>& attn_shape,
+                              ::tenzor::DType d) -> std::string {
+    const int64_t rank = static_cast<int64_t>(attn_shape.size());
+    const int64_t sq   = attn_shape[rank - 2];
+    const int64_t sk   = attn_shape[rank - 1];
+
+    auto dtype_suffix = [](::tenzor::DType dt) -> const char* {
+        switch (dt) {
+            case ::tenzor::DType::Float32:  return "f32";
+            case ::tenzor::DType::Float64:  return "f64";
+            case ::tenzor::DType::Float16:  return "f16";
+            case ::tenzor::DType::BFloat16: return "bf16";
+            default: return "f32";
+        }
+    };
+
+    // iota_q in shape (sq, sk) along dim 0 -> q-row index.
+    auto iq = ctx.fresh_name();
+    body << '%' << iq
+         << " = stablehlo.iota dim = 0 : tensor<" << sq << 'x' << sk << "xi32>\n";
+    auto ik = ctx.fresh_name();
+    body << '%' << ik
+         << " = stablehlo.iota dim = 1 : tensor<" << sq << 'x' << sk << "xi32>\n";
+    // mask = (q < k)  → upper triangular cells become true.
+    auto mask_bool = ctx.fresh_name();
+    body << '%' << mask_bool
+         << " = stablehlo.compare LT, %" << iq << ", %" << ik
+         << " : (tensor<" << sq << 'x' << sk << "xi32>, tensor<"
+         << sq << 'x' << sk << "xi32>) -> tensor<" << sq << 'x' << sk << "xi1>\n";
+
+    // -inf splat in dtype d, shape (sq, sk).
+    std::string ninf = "0xFF800000";
+    if (d == ::tenzor::DType::Float64)       ninf = "0xFFF0000000000000";
+    else if (d == ::tenzor::DType::Float16)  ninf = "0xFC00";
+    else if (d == ::tenzor::DType::BFloat16) ninf = "0xFF80";
+    auto ninf_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, ninf_c, ninf, {sq, sk}, d); body << '\n';
+    auto zero_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, zero_c, scalar_literal(0.0, d), {sq, sk}, d);
+    body << '\n';
+
+    // mask_d = select(mask_bool, -inf, 0)
+    auto mask_d = ctx.fresh_name();
+    body << '%' << mask_d << " = stablehlo.select %" << mask_bool
+         << ", %" << ninf_c << ", %" << zero_c
+         << " : tensor<" << sq << 'x' << sk << "xi1>, tensor<"
+         << sq << 'x' << sk << 'x' << dtype_suffix(d) << ">\n";
+
+    // Broadcast mask_d from (sq, sk) to attn_shape across last two dims.
+    std::vector<int64_t> bcast_dims = {rank - 2, rank - 1};
+    auto mask_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, mask_b, mask_d, bcast_dims,
+                                    {sq, sk}, attn_shape, d); body << '\n';
+    // attn_masked = qk_scaled + mask_b
+    auto out = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", out, qk_scaled, mask_b, attn_shape, d);
+    body << '\n';
+    return out;
+}
+
+}  // namespace expand
+
+/// FlashAttention expand-to-stablehlo: softmax(Q @ K^T * scale [+ mask]) @ V.
+/// Q/K/V shape: (B, H, S, D) with K/V possibly having H_kv < H — but for
+/// FlashAttention (vs GQA) they must match. The mask is the upper-triangular
+/// -inf mask when `causal=true`.
+auto handle_flash_attention_expand(LoweringContext& ctx,
+                                   const ::tenzor::jit::Node& node,
+                                   std::ostream& body) -> void {
+    if (node.inputs().size() != 3 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: FlashAttention (expand) expects 3 inputs and 1+ "
+            "outputs");
+    }
+    const auto& q_val   = node.inputs()[0];
+    const auto& k_val   = node.inputs()[1];
+    const auto& v_val   = node.inputs()[2];
+    const auto& out_val = node.outputs()[0];
+    const auto q_shape  = q_val->shape();
+    const auto k_shape  = k_val->shape();
+    const auto v_shape  = v_val->shape();
+    const auto d        = out_val->dtype();
+    if (q_shape.size() != 4 || k_shape.size() != 4 || v_shape.size() != 4) {
+        throw std::runtime_error(
+            "GraphToMLIR: FlashAttention (expand) requires 4-D Q/K/V "
+            "(B,H,S,D)");
+    }
+    const int64_t B    = q_shape[0];
+    const int64_t H    = q_shape[1];
+    const int64_t Sq   = q_shape[2];
+    const int64_t D    = q_shape[3];
+    const int64_t Sk   = k_shape[2];
+
+    const bool causal = get_attr_bool (node, {"causal"}, false);
+    float scale       = get_attr_float(node, {"scale"},  0.0f);
+    if (scale == 0.0f) {
+        scale = 1.0f / std::sqrt(static_cast<float>(D));
+    }
+
+    // QK = dot_general(Q, K) batch=(0,1) contract Q.dim=3 K.dim=3
+    // -> shape (B, H, Sq, Sk)
+    const std::vector<int64_t> qk_shape{B, H, Sq, Sk};
+    auto qk = ctx.fresh_name();
+    emit_stablehlo_dot_general(body, qk, ctx.name_for(q_val->id()),
+                               ctx.name_for(k_val->id()),
+                               /*lhs_batch=*/{0, 1}, /*rhs_batch=*/{0, 1},
+                               /*lhs_contracting=*/{3}, /*rhs_contracting=*/{3},
+                               q_shape, k_shape, qk_shape, d);
+    body << '\n';
+
+    // qk_scaled = qk * scale
+    auto scale_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, scale_c,
+                                  scalar_literal(static_cast<double>(scale), d),
+                                  qk_shape, d);
+    body << '\n';
+    auto qk_s = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, d);
+    body << '\n';
+
+    std::string pre_softmax = qk_s;
+    if (causal) {
+        pre_softmax = expand::emit_causal_mask_and_add(ctx, body, qk_s, qk_shape, d);
+    }
+
+    auto attn = expand::emit_softmax_last_dim(ctx, body, pre_softmax,
+                                              qk_shape, d);
+
+    // out = dot_general(attn, V) batch=(0,1) contract attn.dim=3 V.dim=2
+    // -> (B, H, Sq, D)
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_dot_general(body, out_name, attn,
+                               ctx.name_for(v_val->id()),
+                               {0, 1}, {0, 1},
+                               {3}, {2},
+                               qk_shape, v_shape, out_val->shape(), d);
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2281,8 +2483,16 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             // ResidualAdd is already in the binary elementwise group.
 
             // ── Tenzor dialect ops (Group D) ──
+            // Plugin path: emit `stablehlo.custom_call @tenzor_<x>`.
+            // Expand path (plugin_enabled_ == false): decompose to pure
+            // StableHLO primitives.
             case OpType::FlashAttention:
-                handle_flash_attention_custom_call(ctx, *node, body); break;
+                if (plugin_enabled_) {
+                    handle_flash_attention_custom_call(ctx, *node, body);
+                } else {
+                    handle_flash_attention_expand(ctx, *node, body);
+                }
+                break;
             case OpType::GQA:
                 handle_gqa_custom_call(ctx, *node, body); break;
             case OpType::RoPE:

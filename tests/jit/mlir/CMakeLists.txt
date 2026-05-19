@@ -116,6 +116,14 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_flash_attention
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 
+    # Task D.1.3 — FlashAttention expand-to-stablehlo + roundtrip vs eager.
+    add_executable(test_op_flash_attention_expand
+        test_op_flash_attention_expand.cpp)
+    target_link_libraries(test_op_flash_attention_expand
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_flash_attention_expand
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task D.2.1 — GQA dialect op lowers to stablehlo.custom_call @tenzor_gqa.
     add_executable(test_op_gqa test_op_gqa.cpp)
     target_link_libraries(test_op_gqa
