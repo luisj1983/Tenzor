@@ -1407,17 +1407,31 @@ auto pool_window_for_2d(const ::tenzor::jit::Node& node,
                         const std::vector<int64_t>& x_shape)
     -> std::tuple<std::vector<int64_t>, std::vector<int64_t>,
                   std::vector<int64_t>, std::vector<int64_t>> {
+    // Read a (H, W) pair from either:
+    //   - a vec_attr `vec_key` containing [H, W] (rectangular kernels)
+    //   - a vec_attr `vec_key` containing [S]    (square kernels via
+    //     copy_hw_pair in tracing_interceptor)
+    //   - a scalar int_attr `vec_key` (the pooling-layer record path:
+    //     src/nn/layers/pooling.cpp posts `kernel_size`/`stride`/
+    //     `padding` as int_attrs because the layer's API is square-
+    //     only). Previously we silently fell through to the default,
+    //     dropping the real kernel size and emitting a 1x1 window.
+    //   - per-axis int_attrs `h_key`/`w_key`
     auto get_hw = [&](const char* vec_key, const char* h_key,
                       const char* w_key, int64_t fallback) {
-        if (node.has_attr(vec_key)) {
+        if (node.has_vec_attr(vec_key)) {
             auto v = node.get_vec_attr(vec_key);
             if (v.size() == 2) return std::pair{v[0], v[1]};
             if (v.size() == 1) return std::pair{v[0], v[0]};
         }
-        int64_t h = node.has_attr(h_key) ? node.get_int_attr(h_key)
-                                         : fallback;
-        int64_t w = node.has_attr(w_key) ? node.get_int_attr(w_key)
-                                         : fallback;
+        if (node.has_int_attr(vec_key)) {
+            int64_t s = node.get_int_attr(vec_key);
+            return std::pair{s, s};
+        }
+        int64_t h = node.has_int_attr(h_key) ? node.get_int_attr(h_key)
+                                             : fallback;
+        int64_t w = node.has_int_attr(w_key) ? node.get_int_attr(w_key)
+                                             : fallback;
         return std::pair{h, w};
     };
     auto [kh, kw] = get_hw("kernel_size", "kernel_h", "kernel_w", 1);

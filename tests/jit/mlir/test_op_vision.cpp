@@ -218,3 +218,131 @@ TEST(OpVision, InterpolateUpsample2x) {
     EXPECT_NE(mlir.find("stablehlo.reshape"), std::string::npos) << mlir;
     assert_iree_compile_accepts(mlir);
 }
+
+// =====================================================================
+// End-to-end @tz.jit tests for vision-family OpType handlers.
+// MaxPool2d / AvgPool2d / AdaptiveAvgPool2d / Padding / Interpolate /
+// Conv2d each reach the trace via a different surface: pooling layers
+// post a TracedOp directly from src/nn/layers/pooling.cpp (Group E),
+// Conv2d/Padding/Interpolate ride OpId dispatch and get mapped by the
+// tracer interceptor.
+// =====================================================================
+
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/jit/compile.hpp"
+#include "tenzor/nn/functional.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+
+namespace tzv_e2e {
+namespace F = ::tenzor::nn::functional;
+
+void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
+                      const ::tenzor::Variable& x,
+                      float tol = 1e-4F) {
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    auto eager = fn(x);
+    auto jit   = compiled(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
+    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
+    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                    .template item<float>();
+    EXPECT_LT(diff, tol);
+}
+
+}  // namespace tzv_e2e
+
+TEST(OpVision, MaxPool2dEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::max_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x_t = ::tenzor::full({1, 1, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpVision, AvgPool2dEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::avg_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x_t = ::tenzor::full({1, 1, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpVision, AdaptiveAvgPool2dEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::adaptive_avg_pool2d(x, {1, 1});
+    };
+    auto x_t = ::tenzor::full({1, 2, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 32; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpVision, PaddingEndToEnd) {
+    ensure_core_init();
+    // F::pad constant mode is implemented as a sequence of Cat ops
+    // (each leg dispatches OpId::Cat). The JIT therefore exercises
+    // OpType::Cat repeatedly — no dedicated OpType::Padding node is
+    // emitted, but the lowering of the cat-decomposition is what
+    // real models will hit when they pad inputs.
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::pad(x, /*pad=*/{1, 1, 1, 1},
+                               /*mode=*/"constant", /*value=*/0.0);
+    };
+    auto x_t = ::tenzor::full({1, 1, 2, 2}, 1.0F, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpVision, InterpolateEndToEnd) {
+    ensure_core_init();
+    // 2x upsample of a 2x2 -> 4x4 feature map. The lowering implements
+    // integer-ratio nearest as reshape + broadcast + reshape. Note
+    // F::interpolate's "nearest" mode dispatches OpId::Interpolate
+    // which the tracer now maps to OpType::Interpolate.
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::interpolate(x, std::pair<int64_t, int64_t>{4, 4},
+                                       "nearest", /*align_corners=*/false);
+    };
+    auto x_t = ::tenzor::full({1, 1, 2, 2}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    xd[0] = 1.0F; xd[1] = 2.0F; xd[2] = 3.0F; xd[3] = 4.0F;
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpVision, Conv2dEndToEnd) {
+    ensure_core_init();
+    // 3x3 identity-ish kernel on a [1,1,4,4] feature map, stride 1, no pad.
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        // Constant weight Variable (no grad) inside the lambda — full()
+        // dispatches OpId::Full which the tracer leaves as a frozen
+        // graph constant. That's the right shape for an inference-style
+        // JIT lower where weights are baked in.
+        auto w_t = ::tenzor::full({1, 1, 3, 3}, 1.0F, ::tenzor::DType::Float32);
+        ::tenzor::Variable w(w_t, false);
+        return tzv_e2e::F::conv2d(x, w, std::nullopt,
+                                  /*stride=*/{1, 1}, /*padding=*/{0, 0});
+    };
+    auto x_t = ::tenzor::full({1, 1, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x_t, false);
+    // Conv2d through IREE's compile pipeline can pick up ULP-scale drift
+    // compared to oneDNN; widen tolerance slightly.
+    tzv_e2e::run_jit_vs_eager(fn, x, 5e-3F);
+}

@@ -140,3 +140,30 @@ TEST(OpElementwise, Clamp) {
         return ::tenzor::clamp(x, -0.5F, 0.5F);
     });
 }
+
+// =====================================================================
+// End-to-end @tz.jit test for the ResidualAdd marker path. The tracer
+// only records OpType::Add (the eager `+` is an Add); the
+// FuseResidualAddPass in src/jit/compiler.cpp recognises the
+// `x + sublayer(x)` topology and tags the Add node with
+// `residual=true`. The MLIR lowering in handle_binary uses the same
+// stablehlo.add emit for both Add and ResidualAdd OpTypes, so the
+// numerical output is identical; the assertion that matters is the
+// pipeline (trace -> pass -> lower -> iree-compile -> invoke) does not
+// throw on the residual-shape topology — any mismatch in the
+// pattern matcher's value_feeds_into traversal or downstream lowering
+// would surface here.
+// =====================================================================
+
+#include "tenzor/nn/functional.hpp"
+
+TEST(OpElementwise, ResidualAddEndToEnd) {
+    check_matches_eager("residual_add", [](const ::tenzor::Variable& x) {
+        // ReLU is in FuseResidualAddPass::is_sublayer_op's allow-list,
+        // so the trace `Add(x, ReLU(x))` lights up the residual
+        // pattern. After the pass, the Add node carries
+        // residual=true; lowering still emits stablehlo.add.
+        auto sub = ::tenzor::nn::functional::relu(x);
+        return x + sub;
+    });
+}

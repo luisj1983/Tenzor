@@ -118,3 +118,80 @@ TEST(OpNorms, BatchNorm2dEmitsAndParses) {
               std::string::npos) << mlir;
     assert_iree_compile_accepts(mlir);
 }
+
+// =====================================================================
+// End-to-end @tz.jit tests for BatchNorm2d + LayerNorm. Both ops
+// dispatch through OpId on every device (the tracer's OpId -> OpType
+// mapping in src/jit/tracing_interceptor.cpp handles them) so they
+// don't need a side-channel `tracer.record_op` like the pooling layers.
+// =====================================================================
+
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/jit/compile.hpp"
+#include "tenzor/nn/functional.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+
+namespace tzn_e2e {
+namespace F = ::tenzor::nn::functional;
+
+void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
+                      const ::tenzor::Variable& x,
+                      float tol = 5e-4F) {
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    auto eager = fn(x);
+    auto jit   = compiled(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
+    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
+    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                    .template item<float>();
+    EXPECT_LT(diff, tol);
+}
+
+}  // namespace tzn_e2e
+
+TEST(OpNorms, BatchNorm2dEndToEnd) {
+    ensure_core_init();
+    // Inference-mode BatchNorm: weights/bias and running stats are
+    // constant tensors baked in at trace time (they dispatch
+    // OpId::Full inside the lambda which the tracer drops as a
+    // graph break and freezes as constants).
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        const int64_t C = 2;
+        auto rm  = ::tenzor::full({C}, 0.0F, ::tenzor::DType::Float32);
+        auto rv  = ::tenzor::full({C}, 1.0F, ::tenzor::DType::Float32);
+        auto w_t = ::tenzor::full({C}, 1.0F, ::tenzor::DType::Float32);
+        auto b_t = ::tenzor::full({C}, 0.0F, ::tenzor::DType::Float32);
+        ::tenzor::Variable w(w_t, false), b(b_t, false);
+        return tzn_e2e::F::batch_norm(x, rm, rv, w, b,
+                                      /*training=*/false,
+                                      /*momentum=*/0.1,
+                                      /*eps=*/1e-5);
+    };
+    auto x_t = ::tenzor::full({1, 2, 3, 3}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 18; ++i) xd[i] = static_cast<float>(i) * 0.1F;
+    ::tenzor::Variable x(x_t, false);
+    tzn_e2e::run_jit_vs_eager(fn, x);
+}
+
+TEST(OpNorms, LayerNormEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        std::vector<int64_t> normalized_shape = {4};
+        auto w_t = ::tenzor::full({4}, 1.0F, ::tenzor::DType::Float32);
+        auto b_t = ::tenzor::full({4}, 0.0F, ::tenzor::DType::Float32);
+        ::tenzor::Variable w(w_t, false), b(b_t, false);
+        return tzn_e2e::F::layer_norm(x, normalized_shape, w, b,
+                                      /*eps=*/1e-5);
+    };
+    auto x_t = ::tenzor::full({2, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int i = 0; i < 8; ++i) xd[i] = static_cast<float>(i) * 0.3F + 0.1F;
+    ::tenzor::Variable x(x_t, false);
+    tzn_e2e::run_jit_vs_eager(fn, x);
+}

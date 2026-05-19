@@ -127,3 +127,49 @@ TEST(OpCastIndex, IndexSelectEmitsAndParses) {
     EXPECT_NE(mlir.find("stablehlo.gather"), std::string::npos) << mlir;
     assert_iree_compile_accepts(mlir);
 }
+
+// =====================================================================
+// End-to-end tests for OpType::IndexSelect via @tz.jit. `tenzor::
+// index_select` dispatches OpId::IndexSelect on all devices so the
+// tracer's OpId -> OpType mapping is sufficient — no nn-layer side-
+// channel record needed.
+// =====================================================================
+
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/jit/compile.hpp"
+#include "tenzor/ops/indexing.hpp"
+
+TEST(OpCastIndex, IndexSelectEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        // Pick rows [1, 3, 2] from x. Use Int64 indices (the dtype the
+        // CPU index_select kernel and StableHLO gather both expect).
+        auto idx_t = ::tenzor::full({3}, 1.0F, ::tenzor::DType::Int64);
+        auto idx_data = idx_t.data<int64_t>();
+        idx_data[0] = 1; idx_data[1] = 3; idx_data[2] = 2;
+        return ::tenzor::index_select(x, /*dim=*/0, idx_t);
+    };
+
+    // Build a [5,4] input where each row has distinct values so an
+    // index permutation is observable, then JIT and compare to eager.
+    auto x_t = ::tenzor::full({5, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x_t.data<float>();
+    for (int r = 0; r < 5; ++r)
+        for (int c = 0; c < 4; ++c) xd[r * 4 + c] = static_cast<float>(r) + 0.1F * static_cast<float>(c);
+
+    ::tenzor::Variable x(x_t, /*requires_grad=*/false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    auto eager = fn(x);
+    auto jit   = compiled(x);
+
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
+    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
+    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                    .template item<float>();
+    EXPECT_LT(diff, 1e-5F);
+}

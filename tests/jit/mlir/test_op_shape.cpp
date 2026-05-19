@@ -18,17 +18,25 @@
 // graphs manually, then asserting the emitted MLIR is well-formed and
 // parses through iree-compile.
 
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/tenzor.hpp"
 
 #include <gtest/gtest.h>
 
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace tzj = ::tenzor::jit;
 namespace tzm = ::tenzor::jit::mlir_jit;
@@ -216,5 +224,119 @@ TEST(OpShape, BroadcastEmitsAndParses) {
     auto mlir = lowerer.lower(g);
     EXPECT_NE(mlir.find("stablehlo.broadcast_in_dim"), std::string::npos)
         << mlir;
+    assert_iree_compile_accepts(mlir);
+}
+
+// =====================================================================
+// End-to-end tests: eager -> @tz.jit(backend="mlir") -> match. These
+// drive the full CompiledFunction pipeline so they exercise tracer,
+// lowering, iree-compile, and IREE runtime invoke together.
+// =====================================================================
+
+namespace {
+
+void expect_jit_matches_eager(::tenzor::jit::CompiledFunction::FnType fn,
+                              const ::tenzor::Variable& x,
+                              float tol = 1e-5F) {
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    auto eager = fn(x);
+    auto jit   = compiled(x);
+
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
+    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
+    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                    .template item<float>();
+    EXPECT_LT(diff, tol);
+}
+
+}  // namespace
+
+TEST(OpShape, StackEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        // OpId::Stack always dispatches; the tracer maps it to OpType::Stack
+        // which the lowering decomposes into reshape + concatenate.
+        auto y = x * 2.0F;
+        std::vector<::tenzor::Tensor> parts = {x.tensor(), y.tensor()};
+        ::tenzor::Tensor stacked = ::tenzor::stack(
+            std::span<const ::tenzor::Tensor>(parts), /*dim=*/0);
+        return ::tenzor::Variable(stacked, /*requires_grad=*/false);
+    };
+    ::tenzor::Variable x(
+        ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32), false);
+    expect_jit_matches_eager(fn, x);
+}
+
+TEST(OpShape, CatEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        auto y = x * 2.0F;
+        return ::tenzor::cat({x, y}, /*dim=*/0);
+    };
+    ::tenzor::Variable x(
+        ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32), false);
+    expect_jit_matches_eager(fn, x);
+}
+
+TEST(OpShape, BroadcastEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        // The eager path on CPU bypasses dispatch for broadcast_to via a
+        // manual stride rewrite, so the tracer never sees OpId::Expand.
+        // To get a real Broadcast in the trace we force a non-CPU path
+        // would require GPU — instead we rely on the lowering test above
+        // (BroadcastEmitsAndParses) covering the handler, and here we
+        // verify a broadcast-bearing reshape pattern (1->N then add) that
+        // exercises OpType::Broadcast via the eager autograd `+`'s
+        // implicit-broadcast handling and Expand dispatch.
+        //
+        // Concretely: reshape x[4] -> [1,4], then add to ones[3,4] which
+        // forces the runtime to broadcast x. On CPU `add` of [1,4]+[3,4]
+        // goes through OpId::Add (mapped). The broadcast happens inside
+        // the kernel and the trace records a single Add node — which the
+        // MLIR backend lowers by broadcasting the [1,4] operand to [3,4].
+        // No explicit OpType::Broadcast node is produced, but the IR
+        // still contains stablehlo.broadcast_in_dim from the dispatch
+        // shape mismatch path.
+        auto ones_t = ::tenzor::full({3, 4}, 1.0F, ::tenzor::DType::Float32);
+        auto x_2d_t = ::tenzor::reshape(x.tensor(),
+                                        std::vector<int64_t>{1, 4});
+        auto x_2d   = ::tenzor::Variable(x_2d_t, false);
+        auto ones_v = ::tenzor::Variable(ones_t, false);
+        return x_2d + ones_v;
+    };
+    ::tenzor::Variable x(
+        ::tenzor::full({4}, 0.5F, ::tenzor::DType::Float32), false);
+    expect_jit_matches_eager(fn, x);
+}
+
+// Direct-graph emit-and-parse test for OpType::ResidualAdd. The
+// optimiser's FuseResidualAddPass tags the Add via a bool_attr instead
+// of switching the OpType, so OpType::ResidualAdd is normally only
+// constructed when deserialising graphs from disk. Verify the explicit
+// case in the lowering still produces stablehlo.add.
+TEST(OpShape, ResidualAddEmitsAndParses) {
+    ensure_core_init();
+    tzj::Graph g;
+    auto a = g.create_value("a", {4}, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto b = g.create_value("b", {4}, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({a, b});
+    auto node = g.create_node(tzj::OpType::ResidualAdd);
+    node->add_input(a);
+    node->add_input(b);
+    auto z = g.create_value("z", {4}, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    node->add_output(z);
+    g.add_node(node);
+    g.set_outputs({z});
+    tzm::GraphToMLIR lowerer;
+    auto mlir = lowerer.lower(g);
+    EXPECT_NE(mlir.find("stablehlo.add"), std::string::npos) << mlir;
     assert_iree_compile_accepts(mlir);
 }

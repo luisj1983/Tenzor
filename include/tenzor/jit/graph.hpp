@@ -422,6 +422,30 @@ public:
                tensor_attrs_.count(name) > 0;
     }
 
+    /**
+     * @brief Check if a specific *typed* attribute is present.
+     *
+     * The MLIR lowering needs to distinguish between "kernel_size set as
+     * a scalar int" (the pooling-layer record path) and "kernel_size set
+     * as a [H, W] vector" (the dispatch-interceptor copy_hw_pair path).
+     * `has_attr` doesn't disambiguate; these per-map probes do.
+     */
+    auto has_int_attr(const std::string& name) const -> bool {
+        return int_attrs_.count(name) > 0;
+    }
+    auto has_vec_attr(const std::string& name) const -> bool {
+        return vec_attrs_.count(name) > 0;
+    }
+    auto has_bool_attr(const std::string& name) const -> bool {
+        return bool_attrs_.count(name) > 0;
+    }
+    auto has_float_attr(const std::string& name) const -> bool {
+        return attrs_.count(name) > 0;
+    }
+    auto has_tensor_attr(const std::string& name) const -> bool {
+        return tensor_attrs_.count(name) > 0;
+    }
+
     // ========================================================================
     // Subgraph support (for control flow: If, Loop)
     // ========================================================================
