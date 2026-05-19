@@ -160,6 +160,13 @@ auto make_tracing_interceptor(
         copy_float(AttrKey::Eps,      "eps");
         copy_float(AttrKey::Negative_slope, "negative_slope");
         copy_int(AttrKey::Dim,         "dim");
+        // Reduction keepdim flag — graph.cpp's infer_types() needs this to
+        // correctly compute reduced shapes (without it, infer_types
+        // defaults to keepdim=false and silently drops the kept dim).
+        auto copy_bool = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) traced.bool_attrs[name] = attrs.get_bool(k, false);
+        };
+        copy_bool(AttrKey::Keepdim, "keepdim");
         copy_int(AttrKey::KernelSize,  "kernel_size");
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");

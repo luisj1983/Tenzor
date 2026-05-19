@@ -252,7 +252,7 @@ auto parse_output_line(const std::string& shape_and_data)
                              shape_and_data);
     }
     const std::string header = shape_and_data.substr(0, eq_pos);
-    const std::string values = shape_and_data.substr(eq_pos + 1);
+    std::string values = shape_and_data.substr(eq_pos + 1);
 
     // header looks like "4xf32" or "2x3xf64" or "f32" (rank 0).
     std::vector<int64_t> shape;
@@ -284,6 +284,15 @@ auto parse_output_line(const std::string& shape_and_data)
     int64_t numel = 1;
     for (auto d : shape) numel *= d;
     if (shape.empty()) numel = 1;
+
+    // For multi-dim outputs `iree-run-module` formats values with inner
+    // brackets — e.g. `4x1xf32=[13][2][11][0]` or `2x2xf32=[[1 2][3 4]]`.
+    // Normalize: replace any non-numeric punctuation that confuses
+    // stream reads with a single space, leaving only whitespace, digits,
+    // signs, decimal points and exponent letters.
+    for (auto& c : values) {
+        if (c == '[' || c == ']' || c == ',') c = ' ';
+    }
 
     ::tenzor::Tensor out = ::tenzor::full(shape, 0.0, dt);
     std::istringstream is(values);

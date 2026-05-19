@@ -62,4 +62,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_activations
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task C.3 — Reductions (Sum / Mean / Max / Softmax).
+    add_executable(test_op_reductions test_op_reductions.cpp)
+    target_link_libraries(test_op_reductions
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_reductions
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 endif()

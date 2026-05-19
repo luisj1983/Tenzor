@@ -517,6 +517,242 @@ auto handle_gelu(LoweringContext& ctx,
     body << '\n';
 }
 
+/// Determine the reduction dims and keepdim flag from a traced reduce
+/// node. Returns a pair (dims, keepdim) where dims are positive axes in
+/// [0, input_rank). If the node has no "dim" attribute, reduces over all
+/// dims.
+auto resolve_reduce_dims(const ::tenzor::jit::Node& node,
+                         const std::vector<int64_t>& input_shape,
+                         const std::vector<int64_t>& output_shape)
+    -> std::pair<std::vector<int64_t>, bool> {
+    const int64_t in_rank = static_cast<int64_t>(input_shape.size());
+    std::vector<int64_t> dims;
+    if (node.has_attr("dim")) {
+        // Single int dim (the common eager path).
+        auto raw = node.get_int_attr("dim");
+        dims.push_back(normalize_dim(raw, in_rank));
+    } else if (node.has_attr("dims")) {
+        auto vec = node.get_vec_attr("dims");
+        for (auto d : vec) dims.push_back(normalize_dim(d, in_rank));
+    } else {
+        // Reduce all dims.
+        for (int64_t i = 0; i < in_rank; ++i) dims.push_back(i);
+    }
+    // keepdim is true when the output keeps the rank of the input.
+    bool keepdim = output_shape.size() == input_shape.size();
+    return {std::move(dims), keepdim};
+}
+
+/// Emit reduce + optional reshape-to-keepdim. Returns the SSA name of
+/// the (post-keepdim) result.
+auto emit_reduce_with_keepdim(LoweringContext& ctx, std::ostream& body,
+                              const std::string& operand_name,
+                              const std::vector<int64_t>& operand_shape,
+                              const std::vector<int64_t>& result_shape,
+                              const std::vector<int64_t>& dims,
+                              bool keepdim, const std::string& reducer,
+                              const std::string& init_literal,
+                              ::tenzor::DType d) -> std::string {
+    // 1) Init constant: rank-0 splat in dtype `d`.
+    auto init_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_name, init_literal, {}, d);
+    body << '\n';
+
+    // 2) Shape of the reduced (no-keepdim) intermediate.
+    std::vector<int64_t> reduced_shape;
+    {
+        std::unordered_set<int64_t> drop(dims.begin(), dims.end());
+        for (std::size_t i = 0; i < operand_shape.size(); ++i) {
+            if (!drop.count(static_cast<int64_t>(i))) {
+                reduced_shape.push_back(operand_shape[i]);
+            }
+        }
+    }
+
+    auto reduced_name = ctx.fresh_name();
+    emit_stablehlo_reduce(body, reduced_name, operand_name, init_name,
+                          reducer, dims, operand_shape, reduced_shape, d);
+    body << '\n';
+
+    if (!keepdim) return reduced_name;
+    // If keepdim → reshape reduced_shape back to result_shape (which has
+    // size-1 in each reduced axis).
+    if (reduced_shape == result_shape) return reduced_name;
+    auto kd_name = ctx.fresh_name();
+    emit_stablehlo_reshape(body, kd_name, reduced_name, reduced_shape,
+                           result_shape, d);
+    body << '\n';
+    return kd_name;
+}
+
+auto handle_sum(LoweringContext& ctx,
+                const ::tenzor::jit::Node& node,
+                std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Sum expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
+                                                out_val->shape());
+    auto out_name = emit_reduce_with_keepdim(
+        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+        out_val->shape(), dims, keepdim, "add",
+        scalar_literal(0.0, out_val->dtype()), out_val->dtype());
+    ctx.bind(out_val->id(), out_name);
+}
+
+auto handle_max(LoweringContext& ctx,
+                const ::tenzor::jit::Node& node,
+                std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Max expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
+                                                out_val->shape());
+    // -inf init for float (hex bit pattern). For integers fall back to a
+    // very-negative integer; backing dtypes wider than int32 still get a
+    // valid (just non-minimal) lower bound.
+    std::string init_lit;
+    const auto d = out_val->dtype();
+    if (d == ::tenzor::DType::Float32) {
+        init_lit = "0xFF800000";  // IEEE 754 binary32 -inf
+    } else if (d == ::tenzor::DType::Float64) {
+        init_lit = "0xFFF0000000000000";  // IEEE 754 binary64 -inf
+    } else if (d == ::tenzor::DType::Float16) {
+        init_lit = "0xFC00";  // IEEE 754 binary16 -inf
+    } else if (d == ::tenzor::DType::BFloat16) {
+        init_lit = "0xFF80";  // bfloat16 -inf
+    } else if (is_float_dtype(d)) {
+        init_lit = "0xFF800000";  // fallback
+    } else {
+        init_lit = "-2147483648";
+    }
+    auto out_name = emit_reduce_with_keepdim(
+        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+        out_val->shape(), dims, keepdim, "maximum", init_lit, d);
+    ctx.bind(out_val->id(), out_name);
+}
+
+auto handle_mean(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Mean expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
+                                                out_val->shape());
+    const auto d = out_val->dtype();
+    // First compute the sum.
+    auto sum_name = emit_reduce_with_keepdim(
+        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+        out_val->shape(), dims, keepdim, "add", scalar_literal(0.0, d), d);
+
+    // N = product of reduced extents.
+    int64_t N = 1;
+    for (auto k : dims) N *= in_val->shape()[k];
+
+    auto n_const = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, n_const,
+                                  scalar_literal(static_cast<double>(N), d),
+                                  out_val->shape(), d);
+    body << '\n';
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_binary(body, "divide", out_name, sum_name, n_const,
+                          out_val->shape(), d);
+    body << '\n';
+}
+
+/// Softmax along a single dim, numerically stable form:
+///   m = reduce_max(x, dim) (no keepdim, then broadcast back)
+///   z = x - m  (broadcast)
+///   e = exp(z)
+///   s = reduce_sum(e, dim) (no keepdim, then broadcast)
+///   out = e / s
+auto handle_softmax(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error(
+            "GraphToMLIR: Softmax expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    const auto shape = out_val->shape();
+    const auto d     = out_val->dtype();
+    const auto& x    = ctx.name_for(in_val->id());
+
+    const int64_t rank = static_cast<int64_t>(shape.size());
+    int64_t dim = rank == 0 ? 0 : rank - 1;
+    if (node.has_attr("dim")) {
+        dim = normalize_dim(node.get_int_attr("dim"), rank);
+    }
+    std::vector<int64_t> reduce_dims = {dim};
+
+    // Reduced (no-keepdim) shape.
+    std::vector<int64_t> reduced_shape;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (i != dim) reduced_shape.push_back(shape[i]);
+    }
+    // Broadcast dimensions for re-expanding reduced→shape: every dim
+    // index except `dim` maps from reduced index → result index.
+    std::vector<int64_t> bcast_dims;
+    bcast_dims.reserve(reduced_shape.size());
+    for (int64_t i = 0; i < rank; ++i) {
+        if (i != dim) bcast_dims.push_back(i);
+    }
+
+    // 1) reduce_max — -inf init (hex bit pattern per dtype).
+    std::string init_max = "-2147483648";
+    if (d == ::tenzor::DType::Float32)       init_max = "0xFF800000";
+    else if (d == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
+    else if (d == ::tenzor::DType::Float16)  init_max = "0xFC00";
+    else if (d == ::tenzor::DType::BFloat16) init_max = "0xFF80";
+    auto init_m = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_m, init_max, {}, d); body << '\n';
+    auto m_name = ctx.fresh_name();
+    emit_stablehlo_reduce(body, m_name, x, init_m, "maximum", reduce_dims,
+                          shape, reduced_shape, d);
+    body << '\n';
+    // broadcast m back
+    auto m_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, m_b, m_name, bcast_dims,
+                                    reduced_shape, shape, d);
+    body << '\n';
+    // z = x - m
+    auto z = ctx.fresh_name();
+    emit_stablehlo_binary(body, "subtract", z, x, m_b, shape, d);
+    body << '\n';
+    // e = exp(z)
+    auto e = ctx.fresh_name();
+    emit_stablehlo_unary(body, "exponential", e, z, shape, d);
+    body << '\n';
+    // s = reduce_sum(e)
+    auto init_s = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, d), {}, d);
+    body << '\n';
+    auto s_name = ctx.fresh_name();
+    emit_stablehlo_reduce(body, s_name, e, init_s, "add", reduce_dims,
+                          shape, reduced_shape, d);
+    body << '\n';
+    auto s_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, s_b, s_name, bcast_dims,
+                                    reduced_shape, shape, d);
+    body << '\n';
+    // out = e / s
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_binary(body, "divide", out_name, e, s_b, shape, d);
+    body << '\n';
+}
+
 auto handle_pow(LoweringContext& ctx,
                 const ::tenzor::jit::Node& node,
                 std::ostream& body) -> void {
@@ -626,6 +862,12 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Sigmoid:      handle_sigmoid(ctx, *node, body); break;
             case OpType::SiLU:         handle_silu(ctx, *node, body);    break;
             case OpType::GELU:         handle_gelu(ctx, *node, body);    break;
+
+            // ── Reductions ──
+            case OpType::Sum:          handle_sum(ctx, *node, body);     break;
+            case OpType::Mean:         handle_mean(ctx, *node, body);    break;
+            case OpType::Max:          handle_max(ctx, *node, body);     break;
+            case OpType::Softmax:      handle_softmax(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
