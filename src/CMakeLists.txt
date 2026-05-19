@@ -575,3 +575,8 @@ endif()
 
 # Build backends
 add_subdirectory(backends)
+
+# Phase 13 MLIR JIT pipeline (gated on TENZOR_USE_MLIR_JIT)
+if(TENZOR_USE_MLIR_JIT)
+    add_subdirectory(jit/mlir)
+endif()

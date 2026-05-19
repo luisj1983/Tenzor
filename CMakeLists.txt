@@ -123,6 +123,23 @@ set(TENZOR_IREE_VERSION       3.0   CACHE STRING "Required IREE version")
 if(TENZOR_USE_MLIR_JIT)
     message(STATUS "Tenzor: MLIR JIT enabled (Phase 13)")
     message(STATUS "  MLIR ${TENZOR_MLIR_VERSION}, StableHLO ${TENZOR_STABLEHLO_VERSION}, IREE ${TENZOR_IREE_VERSION}")
+
+    # MLIR (build-time C++ API). LLVM is a transitive dependency.
+    find_package(MLIR ${TENZOR_MLIR_VERSION} REQUIRED CONFIG
+        HINTS $ENV{MLIR_DIR} /usr/lib/llvm-${TENZOR_MLIR_VERSION}/lib/cmake/mlir)
+
+    # StableHLO dialect library.
+    find_package(StableHLO ${TENZOR_STABLEHLO_VERSION} REQUIRED CONFIG
+        HINTS $ENV{STABLEHLO_DIR})
+
+    # IREE runtime (in-process); iree-compile is invoked as subprocess at runtime.
+    find_package(IREERuntime ${TENZOR_IREE_VERSION} REQUIRED CONFIG
+        HINTS $ENV{IREE_RUNTIME_DIR})
+
+    # Verify iree-compile is callable AT CONFIGURE TIME so users find out early.
+    find_program(IREE_COMPILE_EXECUTABLE iree-compile
+        HINTS $ENV{TENZOR_IREE_COMPILE} REQUIRED)
+    message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
 endif()
 
 # Link-Time Optimization
