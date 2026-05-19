@@ -428,7 +428,12 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
                             static_cast<std::streamsize>(mlir_text.size()));
                 }
                 const std::string cmd =
-                    iree_compile + " --iree-input-type=stablehlo" +
+                    iree_compile +
+                    // --iree-input-type=auto picks up StableHLO on both old
+                    // (3.0–3.10) and new (3.11+) IREE. Older accepted
+                    // =stablehlo but 3.11+ rejects it; "auto" is the safe
+                    // common value.
+                    " --iree-input-type=auto" +
                     " --iree-hal-target-backends=" + opts.target +
                     " --mlir-disable-threading" +
                     " --mlir-print-ir-after-all" +
@@ -553,7 +558,10 @@ auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
         ::tenzor::jit::mlir_jit::resolve_iree_compile();
 
     const std::string cmd =
-        iree_compile + " --iree-input-type=stablehlo" +
+        iree_compile +
+        // --iree-input-type=auto picks up StableHLO on both old and new
+        // IREE (3.0–3.10 also accepted =stablehlo; 3.11+ replaced it).
+        " --iree-input-type=auto" +
         " --iree-hal-target-backends=" + target +
         " --mlir-disable-threading" +
         " --mlir-print-ir-after-all" +
