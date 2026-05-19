@@ -342,7 +342,15 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/autograd.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/data.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/overrides.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/jit.py
         )
+        # Subpackages (directories with their own __init__.py) — copied via
+        # CMake's directory copy so that all files inside them land in the
+        # build tree without each having to be enumerated here.
+        file(GLOB _PY_SPECIAL_SOURCES CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/special/*.py)
+        file(GLOB _PY_DISTRIBUTIONS_SOURCES CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/distributions/*.py)
         set(_PY_STUBS
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
@@ -359,14 +367,35 @@ if(TENZOR_BUILD_PYTHON)
             get_filename_component(_fname ${_src} NAME)
             list(APPEND _PY_OUTPUTS ${CMAKE_BINARY_DIR}/python/tenzor/${_fname})
         endforeach()
+        foreach(_src ${_PY_SPECIAL_SOURCES})
+            get_filename_component(_fname ${_src} NAME)
+            list(APPEND _PY_OUTPUTS
+                ${CMAKE_BINARY_DIR}/python/tenzor/special/${_fname})
+        endforeach()
+        foreach(_src ${_PY_DISTRIBUTIONS_SOURCES})
+            get_filename_component(_fname ${_src} NAME)
+            list(APPEND _PY_OUTPUTS
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/${_fname})
+        endforeach()
 
         add_custom_command(
             OUTPUT ${_PY_OUTPUTS}
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_BINARY_DIR}/python/tenzor/special
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_SOURCES}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_STUBS}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_PY_SPECIAL_SOURCES}
+                ${CMAKE_BINARY_DIR}/python/tenzor/special/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_PY_DISTRIBUTIONS_SOURCES}
+                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/
             DEPENDS ${_PY_ALL_INPUTS}
+                ${_PY_SPECIAL_SOURCES} ${_PY_DISTRIBUTIONS_SOURCES}
             COMMENT "Copying Python files and type stubs to build directory"
         )
         add_custom_target(copy_python_files DEPENDS ${_PY_OUTPUTS})

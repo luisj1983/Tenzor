@@ -136,17 +136,68 @@ from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
 
 # Load special functions submodule (Bessel, Erf, Gamma, Ndtr, ...)
-from . import special as special
-_sys.modules['tenzor.special'] = special
+# Manually load to bypass the wildcard-import binding of `special` if
+# tenzor_core ever grows a `special` submodule (currently it does not, so
+# `from . import special` works, but the manual load is robust either way).
+_special_path = _os.path.join(_os.path.dirname(__file__), 'special', '__init__.py')
+if _os.path.exists(_special_path):
+    _special_spec = _importlib_util.spec_from_file_location(
+        'tenzor.special', _special_path,
+        submodule_search_locations=[_os.path.dirname(_special_path)])
+    _special_module = _importlib_util.module_from_spec(_special_spec)
+    _sys.modules['tenzor.special'] = _special_module
+    _special_spec.loader.exec_module(_special_module)
+    special = _special_module
+else:  # pragma: no cover — defensive only.
+    from . import special as special  # type: ignore
+    _sys.modules['tenzor.special'] = special
 
-# Phase 13: MLIR/StableHLO/IREE JIT pipeline
-from . import jit as _jit_mod
-jit = _jit_mod.jit
-_sys.modules['tenzor.jit'] = _jit_mod
+# Phase 13: MLIR/StableHLO/IREE JIT pipeline.
+#
+# `from .tenzor_core import *` above bound `tenzor.jit` to the C++ submodule
+# `tenzor_core.jit` (a pybind11 module exposing show_graph/show_mlir/... and
+# compile_function). The Python user-facing API is the sibling
+# `python/tenzor/jit.py` module, which wraps `tenzor_core.jit.compile_function`
+# in a @tz.jit decorator plus show_* helpers that accept either a raw fn or
+# a wrapped fn. We load the Python module explicitly and re-bind:
+#   tz.jit  -> the @tz.jit decorator (callable)
+# while `tenzor.jit` as a sys.modules entry points at the Python wrapper so
+# `tz.jit.show_graph(fn)` etc. resolve through it.
+_jit_path = _os.path.join(_os.path.dirname(__file__), 'jit.py')
+if _os.path.exists(_jit_path):
+    _jit_spec = _importlib_util.spec_from_file_location('tenzor.jit', _jit_path)
+    _jit_mod = _importlib_util.module_from_spec(_jit_spec)
+    _sys.modules['tenzor.jit'] = _jit_mod
+    _jit_spec.loader.exec_module(_jit_mod)
+    jit = _jit_mod.jit  # the decorator
+    # Expose show_* / cache_stats helpers as attributes of the decorator so
+    # `tz.jit.show_graph(fn)` works (in addition to `tz._jit_mod.show_graph`).
+    for _attr in ('show_graph', 'show_mlir', 'show_stablehlo', 'show_iree',
+                  'cache_stats'):
+        if hasattr(_jit_mod, _attr):
+            setattr(jit, _attr, getattr(_jit_mod, _attr))
+else:  # pragma: no cover — defensive only; jit.py is always shipped.
+    from . import jit as _jit_mod  # type: ignore
+    jit = _jit_mod.jit
+    _sys.modules['tenzor.jit'] = _jit_mod
 
-# Load distributions submodule (pure Python — numpy/scipy backend)
-from . import distributions as distributions
-_sys.modules['tenzor.distributions'] = distributions
+# Load distributions submodule (pure Python — numpy/scipy backend).
+# Manually load because `from . import distributions` would resolve through
+# the wildcard-import binding of the C++ submodule `tenzor_core.distributions`
+# rather than the sibling Python package `python/tenzor/distributions/`.
+_dist_path = _os.path.join(_os.path.dirname(__file__), 'distributions',
+                           '__init__.py')
+if _os.path.exists(_dist_path):
+    _dist_spec = _importlib_util.spec_from_file_location(
+        'tenzor.distributions', _dist_path,
+        submodule_search_locations=[_os.path.dirname(_dist_path)])
+    _dist_module = _importlib_util.module_from_spec(_dist_spec)
+    _sys.modules['tenzor.distributions'] = _dist_module
+    _dist_spec.loader.exec_module(_dist_module)
+    distributions = _dist_module
+else:  # pragma: no cover — defensive only.
+    from . import distributions as distributions  # type: ignore
+    _sys.modules['tenzor.distributions'] = distributions
 
 # ----------------------------------------------------------------
 # Phase 2.6 — __tensor_function__ subclass override protocol.

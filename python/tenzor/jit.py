@@ -75,9 +75,16 @@ def jit(fn: Callable[..., Any] | None = None, *,
 
         @functools.wraps(f)
         def _call(*args: Any, **kwargs: Any) -> Any:
+            # Stash the most-recent first positional input so the show_*
+            # helpers (which require an example tensor to re-trace the
+            # graph) can default to it when the user calls them as
+            # `tz.jit.show_graph(f)` after a compile.
+            if args:
+                _call._tz_last_example = args[0]  # type: ignore[attr-defined]
             return compiled(*args, **kwargs)
 
         _call._tz_compiled = compiled  # type: ignore[attr-defined]
+        _call._tz_last_example = None  # type: ignore[attr-defined]
         return _call
 
     if fn is not None:
@@ -85,38 +92,56 @@ def jit(fn: Callable[..., Any] | None = None, *,
     return _wrap  # type: ignore[return-value]
 
 
-def show_graph(fn: Any) -> str:
+def _resolve_example(fn: Any, example: Any) -> Any:
+    """Return the user-supplied example, or fall back to the last-invocation
+    example stashed by the @tz.jit decorator."""
+    if example is not None:
+        return example
+    last = getattr(fn, "_tz_last_example", None)
+    if last is None:
+        raise ValueError(
+            "show_* helpers require an example tensor — either call the "
+            "decorated function once first, or pass an explicit example: "
+            "e.g. tz.jit.show_graph(f, example_tensor).")
+    return last
+
+
+def show_graph(fn: Any, example: Any = None) -> str:
     """Dump the tenzor::jit::Graph IR after tracing."""
     try:
         from . import tenzor_core as _core  # type: ignore[import]
-        return _core.jit.show_graph(getattr(fn, "_tz_compiled", fn))
+        compiled = getattr(fn, "_tz_compiled", fn)
+        return _core.jit.show_graph(compiled, _resolve_example(fn, example))
     except AttributeError:
         raise JitNotEnabledError("show_graph requires TENZOR_USE_MLIR_JIT=ON")
 
 
-def show_mlir(fn: Any) -> str:
+def show_mlir(fn: Any, example: Any = None) -> str:
     """Dump the Tenzor MLIR dialect module before lowering to StableHLO."""
     try:
         from . import tenzor_core as _core  # type: ignore[import]
-        return _core.jit.show_mlir(getattr(fn, "_tz_compiled", fn))
+        compiled = getattr(fn, "_tz_compiled", fn)
+        return _core.jit.show_mlir(compiled, _resolve_example(fn, example))
     except AttributeError:
         raise JitNotEnabledError("show_mlir requires TENZOR_USE_MLIR_JIT=ON")
 
 
-def show_stablehlo(fn: Any) -> str:
+def show_stablehlo(fn: Any, example: Any = None) -> str:
     """Dump the final StableHLO module (textual)."""
     try:
         from . import tenzor_core as _core  # type: ignore[import]
-        return _core.jit.show_stablehlo(getattr(fn, "_tz_compiled", fn))
+        compiled = getattr(fn, "_tz_compiled", fn)
+        return _core.jit.show_stablehlo(compiled, _resolve_example(fn, example))
     except AttributeError:
         raise JitNotEnabledError("show_stablehlo requires TENZOR_USE_MLIR_JIT=ON")
 
 
-def show_iree(fn: Any) -> str:
+def show_iree(fn: Any, example: Any = None) -> str:
     """Run iree-compile --dump-ir-after-all and return the trace."""
     try:
         from . import tenzor_core as _core  # type: ignore[import]
-        return _core.jit.show_iree(getattr(fn, "_tz_compiled", fn))
+        compiled = getattr(fn, "_tz_compiled", fn)
+        return _core.jit.show_iree(compiled, _resolve_example(fn, example))
     except AttributeError:
         raise JitNotEnabledError("show_iree requires TENZOR_USE_MLIR_JIT=ON")
 

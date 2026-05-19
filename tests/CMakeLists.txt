@@ -829,6 +829,11 @@ if(TENZOR_BUILD_PYTHON)
             else()
                 set(_py_labels "python;cpu")
             endif()
+            # Phase 13 — Python-side JIT tests join the `mlir` label so
+            # `ctest -L mlir` covers them alongside the C++ jit tests.
+            if(test_name MATCHES "jit")
+                set(_py_labels "${_py_labels};jit;mlir")
+            endif()
             set_tests_properties("cpu_python_${test_name}" PROPERTIES
                 LABELS "${_py_labels}"
                 TIMEOUT ${TENZOR_TEST_TIMEOUT}
