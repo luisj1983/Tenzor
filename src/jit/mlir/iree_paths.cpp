@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -72,26 +73,32 @@ auto resolve_iree_binary(const char* env_var,
         }
     }
 
-    // 4. CMake-found compiler. iree-run-module typically lives next to
-    // iree-compile so we can derive it from the same root.
-    //
-    // The compile_commands.json puts -DTENZOR_IREE_COMPILE_PATH=... when
-    // CMake found it; otherwise this preprocessor symbol is absent.
+    // 4. CMake-found binaries. Each binary has its own preprocessor symbol
+    // set by src/jit/mlir/CMakeLists.txt; if the requested binary has no
+    // direct symbol we fall back to deriving it from iree-compile's parent
+    // directory (CMake-found iree-compile + sibling iree-run-module).
+    if (binary == "iree-compile") {
 #ifdef TENZOR_IREE_COMPILE_PATH
-    {
         const std::string cmake_path{TENZOR_IREE_COMPILE_PATH};
         if (is_executable(cmake_path)) {
-            if (binary == "iree-compile") {
-                return cmake_path;
-            }
-            const auto sibling =
-                fs::path(cmake_path).parent_path() / binary;
-            if (is_executable(sibling.string())) {
-                return sibling.string();
-            }
+            return cmake_path;
         }
-    }
 #endif
+    } else if (binary == "iree-run-module") {
+#ifdef TENZOR_IREE_RUN_MODULE_PATH
+        const std::string cmake_path{TENZOR_IREE_RUN_MODULE_PATH};
+        if (is_executable(cmake_path)) {
+            return cmake_path;
+        }
+#endif
+#ifdef TENZOR_IREE_COMPILE_PATH
+        const auto sibling =
+            fs::path(TENZOR_IREE_COMPILE_PATH).parent_path() / binary;
+        if (is_executable(sibling.string())) {
+            return sibling.string();
+        }
+#endif
+    }
 
     // 5. $PATH (last resort, mainly for ad-hoc Docker / CI images).
     if (auto p = find_on_path(binary); !p.empty()) {

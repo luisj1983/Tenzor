@@ -22,11 +22,15 @@ target_include_directories(tenzor_jit_mlir PUBLIC
 )
 target_compile_features(tenzor_jit_mlir PUBLIC cxx_std_23)
 
-# Propagate the CMake-found `iree-compile` path into the source so the
-# runtime discovery chain in iree_paths.cpp can prefer it over $PATH.
+# Propagate the CMake-found IREE binary paths into the source so the
+# runtime discovery chain in iree_paths.cpp can prefer them over $PATH.
 if(IREE_COMPILE_EXECUTABLE)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_IREE_COMPILE_PATH="${IREE_COMPILE_EXECUTABLE}")
+endif()
+if(IREE_RUN_MODULE_EXECUTABLE)
+    target_compile_definitions(tenzor_jit_mlir PRIVATE
+        TENZOR_IREE_RUN_MODULE_PATH="${IREE_RUN_MODULE_EXECUTABLE}")
 endif()
 
 # OBJECT library is spliced into the shared tenzor_core; PIC required.
