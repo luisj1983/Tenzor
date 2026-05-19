@@ -33,4 +33,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_iree_customcall_smoke
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task B.1 — Graph → MLIR text lowering (Add only).
+    add_executable(test_lower_add test_lower_add.cpp)
+    target_link_libraries(test_lower_add
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_lower_add
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
 endif()

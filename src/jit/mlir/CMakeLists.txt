@@ -5,11 +5,11 @@
 find_package(OpenSSL REQUIRED)
 
 add_library(tenzor_jit_mlir OBJECT
-    _stub.cpp
     mlir_text_emit.cpp
     iree_compile.cpp
     iree_runtime.cpp
     iree_customcalls.cpp
+    lowering.cpp
 )
 target_link_libraries(tenzor_jit_mlir PUBLIC
     iree_compiler_API_SharedImpl   # embedding_api.h
