@@ -2362,6 +2362,123 @@ auto handle_flash_attention_expand(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// GQA expand-to-stablehlo. K and V each have H_kv heads while Q has H_q,
+/// with H_kv evenly dividing H_q (group size G = H_q / H_kv). Strategy:
+/// broadcast K, V from (B, H_kv, S, D) to (B, H_q, S, D) by inserting a
+/// size-G dim and re-flattening, then run the same FlashAttention expand
+/// pipeline.
+///
+/// Broadcast recipe (StableHLO):
+///   reshape K: (B, H_kv, S, D) -> (B, H_kv, 1, S, D)
+///   broadcast_in_dim:           -> (B, H_kv, G, S, D)
+///   reshape:                    -> (B, H_kv*G, S, D)
+auto handle_gqa_expand(LoweringContext& ctx,
+                       const ::tenzor::jit::Node& node,
+                       std::ostream& body) -> void {
+    if (node.inputs().size() != 3 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: GQA (expand) expects 3 inputs and 1+ outputs");
+    }
+    const auto& q_val   = node.inputs()[0];
+    const auto& k_val   = node.inputs()[1];
+    const auto& v_val   = node.inputs()[2];
+    const auto& out_val = node.outputs()[0];
+    const auto q_shape  = q_val->shape();
+    const auto k_shape  = k_val->shape();
+    const auto v_shape  = v_val->shape();
+    const auto d        = out_val->dtype();
+    if (q_shape.size() != 4 || k_shape.size() != 4 || v_shape.size() != 4) {
+        throw std::runtime_error(
+            "GraphToMLIR: GQA (expand) requires 4-D Q/K/V");
+    }
+    const int64_t B    = q_shape[0];
+    const int64_t Hq   = q_shape[1];
+    const int64_t Sq   = q_shape[2];
+    const int64_t D    = q_shape[3];
+    const int64_t Hkv  = k_shape[1];
+    const int64_t Sk   = k_shape[2];
+    if (Hkv == 0 || Hq % Hkv != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: GQA (expand) requires H_kv | H_q");
+    }
+    const int64_t G = Hq / Hkv;
+
+    const bool causal = get_attr_bool (node, {"causal"}, false);
+    float scale       = get_attr_float(node, {"scale"},  0.0f);
+    if (scale == 0.0f) scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    auto expand_kv = [&](const std::string& src_name,
+                         const std::vector<int64_t>& src_shape) -> std::string {
+        if (Hkv == Hq) return src_name;  // No-op for non-GQA
+        const int64_t S_in = src_shape[2];
+        // Step 1: reshape src to (B, Hkv, 1, S, D)
+        const std::vector<int64_t> r1{B, Hkv, 1, S_in, D};
+        auto reshaped = ctx.fresh_name();
+        body << '%' << reshaped << " = stablehlo.reshape %" << src_name
+             << " : (";
+        write_tensor_type_for_emit(body, src_shape, d);
+        body << ") -> ";
+        write_tensor_type_for_emit(body, r1, d);
+        body << '\n';
+        // Step 2: broadcast_in_dim 5D->5D with G replicating dim 2.
+        const std::vector<int64_t> r2{B, Hkv, G, S_in, D};
+        auto bcasted = ctx.fresh_name();
+        emit_stablehlo_broadcast_in_dim(body, bcasted, reshaped,
+                                        /*bcast_dims=*/{0, 1, 2, 3, 4},
+                                        r1, r2, d);
+        body << '\n';
+        // Step 3: reshape to (B, Hq, S, D)
+        const std::vector<int64_t> r3{B, Hq, S_in, D};
+        auto out = ctx.fresh_name();
+        body << '%' << out << " = stablehlo.reshape %" << bcasted
+             << " : (";
+        write_tensor_type_for_emit(body, r2, d);
+        body << ") -> ";
+        write_tensor_type_for_emit(body, r3, d);
+        body << '\n';
+        return out;
+    };
+
+    auto k_expanded = expand_kv(ctx.name_for(k_val->id()), k_shape);
+    auto v_expanded = expand_kv(ctx.name_for(v_val->id()), v_shape);
+
+    const std::vector<int64_t> kv_full_shape{B, Hq, Sk, D};
+
+    // QK = dot_general(Q, K_expanded), batch=(0,1), contract=(3,3) -> (B,Hq,Sq,Sk)
+    const std::vector<int64_t> qk_shape{B, Hq, Sq, Sk};
+    auto qk = ctx.fresh_name();
+    emit_stablehlo_dot_general(body, qk, ctx.name_for(q_val->id()), k_expanded,
+                               {0, 1}, {0, 1}, {3}, {3},
+                               q_shape, kv_full_shape, qk_shape, d);
+    body << '\n';
+
+    auto scale_c = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, scale_c,
+                                  scalar_literal(static_cast<double>(scale), d),
+                                  qk_shape, d);
+    body << '\n';
+    auto qk_s = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, d);
+    body << '\n';
+
+    std::string pre_softmax = qk_s;
+    if (causal) {
+        pre_softmax = expand::emit_causal_mask_and_add(ctx, body, qk_s,
+                                                       qk_shape, d);
+    }
+    auto attn = expand::emit_softmax_last_dim(ctx, body, pre_softmax,
+                                              qk_shape, d);
+
+    // out = dot_general(attn, V_expanded), batch=(0,1), contract=(3,2)
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_stablehlo_dot_general(body, out_name, attn, v_expanded,
+                               {0, 1}, {0, 1}, {3}, {2},
+                               qk_shape, kv_full_shape, out_val->shape(), d);
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2494,7 +2611,12 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
                 }
                 break;
             case OpType::GQA:
-                handle_gqa_custom_call(ctx, *node, body); break;
+                if (plugin_enabled_) {
+                    handle_gqa_custom_call(ctx, *node, body);
+                } else {
+                    handle_gqa_expand(ctx, *node, body);
+                }
+                break;
             case OpType::RoPE:
                 handle_rope_apply_custom_call(ctx, *node, body); break;
             case OpType::RMSNorm:

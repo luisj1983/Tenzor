@@ -131,6 +131,13 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_gqa
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 
+    # Task D.2.3 — GQA expand-to-stablehlo + roundtrip.
+    add_executable(test_op_gqa_expand test_op_gqa_expand.cpp)
+    target_link_libraries(test_op_gqa_expand
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_gqa_expand
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task D.3.1 — RoPE dialect op lowers to stablehlo.custom_call
     # @tenzor_rope_apply.
     add_executable(test_op_rope test_op_rope.cpp)
