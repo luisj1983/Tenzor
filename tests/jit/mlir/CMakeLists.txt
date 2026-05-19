@@ -122,4 +122,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_op_gqa
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
+
+    # Task D.3.1 — RoPE dialect op lowers to stablehlo.custom_call
+    # @tenzor_rope_apply.
+    add_executable(test_op_rope test_op_rope.cpp)
+    target_link_libraries(test_op_rope
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_rope
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 endif()

@@ -2083,6 +2083,42 @@ auto handle_gqa_custom_call(LoweringContext& ctx,
     body << '\n';
 }
 
+
+/// RoPE (Rotary Position Embedding). Inputs: (x, cos_table, sin_table)
+/// where the tables provide precomputed cos/sin per position. Attrs:
+/// `offset` (int, default 0) — starting sequence offset for KV-cache
+/// resumption. Output shape matches x.
+auto handle_rope_apply_custom_call(LoweringContext& ctx,
+                                   const ::tenzor::jit::Node& node,
+                                   std::ostream& body) -> void {
+    if (node.inputs().size() != 3 || node.outputs().empty()) {
+        throw std::runtime_error(
+            "GraphToMLIR: RoPE expects 3 inputs (x, cos, sin) and 1+ "
+            "outputs");
+    }
+    const auto& x_val   = node.inputs()[0];
+    const auto& cos_val = node.inputs()[1];
+    const auto& sin_val = node.inputs()[2];
+    const auto& out_val = node.outputs()[0];
+
+    int64_t offset = 0;
+    if (node.has_attr("offset")) offset = node.get_int_attr("offset");
+
+    std::ostringstream cfg;
+    cfg << "offset=" << offset;
+
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out_val->id(), out_name);
+    emit_custom_call(body, "tenzor_rope_apply", out_name,
+                     {ctx.name_for(x_val->id()),
+                      ctx.name_for(cos_val->id()),
+                      ctx.name_for(sin_val->id())},
+                     {x_val->shape(), cos_val->shape(), sin_val->shape()},
+                     {x_val->dtype(), cos_val->dtype(), sin_val->dtype()},
+                     out_val->shape(), out_val->dtype(), cfg.str());
+    body << '\n';
+}
+
 }  // namespace
 
 GraphToMLIR::GraphToMLIR() = default;
@@ -2208,6 +2244,8 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
                 handle_flash_attention_custom_call(ctx, *node, body); break;
             case OpType::GQA:
                 handle_gqa_custom_call(ctx, *node, body); break;
+            case OpType::RoPE:
+                handle_rope_apply_custom_call(ctx, *node, body); break;
 
             // ── Pseudo-ops ──
             case OpType::ShapeGuard:   handle_shape_guard(ctx, *node, body); break;
