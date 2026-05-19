@@ -304,6 +304,14 @@ if(TENZOR_BUILD_PYTHON)
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
+        if(TENZOR_USE_MLIR_JIT)
+            # bindings/bindings_jit.cpp uses TENZOR_HAS_MLIR_JIT-guarded code
+            # (cache_stats / reset_cache_stats) so propagate the define.
+            target_compile_definitions(tenzor_python PRIVATE TENZOR_HAS_MLIR_JIT)
+            if(TARGET tenzor_jit_mlir)
+                target_link_libraries(tenzor_python PRIVATE tenzor_jit_mlir)
+            endif()
+        endif()
         if(TARGET tenzor_backend_cuda)
             target_link_libraries(tenzor_python PRIVATE tenzor_backend_cuda)
         endif()
