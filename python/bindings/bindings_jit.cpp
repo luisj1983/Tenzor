@@ -243,6 +243,66 @@ void register_jit(py::module_& m) {
     "or non-Float32 inputs.");
 
     // =========================================================================
+    // Group F — Debug UX: show_graph / show_mlir / show_stablehlo / show_iree
+    // and cache_stats. F.1 lands show_graph plus the shared
+    // CompiledFunctionHandle binding that the python/tenzor/jit.py decorator
+    // routes through (`_core.jit.compile_function`).
+    // =========================================================================
+
+    py::class_<tenzor::jit::CompiledFunction,
+               std::shared_ptr<tenzor::jit::CompiledFunction>>(
+        jit, "CompiledFunctionHandle",
+        "Underlying object held by the @tz.jit decorator. Exposes __call__\n"
+        "for invocation and is the argument accepted by the show_* free\n"
+        "functions on tenzor_core.jit.")
+        .def("__call__",
+             [](tenzor::jit::CompiledFunction& self,
+                const tenzor::Variable& x) {
+                 py::gil_scoped_release release;
+                 return self(x);
+             },
+             py::arg("input"));
+
+    jit.def("compile_function",
+        [](py::function fn, std::string backend, std::string target,
+           bool fallback_to_eager) {
+            (void)fallback_to_eager;  // Future: route into config_.
+            auto cpp_fn = [fn](const tenzor::Variable& input)
+                -> tenzor::Variable {
+                py::gil_scoped_acquire acquire;
+                auto result = fn(input);
+                return result.cast<tenzor::Variable>();
+            };
+
+            tenzor::jit::CompileConfig config;
+            config.backend = std::move(backend);
+            config.target  = std::move(target);
+
+            return std::make_shared<tenzor::jit::CompiledFunction>(
+                std::move(cpp_fn), std::move(config));
+        },
+        py::arg("fn"),
+        py::arg("backend") = "mlir",
+        py::arg("target")  = "auto",
+        py::arg("fallback_to_eager") = false,
+        "Build a CompiledFunctionHandle for @tz.jit. Use the returned\n"
+        "object's __call__ to invoke and the show_* free functions on\n"
+        "this module to introspect the pipeline.");
+
+    jit.def("show_graph",
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
+           const tenzor::Variable& example) {
+            if (!cf) {
+                throw std::runtime_error(
+                    "show_graph: passed object is not a tz.jit-compiled "
+                    "function (no _tz_compiled attribute)");
+            }
+            return cf->dump_graph(example);
+        },
+        py::arg("compiled"), py::arg("example"),
+        "Trace and dump the optimized tenzor::jit::Graph as text.");
+
+    // =========================================================================
     // Lazy Tensor API
     // =========================================================================
     auto lazy = m.def_submodule("lazy", "Lazy/deferred tensor execution");

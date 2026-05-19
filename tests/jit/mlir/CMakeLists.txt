@@ -213,4 +213,12 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_model_resnet
         DISCOVERY_TIMEOUT 600 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Group F — Debug UX (show_graph / show_mlir / show_stablehlo /
+    # show_iree / cache_stats + TENZOR_JIT_DUMP env var).
+    add_executable(test_debug_apis test_debug_apis.cpp)
+    target_link_libraries(test_debug_apis
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_debug_apis
+        DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
 endif()

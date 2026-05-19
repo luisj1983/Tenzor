@@ -226,24 +226,7 @@ auto CompiledFunction::trace_and_compile(const Variable& input)
 // MLIR backend invoke
 // ============================================================================
 
-#ifdef TENZOR_HAS_MLIR_JIT
 namespace {
-
-/// Resolve `cfg.target == "auto"` based on the input tensor's device.
-auto resolve_target(const std::string& cfg_target,
-                    const ::tenzor::Device& dev) -> std::string {
-    if (cfg_target != "auto") return cfg_target;
-    switch (dev.type) {
-        case ::tenzor::Device::Type::CPU:    return "llvm-cpu";
-        case ::tenzor::Device::Type::CUDA:   return "cuda";
-        case ::tenzor::Device::Type::ROCm:   return "rocm";
-        case ::tenzor::Device::Type::Vulkan: return "vulkan-spirv";
-        default:
-            throw std::runtime_error(
-                "MLIR backend: no IREE target mapped for device type " +
-                std::to_string(static_cast<int>(dev.type)));
-    }
-}
 
 /// Build the Graph for a single-input function by running the tracer.
 /// Mirrors `CompiledFunction::trace_and_compile` (the NVRTC path): pushes
@@ -271,6 +254,43 @@ auto trace_single_input_graph(CompiledFunction::FnType& fn,
     }
     DispatchInterceptorStack::pop();
     return tracer.end_trace({input}, {output});
+}
+
+}  // namespace
+
+// ============================================================================
+// Debug / introspection APIs (Group F.1 — show_graph)
+// ============================================================================
+
+auto CompiledFunction::dump_graph(const Variable& input) -> std::string {
+    auto graph = trace_single_input_graph(fn_, input);
+    if (!graph || graph->num_nodes() == 0) {
+        return "<empty graph>\n";
+    }
+    if (config_.enable_fusion) {
+        Compiler compiler(true);
+        compiler.optimize(*graph);
+    }
+    return graph->to_string();
+}
+
+#ifdef TENZOR_HAS_MLIR_JIT
+namespace {
+
+/// Resolve `cfg.target == "auto"` based on the input tensor's device.
+auto resolve_target(const std::string& cfg_target,
+                    const ::tenzor::Device& dev) -> std::string {
+    if (cfg_target != "auto") return cfg_target;
+    switch (dev.type) {
+        case ::tenzor::Device::Type::CPU:    return "llvm-cpu";
+        case ::tenzor::Device::Type::CUDA:   return "cuda";
+        case ::tenzor::Device::Type::ROCm:   return "rocm";
+        case ::tenzor::Device::Type::Vulkan: return "vulkan-spirv";
+        default:
+            throw std::runtime_error(
+                "MLIR backend: no IREE target mapped for device type " +
+                std::to_string(static_cast<int>(dev.type)));
+    }
 }
 
 }  // namespace

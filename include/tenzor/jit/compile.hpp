@@ -137,6 +137,16 @@ public:
      */
     auto had_graph_break() const -> bool { return had_graph_break_; }
 
+    /**
+     * @brief Trace the function (if needed) and dump the post-optimization
+     *        tenzor::jit::Graph IR as text. Used by tz.jit.show_graph().
+     *
+     * Forces a trace at the given input shape/dtype/device, runs the same
+     * fusion pass mlir_invoke would, and returns Graph::to_string(). Does
+     * not compile or invoke the MLIR pipeline.
+     */
+    auto dump_graph(const Variable& input) -> std::string;
+
 private:
     FnType fn_;
     CompileConfig config_;
