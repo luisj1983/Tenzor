@@ -19,4 +19,11 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
     tenzor_discover_tests(test_iree_compile
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Task A.8 — IREE Runtime invocation via iree-run-module subprocess.
+    add_executable(test_iree_invoke test_iree_invoke.cpp)
+    target_link_libraries(test_iree_invoke
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_iree_invoke
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
 endif()
