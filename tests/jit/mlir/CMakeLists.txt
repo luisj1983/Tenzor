@@ -161,6 +161,13 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_rope
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
 
+    # Task D.3.2 — tenzor_rope_apply custom_call dispatcher.
+    add_executable(test_op_rope_callback test_op_rope_callback.cpp)
+    target_link_libraries(test_op_rope_callback
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_rope_callback
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir")
+
     # Task D.3.3 — RoPE expand-to-stablehlo + roundtrip.
     add_executable(test_op_rope_expand test_op_rope_expand.cpp)
     target_link_libraries(test_op_rope_expand

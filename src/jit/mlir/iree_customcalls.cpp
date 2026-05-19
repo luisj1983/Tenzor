@@ -24,6 +24,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/transform.hpp"
 
@@ -199,11 +201,65 @@ auto dispatch_gqa(const std::vector<::tenzor::Tensor>& inputs,
     return dispatch_flash_attention({q, k_full, v_full}, backend_config);
 }
 
-auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& /*inputs*/,
-                         const std::string& /*backend_config*/)
+auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
+                         const std::string& backend_config)
     -> ::tenzor::Tensor {
-    throw std::runtime_error(
-        "tenzor_rope_apply: dispatcher not yet implemented (Group D.3.2)");
+    if (inputs.size() != 3) {
+        throw std::runtime_error(
+            "tenzor_rope_apply: expected 3 inputs (x, cos, sin), got " +
+            std::to_string(inputs.size()));
+    }
+    const auto& x   = inputs[0];
+    const auto& cos = inputs[1];
+    const auto& sin = inputs[2];
+    const auto x_shape = x.shape();
+    const int64_t rank = static_cast<int64_t>(x_shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("tenzor_rope_apply: x must have rank >= 1");
+    }
+    const int64_t D = x_shape[rank - 1];
+    if (D % 2 != 0) {
+        throw std::runtime_error(
+            "tenzor_rope_apply: last dim of x must be even");
+    }
+    const int64_t H = D / 2;
+    const int64_t last_dim = rank - 1;
+
+    // backend_config carries `offset=<i>` but the eager precomputation
+    // bakes the offset into the cos/sin tables, so the dispatcher does
+    // not need to consume it. Parse it anyway so unknown configs trigger
+    // visible failures rather than silently ignoring typo'd keys.
+    const auto kv = parse_backend_config(backend_config);
+    (void)parse_int(kv.count("offset") ? kv.at("offset") : "", 0);
+
+    // x1 = x[..., :H], x2 = x[..., H:]
+    // `.contiguous()` after narrow so cat() receives compact buffers — the
+    // narrow path can return a non-contiguous view and some backends'
+    // concatenate kernels assume contiguous inputs.
+    auto x1 = ::tenzor::narrow(x, last_dim, 0, H).contiguous();
+    auto x2 = ::tenzor::narrow(x, last_dim, H, H).contiguous();
+    auto neg_x2 = ::tenzor::neg(x2);
+    auto rotated = ::tenzor::cat({neg_x2, x1}, last_dim);
+
+    // Broadcast cos/sin to x_shape by aligning the trailing dims. The eager
+    // RoPE layer pre-broadcasts to x shape too, but in case the caller
+    // passes (S, D) tables we let the binary ops broadcast implicitly —
+    // tenzor::Tensor operator* handles right-aligned broadcasting on the
+    // CPU path. For full safety on all backends, reshape cos/sin via
+    // unsqueeze leading dims to align rank explicitly.
+    auto align_trailing = [&](const ::tenzor::Tensor& t) -> ::tenzor::Tensor {
+        const auto sh = t.shape();
+        if (static_cast<int64_t>(sh.size()) == rank) return t;
+        ::tenzor::Tensor out = t;
+        while (static_cast<int64_t>(out.shape().size()) < rank) {
+            out = ::tenzor::unsqueeze(out, 0);
+        }
+        return out;
+    };
+    auto cos_b = align_trailing(cos);
+    auto sin_b = align_trailing(sin);
+
+    return x * cos_b + rotated * sin_b;
 }
 
 auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& /*inputs*/,
@@ -226,8 +282,8 @@ constexpr const char* kMessage_GQA =
     "tenzor_gqa: dispatcher wired (Group D.2.2); IREE-side runtime binding "
     "pending iree/runtime/api.h restoration in the dist";
 constexpr const char* kMessage_RopeApply =
-    "tenzor_rope_apply: dispatcher pending (Group D.3.2); placeholder text "
-    "emitted while the iree/runtime/api.h headers remain incomplete";
+    "tenzor_rope_apply: dispatcher wired (Group D.3.2); IREE-side runtime "
+    "binding pending iree/runtime/api.h restoration in the dist";
 constexpr const char* kMessage_RmsNorm =
     "tenzor_rms_norm: dispatcher pending (Group D.4.2); placeholder text "
     "emitted while the iree/runtime/api.h headers remain incomplete";
