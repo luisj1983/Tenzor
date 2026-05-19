@@ -139,6 +139,11 @@ _sys.modules['tenzor.linalg'] = linalg
 from . import special as special
 _sys.modules['tenzor.special'] = special
 
+# Phase 13: MLIR/StableHLO/IREE JIT pipeline
+from . import jit as _jit_mod
+jit = _jit_mod.jit
+_sys.modules['tenzor.jit'] = _jit_mod
+
 # Load distributions submodule (pure Python — numpy/scipy backend)
 from . import distributions as distributions
 _sys.modules['tenzor.distributions'] = distributions
@@ -421,6 +426,8 @@ __all__ = [
 
     # Probability distributions submodule
     "distributions",
+    "jit",      # @tz.jit decorator (Phase 13 MLIR pipeline)
+    "_jit_mod", # full jit submodule for show_*/cache_stats helpers
 
     # Special functions (also accessible via tz.special.*)
     "erf",
