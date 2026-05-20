@@ -14,10 +14,14 @@ namespace fft {
 
 namespace {
 
-// Validate input is floating-point or complex
+// Validate input is a floating-point or complex dtype.  Half-precision
+// inputs (Float16 / BFloat16) are widened to Float32 inside the CPU
+// kernels via build_complex64_from_half (audit item F.10 / E.5), so we
+// accept them here too.
 void validate_fft_input(const Tensor& input, const char* op_name) {
     auto dt = input.dtype();
     if (dt != DType::Float32 && dt != DType::Float64 &&
+        dt != DType::Float16 && dt != DType::BFloat16 &&
         dt != DType::Complex64 && dt != DType::Complex128) {
         throw std::runtime_error(
             std::string(op_name) + ": requires floating-point or complex input, got " +
@@ -25,11 +29,15 @@ void validate_fft_input(const Tensor& input, const char* op_name) {
     }
 }
 
-// Get complex dtype corresponding to a real dtype
+// Get complex dtype corresponding to a real dtype.  Half-precision
+// inputs widen to Complex64 (Float32 internal arithmetic per E.5).
 DType to_complex_dtype(DType dt) {
     switch (dt) {
         case DType::Float32: return DType::Complex64;
         case DType::Float64: return DType::Complex128;
+        case DType::Float16:
+        case DType::BFloat16:
+            return DType::Complex64;
         case DType::Complex64: return DType::Complex64;
         case DType::Complex128: return DType::Complex128;
         default: return DType::Complex64;

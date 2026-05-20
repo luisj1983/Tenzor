@@ -736,16 +736,24 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                  std::string_view norm) -> Tensor {
     dim = normalize_dim(dim, input.ndim());
 
-    DType real_dtype = to_real_dtype(input.dtype());
-    DType complex_dtype = to_complex_dtype(input.dtype());
-    auto precision = dfti_precision(input.dtype());
+    // Audit item F.10: Float16 / BFloat16 inputs widen to Float32 for
+    // the underlying MKL DFTI call (single-precision is the smallest
+    // mantissa MKL accepts).  The complex output is Complex64.
+    const DType orig_dtype = input.dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
 
-    // Input must be real
     Tensor inp = input;
-    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+    if (orig_dtype == DType::Complex64 || orig_dtype == DType::Complex128) {
         // If complex input, take real part (by reinterpreting)
-        inp = input.to(real_dtype);
+        inp = input.to(to_real_dtype(orig_dtype));
+    } else if (is_half) {
+        inp = input.to(DType::Float32);
     }
+
+    DType real_dtype = inp.dtype();          // Float32 or Float64 after widening
+    DType complex_dtype = to_complex_dtype(real_dtype);
+    auto precision = dfti_precision(real_dtype);
+
     auto cont = inp.contiguous();
     auto shape = cont.shape();
     int64_t N_in = shape[dim];
@@ -779,13 +787,25 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                   std::string_view norm) -> Tensor {
     dim = normalize_dim(dim, input.ndim());
 
-    DType real_dtype = to_real_dtype(input.dtype());
-    DType complex_dtype = to_complex_dtype(input.dtype());
-    auto precision = dfti_precision(input.dtype());
+    // Audit item F.10: Float16 / BFloat16 inputs widen to Float32 for
+    // the MKL DFTI call (which is FP32/FP64 only).  Output is the
+    // matching real type (Float32 for half inputs).
+    const DType orig_dtype = input.dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
 
-    // Ensure input is complex
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(complex_dtype) : input;
+    Tensor inp;
+    if (is_half) {
+        inp = input.to(DType::Complex64);
+    } else if (orig_dtype == DType::Float32 || orig_dtype == DType::Float64) {
+        inp = input.to(to_complex_dtype(orig_dtype));
+    } else {
+        inp = input;
+    }
+
+    DType complex_dtype = inp.dtype();
+    DType real_dtype = (complex_dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+    auto precision = dfti_precision(real_dtype);
+
     auto cont = inp.contiguous();
     auto shape = cont.shape();
     int64_t N_in = shape[dim];

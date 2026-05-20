@@ -17,7 +17,11 @@ using namespace tenzor::testing;
 class FFTMultiDTypeTest : public MultiBackendDTypeTest {};
 
 TEST_P(FFTMultiDTypeTest, FFTRoundtrip1D) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10 / E.5: CPU FFT path widens Float16 inputs to
+    // Complex64 per-element via build_complex64_from_half(), so the
+    // round-trip is fully supported.  Use the dtype-specific atol from
+    // the fixture (1e-2 for Float16, 1e-5 for Float32, 1e-7 for
+    // Float64) — for an 8-point FFT round-trip 1e-2 is comfortable.
     auto x = ones({8}, dtype(), device());
     auto X = fft::fft(x, std::nullopt, -1, "backward");
     auto y = fft::ifft(X, std::nullopt, -1, "backward");
@@ -40,7 +44,7 @@ TEST_P(FFTMultiDTypeTest, FFTRoundtrip1D) {
 }
 
 TEST_P(FFTMultiDTypeTest, DCSignal) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = ones({4}, dtype(), device());
     auto X = fft::fft(x, std::nullopt, -1, "backward");
 
@@ -63,7 +67,7 @@ TEST_P(FFTMultiDTypeTest, DCSignal) {
 }
 
 TEST_P(FFTMultiDTypeTest, ImpulseSignal) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = zeros({4}, DType::Float32, Device::cpu());
     x.data<float>()[0] = 1.0f;
     x = x.to(dtype()).to(device());
@@ -85,7 +89,7 @@ TEST_P(FFTMultiDTypeTest, ImpulseSignal) {
 }
 
 TEST_P(FFTMultiDTypeTest, RFFTOnes) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = ones({8}, dtype(), device());
     auto X = fft::rfft(x, std::nullopt, -1, "backward");
 
@@ -105,7 +109,7 @@ TEST_P(FFTMultiDTypeTest, RFFTOnes) {
 }
 
 TEST_P(FFTMultiDTypeTest, IRFFTRoundtrip) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = ones({8}, dtype(), device());
     auto X = fft::rfft(x, std::nullopt, -1, "backward");
     auto y = fft::irfft(X, 8, -1, "backward");
@@ -118,7 +122,7 @@ TEST_P(FFTMultiDTypeTest, IRFFTRoundtrip) {
 }
 
 TEST_P(FFTMultiDTypeTest, BatchedFFT) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = ones({3, 4}, dtype(), device());
     auto X = fft::fft(x, std::nullopt, -1, "backward");
 
@@ -138,7 +142,7 @@ TEST_P(FFTMultiDTypeTest, BatchedFFT) {
 }
 
 TEST_P(FFTMultiDTypeTest, FFTWithPadding) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 FFT precision insufficient";
+    // Audit item F.10: Float16 FFT is wired via build_complex64_from_half.
     auto x = ones({4}, dtype(), device());
     auto X = fft::fft(x, 8, -1, "backward");
 
