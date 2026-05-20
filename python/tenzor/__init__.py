@@ -183,7 +183,7 @@ if _os.path.exists(_jit_path):
     # Expose show_* / cache_stats helpers as attributes of the decorator so
     # `tz.jit.show_graph(fn)` works (in addition to `tz._jit_mod.show_graph`).
     for _attr in ('show_graph', 'show_mlir', 'show_stablehlo', 'show_iree',
-                  'cache_stats', 'JitNotEnabledError'):
+                  'cache_stats', 'reset_cache_stats', 'JitNotEnabledError'):
         if hasattr(_jit_mod, _attr):
             setattr(jit, _attr, getattr(_jit_mod, _attr))
     # Pre-Phase-13 tests use `tz.jit.trace`, `tz.jit.Compiler`,

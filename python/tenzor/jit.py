@@ -153,3 +153,19 @@ def cache_stats() -> dict:
         return _core.jit.cache_stats()
     except AttributeError:
         raise JitNotEnabledError("cache_stats requires TENZOR_USE_MLIR_JIT=ON")
+
+
+def reset_cache_stats() -> None:
+    """Reset the JIT compile-cache statistics counters to zero.
+
+    Audit item H.6: the C++ binding `reset_cache_stats` was added to
+    `tenzor_core.jit` but never re-exported through the Python
+    `tenzor.jit` shim, so user code calling ``tz.jit.reset_cache_stats()``
+    silently fell back to AttributeError instead of resetting the
+    counters.
+    """
+    try:
+        from . import tenzor_core as _core  # type: ignore[import]
+        _core.jit.reset_cache_stats()
+    except AttributeError:
+        raise JitNotEnabledError("reset_cache_stats requires TENZOR_USE_MLIR_JIT=ON")
