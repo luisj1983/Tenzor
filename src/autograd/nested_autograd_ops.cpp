@@ -308,15 +308,25 @@ public:
             auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
                                        tenzor::full({1}, static_cast<float>(scale_),
                                                      Q.dtype(), Q.device()));
-            // Causal mask
+            // Causal mask: positions (qi, ki) with ki > qi must contribute
+            // softmax weight 0 so the recomputed attention matches the
+            // forward path.  Build an additive mask whose upper-triangular
+            // (excluding diagonal) is -inf and add it to the scaled scores
+            // BEFORE the softmax.  Without this, the backward softmax sees
+            // attention weights renormalised over the full key dimension and
+            // d_scores leaks gradient onto the masked positions (audit item
+            // A.6).
             if (causal_) {
-                int64_t Lq = qe - qs, Lkv = kve - kvs;
-                for (int64_t qi = 0; qi < Lq; ++qi) {
-                    for (int64_t ki = qi + 1; ki < Lkv; ++ki) {
-                        // Set future positions to -inf would be done in kernel;
-                        // for CPU fallback we rely on the forward kernel
-                    }
-                }
+                const int64_t Lq = qe - qs;
+                const int64_t Lkv = kve - kvs;
+                const float neg_inf = -std::numeric_limits<float>::infinity();
+                // Construct -inf above the diagonal, 0 elsewhere directly.
+                // (`triu(ones, 1) * -inf` would propagate NaN below the
+                // diagonal because IEEE 754 `0 * -inf = NaN`.)
+                Tensor neg_inf_mat = tenzor::full(
+                    {Lq, Lkv}, neg_inf, Q.dtype(), Q.device());
+                Tensor mask = tenzor::triu(neg_inf_mat, /*diagonal=*/1);
+                scores = tenzor::add(scores, mask);
             }
 
             // Softmax per query row

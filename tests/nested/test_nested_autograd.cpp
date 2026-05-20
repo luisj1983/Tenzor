@@ -204,6 +204,70 @@ TEST_F(NestedAutogradTest, NestedAttentionGradient) {
 }
 
 // ============================================================================
+// Audit item A.6 — Causal mask MUST affect the backward gradient.
+//
+// The previous NestedAttentionBackward had an empty `if (causal_) { for ... }`
+// body that walked the upper-triangular positions without doing anything.
+// As a result the recomputed softmax inside backward saw the unmasked
+// scores, producing a gradient that ignored the causal contract.  This
+// test pins the fix: the gradient with causal=true MUST differ from the
+// gradient with causal=false (because the masked positions contribute zero
+// to forward and therefore should receive zero gradient — non-trivially
+// different from the unmasked case).
+// ============================================================================
+TEST_F(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
+    const int64_t head_dim = 4;
+
+    // One sequence of length 3 so causal matters (full upper triangle is
+    // non-trivial).
+    auto q_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto k_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto v_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
+
+    auto q_offsets = make_int64_tensor({0, 3});
+    auto kv_offsets = make_int64_tensor({0, 3});
+    const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+
+    auto run_backward = [&](bool causal) -> std::tuple<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor> {
+        tenzor::Variable Q(q_data, true);
+        tenzor::Variable K(k_data, true);
+        tenzor::Variable V(v_data, true);
+        auto out = tenzor::autograd::nested_attention(
+            Q, K, V, q_offsets, kv_offsets, scale, causal);
+        auto loss = tenzor::sum(out);
+        loss.backward();
+        return {*Q.grad(), *K.grad(), *V.grad()};
+    };
+
+    auto [gQ_nc, gK_nc, gV_nc] = run_backward(/*causal=*/false);
+    auto [gQ_c,  gK_c,  gV_c]  = run_backward(/*causal=*/true);
+
+    auto max_abs_diff = [](const tenzor::Tensor& a, const tenzor::Tensor& b) -> float {
+        const float* pa = a.data<float>();
+        const float* pb = b.data<float>();
+        float m = 0.0f;
+        for (int64_t i = 0; i < a.numel(); ++i) {
+            m = std::max(m, std::abs(pa[i] - pb[i]));
+        }
+        return m;
+    };
+
+    EXPECT_GT(max_abs_diff(gQ_c, gQ_nc), 1e-3f)
+        << "Q gradient unchanged by causal mask — backward did not apply mask";
+    EXPECT_GT(max_abs_diff(gK_c, gK_nc), 1e-3f)
+        << "K gradient unchanged by causal mask — backward did not apply mask";
+    EXPECT_GT(max_abs_diff(gV_c, gV_nc), 1e-3f)
+        << "V gradient unchanged by causal mask — backward did not apply mask";
+
+    for (const auto* g : {&gQ_c, &gK_c, &gV_c}) {
+        for (int64_t i = 0; i < g->numel(); ++i) {
+            EXPECT_FALSE(std::isnan(g->data<float>()[i]));
+            EXPECT_FALSE(std::isinf(g->data<float>()[i]));
+        }
+    }
+}
+
+// ============================================================================
 // No-grad path
 // ============================================================================
 
