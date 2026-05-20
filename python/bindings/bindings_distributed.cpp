@@ -94,13 +94,31 @@ void register_distributed(py::module_& m) {
         // callers then assign the return value back.
         .def("gather", [](tenzor::distributed::ProcessGroup& self,
                            const tenzor::Tensor& tensor,
-                           std::vector<tenzor::Tensor> output,
-                           int dst_rank) -> std::vector<tenzor::Tensor> {
+                           py::list output_list,
+                           int dst_rank) -> py::object {
+            // Audit item H.5: match torch.distributed.gather convention.
+            // The destination list is mutated in place on dst_rank; the
+            // call returns None on every rank.  Previous binding took
+            // output by value, modified the local copy, and returned it
+            // — forcing callers to re-bind their list and producing the
+            // documented "other ranks return the unmodified placeholder"
+            // oddity.
+            std::vector<tenzor::Tensor> output;
+            output.reserve(output_list.size());
+            for (auto item : output_list) {
+                output.push_back(item.cast<tenzor::Tensor>());
+            }
             self.gather(tensor, output, dst_rank);
-            return output;
+            if (self.rank() == dst_rank) {
+                for (size_t i = 0; i < output.size(); ++i) {
+                    output_list[i] = py::cast(output[i]);
+                }
+            }
+            return py::none();
         }, py::arg("tensor"), py::arg("output"), py::arg("dst_rank"),
-           "Gather per-rank tensors onto dst_rank. Returns the filled output "
-           "list; other ranks return the unmodified placeholder.")
+           "Gather per-rank tensors onto dst_rank.  The `output` list is "
+           "mutated in place on dst_rank (other ranks leave it unchanged). "
+           "Returns None — matches torch.distributed.gather semantics.")
         .def("scatter", &tenzor::distributed::ProcessGroup::scatter,
             "Scatter per-rank tensors from a source rank to each rank",
             py::arg("tensors"), py::arg("output"), py::arg("src_rank"))
