@@ -8,6 +8,7 @@
 #include "../../include/tenzor/ops/creation.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
+#include "../../include/tenzor/utils/log.hpp"
 #include <chrono>
 #include <unordered_set>
 #include <unordered_map>
@@ -174,9 +175,10 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
         auto verify_outputs = forward_fn_(verify_inputs);
 
         if (verify_outputs.size() != outputs.size()) {
-            fprintf(stderr, "[WARNING] Checkpoint: non-deterministic function detected "
-                    "(different output count: %zu vs %zu)\n",
-                    outputs.size(), verify_outputs.size());
+            // Audit I.4: unified logger so TENZOR_LOG_LEVEL filter applies.
+            TENZOR_LOG_WARN("Checkpoint: non-deterministic function detected "
+                            "(different output count: {} vs {})",
+                            outputs.size(), verify_outputs.size());
         } else {
             for (size_t i = 0; i < outputs.size(); ++i) {
                 auto diff = tenzor::abs(outputs[i].tensor().to(DType::Float64) -
@@ -184,9 +186,10 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
                 auto max_diff_t = tenzor::max(diff);
                 double max_diff = *static_cast<const double*>(max_diff_t.data_ptr());
                 if (max_diff > 1e-6) {
-                    fprintf(stderr, "[WARNING] Checkpoint: non-deterministic function detected "
-                            "(output %zu max diff: %g). Gradients may be incorrect.\n",
-                            i, max_diff);
+                    // Audit I.4: unified logger.
+                    TENZOR_LOG_WARN("Checkpoint: non-deterministic function detected "
+                                    "(output {} max diff: {}). Gradients may be incorrect.",
+                                    i, max_diff);
                 }
             }
         }
