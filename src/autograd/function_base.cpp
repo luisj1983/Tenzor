@@ -14,6 +14,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/log.hpp"
 #include "tenzor/utils/safe_math.hpp"
 #include <cmath>
 #include <iostream>
@@ -321,12 +322,15 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 "to fall through with disconnected gradient graph.");
         case HigherOrderGradMode::Warn: {
             auto count = g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed) + 1;
-            std::cerr << "[tenzor::autograd] Warning: '" << op_name
-                      << "' does not support higher-order gradients"
-                      << (is_higher_order_stub() ? " (passthrough stub)" : "")
-                      << ". The gradient graph is disconnected at this operation"
-                      << " — second-order derivatives through it will be zero."
-                      << " (disconnection #" << count << ")\n";
+            // Audit I.4: unified logger so TENZOR_LOG_LEVEL can silence
+            // these warnings in production.
+            TENZOR_LOG_WARN("[tenzor::autograd] '{}' does not support higher-order "
+                            "gradients{}. The gradient graph is disconnected at "
+                            "this operation — second-order derivatives through "
+                            "it will be zero. (disconnection #{})",
+                            op_name,
+                            is_higher_order_stub() ? " (passthrough stub)" : "",
+                            count);
             break;
         }
         }

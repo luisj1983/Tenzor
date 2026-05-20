@@ -1,6 +1,7 @@
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/autograd/anomaly_mode.hpp"
 #include "tenzor/autograd/profiler.hpp"
+#include "tenzor/utils/log.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -341,10 +342,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 "Use set_higher_order_grad_mode(Warn) to allow this.");
                         }
                         detail::increment_higher_order_disconnection_count();
-                        std::cerr << "[tenzor::autograd] Warning: '" << function->name()
-                                  << "' is a higher-order stub — second derivatives "
-                                  << "through it will be zero. (disconnection #"
-                                  << higher_order_disconnection_count() << ")\n";
+                        // Audit I.4: unified logger so TENZOR_LOG_LEVEL filter applies.
+                        TENZOR_LOG_WARN("[tenzor::autograd] '{}' is a higher-order stub — "
+                                        "second derivatives through it will be zero. "
+                                        "(disconnection #{})",
+                                        function->name(),
+                                        higher_order_disconnection_count());
                     }
 
                     // Extract raw tensors for the standard accumulation path (unchanged),
@@ -390,12 +393,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     }
                 }
                 if (skipped_requiring_grad > 0) {
-                    std::cerr << "[tenzor::autograd] Warning: backward function '"
-                              << function->name()
-                              << "' returned " << input_grads.size()
-                              << " gradients but has " << input_vars.size()
-                              << " inputs (" << skipped_requiring_grad
-                              << " skipped inputs require grad)" << std::endl;
+                    // Audit I.4: unified logger.
+                    TENZOR_LOG_WARN("[tenzor::autograd] backward function '{}' returned "
+                                    "{} gradients but has {} inputs ({} skipped inputs "
+                                    "require grad)",
+                                    function->name(),
+                                    input_grads.size(),
+                                    input_vars.size(),
+                                    skipped_requiring_grad);
                 }
             }
 
