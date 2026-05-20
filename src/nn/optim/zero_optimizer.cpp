@@ -8,6 +8,7 @@
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/serialize.hpp"
+#include "tenzor/utils/log.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -3399,8 +3400,10 @@ auto ZeROStage3Optimizer::free_gathered_parameter(Tensor* param) -> void {
             state.local_partition = offload_engine_->offload_to_cpu(state.local_partition);
             state.partition_on_cpu = true;
         } catch (const std::exception& e) {
-            std::cerr << "ZeROStage3Optimizer: partition CPU offload failed: "
-                      << e.what() << " -- continuing with GPU-resident partition\n";
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("ZeROStage3Optimizer: partition CPU offload failed: "
+                            "{} -- continuing with GPU-resident partition",
+                            e.what());
         }
     }
 }
@@ -3439,7 +3442,8 @@ auto ZeROStage3Optimizer::gather_for_recompute() -> void {
             *p = state.full_param;
             recompute_gathered_.push_back(p);
         } catch (const std::exception& e) {
-            std::cerr << "ZeROStage3Optimizer::gather_for_recompute: " << e.what() << "\n";
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("ZeROStage3Optimizer::gather_for_recompute: {}", e.what());
         }
     }
 }
@@ -3935,8 +3939,9 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
             state.local_partition = offload_engine_->load_to_gpu(state.local_partition, target);
             state.partition_on_cpu = false;
         } catch (const std::exception& e) {
-            std::cerr << "ZeROStage3Optimizer: partition CPU->GPU reload failed: "
-                      << e.what() << "\n";
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("ZeROStage3Optimizer: partition CPU->GPU reload failed: {}",
+                            e.what());
         }
     }
 
