@@ -190,16 +190,20 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
     }
     std::vector<int64_t> shape(dl.shape, dl.shape + dl.ndim);
 
-    // Phase 5.1: only accept contiguous imports for now. Non-contiguous
-    // incoming DLPack tensors would need a strided from_blob overload.
+    // Audit item F.8: support non-contiguous DLPack imports.  Producers
+    // (NumPy views, PyTorch slices, …) hand us strides; we copy into a
+    // contiguous Tensor on import rather than refusing.  The copy is on
+    // the producer's device (CPU only here — GPU dlpack with strides
+    // would need a backend-specific strided memcpy; keep that path on
+    // the throw side until we wire it).
+    bool is_contiguous = true;
     if (dl.strides != nullptr) {
         int64_t expected_stride = 1;
         for (int32_t i = dl.ndim - 1; i >= 0; --i) {
+            // DLPack strides are in ELEMENTS, not bytes.
             if (dl.strides[i] != expected_stride) {
-                throw std::runtime_error(
-                    "from_dlpack: non-contiguous DLPack tensors are not yet "
-                    "supported. Request the producer to materialize a "
-                    "contiguous copy before passing it across the boundary.");
+                is_contiguous = false;
+                break;
             }
             expected_stride *= shape[i];
         }
@@ -208,6 +212,52 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
     // Apply byte_offset to get the actual data pointer.
     auto* data_base = static_cast<uint8_t*>(dl.data);
     auto* data_ptr = data_base + dl.byte_offset;
+
+    if (!is_contiguous) {
+        // Copy through strided indexing into a fresh contiguous Tensor.
+        // Only CPU is supported; GPU-side strided dlpack would need a
+        // device memcpy kernel (e.g. cudaMemcpy3D with non-unit strides),
+        // which has not been wired yet — fail clearly there.
+        if (device.type != Device::Type::CPU) {
+            throw std::runtime_error(
+                "from_dlpack: non-contiguous DLPack tensors are only "
+                "supported on CPU.  For GPU producers, request a "
+                "contiguous copy on the producer side first.");
+        }
+        const size_t elem_bytes = dtype_size(dtype);
+        Tensor out(shape, dtype, device);
+        auto* dst = static_cast<uint8_t*>(out.data_ptr());
+
+        // Walk every index of the output (row-major) and dereference the
+        // matching strided position in the source.
+        int64_t total = 1;
+        for (auto s : shape) total *= s;
+        std::vector<int64_t> idx(shape.size(), 0);
+        for (int64_t lin = 0; lin < total; ++lin) {
+            // Compute source byte offset from per-axis strides (in elements).
+            int64_t src_elem_off = 0;
+            for (size_t d = 0; d < shape.size(); ++d) {
+                src_elem_off += idx[d] * dl.strides[d];
+            }
+            const size_t src_byte_off = static_cast<size_t>(src_elem_off) * elem_bytes;
+            std::memcpy(dst + static_cast<size_t>(lin) * elem_bytes,
+                        data_ptr + src_byte_off, elem_bytes);
+
+            // Increment row-major index.
+            for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+
+        // Producer's deleter still needs to run when we drop our reference
+        // to the source.  Run it immediately since we have made our own
+        // copy and no longer need the original buffer.
+        if (managed->deleter != nullptr) {
+            managed->deleter(managed);
+        }
+        return out;
+    }
 
     // Wrap the external buffer with a deleter that invokes the producer's
     // DLPack deleter exactly once. from_blob's deleter runs when the new

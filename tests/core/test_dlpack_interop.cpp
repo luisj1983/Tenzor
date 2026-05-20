@@ -128,30 +128,53 @@ TEST_F(DLPackInteropTest, ExternalProducerDeleterRunsOnce) {
 }
 
 // ---------------------------------------------------------------------------
-// Non-contiguous imports currently throw. This is a documented limitation;
-// the test pins the behavior so we notice if it changes.
+// Audit item F.8 — non-contiguous DLPack imports are now supported on CPU by
+// copying through strided indexing into a fresh contiguous Tensor.  This
+// replaces the previous "throw" pin.
 // ---------------------------------------------------------------------------
 
-TEST_F(DLPackInteropTest, NonContiguousImportThrows) {
+TEST_F(DLPackInteropTest, NonContiguousImportCopiesIntoContiguous) {
+    // Build a 2x3 transposed view: original shape (3, 2) in memory, but
+    // we present it as (2, 3) with column-major strides — non-contig.
     static int64_t shape[] = {2, 3};
-    static int64_t bad_strides[] = {1, 2}; // Intentionally wrong (not C-contig)
-    static float buffer[6] = {};
+    static int64_t col_major_strides[] = {1, 2};  // stride along dim 0 = 1 elt; dim 1 = 2 elts
+    static float buffer[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 
+    // For shape (2, 3) and strides (1, 2):
+    //   (0, 0) -> idx 0  = 1
+    //   (0, 1) -> idx 2  = 3
+    //   (0, 2) -> idx 4  = 5
+    //   (1, 0) -> idx 1  = 2
+    //   (1, 1) -> idx 3  = 4
+    //   (1, 2) -> idx 5  = 6
+    // So the materialised contiguous output should be {1, 3, 5, 2, 4, 6}.
+    const float expected[6] = {1.0f, 3.0f, 5.0f, 2.0f, 4.0f, 6.0f};
+
+    std::atomic<int> deleter_calls{0};
     auto* managed = new DLManagedTensor{};
     managed->dl_tensor.data = buffer;
     managed->dl_tensor.device = DLDevice{kDLCPU, 0};
     managed->dl_tensor.ndim = 2;
     managed->dl_tensor.dtype = DLDataType{kDLFloat, 32, 1};
     managed->dl_tensor.shape = shape;
-    managed->dl_tensor.strides = bad_strides;
+    managed->dl_tensor.strides = col_major_strides;
     managed->dl_tensor.byte_offset = 0;
-    managed->manager_ctx = nullptr;
-    managed->deleter = [](DLManagedTensor* self) { delete self; };
+    managed->manager_ctx = &deleter_calls;
+    managed->deleter = [](DLManagedTensor* self) {
+        auto* counter = static_cast<std::atomic<int>*>(self->manager_ctx);
+        if (counter) counter->fetch_add(1);
+        delete self;
+    };
 
-    EXPECT_THROW(from_dlpack(managed), std::runtime_error);
-
-    // Ownership was NOT transferred on failure; caller must free.
-    managed->deleter(managed);
+    Tensor t = from_dlpack(managed);
+    EXPECT_TRUE(t.is_contiguous()) << "import must materialise a contiguous tensor";
+    ASSERT_EQ(t.numel(), 6);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_FLOAT_EQ(t.data<float>()[i], expected[i]) << "i=" << i;
+    }
+    // Producer's deleter must have run exactly once (we made our own copy).
+    EXPECT_EQ(deleter_calls.load(), 1)
+        << "producer's deleter must run once when from_dlpack copied the data";
 }
 
 // ---------------------------------------------------------------------------
