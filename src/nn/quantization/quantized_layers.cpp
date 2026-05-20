@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/quantization/quantized_layers.hpp"
+#include "tenzor/nn/quantization/fake_quantize.hpp"  // QAT STE path (B.1)
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
@@ -686,11 +687,43 @@ QuantStub::QuantStub(QuantizationParams qparams)
     : qparams_(std::move(qparams)) {}
 
 auto QuantStub::forward_impl(const Variable& input) -> Variable {
-    // Quantize input tensor and immediately dequantize for Variable compatibility
-    // This maintains the computational graph while simulating quantization
-    auto q_tensor = forward_to_quantized(input.tensor());
-    Tensor dequantized = q_tensor.dequantize();
-    return Variable(dequantized, input.requires_grad());
+    // Audit item B.1: previously did quantize→dequantize on raw tensors
+    // and wrapped the result in `Variable(out, input.requires_grad())`,
+    // claiming gradient flow that the raw-tensor round-trip cannot
+    // deliver.  When the user does require_grad=true (QAT), route
+    // through fake_quantize_with_grad which has a real STE backward.
+    // When require_grad=false (PTQ inference path), do the cheap
+    // quantize→dequantize directly.
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto q_tensor = forward_to_quantized(input.tensor());
+        Tensor dequantized = q_tensor.dequantize();
+        return Variable(dequantized, /*requires_grad=*/false);
+    }
+
+    // QAT path: STE through the quantization boundary.
+    // Extract scalar scale / zero_point from per-tensor params; reject
+    // per-channel here (QuantStub is per-tensor by definition).
+    if (qparams_.axis >= 0 && qparams_.scale.numel() > 1) {
+        throw std::runtime_error(
+            "QuantStub: QAT (requires_grad=true) is only supported for "
+            "per-tensor quantization; per-channel scale was supplied. "
+            "Use FakeQuantize directly for per-channel QAT.");
+    }
+    const float scale = qparams_.scale.numel() > 0
+        ? qparams_.scale.data<float>()[0]
+        : 1.0f;
+    const float zero_point = qparams_.zero_point.numel() > 0
+        ? static_cast<float>(qparams_.zero_point.data<int64_t>()[0])
+        : 0.0f;
+    float qmin = -128.0f, qmax = 127.0f;
+    switch (qparams_.dtype) {
+        case QuantDType::INT8:   qmin = -128.0f; qmax = 127.0f;  break;
+        case QuantDType::UINT8:  qmin =    0.0f; qmax = 255.0f;  break;
+        case QuantDType::INT4:   qmin =   -8.0f; qmax =   7.0f;  break;
+        case QuantDType::UINT4:  qmin =    0.0f; qmax =  15.0f;  break;
+    }
+    return ::tenzor::nn::quantization::fake_quantize_with_grad(
+        input, scale, zero_point, qmin, qmax);
 }
 
 auto QuantStub::forward_to_quantized(const Tensor& input) -> QuantizedTensor {
