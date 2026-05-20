@@ -51,15 +51,8 @@ auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,
 
 }  // namespace tenzor::jit::mlir_jit::customcalls
 
-namespace tenzor::jit::mlir_jit::placeholder_messages {
-
-/// Each function returns the human-readable error message that would be
-/// emitted by the corresponding IREE-side stub callback while the
-/// iree/runtime/api.h headers remain incomplete in the distribution. The
-/// dispatcher logic itself (above, in `customcalls`) is wired up by Group D.
-auto flash_attention() -> const char*;
-auto gqa() -> const char*;
-auto rope_apply() -> const char*;
-auto rms_norm() -> const char*;
-
-}  // namespace tenzor::jit::mlir_jit::placeholder_messages
+// Audit item I.6: tenzor::jit::mlir_jit::placeholder_messages namespace
+// removed.  These message helpers were kept "for ABI compatibility with
+// the smoke test" after Path A's in-process plugin replaced them as the
+// active failure-mode source.  Both the test and the implementation are
+// gone now.

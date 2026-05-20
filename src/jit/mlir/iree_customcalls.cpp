@@ -617,22 +617,7 @@ auto create_tenzor_plugin_module(iree_vm_instance_t* instance,
         &interface, &plugin::kDescriptor, instance, allocator, out_module);
 }
 
-namespace placeholder_messages {
-// Kept for ABI compatibility with the smoke test (which now exercises the
-// real plugin path); these messages are no longer the active failure mode
-// because the in-process invoker resolves the calls.
-auto flash_attention() -> const char* {
-    return "tenzor_plugin.flash_attention resolved via in-process VM module";
-}
-auto gqa() -> const char* {
-    return "tenzor_plugin.gqa resolved via in-process VM module";
-}
-auto rope_apply() -> const char* {
-    return "tenzor_plugin.rope_apply resolved via in-process VM module";
-}
-auto rms_norm() -> const char* {
-    return "tenzor_plugin.rms_norm resolved via in-process VM module";
-}
-}  // namespace placeholder_messages
+// Audit item I.6: placeholder_messages namespace deleted along with the
+// smoke test that exercised it.
 
 }  // namespace tenzor::jit::mlir_jit

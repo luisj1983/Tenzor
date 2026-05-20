@@ -66,22 +66,7 @@ TEST(IreeCustomCallSmoke, FlashAttention_RejectedWithoutResolver) {
     fs::remove_all(tmp);
 }
 
-TEST(IreeCustomCallSmoke, PlaceholderMessages_AllPresent) {
-    using namespace ::tenzor::jit::mlir_jit::placeholder_messages;
-    const std::string fa = flash_attention();
-    const std::string gqa_msg = gqa();
-    const std::string rope = rope_apply();
-    const std::string rms = rms_norm();
-
-    // After Path A's in-process plugin lit up, each message reports the
-    // plugin module that now satisfies these calls.
-    EXPECT_NE(fa.find("tenzor_plugin"), std::string::npos);
-    EXPECT_NE(gqa_msg.find("tenzor_plugin"), std::string::npos);
-    EXPECT_NE(rope.find("tenzor_plugin"), std::string::npos);
-    EXPECT_NE(rms.find("tenzor_plugin"), std::string::npos);
-
-    EXPECT_NE(fa.find("flash_attention"), std::string::npos);
-    EXPECT_NE(gqa_msg.find("gqa"), std::string::npos);
-    EXPECT_NE(rope.find("rope_apply"), std::string::npos);
-    EXPECT_NE(rms.find("rms_norm"), std::string::npos);
-}
+// Audit item I.6: removed the PlaceholderMessages_AllPresent test along
+// with the tenzor::jit::mlir_jit::placeholder_messages namespace it
+// exercised — Path A's in-process plugin now resolves these calls, so
+// the placeholder error messages are dead code.  See iree_customcalls.hpp.
