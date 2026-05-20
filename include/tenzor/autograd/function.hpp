@@ -2822,7 +2822,16 @@ public:
           stride_(std::move(stride)), storage_offset_(storage_offset) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: AsStrided is a linear strided gather; its backward is
+    // a linear scatter-add. The higher-order backward of that scatter
+    // is the same strided gather applied to the second-order grad,
+    // which is exactly what `tenzor::as_strided` (Variable overload)
+    // does — and that overload installs its own grad_fn so further
+    // differentiation keeps composing. No structural-zero stub.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "AsStridedBackward"; }
 private:
     std::vector<int64_t> input_shape_;

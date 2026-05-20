@@ -1475,6 +1475,24 @@ auto AsStridedBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     return {reshape(result, input_shape_)};
 }
 
+// Audit B.3 closed-form higher-order: AsStrided is a linear gather
+// (strided view) with constant Jacobian, so its backward is a linear
+// scatter-add (above). The backward of *that* is the linear gather
+// itself: pulling the second-order grad (a tensor of input_shape_)
+// through the same stride/size/offset pattern recovers the second-
+// order grad as it would be seen at the AsStrided output. Calling
+// `as_strided` on the Variable preserves the differentiation graph
+// (the as_strided wrapper installs its own grad_fn so a third-order
+// backward, if requested, would scatter-add right back through this
+// same backward()).
+auto AsStridedBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    return {::tenzor::as_strided(grad_outputs[0],
+                                  std::span<const int64_t>(size_),
+                                  std::span<const int64_t>(stride_),
+                                  storage_offset_)};
+}
+
 // ============================================================================
 // Phase 12 (audit-2026-05-03) — Bessel J0/J1/Y0/Y1 and Zeta autograd.
 // ============================================================================
