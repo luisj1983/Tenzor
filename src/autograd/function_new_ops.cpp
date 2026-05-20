@@ -1700,4 +1700,27 @@ auto SearchSortedBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std
         "if you need a differentiable approximation.");
 }
 
+auto MultinomialSampleBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("MultinomialSampleBackward::forward should not be called directly");
+}
+auto MultinomialSampleBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "multinomial sampling: sampled indices are integer draws and are not "
+        "differentiable in the probability tensor (the gradient is the "
+        "delta-of-Diracs distribution). Use the Gumbel-softmax relaxation "
+        "(tenzor.nn.functional.gumbel_softmax) or a straight-through "
+        "estimator if you need gradients through the categorical sample.");
+}
+
+auto BernoulliSampleBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BernoulliSampleBackward::forward should not be called directly");
+}
+auto BernoulliSampleBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bernoulli sampling: drawn {0, 1} value is non-differentiable in the "
+        "probability tensor (the output doesn't change continuously with "
+        "`probs`). Use a relaxed Bernoulli (Concrete / Gumbel-sigmoid) or "
+        "a straight-through estimator for differentiable variants.");
+}
+
 } // namespace tenzor

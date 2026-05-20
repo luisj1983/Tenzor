@@ -2994,4 +2994,30 @@ public:
     auto name() const -> std::string override { return "SearchSortedBackward"; }
 };
 
+/**
+ * @brief Multinomial (weighted-index) sampling. Returns int64 indices
+ *        whose gradient w.r.t. probs is the delta-of-Diracs distribution —
+ *        intrinsically non-differentiable.  Use Gumbel-softmax or a
+ *        straight-through estimator for differentiable approximations.
+ */
+class MultinomialSampleBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MultinomialSampleBackward"; }
+};
+
+/**
+ * @brief Bernoulli sampling. Returns {0, 1} draws whose Jacobian w.r.t.
+ *        the input probability is undefined (the output value doesn't
+ *        change continuously with `probs`).  Use STE or a relaxed
+ *        Bernoulli (Concrete distribution) for differentiable variants.
+ */
+class BernoulliSampleBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BernoulliSampleBackward"; }
+};
+
 } // namespace tenzor

@@ -97,6 +97,50 @@ TEST_F(NonDifferentiableOpsTest, ForwardThrowsClearly) {
     EXPECT_THROW({
         (void) s.forward({});
     }, std::runtime_error);
+
+    MultinomialSampleBackward m;
+    EXPECT_THROW({
+        (void) m.forward({});
+    }, std::runtime_error);
+
+    BernoulliSampleBackward bern;
+    EXPECT_THROW({
+        (void) bern.forward({});
+    }, std::runtime_error);
+}
+
+TEST_F(NonDifferentiableOpsTest, MultinomialSampleBackwardThrowsTypedException) {
+    MultinomialSampleBackward fn;
+    std::vector<Tensor> dummy_grads;
+    dummy_grads.emplace_back(std::vector<int64_t>{1},
+                              DType::Float32, Device::cpu());
+    try {
+        (void) fn.backward(std::move(dummy_grads));
+        FAIL() << "expected NonDifferentiable, got no exception";
+    } catch (const NonDifferentiable& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("multinomial"), std::string::npos)
+            << "actual: " << msg;
+        EXPECT_NE(msg.find("Gumbel-softmax"), std::string::npos)
+            << "actual: " << msg;
+    }
+}
+
+TEST_F(NonDifferentiableOpsTest, BernoulliSampleBackwardThrowsTypedException) {
+    BernoulliSampleBackward fn;
+    std::vector<Tensor> dummy_grads;
+    dummy_grads.emplace_back(std::vector<int64_t>{1},
+                              DType::Float32, Device::cpu());
+    try {
+        (void) fn.backward(std::move(dummy_grads));
+        FAIL() << "expected NonDifferentiable, got no exception";
+    } catch (const NonDifferentiable& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("bernoulli"), std::string::npos)
+            << "actual: " << msg;
+        EXPECT_NE(msg.find("Concrete"), std::string::npos)
+            << "actual: " << msg;
+    }
 }
 
 }  // namespace
