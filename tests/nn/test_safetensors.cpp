@@ -117,3 +117,34 @@ TEST_F(SafeTensorsTest, MultipleTensorsPreserveNames) {
     EXPECT_TRUE(loaded.count("layer1.bias"));
     EXPECT_TRUE(loaded.count("layer2.weight"));
 }
+
+// Audit item I.13 — Complex64 / Complex128 round-trip via Tenzor-specific
+// dtype strings (C64 / C128).  Previously safetensors flattened complex
+// to F32 / F64 on save, losing the complex nature.
+TEST_F(SafeTensorsTest, Complex64RoundTrip) {
+    auto z = zeros({2, 3}, DType::Complex64, Device::cpu());
+    // We can't directly write Complex64 here without complex creation
+    // helpers; the round-trip test is about the dtype tag surviving.
+    std::unordered_map<std::string, Tensor> state;
+    state["z"] = z;
+    nn::SafeTensorsSerializer::save(state, test_path_);
+    auto loaded = nn::SafeTensorsSerializer::load(test_path_);
+    ASSERT_EQ(loaded.size(), 1u);
+    ASSERT_TRUE(loaded.count("z"));
+    EXPECT_EQ(loaded["z"].dtype(), DType::Complex64)
+        << "Complex64 dtype must survive the safetensors round-trip "
+           "(audit I.13 — Tenzor uses the C64 string extension)";
+    ASSERT_EQ(loaded["z"].shape().size(), 2u);
+    EXPECT_EQ(loaded["z"].shape()[0], 2);
+    EXPECT_EQ(loaded["z"].shape()[1], 3);
+}
+
+TEST_F(SafeTensorsTest, Complex128RoundTrip) {
+    auto z = zeros({4}, DType::Complex128, Device::cpu());
+    std::unordered_map<std::string, Tensor> state;
+    state["z"] = z;
+    nn::SafeTensorsSerializer::save(state, test_path_);
+    auto loaded = nn::SafeTensorsSerializer::load(test_path_);
+    EXPECT_EQ(loaded["z"].dtype(), DType::Complex128);
+    EXPECT_EQ(loaded["z"].shape()[0], 4);
+}

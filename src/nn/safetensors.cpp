@@ -19,6 +19,12 @@ namespace tenzor::nn {
 // ============================================================================
 
 auto SafeTensorsSerializer::dtype_to_st_string(DType dtype) -> std::string {
+    // Tenzor-specific extensions on top of the upstream SafeTensors dtype
+    // strings: "C64" / "C128" for complex (audit item I.13), and the
+    // already-vendored "F8_E4M3" / "F8_E5M2" for FP8.  Quantized types
+    // (QInt8 / QUInt8 / QInt4x2) round-trip as their raw storage dtype;
+    // the scale / zero_point need to ride alongside in metadata for full
+    // round-trip — see the Q* handling below.
     switch (dtype) {
         case DType::Float32:    return "F32";
         case DType::Float64:    return "F64";
@@ -33,13 +39,13 @@ auto SafeTensorsSerializer::dtype_to_st_string(DType dtype) -> std::string {
         case DType::UInt32:     return "U32";
         case DType::UInt64:     return "U64";
         case DType::Bool:       return "BOOL";
-        case DType::Complex64:  return "F32";  // Not standard in SafeTensors
-        case DType::Complex128: return "F64";  // Not standard in SafeTensors
+        case DType::Complex64:  return "C64";   // Tenzor extension
+        case DType::Complex128: return "C128";  // Tenzor extension
         case DType::FP8_E4M3:   return "F8_E4M3";
         case DType::FP8_E5M2:   return "F8_E5M2";
-        case DType::QInt8:      return "I8";   // Stored as raw int8
-        case DType::QUInt8:     return "U8";   // Stored as raw uint8
-        case DType::QInt4x2:    return "I8";   // Packed, stored as bytes
+        case DType::QInt8:      return "QI8";   // Tenzor extension (raw int8 + qparams)
+        case DType::QUInt8:     return "QU8";   // Tenzor extension
+        case DType::QInt4x2:    return "QI4X2"; // Tenzor extension (4-bit packed)
     }
     return "F32";
 }
@@ -60,6 +66,13 @@ auto SafeTensorsSerializer::st_string_to_dtype(const std::string& s) -> DType {
     if (s == "BOOL")     return DType::Bool;
     if (s == "F8_E4M3")  return DType::FP8_E4M3;
     if (s == "F8_E5M2")  return DType::FP8_E5M2;
+    // Audit item I.13 — Tenzor-specific dtype extensions.  Non-Tenzor
+    // readers may not recognise these; that is the documented contract.
+    if (s == "C64")      return DType::Complex64;
+    if (s == "C128")     return DType::Complex128;
+    if (s == "QI8")      return DType::QInt8;
+    if (s == "QU8")      return DType::QUInt8;
+    if (s == "QI4X2")    return DType::QInt4x2;
     throw std::runtime_error("SafeTensors: unknown dtype string '" + s + "'");
 }
 
