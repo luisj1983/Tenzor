@@ -77,7 +77,17 @@ inline void onednn_sgemm_nt(
     const float* B, int64_t ldb,
     float beta, float* C, int64_t ldc
 ) {
-    (void)alpha; (void)beta;
+    // Audit item C.2: honour alpha and beta via oneDNN post-ops rather
+    // than silently ignoring them.  Equivalent to BLAS sgemm:
+    //   C = alpha * (A @ B^T) + beta * C
+    // - alpha: eltwise_linear post-op with (alpha, 0)
+    // - beta : sum post-op with scale=beta (reads the current C value
+    //          before the write).
+    // The order matters: append the sum first so beta*C is added BEFORE
+    // alpha is applied; then eltwise_linear scales the combined result.
+    // We instead append eltwise_linear FIRST (scales matmul output) and
+    // sum AFTER with scale=beta (adds beta*C to the scaled product).
+    // That yields  C = alpha * (A @ B^T) + beta * C  — the BLAS contract.
     auto& engine = tenzor::cpu::get_onednn_engine();
     auto& stream = tenzor::cpu::get_onednn_stream();
 
@@ -93,7 +103,24 @@ inline void onednn_sgemm_nt(
         dnnl::memory::desc c_md(c_dims, dnnl::memory::data_type::f32,
                                 dnnl::memory::dims{ldc, 1});
 
-        auto matmul_pd = dnnl::matmul::primitive_desc(engine, a_md, bt_md, c_md);
+        dnnl::primitive_attr attr;
+        const bool need_alpha = (alpha != 1.0f);
+        const bool need_beta  = (beta  != 0.0f);
+        if (need_alpha || need_beta) {
+            dnnl::post_ops po;
+            if (need_alpha) {
+                // eltwise_linear(alpha, 0) ⇒ y = alpha * x
+                po.append_eltwise(dnnl::algorithm::eltwise_linear,
+                                  /*alpha=*/alpha, /*beta=*/0.0f);
+            }
+            if (need_beta) {
+                // sum(scale=beta) ⇒ y += beta * existing(C)
+                po.append_sum(beta);
+            }
+            attr.set_post_ops(po);
+        }
+        auto matmul_pd = dnnl::matmul::primitive_desc(
+            engine, a_md, bt_md, c_md, attr);
         auto matmul_prim = dnnl::matmul(matmul_pd);
 
         auto a_mem = dnnl::memory(a_md, engine, const_cast<float*>(A));
@@ -116,13 +143,15 @@ inline void onednn_sgemm_nt(
                 e.what());
         }
         TENZOR_LOG_WARN("[LSTM] oneDNN matmul failed ({}); using scalar fallback", e.what());
+        // Scalar fallback honours alpha and beta (audit item C.2).
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 float sum = 0.0f;
                 for (int64_t k = 0; k < K; ++k) {
                     sum += A[i * lda + k] * B[j * ldb + k];
                 }
-                C[i * ldc + j] = sum;
+                const float prev = (beta != 0.0f) ? C[i * ldc + j] : 0.0f;
+                C[i * ldc + j] = alpha * sum + beta * prev;
             }
         }
     }
