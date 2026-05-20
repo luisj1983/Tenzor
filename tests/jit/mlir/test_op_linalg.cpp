@@ -101,3 +101,58 @@ TEST(OpLinalg, LinearWithBias) {
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "linear diff=" << diff;
 }
+
+// ---------------------------------------------------------------------------
+// Audit item A.8 — unequal-rank MatMul must broadcast the smaller operand.
+//
+// PyTorch / NumPy MatMul semantics: with lhs of rank R and rhs of rank 2,
+// the lhs's leading R-2 dims are batch dims; rhs is broadcast across them.
+// Previously the MLIR lowering set empty batch lists when ranks differed,
+// producing a stablehlo.dot_general with wrong batch semantics.
+// ---------------------------------------------------------------------------
+TEST(OpLinalg, MatMulUnequalRankBatchLhs) {
+    ensure_core_init();
+    auto W = ::tenzor::randn({8, 6}, ::tenzor::DType::Float32);
+    ::tenzor::Variable wv(W, false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
+
+    auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        // lhs: (B=2, M=4, K=8), rhs: (K=8, N=6) ⇒ out (B=2, M=4, N=6)
+        return ::tenzor::matmul(x, wv);
+    };
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    auto raw = ::tenzor::randn({2, 4, 8}, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(raw, false);
+    auto eager  = fn(x);
+    auto jitted = compiled(x);
+    auto diff = ::tenzor::max(::tenzor::abs(
+        eager.tensor() - jitted.tensor())).template item<float>();
+    EXPECT_LT(diff, 1e-3F) << "matmul rank-3 lhs @ rank-2 rhs diff=" << diff;
+}
+
+TEST(OpLinalg, MatMulUnequalRankBatchRhs) {
+    ensure_core_init();
+    // lhs of rank 2, rhs of rank 3 ⇒ rhs is broadcast over the batch dim
+    // of the OUTPUT (PyTorch matmul: result shape is (B, M, N)).
+    auto W = ::tenzor::randn({3, 8, 6}, ::tenzor::DType::Float32);
+    ::tenzor::Variable wv(W, false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
+
+    auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::matmul(x, wv);
+    };
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(raw, false);
+    auto eager  = fn(x);
+    auto jitted = compiled(x);
+    auto diff = ::tenzor::max(::tenzor::abs(
+        eager.tensor() - jitted.tensor())).template item<float>();
+    EXPECT_LT(diff, 1e-3F) << "matmul rank-2 lhs @ rank-3 rhs diff=" << diff;
+}

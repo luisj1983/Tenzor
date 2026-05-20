@@ -935,25 +935,73 @@ auto handle_matmul(LoweringContext& ctx,
             "GraphToMLIR: MatMul requires rank ≥ 2 on both sides");
     }
 
-    // Batch dims: matched leading dims on both sides. When one side has
-    // fewer batch dims, we'd need to broadcast — defer that to higher
-    // ranks for now and require both ranks equal.
-    std::vector<int64_t> lhs_batch, rhs_batch;
-    if (lr == rr) {
-        for (int64_t i = 0; i < lr - 2; ++i) {
-            lhs_batch.push_back(i);
-            rhs_batch.push_back(i);
+    // Batch dims: matched leading dims on both sides.  When the ranks
+    // differ we right-align matmul (PyTorch / numpy semantics): the
+    // smaller-rank operand is treated as having implicit leading 1s and
+    // broadcast across the larger operand's batch dims (audit item A.8).
+    //
+    // Build the canonical batch shape from whichever operand has more
+    // batch dims, then broadcast the other operand up to that rank.  Both
+    // sides then share the same batch-dim list passed to dot_general.
+    const int64_t max_rank = std::max(lr, rr);
+    const int64_t batch_rank = max_rank - 2;
+
+    // Canonical batch shape: take the corresponding dim from whichever
+    // operand has a non-1 size; mismatches throw (caller should have
+    // broadcast-aligned the graph already).
+    std::vector<int64_t> batch_shape(batch_rank, 1);
+    auto resolve = [&](const std::vector<int64_t>& shape, int64_t r) {
+        const int64_t shape_batch = r - 2;
+        for (int64_t i = 0; i < shape_batch; ++i) {
+            const int64_t out_idx = batch_rank - shape_batch + i;
+            const int64_t s = shape[i];
+            if (batch_shape[out_idx] == 1) {
+                batch_shape[out_idx] = s;
+            } else if (s != 1 && s != batch_shape[out_idx]) {
+                throw std::runtime_error(
+                    "GraphToMLIR: MatMul batch shapes not broadcast-"
+                    "compatible at dim " + std::to_string(i));
+            }
         }
+    };
+    resolve(lhs_shape, lr);
+    resolve(rhs_shape, rr);
+
+    // Build target shapes for each side: (batch_shape..., M, K) for lhs,
+    // (batch_shape..., K, N) for rhs.
+    std::vector<int64_t> lhs_target = batch_shape;
+    lhs_target.push_back(lhs_shape[lr - 2]);  // M
+    lhs_target.push_back(lhs_shape[lr - 1]);  // K
+    std::vector<int64_t> rhs_target = batch_shape;
+    rhs_target.push_back(rhs_shape[rr - 2]);  // K
+    rhs_target.push_back(rhs_shape[rr - 1]);  // N
+
+    // Broadcast the operands up to the canonical rank.  maybe_broadcast
+    // is a no-op when shapes already match.
+    const std::string lhs_name = maybe_broadcast(
+        body, ctx, ctx.name_for(lhs->id()),
+        std::vector<int64_t>(lhs_shape.begin(), lhs_shape.end()),
+        lhs_target, lhs->dtype());
+    const std::string rhs_name = maybe_broadcast(
+        body, ctx, ctx.name_for(rhs->id()),
+        std::vector<int64_t>(rhs_shape.begin(), rhs_shape.end()),
+        rhs_target, rhs->dtype());
+
+    std::vector<int64_t> lhs_batch, rhs_batch;
+    for (int64_t i = 0; i < batch_rank; ++i) {
+        lhs_batch.push_back(i);
+        rhs_batch.push_back(i);
     }
-    std::vector<int64_t> lhs_contracting = {lr - 1};
-    std::vector<int64_t> rhs_contracting = {rr - 2};
+    std::vector<int64_t> lhs_contracting = {batch_rank + 1};   // K dim of lhs
+    std::vector<int64_t> rhs_contracting = {batch_rank};       // K dim of rhs
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
-    emit_stablehlo_dot_general(body, out_name, ctx.name_for(lhs->id()),
-                               ctx.name_for(rhs->id()), lhs_batch, rhs_batch,
-                               lhs_contracting, rhs_contracting, lhs_shape,
-                               rhs_shape, out->shape(), out->dtype());
+    emit_stablehlo_dot_general(body, out_name, lhs_name, rhs_name,
+                               lhs_batch, rhs_batch,
+                               lhs_contracting, rhs_contracting,
+                               lhs_target, rhs_target, out->shape(),
+                               out->dtype());
     body << '\n';
 }
 
