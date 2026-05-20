@@ -636,36 +636,47 @@ class SubsetRandomSampler(Sampler[int]):
 def default_collate(batch: list) -> Any:
     """Default collate function that stacks tensors and groups tuples.
 
-    Parameters
-    ----------
-    batch : list
-        List of samples from the dataset.
+    Matches the contract of ``torch.utils.data.default_collate``:
 
-    Returns
-    -------
-    Any
-        Collated batch.  If samples are tuples, returns a tuple of
-        collated elements.  Otherwise returns a list.
+    - List/tuple samples are collated element-wise.
+    - Dict samples are collated key-wise (audit item E.12 — was missing).
+    - Tensor / Variable samples are stacked along a new leading dim via
+      the C++ stack op.
+    - Other types (scalars, strings, …) are returned as a Python list.
+
+    Shape/dtype mismatches inside the C++ stack now propagate as a
+    RuntimeError instead of being silently swallowed (audit item E.12).
+    The previous "swallow RuntimeError → return un-batched list" path
+    hid real bugs in user datasets — failures are now visible.
     """
     if not batch:
         return batch
 
     elem = batch[0]
 
-    # If elements are tuples/lists, collate each position independently
+    # Dict: collate each key's values independently.
+    if isinstance(elem, dict):
+        keys = elem.keys()
+        return {k: default_collate([d[k] for d in batch]) for k in keys}
+
+    # Tuple / list: collate each position independently.
     if isinstance(elem, (tuple, list)):
         collated = [default_collate([d[i] for d in batch]) for i in range(len(elem))]
         return type(elem)(collated)
 
-    # Try to stack tensors using the C++ stack operation
+    # Tensors / Variables: stack along new leading axis.  Propagate any
+    # RuntimeError (e.g. shape mismatch) so the caller sees the actual
+    # error message instead of a silently-unbatched list.
     try:
         from . import tenzor_core as _core
-        if isinstance(elem, (_core.Tensor, _core.Variable)):
-            return _core.stack(batch, 0)
-    except (ImportError, AttributeError, RuntimeError):
-        pass
+    except ImportError:
+        # No C++ core available — fall through to the scalar return path
+        # below; tensor stacking is impossible without it.
+        return batch
+    if isinstance(elem, (_core.Tensor, _core.Variable)):
+        return _core.stack(batch, 0)
 
-    # Fallback: return as-is (list of scalars, strings, etc.)
+    # Fallback for scalars / strings / other Python objects.
     return batch
 
 

@@ -137,5 +137,33 @@ def test_distributed_sampler_partition():
     assert len(idx1) == 5
 
 
+# ---------------------------------------------------------------------------
+# default_collate — audit item E.12 (dict collation + RuntimeError
+# propagation must not silently fall back to an un-batched list)
+# ---------------------------------------------------------------------------
+
+def test_default_collate_dict():
+    """Dict samples must collate key-wise, matching torch.utils.data.default_collate."""
+    from tenzor.data import default_collate
+    batch = [
+        {"x": tz.full([3], 1.0), "y": tz.full([2], 2.0)},
+        {"x": tz.full([3], 3.0), "y": tz.full([2], 4.0)},
+    ]
+    out = default_collate(batch)
+    assert isinstance(out, dict)
+    assert set(out.keys()) == {"x", "y"}
+    assert out["x"].shape == [2, 3]
+    assert out["y"].shape == [2, 2]
+
+
+def test_default_collate_propagates_shape_mismatch():
+    """Mismatched tensor shapes in a batch must surface as a RuntimeError,
+    not silently degrade to an un-batched list (audit item E.12)."""
+    from tenzor.data import default_collate
+    bad = [tz.full([3], 1.0), tz.full([4], 2.0)]
+    with pytest.raises(RuntimeError):
+        default_collate(bad)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
