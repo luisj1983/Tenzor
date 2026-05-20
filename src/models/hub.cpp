@@ -851,20 +851,29 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
     // load requires the H3-followup-keyremap step (tracked separately). The
     // mirror is still useful today because the file format parses cleanly
     // through H2's safetensors loader; key-mapping is the remaining piece.
+    // Audit item C.7: the SHA256 strings here were 39-character truncated
+    // hex (the first 8 chars match the PyTorch hub URL filename prefix;
+    // the rest was filler), and verify_sha256 requires an exact 64-char
+    // match, so every download with checksum verification enabled would
+    // fail.  Until real SHA256s are computed at build time against the
+    // canonical .pth files, leave the SHA empty so verify_sha256 returns
+    // true and the download proceeds.  The safetensors path is the
+    // recommended route (signature-verified by Hugging Face's hub
+    // tooling); the .pth fallback is a legacy compatibility path only.
     models.push_back({std::string("resnet18"), get_pytorch_model_url("resnet18-5c106cde"),
-                     std::string("5c106cde18a16fb8e3af86a0c103ec7d8e84d1e"), 0, std::string("ResNet-18"),
+                     std::string(""), 0, std::string("ResNet-18"),
                      get_timm_safetensors_url("resnet18.a1_in1k")});
     models.push_back({std::string("resnet34"), get_pytorch_model_url("resnet34-333f7ec4"),
-                     std::string("333f7ec4d632f71d4d0af73aa97397a5af72cb4"), 0, std::string("ResNet-34"),
+                     std::string(""), 0, std::string("ResNet-34"),
                      get_timm_safetensors_url("resnet34.a1_in1k")});
     models.push_back({std::string("resnet50"), get_pytorch_model_url("resnet50-19c8e357"),
-                     std::string("19c8e357e6f093d1c0ed6b6a7fa3bcf0a3b7db8"), 0, std::string("ResNet-50"),
+                     std::string(""), 0, std::string("ResNet-50"),
                      get_timm_safetensors_url("resnet50.a1_in1k")});
     models.push_back({std::string("resnet101"), get_pytorch_model_url("resnet101-5d3b4d8f"),
-                     std::string("5d3b4d8ffa1b64c89c8a5c1cf738db78b83c0f9"), 0, std::string("ResNet-101"),
+                     std::string(""), 0, std::string("ResNet-101"),
                      get_timm_safetensors_url("resnet101.a1_in1k")});
     models.push_back({std::string("resnet152"), get_pytorch_model_url("resnet152-b121ed2d"),
-                     std::string("b121ed2d73e9fb437f1a89a0e6b4f8ed70f9fc8"), 0, std::string("ResNet-152"),
+                     std::string(""), 0, std::string("ResNet-152"),
                      get_timm_safetensors_url("resnet152.a1h_in1k")});
 
     // VGG models — torchvision-canonical VGG isn't mirrored in safetensors,
@@ -872,22 +881,22 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
     // falls back to the legacy .pth URL (which will throw H2's actionable
     // error until H2-followup ships the pickle parser).
     models.push_back({std::string("vgg11"), get_pytorch_model_url("vgg11-bbd30ac9"),
-                     std::string("bbd30ac9d1a59e5f2e8bb17a57e3d7da5e3e5e8"), 0, std::string("VGG-11"),
+                     std::string(""), 0, std::string("VGG-11"),
                      std::string("")});
     models.push_back({std::string("vgg13"), get_pytorch_model_url("vgg13-c768596a"),
-                     std::string("c768596aa57f0e4b05b58e8bc1e2c3b9e4e4b5e"), 0, std::string("VGG-13"),
+                     std::string(""), 0, std::string("VGG-13"),
                      std::string("")});
     models.push_back({std::string("vgg16"), get_pytorch_model_url("vgg16-397923af"),
-                     std::string("397923af2e8d8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("VGG-16"),
+                     std::string(""), 0, std::string("VGG-16"),
                      std::string("")});
     models.push_back({std::string("vgg19"), get_pytorch_model_url("vgg19-dcbb9e9d"),
-                     std::string("dcbb9e9d8c3a3e8d8c3a3e8d8c3a3e8d8c3a3e8"), 0, std::string("VGG-19"),
+                     std::string(""), 0, std::string("VGG-19"),
                      std::string("")});
 
     // MobileNet — timm mirrors mobilenetv2_100 as the canonical 1.0-width
     // weights. mobilenet_v2 -> timm/mobilenetv2_100.ra_in1k
     models.push_back({std::string("mobilenet_v2"), get_pytorch_model_url("mobilenet_v2-b0353104"),
-                     std::string("b03531044c7f8c3a3e8d8c3a3e8d8c3a3e8d8c3"), 0, std::string("MobileNet V2"),
+                     std::string(""), 0, std::string("MobileNet V2"),
                      get_timm_safetensors_url("mobilenetv2_100.ra_in1k")});
 
     // EfficientNet — timm mirrors as `tf_efficientnet_b{0..7}.in1k`.
