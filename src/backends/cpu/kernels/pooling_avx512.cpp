@@ -15,6 +15,8 @@
 #endif
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 
 #ifdef _OPENMP
@@ -180,11 +182,29 @@ void adaptive_avgpool2d_forward_f32(
 
 #else
 
-// Stubs when AVX-512 is not available
+// Audit item C.1: non-AVX-512 builds must NOT silently provide empty
+// AVX-512 stubs that write nothing to the output buffer.  Any code path
+// that compiles these symbols on a non-AVX-512 build and calls them
+// would have silently produced uninitialised output.  The CMake gate
+// (TENZOR_HAVE_AVX512) ensures this translation unit is not compiled
+// outside AVX-512 builds; if it ever is, the abort below is the loud
+// failure mode we want.
+[[noreturn]] static void avx512_unavailable(const char* func) {
+    std::fprintf(stderr,
+        "[Tenzor] %s called on a build without AVX-512 support — "
+        "rebuild with -DTENZOR_HAVE_AVX512=ON or use the scalar / AVX2 "
+        "fallback path.\n", func);
+    std::abort();
+}
+
 void avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
-                           int64_t, int64_t, int64_t, int64_t, int64_t) {}
+                           int64_t, int64_t, int64_t, int64_t, int64_t) {
+    avx512_unavailable("avgpool2d_forward_f32");
+}
 void adaptive_avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
-                                     int64_t, int64_t) {}
+                                     int64_t, int64_t) {
+    avx512_unavailable("adaptive_avgpool2d_forward_f32");
+}
 
 #endif
 

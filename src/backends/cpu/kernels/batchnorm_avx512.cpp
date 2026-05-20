@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #ifdef _OPENMP
@@ -203,10 +205,27 @@ void batchnorm_normalize_f32(
 
 #else
 
-// Stubs when AVX-512 is not available (should never be called)
-void batchnorm_mean_var_f32(const float*, float*, float*, int64_t, int64_t, int64_t, int64_t) {}
-void batchnorm_forward_affine_f32(const float*, float*, const float*, const float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t) {}
-void batchnorm_normalize_f32(const float*, float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t) {}
+// Audit item C.1: non-AVX-512 builds must NOT silently provide empty
+// AVX-512 stubs that write nothing to the output buffer.  The comment
+// admitted "should never be called" but a CMake misconfiguration or
+// future refactor could route into them.  Make the failure mode loud.
+[[noreturn]] static void avx512_unavailable(const char* func) {
+    std::fprintf(stderr,
+        "[Tenzor] %s called on a build without AVX-512 support — "
+        "rebuild with -DTENZOR_HAVE_AVX512=ON or use the scalar / AVX2 "
+        "fallback path.\n", func);
+    std::abort();
+}
+
+void batchnorm_mean_var_f32(const float*, float*, float*, int64_t, int64_t, int64_t, int64_t) {
+    avx512_unavailable("batchnorm_mean_var_f32");
+}
+void batchnorm_forward_affine_f32(const float*, float*, const float*, const float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t) {
+    avx512_unavailable("batchnorm_forward_affine_f32");
+}
+void batchnorm_normalize_f32(const float*, float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t) {
+    avx512_unavailable("batchnorm_normalize_f32");
+}
 
 #endif
 
