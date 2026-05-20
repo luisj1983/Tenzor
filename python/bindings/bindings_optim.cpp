@@ -503,6 +503,59 @@ void register_optim(py::module_& m) {
         .def("get_epoch", &tenzor::optim::CosineAnnealingLR::get_epoch,
              "Get current epoch number");
 
+    // MultiStepLR + LambdaLR — audit item E.11.
+    // Both classes already exist in C++ (scheduler.hpp + scheduler_advanced.cpp);
+    // only the Python bindings were missing.
+    py::class_<tenzor::optim::MultiStepLR, tenzor::optim::LRScheduler>(lr_scheduler, "MultiStepLR")
+        .def(py::init<tenzor::optim::SGD&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1,
+             "Decays learning rate by gamma at each epoch in `milestones`")
+        .def(py::init<tenzor::optim::Adam&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::AdamW&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::RMSprop&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::Adagrad&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::Adadelta&, std::vector<int>, double>(),
+             py::arg("optimizer"), py::arg("milestones"), py::arg("gamma") = 0.1)
+        .def("get_epoch", &tenzor::optim::MultiStepLR::get_epoch,
+             "Get current epoch number");
+
+    py::class_<tenzor::optim::LambdaLR, tenzor::optim::LRScheduler>(lr_scheduler, "LambdaLR")
+        .def(py::init([](tenzor::optim::SGD& opt, py::function lr_lambda) {
+                 return new tenzor::optim::LambdaLR(opt,
+                     [lr_lambda](int epoch) -> double {
+                         py::gil_scoped_acquire gil;
+                         return lr_lambda(epoch).cast<double>();
+                     });
+             }), py::arg("optimizer"), py::arg("lr_lambda"),
+             "Sets lr_t = base_lr * lr_lambda(epoch)")
+        .def(py::init([](tenzor::optim::Adam& opt, py::function lr_lambda) {
+                 return new tenzor::optim::LambdaLR(opt,
+                     [lr_lambda](int epoch) -> double {
+                         py::gil_scoped_acquire gil;
+                         return lr_lambda(epoch).cast<double>();
+                     });
+             }), py::arg("optimizer"), py::arg("lr_lambda"))
+        .def(py::init([](tenzor::optim::AdamW& opt, py::function lr_lambda) {
+                 return new tenzor::optim::LambdaLR(opt,
+                     [lr_lambda](int epoch) -> double {
+                         py::gil_scoped_acquire gil;
+                         return lr_lambda(epoch).cast<double>();
+                     });
+             }), py::arg("optimizer"), py::arg("lr_lambda"))
+        .def(py::init([](tenzor::optim::RMSprop& opt, py::function lr_lambda) {
+                 return new tenzor::optim::LambdaLR(opt,
+                     [lr_lambda](int epoch) -> double {
+                         py::gil_scoped_acquire gil;
+                         return lr_lambda(epoch).cast<double>();
+                     });
+             }), py::arg("optimizer"), py::arg("lr_lambda"))
+        .def("get_epoch", &tenzor::optim::LambdaLR::get_epoch,
+             "Get current epoch number");
+
     // Advanced schedulers
     py::class_<tenzor::optim::ReduceLROnPlateau, tenzor::optim::LRScheduler>(lr_scheduler, "ReduceLROnPlateau")
         .def(py::init<tenzor::optim::SGD&, const std::string&, double, int64_t, double,
