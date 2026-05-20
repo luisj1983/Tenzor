@@ -216,16 +216,15 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
             throw std::runtime_error("All target samples must have same shape");
         }
 
-        // Copy data into batch
-        // Use slice assignment to place sample at index i
-        // batch_inputs[i] = input
-        // batch_targets[i] = target
-
-        // Note: This requires implementing slice assignment in Tensor class
-        // For now, we'll create a simplified version using the stack operation
+        // The stack-based path below is the canonical implementation —
+        // unsqueeze each sample to add a leading batch dim, then concat
+        // along that dim. The earlier "implement slice assignment"
+        // comment referred to an in-place alternative that was never
+        // wired in (and isn't needed: stack+cat is already O(N) and
+        // avoids the mutable-Tensor-view machinery slice assignment
+        // would require).
     }
 
-    // Alternative: Use stack operation if available
     std::vector<Tensor> input_list, target_list;
     for (const auto& [input, target] : samples) {
         input_list.push_back(unsqueeze(input, 0));
