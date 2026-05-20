@@ -125,3 +125,21 @@ class DataLoader:
 
     def __iter__(self) -> Iterator: ...
     def __len__(self) -> int: ...
+
+
+# Audit E.10: collate helpers and random_split previously lived at runtime
+# but were absent from data.pyi.
+
+class Subset(Dataset):
+    """Dataset wrapper that exposes a subset of indices from a parent dataset."""
+    dataset: Dataset
+    indices: Sequence[int]
+    def __init__(self, dataset: Dataset, indices: Sequence[int]) -> None: ...
+
+def default_collate(batch: list) -> Any: ...
+
+def random_split(
+    dataset: Dataset,
+    lengths: Sequence[int],
+    generator: Optional[Any] = None,
+) -> List[Subset]: ...

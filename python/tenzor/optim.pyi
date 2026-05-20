@@ -335,16 +335,8 @@ class MultiplicativeLR(LRScheduler):
         verbose: bool = False
     ) -> None: ...
 
-# Utility functions
-def clip_grad_norm_(
-    parameters: Iterable[Tensor],
-    max_norm: float,
-    norm_type: float = 2.0,
-    error_if_nonfinite: bool = False
-) -> Tensor:
-    """Clip gradient norms."""
-    ...
-
-def clip_grad_value_(parameters: Iterable[Tensor], clip_value: float) -> None:
-    """Clip gradient values."""
-    ...
+# Audit E.10: clip_grad_norm_ / clip_grad_value_ live in tenzor.nn.functional
+# (and are re-exported through tenzor.nn). The previous declarations here
+# never existed in `tenzor.optim` at runtime and drove typecheckers to
+# "undefined attribute" on legitimate `tz.nn.functional.clip_grad_norm_`
+# calls. The canonical declarations are in functional.pyi / nn.pyi.
