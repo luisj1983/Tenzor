@@ -85,6 +85,24 @@ from .tenzor_core import (
     _foreach_lerp_, _foreach_norm,
 )
 
+# Audit E.10: module-level `from_numpy` convenience. Until now the .pyi
+# advertised `tz.from_numpy(array, requires_grad=False)` but the runtime
+# only exposed `tz.Tensor.from_numpy(...)`. Expose a thin top-level alias
+# so the documented surface matches reality.
+def from_numpy(array, requires_grad: bool = False):
+    """Create a Tensor (or Variable, if ``requires_grad=True``) from a NumPy array.
+
+    Mirrors ``torch.from_numpy``: zero-copy when the dtype and stride layout
+    allow it, otherwise materialises a host copy. The returned tensor lives
+    on CPU; move it explicitly with ``.to(device)``.
+    """
+    from .tenzor_core import Tensor as _Tensor, Variable as _Variable
+    t = _Tensor.from_numpy(array)
+    if requires_grad:
+        return _Variable(t, True)
+    return t
+
+
 # Import the nn submodule from C++ (keep reference for internal use)
 from .tenzor_core import nn as _cpp_nn
 
