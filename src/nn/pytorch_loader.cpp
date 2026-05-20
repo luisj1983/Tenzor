@@ -14,6 +14,7 @@
 
 #include "tenzor/nn/pytorch_loader.hpp"
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
@@ -192,6 +193,15 @@ constexpr uint8_t PICKLE_BINFLOAT = 'G';
 constexpr uint8_t PICKLE_BINBYTES = 'B';
 constexpr uint8_t PICKLE_SHORT_BINBYTES = 'C';
 constexpr uint8_t PICKLE_FRAME = 0x95;
+// Audit C.8: previously the default-branch of the opcode switch silently
+// dropped unknown opcodes, which made pickle blobs that used common
+// Python-3.4+ defaults (MEMOIZE) or wider integer forms (LONG4) parse to
+// garbage state dicts.  These opcodes are now handled explicitly and
+// the default branch throws.
+constexpr uint8_t PICKLE_MEMOIZE = 0x94;
+constexpr uint8_t PICKLE_LONG4   = 0x8B;
+constexpr uint8_t PICKLE_LIST    = 'l';
+constexpr uint8_t PICKLE_DICT    = 'd';
 
 // Simple tagged value for pickle stack
 enum class PVal { None, Int, Float, String, List, Dict, Tuple, Class, Persistent, Bool };
@@ -636,9 +646,89 @@ private:
                     break;
                 }
 
-                default:
-                    // Skip unknown opcodes gracefully
+                case PICKLE_MEMOIZE: {
+                    // Audit C.8: Python 3.4+ default protocol 4 emits MEMOIZE
+                    // after every memoised value: pop nothing, push memo_[n]
+                    // = stack.back() where n is the next memo slot.
+                    if (!stack_.empty()) {
+                        memo_[static_cast<uint32_t>(memo_.size())] = stack_.back();
+                    }
                     break;
+                }
+
+                case PICKLE_LONG4: {
+                    // 4-byte little-endian length prefix, then that many bytes
+                    // encoding a signed integer (little-endian, two's complement).
+                    uint32_t len = read_u32(data_ + pos_);
+                    pos_ += 4;
+                    int64_t val = 0;
+                    if (len > 0 && pos_ + len <= size_) {
+                        // Sign-extend from the high byte.
+                        for (uint32_t i = 0; i < len && i < sizeof(int64_t); ++i) {
+                            val |= static_cast<int64_t>(data_[pos_ + i]) << (8 * i);
+                        }
+                        if (len <= sizeof(int64_t) && (data_[pos_ + len - 1] & 0x80)) {
+                            // Negative — fill the remaining bits with 1s.
+                            for (uint32_t i = len; i < sizeof(int64_t); ++i) {
+                                val |= static_cast<int64_t>(0xFF) << (8 * i);
+                            }
+                        }
+                    }
+                    pos_ += len;
+                    PickleValue v;
+                    v.type = PVal::Int;
+                    v.int_val = val;
+                    stack_.push_back(std::move(v));
+                    break;
+                }
+
+                case PICKLE_LIST: {
+                    // Build a list from stack between the most recent mark and
+                    // the top of the stack.  Mirrors PICKLE_TUPLE for list-typed
+                    // values.
+                    if (marks_.empty()) break;
+                    size_t mark = marks_.back();
+                    marks_.pop_back();
+                    PickleValue v;
+                    v.type = PVal::List;
+                    for (size_t i = mark; i < stack_.size(); ++i) {
+                        v.list_val.push_back(std::move(stack_[i]));
+                    }
+                    stack_.resize(mark);
+                    stack_.push_back(std::move(v));
+                    break;
+                }
+
+                case PICKLE_DICT: {
+                    // Build a dict from stack between mark and top, alternating
+                    // key/value pairs.  Mirrors PICKLE_SETITEMS but constructs
+                    // a fresh dict rather than populating an existing one.
+                    if (marks_.empty()) break;
+                    size_t mark = marks_.back();
+                    marks_.pop_back();
+                    PickleValue dict_v;
+                    dict_v.type = PVal::Dict;
+                    for (size_t i = mark; i + 1 < stack_.size(); i += 2) {
+                        process_dict_item(stack_[i], stack_[i + 1]);
+                    }
+                    stack_.resize(mark);
+                    stack_.push_back(std::move(dict_v));
+                    break;
+                }
+
+                default: {
+                    // Audit C.8: surface unknown opcodes instead of silently
+                    // skipping them.  Silent skip produced state dicts that
+                    // referenced uninitialised memo slots, corrupting tensor
+                    // shapes / dtypes downstream.  If a real-world pickle blob
+                    // surfaces a missing opcode this should be reported and
+                    // wired in explicitly.
+                    char hex[8];
+                    std::snprintf(hex, sizeof(hex), "0x%02X", op);
+                    throw std::runtime_error(
+                        std::string("PyTorch pickle parser: unsupported opcode ") +
+                        hex + " at offset " + std::to_string(pos_ - 1));
+                }
             }
         }
     }

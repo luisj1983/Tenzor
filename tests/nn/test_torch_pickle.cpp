@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "tenzor/io/torch_pickle.hpp"
+#include "tenzor/nn/pytorch_loader.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -435,6 +436,48 @@ TEST_F(TorchPickleTest, LoadsMultipleTensors) {
     EXPECT_EQ(b.shape().size(), 1u);
     EXPECT_EQ(b.shape()[0], 2);
     for (size_t i = 0; i < 2; ++i) EXPECT_FLOAT_EQ(b.data<float>()[i], v1[i]);
+}
+
+// Audit C.8: unsupported pickle opcodes must throw, not silently skip.
+// Previously the default branch of the opcode switch did `break;`, so a
+// pickle blob using an opcode the parser didn't recognise would parse to
+// a garbage state dict.  The parser now surfaces unknown opcodes with the
+// byte and offset.
+TEST_F(TorchPickleTest, ErrorOnUnsupportedOpcode) {
+    // Build a minimal pickle stream that starts with PROTO 2 / EMPTY_DICT
+    // and then hits an undefined opcode byte (0xFE).  Wrap in the minimal
+    // zip layout the loader requires.
+    std::vector<uint8_t> pkl = {
+        0x80, 0x02,          // PROTO 2
+        '}',                 // EMPTY_DICT
+        0xFE,                // unsupported opcode
+        '.'                  // STOP (never reached)
+    };
+
+    ZipBuilder zip;
+    zip.add("archive/data.pkl", pkl);
+    auto data = zip.build();
+
+    auto path = std::filesystem::temp_directory_path() /
+                "tenzor_pickle_unsupported_opcode.pth";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size()));
+    }
+
+    try {
+        (void) tenzor::nn::load_pytorch_state_dict(path.string());
+        FAIL() << "expected load_pytorch_state_dict to throw on unsupported opcode";
+    } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("unsupported opcode"), std::string::npos)
+            << "actual error: " << msg;
+        EXPECT_NE(msg.find("0xFE"), std::string::npos)
+            << "actual error: " << msg;
+    }
+
+    std::filesystem::remove(path);
 }
 
 int main(int argc, char** argv) {
