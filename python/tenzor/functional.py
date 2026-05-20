@@ -2310,4 +2310,20 @@ __all__ = [
     "mfcc",
     # Sparse eigenvalue solver
     "lobpcg",
+    # Audit item E.9 — these were implemented but missing from __all__.
+    "channel_shuffle",
+    "cosine_embedding_loss",
+    "dct",
+    "deformable_conv2d",
+    "gaussian_nll_loss",
+    "hinge_embedding_loss",
+    "idct",
+    "multi_head_attention_forward",
+    "multi_label_soft_margin_loss",
+    "multi_margin_loss",
+    "pairwise_distance",
+    "pdist",
+    "poisson_nll_loss",
+    "soft_margin_loss",
+    "triplet_margin_loss",
 ]
