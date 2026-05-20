@@ -335,6 +335,23 @@ private:
                           const std::string& op_type) const -> bool;
 
     /**
+     * @brief Check if a node's Function is the given forward OpId.
+     *
+     * Audit A.2: Pattern matchers should compare via the OpId enum rather
+     * than the legacy RTTI-substring `is_operation_type(node, "string")`
+     * path. This overload returns true when `node->function->op_id() ==
+     * op_id`. Subclasses that haven't yet opted in to op_id() return
+     * `OpId::Unknown`, so this never matches an un-opted-in node — the
+     * RTTI-substring overload remains available for those callers.
+     *
+     * @param node Node to check
+     * @param op_id Expected forward OpId
+     * @return true if `node->function->op_id() == op_id`
+     */
+    auto is_operation_type(std::shared_ptr<GraphNode> node,
+                           OpId op_id) const -> bool;
+
+    /**
      * @brief Replace a sequence of nodes with a fused operation.
      *
      * Replaces a matched pattern of nodes with a single fused node.

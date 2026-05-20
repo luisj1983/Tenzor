@@ -456,6 +456,11 @@ add_executable(test_function_op_id test_function_op_id.cpp)
 target_link_libraries(test_function_op_id PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_function_op_id DISCOVERY_TIMEOUT 60)
 
+# GraphOptimizer OpId-based pattern matcher (audit A.2)
+add_executable(test_graph_optimizer_op_id test_graph_optimizer_op_id.cpp)
+target_link_libraries(test_graph_optimizer_op_id PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_graph_optimizer_op_id DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)

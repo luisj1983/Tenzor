@@ -82,7 +82,8 @@ auto GraphOptimizer::fuse_linear_relu(ComputationGraph& graph) -> size_t {
         if (!node || !node->function) continue;
 
         // Check if this is a MatMul operation
-        if (!is_operation_type(node, "MatMulBackward")) continue;
+        // Audit A.2: OpId-based pattern match (stronger than RTTI-substring).
+        if (!is_operation_type(node, OpId::MatMul)) continue;
 
         // Check if it has exactly one consumer (ReLU)
         if (!has_single_consumer(node)) continue;
@@ -233,12 +234,14 @@ auto GraphOptimizer::fuse_linear_gelu(ComputationGraph& graph) -> size_t {
 
     for (const auto& node : all_nodes) {
         if (!node || !node->function) continue;
-        if (!is_operation_type(node, "MatMulBackward") &&
-            !is_operation_type(node, "LinearBackward")) continue;
+        // Audit A.2: OpId-based pattern match.
+        if (!is_operation_type(node, OpId::MatMul) &&
+            !is_operation_type(node, OpId::Linear)) continue;
         if (!has_single_consumer(node)) continue;
         if (node->next_nodes.empty()) continue;
         auto next = node->next_nodes[0].lock();
-        if (!next || !is_operation_type(next, "GeluBackward")) continue;
+        // Audit A.2: OpId-based pattern match.
+        if (!next || !is_operation_type(next, OpId::Gelu)) continue;
         count++;
     }
 
@@ -286,12 +289,14 @@ auto GraphOptimizer::eliminate_transpose_pairs(ComputationGraph& graph) -> size_
 
     for (const auto& node : all_nodes) {
         if (!node || !node->function) continue;
-        if (!is_operation_type(node, "TransposeBackward")) continue;
+        // Audit A.2: OpId-based pattern match.
+        if (!is_operation_type(node, OpId::Transpose)) continue;
         if (!has_single_consumer(node)) continue;
         if (node->next_nodes.empty()) continue;
 
         auto next = node->next_nodes[0].lock();
-        if (!next || !is_operation_type(next, "TransposeBackward")) continue;
+        // Audit A.2: OpId-based pattern match.
+        if (!next || !is_operation_type(next, OpId::Transpose)) continue;
         // Two consecutive transposes — this is an identity (or at least reducible)
         count++;
     }
@@ -405,6 +410,25 @@ auto GraphOptimizer::is_operation_type(std::shared_ptr<GraphNode> node,
     // Check if the type name contains the expected operation type
     // Note: RTTI names are compiler-dependent, so this checks for substring match
     return actual_type.find(op_type) != std::string::npos;
+}
+
+auto GraphOptimizer::is_operation_type(std::shared_ptr<GraphNode> node,
+                                       OpId op_id) const -> bool {
+    // Audit A.2: OpId-based pattern matching. Strictly stronger than the
+    // RTTI-substring overload: OpId is a compile-time enum value, so a
+    // miss-by-renaming or compiler-dependent type-mangling change can't
+    // silently break the matcher. Subclasses that haven't opted in to
+    // `op_id()` return OpId::Unknown, which is treated by every matcher
+    // as "do not match" — so adding new Functions or renaming existing
+    // ones is safe (it never silently mis-matches).
+    if (!node || !node->function) return false;
+    if (op_id == OpId::Unknown) {
+        // Refuse to match the sentinel "no opted-in OpId" value so that
+        // callers passing the default never accidentally collect every
+        // un-opted-in Function in the graph. Caller bug, surface it.
+        return false;
+    }
+    return node->function->op_id() == op_id;
 }
 
 auto GraphOptimizer::has_single_consumer(std::shared_ptr<GraphNode> node) const -> bool {
