@@ -598,10 +598,16 @@ auto InferenceServer::serve_loop() -> void {
     std::cout << "[TenzorServing] HTTP server listening on port " << config_.http_port << std::endl;
     svr.listen("0.0.0.0", config_.http_port);
 #else
-    // Fallback: no HTTP library, just spin
-    while (running_.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    // Audit G.12: previously the !TENZOR_HAS_HTTPLIB build entered a
+    // silent 100ms-sleep busy-loop that pretended the server was running.
+    // The serving subsystem requires an HTTP transport — surface a typed
+    // build-config error so users wire one in (httplib, or the planned
+    // gRPC transport) rather than seeing a no-op idle "server".
+    throw std::runtime_error(
+        "tenzor::serving::InferenceServer::serve_loop: this build was "
+        "configured without TENZOR_HAS_HTTPLIB. Rebuild with httplib "
+        "enabled (or another supported transport) before starting the "
+        "inference server.");
 #endif
 }
 
