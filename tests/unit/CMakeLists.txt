@@ -817,6 +817,11 @@ add_executable(test_masked_tensor test_masked_tensor.cpp)
 target_link_libraries(test_masked_tensor PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_masked_tensor LABELS "unit" DISCOVERY_TIMEOUT 60)
 
+# CPU reduction half-dtype contract (audit items E.1 + E.2).
+add_executable(test_reduction_half_dtype test_reduction_half_dtype.cpp)
+target_link_libraries(test_reduction_half_dtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_reduction_half_dtype LABELS "unit" DISCOVERY_TIMEOUT 60)
+
 # test_cublas_cudnn.cpp orphan removed: rotted APIs (Tensor::ones/randn/matmul methods no longer exist)
 
 # Quantization observers and FakeQuantize specifics (16 tests, complements canonical test_quantization)

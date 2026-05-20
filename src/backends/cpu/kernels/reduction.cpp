@@ -2836,42 +2836,29 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
-        case DType::Float16: {
-            // Compute product in Float32, store result as Float32
-            // (Float16 product overflows easily, so output stays Float32)
-            auto input_f32 = input.to(DType::Float32);
-            auto* input_data = input_f32.data<float>();
-
-            // Reallocate output as Float32
-            output = Tensor(output_shape, DType::Float32, input.device());
-            auto* output_data = output.data<float>();
-            if (dim == REDUCE_ALL) {
-                output_data[0] = prod_impl(input_data, input.numel());
-            } else {
-                auto strides_span = input_f32.strides();
-                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
-                prod_along_dim(input_data, output_data,
-                              std::vector<int64_t>(input_f32.shape().begin(), input_f32.shape().end()),
-                              input_strides, dim);
-            }
-            break;
-        }
+        case DType::Float16:
         case DType::BFloat16: {
-            // Compute product in Float32, store result as Float32
-            auto input_f32 = input.to(DType::Float32);
+            // Compute the product in Float32 for numerical headroom
+            // (half-dtype products overflow trivially), then narrow back
+            // to the input dtype so the caller's expected output dtype
+            // is preserved (audit item E.2 — previous code left the
+            // output as Float32, silently changing the dtype contract).
+            const DType orig = input.dtype();
+            Tensor input_f32 = input.to(DType::Float32);
             auto* input_data = input_f32.data<float>();
 
-            output = Tensor(output_shape, DType::Float32, input.device());
-            auto* output_data = output.data<float>();
+            Tensor out_f32(output_shape, DType::Float32, input.device());
+            auto* out_data = out_f32.data<float>();
             if (dim == REDUCE_ALL) {
-                output_data[0] = prod_impl(input_data, input.numel());
+                out_data[0] = prod_impl(input_data, input.numel());
             } else {
                 auto strides_span = input_f32.strides();
                 std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
-                prod_along_dim(input_data, output_data,
+                prod_along_dim(input_data, out_data,
                               std::vector<int64_t>(input_f32.shape().begin(), input_f32.shape().end()),
                               input_strides, dim);
             }
+            output = out_f32.to(orig);
             break;
         }
         default:
@@ -3297,9 +3284,10 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
     dim = normalize_dim(dim, ndim);
 
     if (dim != REDUCE_ALL) {
-        // Per-dim reduction — only Float32 / Float64 are wired through the
-        // dim path. Float16/BFloat16 fall through to the old "full reduction
-        // only" error so we don't silently lose precision on those dtypes.
+        // Per-dim reduction — Float32 / Float64 have native templates; for
+        // Float16 / BFloat16 widen to Float32, compute, and narrow back so
+        // half-dtype users get a working `norm(dim=...)` instead of a hard
+        // throw (audit item E.1, feedback_float16_widen_narrow pattern).
         if (input.dtype() == DType::Float32) {
             return norm_kernel_dim_float32(input, p, dim, keepdim);
         }
@@ -3308,9 +3296,17 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             // round-trip, no precision loss.
             return norm_kernel_dim<double>(input, p, dim, keepdim);
         }
+        if (input.dtype() == DType::Float16 ||
+            input.dtype() == DType::BFloat16) {
+            const DType orig = input.dtype();
+            Tensor input_f32 = input.to(DType::Float32);
+            Tensor out_f32 = norm_kernel_dim_float32(input_f32, p, dim, keepdim);
+            return out_f32.to(orig);
+        }
         throw std::runtime_error(
-            "norm: dim reduction only supported for Float32/Float64 on CPU "
-            "(got " + std::string(dtype_name(input.dtype())) + ")");
+            "norm: dim reduction not supported for dtype " +
+            std::string(dtype_name(input.dtype())) +
+            " on CPU — only Float32 / Float64 / Float16 / BFloat16 are valid.");
     }
 
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
