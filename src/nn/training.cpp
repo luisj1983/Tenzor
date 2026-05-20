@@ -106,6 +106,11 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
         callbacks.push_back(std::make_shared<ProgressCallback>());
     }
 
+    // === Callbacks: on_train_begin (audit G.9 — previously unfired) ===
+    for (auto& callback : callbacks) {
+        callback->on_train_begin();
+    }
+
     // Main training loop
     for (int epoch = 0; epoch < epochs; ++epoch) {
         // === Callbacks: on_epoch_begin ===
@@ -119,6 +124,11 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
         int train_batch_count = 0;
 
         for (auto [inputs, targets] : train_loader) {
+            // === Callbacks: on_batch_begin (audit G.9 — previously unfired) ===
+            for (auto& callback : callbacks) {
+                callback->on_batch_begin(train_batch_count);
+            }
+
             // Convert tensors to variables
             Variable input_var(inputs, false);   // Input doesn't need gradients
             Variable target_var(targets, false); // Target doesn't need gradients
@@ -187,6 +197,11 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
         for (auto& callback : callbacks) {
             callback->on_epoch_end(epoch, avg_train_loss, avg_val_loss);
         }
+    }
+
+    // === Callbacks: on_train_end (audit G.9 — previously unfired) ===
+    for (auto& callback : callbacks) {
+        callback->on_train_end();
     }
 
     // Final summary
