@@ -44,11 +44,20 @@ class Categorical(Distribution):
         return out.reshape(out_shape) if out_shape else out.reshape(-1)[0]
 
     def log_prob(self, value):
+        # Use take_along_axis so batched probs (..., K) + matching-shape
+        # value (...) return per-batch log-probability of the chosen
+        # class — `lp[..., value]` advanced-indexes the whole `value`
+        # array across the last axis, producing a Cartesian-product
+        # shape (audit item A.9.a).
         value = np.asarray(value, dtype=np.int64)
         eps = 1e-7
         lp = np.log(np.clip(self.probs, eps, 1.0))
-        # Gather log prob at selected indices
-        return lp[..., value]
+        if value.ndim == 0:
+            # Scalar value broadcast across all (if any) batches.
+            return lp[..., int(value)]
+        # value.shape must match lp.shape[:-1] so we can gather one entry
+        # per batched probability vector.
+        return np.take_along_axis(lp, value[..., np.newaxis], axis=-1).squeeze(-1)
 
     def entropy(self):
         eps = 1e-7

@@ -30,10 +30,21 @@ class Dirichlet(Distribution):
         return a * (a0 - a) / (a0 ** 2 * (a0 + 1.0))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return np.random.dirichlet(self.concentration, size=shape or None)
+        # np.random.dirichlet rejects batched alpha; build samples via the
+        # Gamma(α_i, 1)/Σ Gamma(α_j, 1) construction so any leading batch
+        # shape of `concentration` is supported (audit item A.9.b).
+        sample_shape = tuple(sample_shape)
+        output_shape = sample_shape + self.concentration.shape
+        # Broadcast the alpha array to (sample_shape, batch_shape, K).
+        alpha = np.broadcast_to(self.concentration, output_shape)
+        # Gamma(α_i, 1) iid per-element; normalise across the last axis.
+        g = np.random.gamma(shape=alpha, scale=1.0, size=output_shape)
+        return g / g.sum(axis=-1, keepdims=True)
 
     def rsample(self, sample_shape=()):
+        # Same construction as sample() but routed through a path that
+        # would be reparameterised if/when we wire pathwise gradients
+        # through Gamma (audit item A.9 reparameterisation list).
         return self.sample(sample_shape)
 
     def log_prob(self, value):

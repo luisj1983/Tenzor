@@ -42,12 +42,36 @@ class Binomial(Distribution):
         return log_binom + value * np.log(p) + (n - value) * np.log(1.0 - p)
 
     def entropy(self):
-        # No simple closed form; use the Gaussian approximation
-        # H ≈ 0.5 * log(2*pi*e*n*p*(1-p)) for large n
-        eps = 1e-7
-        p = np.clip(self.probs, eps, 1.0 - eps)
-        n = float(self.total_count)
-        return 0.5 * np.log(2 * math.pi * math.e * n * p * (1.0 - p))
+        # Exact entropy: H = -Σ p(k) log p(k) for k=0..n.
+        # Previously used the Gaussian large-n approximation which is wildly
+        # wrong for small n (audit item A.9.c).  We compute the PMF in
+        # log-space for numerical stability, exponentiate, renormalise, then
+        # sum.  Vectorised over arbitrary batched `probs`.
+        p = np.asarray(self.probs, dtype=np.float64)
+        n_int = int(self.total_count)
+        ks = np.arange(0, n_int + 1, dtype=np.float64)            # (n+1,)
+        log_binom = gammaln(n_int + 1.0) - gammaln(ks + 1.0) - gammaln(n_int - ks + 1.0)
+
+        # Broadcast: result is p.shape + (n+1,).
+        # Handle p ∈ {0, 1} explicitly so log_p does not produce -inf*0 = NaN.
+        out = np.zeros_like(p)
+        nontrivial = (p > 0.0) & (p < 1.0)
+        if np.any(nontrivial):
+            p_nt = p[nontrivial]
+            # log p(k|n,p) — broadcast (M, n+1).
+            log_p = (
+                log_binom
+                + ks * np.log(p_nt)[..., None]
+                + (n_int - ks) * np.log(1.0 - p_nt)[..., None]
+            )
+            # Numerical safety: subtract max, exponentiate, renormalise.
+            log_p = log_p - log_p.max(axis=-1, keepdims=True)
+            probs_k = np.exp(log_p)
+            probs_k = probs_k / probs_k.sum(axis=-1, keepdims=True)
+            ent = -(probs_k * np.log(np.clip(probs_k, 1e-300, 1.0))).sum(axis=-1)
+            out[nontrivial] = ent
+        # For p ∈ {0, 1} the distribution is a point mass ⇒ entropy 0.
+        return out
 
     def support(self):
         return f"{{0, 1, ..., {self.total_count}}}"

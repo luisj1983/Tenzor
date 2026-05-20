@@ -615,3 +615,116 @@ class TestNegativeBinomial:
         nb = NegativeBinomial(total_count=5.0, probs=0.4)
         s = nb.sample((10000,))
         assert abs(s.mean() - 3.333) < 0.5
+
+
+# ===========================================================================
+# A.9 — Audit regressions: batched math bugs in pure-Python distributions.
+# ===========================================================================
+
+class TestCategoricalBatchedLogProb:
+    """Audit item A.9.a — Categorical.log_prob with batched probs+value
+    returned the wrong shape because `lp[..., value]` advanced-indexes the
+    last axis with the full `value` array instead of one-per-batch.
+    Expected: with probs (B, K) and value (B,), result has shape (B,)."""
+
+    def test_batched_shape(self):
+        # B=4 batch, K=3 classes
+        probs = np.array(
+            [
+                [0.7, 0.2, 0.1],
+                [0.1, 0.8, 0.1],
+                [0.3, 0.3, 0.4],
+                [0.2, 0.5, 0.3],
+            ]
+        )
+        value = np.array([0, 1, 2, 1], dtype=np.int64)
+        cat = Categorical(probs)
+        lp = cat.log_prob(value)
+        assert lp.shape == (4,), f"expected (4,), got {lp.shape}"
+
+    def test_batched_values(self):
+        probs = np.array([[0.5, 0.3, 0.2], [0.1, 0.6, 0.3]])
+        value = np.array([0, 1], dtype=np.int64)
+        cat = Categorical(probs)
+        lp = cat.log_prob(value)
+        expected = np.log(np.array([0.5, 0.6]))
+        assert np.allclose(lp, expected, atol=1e-6), (
+            f"expected {expected}, got {lp}"
+        )
+
+    def test_unbatched_still_works(self):
+        # Sanity: the unbatched K-only path used by existing tests.
+        cat = Categorical(np.array([0.5, 0.3, 0.2]))
+        lp = cat.log_prob(np.array(2, dtype=np.int64))
+        assert allclose(lp, math.log(0.2))
+
+
+class TestDirichletBatchedSample:
+    """Audit item A.9.b — Dirichlet.sample(()) with batched concentration
+    raised because np.random.dirichlet accepts only 1-D alpha.  Build
+    samples via the Gamma-normalisation trick so any leading batch shape
+    is supported."""
+
+    def test_batched_concentration_sample_shape(self):
+        # concentration shape (B=2, K=3) ⇒ sample default shape (2, 3)
+        conc = np.array([[1.0, 2.0, 3.0], [0.5, 0.5, 0.5]])
+        d = Dirichlet(conc)
+        s = d.sample()
+        assert s.shape == (2, 3), f"expected (2, 3), got {s.shape}"
+        # Every row must sum to 1 and be non-negative.
+        assert np.allclose(s.sum(axis=-1), 1.0, atol=1e-6)
+        assert np.all(s >= 0)
+
+    def test_batched_concentration_sample_with_extra_leading(self):
+        # Caller adds a leading sample dim ⇒ shape (N=5, B=2, K=3).
+        conc = np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
+        d = Dirichlet(conc)
+        s = d.sample((5,))
+        assert s.shape == (5, 2, 3), f"expected (5, 2, 3), got {s.shape}"
+        assert np.allclose(s.sum(axis=-1), 1.0, atol=1e-6)
+
+
+class TestBinomialEntropyExact:
+    """Audit item A.9.c — Binomial.entropy used a Gaussian approximation
+    `0.5*log(2πenp(1-p))`, which is wildly wrong for small n.
+    Compare against the exact sum -Σ p(k)log p(k)."""
+
+    @staticmethod
+    def _exact_entropy(n, p):
+        from scipy.special import gammaln
+        if p <= 0.0 or p >= 1.0:
+            return 0.0
+        ks = np.arange(0, int(n) + 1)
+        log_binom = (
+            gammaln(n + 1.0)
+            - gammaln(ks + 1.0)
+            - gammaln(n - ks + 1.0)
+        )
+        log_p = log_binom + ks * math.log(p) + (n - ks) * math.log(1.0 - p)
+        probs = np.exp(log_p)
+        # Numerical safety
+        probs = probs / probs.sum()
+        return float(-(probs * np.log(np.clip(probs, 1e-300, 1.0))).sum())
+
+    def test_small_n(self):
+        b = Binomial(5, 0.3)
+        exact = self._exact_entropy(5, 0.3)
+        assert allclose(b.entropy(), exact, atol=1e-6), (
+            f"expected {exact}, got {b.entropy()}"
+        )
+
+    def test_n_equals_1_is_bernoulli(self):
+        # Binomial(1, p) entropy equals Bernoulli entropy.
+        b = Binomial(1, 0.4)
+        p = 0.4
+        expected = -(p * math.log(p) + (1 - p) * math.log(1 - p))
+        assert allclose(b.entropy(), expected, atol=1e-6)
+
+    def test_large_n_close_to_gaussian(self):
+        # For large n, the exact entropy approaches the Gaussian approx.
+        n = 200
+        p = 0.5
+        b = Binomial(n, p)
+        gaussian = 0.5 * math.log(2 * math.pi * math.e * n * p * (1 - p))
+        # ≤ 1% relative error.
+        assert abs(b.entropy() - gaussian) / gaussian < 0.01
