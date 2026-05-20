@@ -27,8 +27,15 @@ def _compile_function(fn: Callable, *, backend: str, target: str,
             fallback_to_eager=fallback_to_eager)
     except AttributeError:
         # tenzor_core exists but jit submodule not compiled in (MLIR JIT OFF).
-        class _NotEnabled:
-            """Placeholder returned when MLIR JIT is not enabled at build time."""
+        # Return a deferred-error wrapper that raises JitNotEnabledError on
+        # first invocation — keeps the decorator usable as a no-op for
+        # builds without the JIT, but loudly tells the user how to enable
+        # it the moment they actually try to compile.  (Audit item I.7:
+        # renamed from "_NotEnabled / placeholder" so the symbol no longer
+        # implies it is a placeholder waiting for a real implementation.)
+        class _JitDisabledStub:
+            """Deferred error: invocation raises JitNotEnabledError until
+            the build re-enables MLIR JIT."""
             def __init__(self, fn_: Callable):
                 self._fn = fn_
                 functools.update_wrapper(self, fn_)
@@ -37,10 +44,10 @@ def _compile_function(fn: Callable, *, backend: str, target: str,
                     f"@tz.jit: MLIR JIT is not enabled in this build. "
                     f"Rebuild Tenzor with -DTENZOR_USE_MLIR_JIT=ON to enable it. "
                     f"See docs/jit-mlir-setup.md for installation instructions.")
-        return _NotEnabled(fn)
+        return _JitDisabledStub(fn)
     except ImportError:
-        # tenzor_core not found at all — still return a helpful placeholder.
-        class _NoCoreNotEnabled:  # type: ignore[no-redef]
+        # tenzor_core not found at all — same deferred-error pattern.
+        class _CoreMissingStub:  # type: ignore[no-redef]
             def __init__(self, fn_: Callable):
                 self._fn = fn_
                 functools.update_wrapper(self, fn_)
@@ -48,7 +55,7 @@ def _compile_function(fn: Callable, *, backend: str, target: str,
                 raise JitNotEnabledError(
                     "@tz.jit: tenzor_core C++ module not found. "
                     "Build the project and set PYTHONPATH to include build/python.")
-        return _NoCoreNotEnabled(fn)
+        return _CoreMissingStub(fn)
 
 
 def jit(fn: Callable[..., Any] | None = None, *,
