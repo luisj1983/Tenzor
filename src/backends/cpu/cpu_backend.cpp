@@ -296,6 +296,14 @@ public:
         std::memcpy(dst, src, bytes);
     }
 
+    // Audit item F.7 — Backend::memset's default throws.  CPU has a
+    // trivial implementation that just forwards to std::memset; the GPU
+    // backends override with cudaMemset / hipMemset / etc.
+    auto memset(void* ptr, int value, size_t bytes,
+                [[maybe_unused]] int32_t device_id) -> void override {
+        std::memset(ptr, value, bytes);
+    }
+
     auto synchronize([[maybe_unused]] int32_t device_id) -> void override {
         // CPU is always synchronized
     }
