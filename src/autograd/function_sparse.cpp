@@ -96,7 +96,14 @@ auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     // sparse gradients can detect the sparsity pattern from the result
     // (zeros at positions outside A's pattern).
     auto& grad_c = grad_outputs[0];
-    std::vector<Tensor> result;
+    // The result vector MUST align positionally with input_variables_:
+    //   result[0] = grad w.r.t. A
+    //   result[1] = grad w.r.t. B
+    // Pre-allocate with empty Tensor placeholders so a missing
+    // sparse_a_t_ / sparse_b_t_ doesn't shift grad_B into result[0]
+    // (audit item B.4).  Downstream engine code treats an empty Tensor
+    // at position k as "no gradient for input k".
+    std::vector<Tensor> result(2);
 
     // B.6: dual return — dense Tensor for the standard autograd engine
     // (every leaf has a dense grad slot), AND a SparseTensor stored on
@@ -130,7 +137,7 @@ auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
                                               existing.shape()));
             }
         }
-        result.push_back(std::move(dense_grad_a));
+        result[0] = std::move(dense_grad_a);
     }
     if (sparse_a_t_.has_value()) {
         Tensor dense_grad_b = sparse::spmm(sparse_a_t_.value(), grad_c);
@@ -145,7 +152,7 @@ auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
                                               existing.shape()));
             }
         }
-        result.push_back(std::move(dense_grad_b));
+        result[1] = std::move(dense_grad_b);
     }
     return result;
 }
