@@ -3525,9 +3525,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        // Forward to the inline tenzor::trace(Tensor) implementation. The
-        // earlier "handled inline" stub broke parity tests that exercise
-        // the dispatch path directly via dispatch<OpId::Trace>.
+        // Forward to the inline tenzor::trace(Tensor) implementation.
         return tenzor::trace(inputs[0]);
     });
 

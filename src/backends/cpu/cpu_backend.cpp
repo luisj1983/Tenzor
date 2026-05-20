@@ -319,8 +319,6 @@ public:
     auto synchronize_stream([[maybe_unused]] StreamHandle stream) -> void override {
         // No-op for CPU
     }
-
-    // Legacy string-keyed dispatch removed (audit Phase C).
 };
 
 // Forward declaration of kernel registration function

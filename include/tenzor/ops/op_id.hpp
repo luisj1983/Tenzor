@@ -261,12 +261,8 @@ enum class OpId : uint16_t {
     GatherRelativePositionBias,
     NMS,                       // Non-Maximum Suppression
     GridSample,                // F.grid_sample spatial transformer
-    // Inf-D follow-up: AffineGrid was auto-incrementing to 210, which
-    // collided with FusedLinearReLU = 210 below. Pinned to 695 to leave
-    // the Fused (210-229) and Creation (230-249) blocks intact while
-    // giving AffineGrid a unique slot. The ONNX exporter mapping at
-    // src/onnx/exporter.cpp can now route AffineGrid -> "AffineGrid"
-    // distinctly from FusedLinearReLU -> "Relu".
+    // AffineGrid is pinned to 692 so it does not collide with
+    // FusedLinearReLU=210; auto-incrementing here would have collided.
     AffineGrid = 692,          // F.affine_grid for grid generation
 
     // =========================================================================
