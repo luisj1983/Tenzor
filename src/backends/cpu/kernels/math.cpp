@@ -7736,34 +7736,10 @@ T igammac_cf(T a, T x) {
     T C = tiny;
     T D = T(0);
 
-    for (int n = 1; n <= max_iter; ++n) {
-        T an, bn;
-        if (n == 1) {
-            an = T(1);
-            bn = x + T(1) - a;
-        } else if (n % 2 == 0) {
-            int k = n / 2;
-            an = T(k) * (a - T(k));
-            bn = x + T(2 * k + 1) - a;
-        } else {
-            int k = (n - 1) / 2;
-            an = -(a + T(k)) * (a + T(k));  // Corrected: should be -(a+k)*(... )
-            // Actually for the standard CF representation of Q(a,x):
-            // Use the even/odd form. Let's use a simpler CF form.
-            an = -(a - T(1) + T(n)) * T(n == 1 ? 1 : (n - 1) / 2);
-            bn = x + T(n) - a;
-        }
-        // Simplified: use the standard CF for gamma
-        // a_n = n*(a-n) for even n, a_n = -(a-1+n)*((n-1)/2) for odd n>1
-        // This is getting complex. Let's use a cleaner approach.
-        (void)an; (void)bn;
-        break;
-    }
-
-    // Cleaner approach: compute Q(a,x) = 1 - P(a,x) when series is used,
-    // or use series directly for P(a,x) and subtract.
-    // For the CF path, use Gauss continued fraction:
-    // 1/(x+1-a+ 1*(1-a)/(x+3-a+ 2*(2-a)/(x+5-a+ ...)))
+    // Use the standard Gauss continued fraction for Q(a, x):
+    //   1/(x+1-a + 1*(1-a)/(x+3-a + 2*(2-a)/(x+5-a + ...)))
+    // (audit item F.2 — removed an earlier dead-aborted experimental
+    // loop that was left in source.)
     f = x + T(1) - a;
     if (std::abs(f) < tiny) f = tiny;
     C = f;

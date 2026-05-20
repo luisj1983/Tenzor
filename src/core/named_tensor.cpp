@@ -177,23 +177,13 @@ auto NamedTensor::unsqueeze(const std::string& name, int64_t dim) const
     -> NamedTensor {
     auto out = tensor_.unsqueeze(dim);
 
-    // Normalise negative dim.
+    // Normalise negative dim, then insert the new name at that
+    // position in a copy of the existing name vector (audit item I.5 —
+    // removed dead scaffolding loop that the next two lines made
+    // redundant anyway).
     int64_t effective_dim = dim < 0 ? ndim() + 1 + dim : dim;
 
-    std::vector<std::optional<std::string>> new_names;
-    new_names.reserve(static_cast<size_t>(ndim() + 1));
-    for (int64_t i = 0; i < ndim() + 1; ++i) {
-        if (i == effective_dim) {
-            new_names.push_back(name);
-        }
-        if (i < ndim()) {
-            // Insert existing name except when we've already hit all dims.
-            // We need a separate counter for old dims.
-        }
-    }
-    // Simpler approach: insert into copy.
-    new_names.clear();
-    new_names = names_;
+    std::vector<std::optional<std::string>> new_names = names_;
     new_names.insert(
         new_names.begin() + effective_dim,
         std::make_optional(name));
