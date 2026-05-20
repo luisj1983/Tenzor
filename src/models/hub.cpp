@@ -3,6 +3,7 @@
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/nn/safetensors.hpp"  // Audit H2: format-aware loader
 #include "tenzor/io/torch_pickle.hpp" // H2-followup: native .pth pickle parser
+#include "tenzor/utils/log.hpp"      // Audit I.4: unified logger
 #include <unordered_set>  // H3-followup-keyremap
 #include <cctype>          // H3-followup-keyremap
 #include <curl/curl.h>
@@ -181,8 +182,11 @@ public:
 
             retries++;
             if (retries <= config.max_retries) {
-                std::cerr << "Download failed (attempt " << retries << "/" << config.max_retries
-                         << "): " << curl_easy_strerror(res) << std::endl;
+                // Audit I.4: unified logger.
+                TENZOR_LOG_WARN("ModelHub: download failed (attempt {}/{}): {}",
+                                retries,
+                                config.max_retries,
+                                curl_easy_strerror(res));
                 std::this_thread::sleep_for(std::chrono::seconds(1 << (retries - 1)));  // Exponential backoff
             }
         }
@@ -359,7 +363,9 @@ std::string ModelHub::download_weights(
                 }
                 return cache_path;
             } else {
-                std::cerr << "Cached file checksum mismatch, re-downloading..." << std::endl;
+                // Audit I.4: unified logger.
+                TENZOR_LOG_WARN("ModelHub: cached file checksum mismatch, re-downloading: {}",
+                                cache_path);
                 fs::remove(cache_path);
             }
         } else {
@@ -510,7 +516,8 @@ void ModelHub::load_pretrained_weights(
             // and masked the real error.
             throw std::runtime_error(std::string("Failed to load weights: ") + load_error);
         }
-        std::cerr << "Warning: Partial weight loading - " << load_error << std::endl;
+        // Audit I.4: unified logger.
+        TENZOR_LOG_WARN("ModelHub: partial weight loading - {}", load_error);
     }
 
     // H3-followup-keyremap: rewrite common torchvision/timm naming conventions
@@ -578,10 +585,11 @@ void ModelHub::load_pretrained_weights(
             if (strict) {
                 remapped.emplace(k, t);
             } else {
-                std::cerr << "Warning: dropping unmatched checkpoint key '"
-                          << k << "' (no target param/buffer); "
-                             "use strict=true to see all unmatched keys."
-                          << std::endl;
+                // Audit I.4: unified logger.
+                TENZOR_LOG_WARN("ModelHub: dropping unmatched checkpoint key '{}' "
+                                "(no target param/buffer); use strict=true to see "
+                                "all unmatched keys.",
+                                k);
             }
         }
         state_dict = std::move(remapped);
@@ -597,7 +605,9 @@ void ModelHub::load_pretrained_weights(
         if (strict) {
             throw std::runtime_error(std::string("Failed to load state dict: ") + e.what());
         } else {
-            std::cerr << "Warning: Model state_dict loading failed - " << e.what() << std::endl;
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("ModelHub: state_dict loading failed (non-strict): {}",
+                            e.what());
         }
     }
 }
