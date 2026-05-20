@@ -276,8 +276,17 @@ auto compile_via_subprocess(const std::string& mlir_text,
     // larger modules (>32 KB) in IREE 3.11+ — the parser couldn't decide
     // the dialect from a partial pipe read. Passing a file path lets
     // iree-compile mmap the whole thing and sniff dialects reliably.
-    char mlir_tmp_template[] = "/tmp/tenzor_mlir_XXXXXX.mlir";
-    int mlir_fd = mkstemps(mlir_tmp_template, /*suffixlen=*/5);
+    // Audit item I.15: use the platform-specific temp dir instead of a
+    // hard-coded `/tmp/` prefix.  std::filesystem::temp_directory_path()
+    // honours $TMPDIR on POSIX and %TEMP%/%TMP% on Windows, so sandboxed
+    // and Windows builds work without patching.
+    std::string mlir_tmp_str =
+        (std::filesystem::temp_directory_path() / "tenzor_mlir_XXXXXX.mlir").string();
+    // mkstemps mutates the template buffer in place; copy into a writable
+    // char array of known size (max-path is fine for our use).
+    std::vector<char> mlir_tmp_template(mlir_tmp_str.begin(), mlir_tmp_str.end());
+    mlir_tmp_template.push_back('\0');
+    int mlir_fd = mkstemps(mlir_tmp_template.data(), /*suffixlen=*/5);
     if (mlir_fd < 0) {
         throw JitCompileError(
             std::string("mkstemps for MLIR input failed: ") + std::strerror(errno),
@@ -291,7 +300,7 @@ auto compile_via_subprocess(const std::string& mlir_text,
             if (n < 0) {
                 if (errno == EINTR) continue;
                 ::close(mlir_fd);
-                ::unlink(mlir_tmp_template);
+                ::unlink(mlir_tmp_template.data());
                 throw JitCompileError(
                     std::string("write to MLIR temp failed: ") + std::strerror(errno),
                     mlir_path);
@@ -302,12 +311,12 @@ auto compile_via_subprocess(const std::string& mlir_text,
     ::close(mlir_fd);
     args.push_back("-o");
     args.push_back(vmfb_path.string());
-    args.push_back(mlir_tmp_template);  // path; iree-compile mmaps it
+    args.push_back(std::string(mlir_tmp_template.data()));  // path; iree-compile mmaps it
     std::string stderr_text, vmfb_unused;
     // Pass empty stdin since we're using a file path.
     const int rc = run_iree_compile_subprocess(bin, args, std::string{},
                                                stderr_text, vmfb_unused);
-    ::unlink(mlir_tmp_template);
+    ::unlink(mlir_tmp_template.data());
     if (rc != 0) {
         throw JitCompileError(
             "iree-compile subprocess (target=" + target + ") exit=" +
