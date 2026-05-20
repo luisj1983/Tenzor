@@ -2742,7 +2742,15 @@ class LinalgHouseholderBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit item B.3: previously declared STRUCTURAL_ZERO_STUB, which
+    // claimed `is_higher_order_stub() == true` even though the first-order
+    // backward (function_new_ops.cpp:807) is a real closed-form
+    // implementation.  The stub macro was a lie that also installed a
+    // passthrough `backward_with_variables` — wrong for a non-linear op.
+    // Removed; create_graph=true through Householder now raises a clear
+    // "higher-order not supported" error from the base class default,
+    // which is the honest contract for an op that has not yet shipped
+    // its second-order backward.
     auto name() const -> std::string override { return "LinalgHouseholderBackward"; }
 };
 
