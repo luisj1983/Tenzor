@@ -2,15 +2,15 @@
 # Always available, uses SIMD and OpenMP for optimization
 #
 # Optimization Headers (header-only, included where needed):
-#   kernels/reduction_optimized.hpp    - Pre-computed strides, SIMD horizontal reductions
 #   kernels/float16_simd.hpp           - F16C SIMD intrinsics for Float16 operations
 #   kernels/buffer_pool.hpp            - Thread-local buffer pool for temp allocations
 #   kernels/fused_conv_bn_relu.hpp     - Fused Conv2d + BatchNorm + ReLU kernel
-#   kernels/activations_backward_simd.hpp - SIMD backward passes for activations
-#   kernels/gemm_packing_simd.hpp      - SIMD-accelerated GEMM packing
-#   kernels/fused_linear_optimized.hpp - Optimized fused linear layer operations
 #   kernels/gemm_optimized.hpp         - High-performance GEMM micro-kernels
 #   kernels/simd_fast_math.hpp         - Fast transcendental approximations
+# (Audit item F.1: removed reduction_optimized.hpp,
+#  activations_backward_simd.hpp, gemm_packing_simd.hpp,
+#  fused_linear_optimized.hpp, quantized_matmul.hpp, transpose_simd.hpp
+#  — all six were orphan experiments with zero non-self includers.)
 
 # Option for portable binary builds (multi-ISA kernel compilation)
 option(TENZOR_PORTABLE "Build portable binaries with runtime SIMD dispatch instead of -march=native" OFF)
