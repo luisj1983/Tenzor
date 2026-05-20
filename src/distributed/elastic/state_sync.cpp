@@ -4,6 +4,8 @@
  */
 
 #include "tenzor/distributed/elastic/state_sync.hpp"
+#include "tenzor/nn/serialize.hpp"
+#include "tenzor/nn/module.hpp"
 #include "tenzor/utils/log.hpp"
 #include <filesystem>
 #include <iostream>
@@ -30,15 +32,16 @@ auto StateSync::save_checkpoint(const nn::Module& module,
 
     auto path = checkpoint_dir + "/rank_" + std::to_string(rank) + ".pt";
 
-    // Save state dict
+    // Audit (elastic-D2-followup): actually persist the state dict via the
+    // existing Tenzor serializer. Previously this only logged "saved";
+    // recovery from a real elastic-trainer crash had nothing to load from.
     auto state = module.state_dict();
-    // In production: use nn::Serializer::save(state, path)
-    // For now: mark as saved
-    // Audit I.4: unified logger (was raw stderr write).
-    TENZOR_LOG_INFO("[StateSync] Checkpoint saved to {}", path);
+    nn::Serializer::save(state, path);
+    TENZOR_LOG_INFO("[StateSync] Checkpoint saved to {} ({} tensors)",
+                    path, state.size());
 }
 
-auto StateSync::load_checkpoint([[maybe_unused]] nn::Module& module,
+auto StateSync::load_checkpoint(nn::Module& module,
                                  const std::string& checkpoint_dir,
                                  int rank) -> void {
     // Try to load from the exact rank first
@@ -55,9 +58,14 @@ auto StateSync::load_checkpoint([[maybe_unused]] nn::Module& module,
         return;
     }
 
-    // In production: use nn::Serializer::load(path) and module.load_state_dict()
-    // Audit I.4: unified logger.
-    TENZOR_LOG_INFO("[StateSync] Checkpoint loaded from {}", path);
+    // Audit (elastic-D2-followup): actually deserialise and re-install the
+    // state dict on the module. Previously the load() body only logged
+    // "loaded" and the [[maybe_unused]] parameter never received the
+    // saved weights.
+    auto state = nn::Serializer::load(path);
+    module.load_state_dict(state);
+    TENZOR_LOG_INFO("[StateSync] Checkpoint loaded from {} ({} tensors)",
+                    path, state.size());
 }
 
 } // namespace elastic
