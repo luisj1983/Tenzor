@@ -257,6 +257,7 @@ inline __m256 sigmoid_avx2(__m256 x) {
 }
 
 /**
+/**
  * @brief AVX2 vectorized pow for positive bases: x^y = exp(y * log(x))
  *
  * WARNING: This function only produces correct results for x > 0.
@@ -268,21 +269,13 @@ inline __m256 sigmoid_avx2(__m256 x) {
  * Accuracy: ~1-2 ULP for positive x in normal float range.
  */
 inline __m256 pow_avx2(__m256 x, __m256 y) {
-    // Clamp x to small positive — negative/zero bases would produce NaN
-    // from log, so we clamp to avoid undefined behavior in the log-exp path.
     __m256 min_val = _mm256_set1_ps(1e-30f);
     x = _mm256_max_ps(x, min_val);
-
-    // pow(x, y) = exp(y * log(x))
     __m256 log_x = log_avx2(x);
     __m256 y_log_x = _mm256_mul_ps(y, log_x);
     return exp_avx2(y_log_x);
 }
 
-/**
- * @brief AVX2 vectorized pow with scalar exponent (positive bases only)
- * @see pow_avx2(__m256, __m256) for limitations on negative bases.
- */
 inline __m256 pow_avx2(__m256 x, float y) {
     return pow_avx2(x, _mm256_set1_ps(y));
 }
@@ -363,15 +356,6 @@ inline __m256 sin_avx2(__m256 x) {
 inline __m256 cos_avx2(__m256 x) {
     __m256 pi_2 = _mm256_set1_ps(1.57079632679f);  // π/2
     return sin_avx2(_mm256_add_ps(x, pi_2));
-}
-
-/**
- * @brief AVX2 vectorized where (conditional select)
- * where(cond, x, y) = cond ? x : y
- */
-inline __m256 where_avx2(__m256 cond_mask, __m256 x, __m256 y) {
-    // cond_mask should be result of comparison (all 1s or all 0s per lane)
-    return _mm256_blendv_ps(y, x, cond_mask);
 }
 
 /**
