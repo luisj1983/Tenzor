@@ -520,10 +520,25 @@ QuantizedBatchNorm2d::QuantizedBatchNorm2d(
     bias_(std::move(bias)) {}
 
 auto QuantizedBatchNorm2d::forward_impl(const Variable& input) -> Variable {
-    // Apply scale and bias
+    // Audit item B.1: QuantizedBatchNorm2d is an INFERENCE-ONLY layer
+    // (it has no learnable parameters in its quantized form — scale and
+    // bias are fixed quantization-aware folded constants).  Previously
+    // returned `Variable(output, input.requires_grad())` which claimed
+    // gradient flow that the raw-tensor pipeline could not deliver.
+    //
+    // Honest contract: build via raw tensor ops, return with
+    // requires_grad=false, and refuse to participate in autograd if the
+    // caller passed a requires_grad=true input (the result was being
+    // silently disconnected from the upstream graph anyway).
+    if (input.requires_grad()) {
+        throw std::runtime_error(
+            "QuantizedBatchNorm2d: input has requires_grad=true but this "
+            "is an inference-only quantized layer; gradients cannot flow "
+            "through.  Use a non-quantized BatchNorm2d for QAT/training.");
+    }
     Tensor scaled = input.tensor() * scale_.unsqueeze(0).unsqueeze(2).unsqueeze(3);
     Tensor output = scaled + bias_.unsqueeze(0).unsqueeze(2).unsqueeze(3);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedBatchNorm2d::forward_quantized(const QuantizedTensor& input) -> QuantizedTensor {
@@ -594,6 +609,16 @@ QuantizedLayerNorm::QuantizedLayerNorm(
     eps_(eps) {}
 
 auto QuantizedLayerNorm::forward_impl(const Variable& input) -> Variable {
+    // Audit item B.1: QuantizedLayerNorm is inference-only; previous
+    // forward built the output via raw tensor ops and wrapped it in
+    // Variable(out, input.requires_grad()) — the raw-tensor pipeline
+    // does not flow gradients, so this was a false claim.
+    if (input.requires_grad()) {
+        throw std::runtime_error(
+            "QuantizedLayerNorm: input has requires_grad=true but this is "
+            "an inference-only quantized layer; gradients cannot flow "
+            "through.  Use a non-quantized LayerNorm for QAT/training.");
+    }
     // Layer norm: y = (x - mean) / sqrt(var + eps) * weight + bias
     // For quantized inference, we compute at float precision
     Tensor x = input.tensor();
@@ -621,7 +646,8 @@ auto QuantizedLayerNorm::forward_impl(const Variable& input) -> Variable {
     normalized = normalized.reshape(std::vector<int64_t>(x_shape.begin(), x_shape.end()));
     Tensor output = normalized * weight_ + bias_;
 
-    return Variable(output, input.requires_grad());
+    // Honest contract — see comment at top of forward_impl.
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedLayerNorm::forward_quantized(const QuantizedTensor& input) -> QuantizedTensor {
@@ -826,10 +852,19 @@ QuantizedConv2dBnReLU::QuantizedConv2dBnReLU(
 }
 
 auto QuantizedConv2dBnReLU::forward_impl(const Variable& input) -> Variable {
-    // Quantize input, run fused conv+BN+ReLU, return float output
+    // Audit item B.1: inference-only quantized layer.  Previously
+    // returned `Variable(output, input.requires_grad())` claiming
+    // gradient flow that the quantize→fused-conv-bn-relu→dequant
+    // pipeline cannot deliver.
+    if (input.requires_grad()) {
+        throw std::runtime_error(
+            "QuantizedConv2dBnReLU: input has requires_grad=true but this "
+            "is an inference-only quantized fused layer.  Use a "
+            "non-quantized Conv2d+BatchNorm2d+ReLU for QAT/training.");
+    }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedConv2dBnReLU::forward_quantized(const QuantizedTensor& input) -> Tensor {
@@ -1889,9 +1924,17 @@ QuantizedConv1d::QuantizedConv1d(
     bias_scale_(bias_scale) {}
 
 auto QuantizedConv1d::forward_impl(const Variable& input) -> Variable {
+    // Audit item B.1: inference-only quantized layer; reject
+    // requires_grad inputs instead of falsely claiming grad flow.
+    if (input.requires_grad()) {
+        throw std::runtime_error(
+            "QuantizedConv1d: input has requires_grad=true but this is "
+            "an inference-only quantized layer.  Use a non-quantized "
+            "Conv1d for training.");
+    }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedConv1d::forward_quantized(const QuantizedTensor& input) -> Tensor {
@@ -2040,9 +2083,16 @@ QuantizedConvTranspose2d::QuantizedConvTranspose2d(
     bias_scale_(bias_scale) {}
 
 auto QuantizedConvTranspose2d::forward_impl(const Variable& input) -> Variable {
+    // Audit item B.1: inference-only quantized layer.
+    if (input.requires_grad()) {
+        throw std::runtime_error(
+            "QuantizedConvTranspose2d: input has requires_grad=true but "
+            "this is an inference-only quantized layer.  Use a "
+            "non-quantized ConvTranspose2d for training.");
+    }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedConvTranspose2d::forward_quantized(const QuantizedTensor& input) -> Tensor {
