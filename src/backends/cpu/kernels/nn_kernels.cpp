@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/omp_thresholds.hpp"
+#include "tenzor/utils/log.hpp"
 #include <bit>
 #include <random>
 #include <cmath>
@@ -211,7 +212,11 @@ static bool linear_onednn(
         stream.wait();
         return true;
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected exceptions in the oneDNN Linear
+        // fast path. Returning false silently downgraded any non-dnnl
+        // exception to the scalar fallback and hid the underlying bug.
+        TENZOR_LOG_ERROR("[oneDNN Linear] unexpected exception in fast path; rethrowing");
+        throw;
     }
 }
 #endif
@@ -1198,15 +1203,18 @@ static bool layer_norm_onednn(
         stream.wait();
         return true;
     } catch (const std::exception& e) {
-#ifndef NDEBUG
-        std::cerr << "[TENZOR] oneDNN LayerNorm failed: " << e.what() << std::endl;
-#endif
+        // Audit F.4: log via the unified logger (was stderr-only in debug
+        // builds previously). Returning false hands control back to the
+        // scalar fallback, which is the documented behaviour for the
+        // oneDNN LayerNorm fast path.
+        TENZOR_LOG_WARN("[oneDNN LayerNorm] failed ({}); using scalar fallback", e.what());
         return false;
     } catch (...) {
-#ifndef NDEBUG
-        std::cerr << "[TENZOR] oneDNN LayerNorm failed with unknown exception" << std::endl;
-#endif
-        return false;
+        // Audit F.4: surface unexpected non-std::exception throws
+        // instead of silently swallowing them.
+        TENZOR_LOG_ERROR("[oneDNN LayerNorm] unexpected non-std::exception "
+                         "in fast path; rethrowing");
+        throw;
     }
 }
 #endif

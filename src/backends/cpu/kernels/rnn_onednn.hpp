@@ -367,7 +367,15 @@ inline bool lstm_forward_onednn(
                         e.what());
         return false;
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected non-dnnl exceptions. The
+        // outer dnnl::error catch above already handles primitive-
+        // descriptor failures with a documented scalar fallback;
+        // anything reaching this branch is a non-oneDNN exception
+        // (bad_alloc, logic_error from our wrappers, etc.) and
+        // should not be silently swallowed.
+        TENZOR_LOG_ERROR("[LSTM single-layer oneDNN] unexpected non-dnnl exception "
+                         "in fast path; rethrowing");
+        throw;
     }
 }
 
@@ -522,7 +530,11 @@ inline bool lstm_forward_onednn_with_cache(
         return true;
 
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected exceptions instead of silently
+        // returning false; the caller's fallback should kick in only on a
+        // documented dnnl::error path.
+        TENZOR_LOG_ERROR("[LSTM oneDNN cached-primitive] unexpected exception; rethrowing");
+        throw;
     }
 }
 
@@ -635,7 +647,12 @@ inline bool bilstm_forward_onednn(
         return true;
 
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected exceptions in the BiLSTM stitch
+        // path. The fwd/bwd direction calls each handle their own
+        // dnnl::error fallback; reaching this catch means something else
+        // broke.
+        TENZOR_LOG_ERROR("[BiLSTM oneDNN stitch] unexpected exception; rethrowing");
+        throw;
     }
 }
 
@@ -864,7 +881,11 @@ inline bool gru_forward_onednn(
                         e.what());
         return false;
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected non-dnnl exceptions in the GRU
+        // single-layer fast path.
+        TENZOR_LOG_ERROR("[GRU single-layer oneDNN] unexpected non-dnnl exception "
+                         "in fast path; rethrowing");
+        throw;
     }
 }
 
@@ -1048,7 +1069,12 @@ inline bool lstm_multilayer_forward_onednn(
 
         return true;
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected exceptions in the multi-layer
+        // LSTM fast path. Per-layer fast paths already handle dnnl::error
+        // with documented scalar fallbacks; anything reaching this catch
+        // is a non-dnnl exception worth surfacing.
+        TENZOR_LOG_ERROR("[LSTM multi-layer oneDNN] unexpected exception; rethrowing");
+        throw;
     }
 
 }
@@ -1394,7 +1420,11 @@ inline bool gru_multilayer_forward_onednn(
                         e.what());
         return false;
     } catch (...) {
-        return false;
+        // Audit F.4: surface unexpected non-dnnl exceptions in the GRU
+        // multi-layer fast path.
+        TENZOR_LOG_ERROR("[GRU multi-layer oneDNN] unexpected non-dnnl exception "
+                         "in fast path; rethrowing");
+        throw;
     }
 }
 
