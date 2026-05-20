@@ -331,26 +331,34 @@ auto torch_storage_name_to_dtype(const std::string& mod, const std::string& name
             "torch_pickle: persistent ID dtype must be torch.*Storage, got " +
             mod + "." + name);
     }
-    if (name == "FloatStorage")   return {DType::Float32, 4};
-    if (name == "DoubleStorage")  return {DType::Float64, 8};
-    if (name == "HalfStorage")    return {DType::Float16, 2};
-    if (name == "BFloat16Storage")return {DType::BFloat16, 2};
-    if (name == "LongStorage")    return {DType::Int64, 8};
-    if (name == "IntStorage")     return {DType::Int32, 4};
-    if (name == "ShortStorage")   return {DType::Int16, 2};
-    if (name == "CharStorage")    return {DType::Int8, 1};
-    if (name == "ByteStorage")    return {DType::UInt8, 1};
-    if (name == "BoolStorage")    return {DType::Bool, 1};
+    if (name == "FloatStorage")          return {DType::Float32, 4};
+    if (name == "DoubleStorage")         return {DType::Float64, 8};
+    if (name == "HalfStorage")           return {DType::Float16, 2};
+    if (name == "BFloat16Storage")       return {DType::BFloat16, 2};
+    if (name == "LongStorage")           return {DType::Int64, 8};
+    if (name == "IntStorage")            return {DType::Int32, 4};
+    if (name == "ShortStorage")          return {DType::Int16, 2};
+    if (name == "CharStorage")           return {DType::Int8, 1};
+    if (name == "ByteStorage")           return {DType::UInt8, 1};
+    if (name == "BoolStorage")           return {DType::Bool, 1};
+    // Audit I.13: extend coverage to complex storages. torch saves
+    // Complex64 as `ComplexFloatStorage` (two float32 interleaved) and
+    // Complex128 as `ComplexDoubleStorage` (two float64 interleaved).
+    // Our DType::Complex64/Complex128 use the same byte layout so the
+    // raw storage copy is a 1:1 bit copy with no per-element conversion.
+    if (name == "ComplexFloatStorage")   return {DType::Complex64, 8};
+    if (name == "ComplexDoubleStorage")  return {DType::Complex128, 16};
     throw std::runtime_error(
         "torch_pickle: unsupported torch storage dtype: torch." + name +
         ". Supported storage types: FloatStorage (Float32), "
         "DoubleStorage (Float64), HalfStorage (Float16), "
         "BFloat16Storage (BFloat16), LongStorage (Int64), "
         "IntStorage (Int32), ShortStorage (Int16), CharStorage (Int8), "
-        "ByteStorage (UInt8), BoolStorage (Bool). "
-        "Complex64/Complex128/quantized storages are not implemented in the "
-        "native pickle reader; re-save the model as safetensors "
-        "(`model.safetensors`) and load through "
+        "ByteStorage (UInt8), BoolStorage (Bool), "
+        "ComplexFloatStorage (Complex64), ComplexDoubleStorage (Complex128). "
+        "Quantized storages (QInt8Storage / QUInt8Storage) are not yet "
+        "implemented in the native pickle reader; re-save those tensors as "
+        "safetensors (`model.safetensors`) and load through "
         "ModelHub::load_pretrained_weights instead.");
 }
 
