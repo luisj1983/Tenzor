@@ -152,6 +152,54 @@ TEST_F(OptimizersExtendedTest, RMSpropInvalidParameters) {
     EXPECT_THROW(RMSprop(params_, 0.01, 0.99, -1e-8), std::invalid_argument);  // Negative eps
 }
 
+// Audit item D.5 — RMSprop state_dict must round-trip every hyperparameter
+// (lr / alpha / eps / weight_decay / momentum / centered) in addition to the
+// per-parameter buffers.  Previously dropped, so a checkpoint→restart of
+// a non-default-hyperparam RMSprop silently reverted to constructor
+// defaults.
+TEST_F(OptimizersExtendedTest, RMSpropStateDictRoundTripsHyperparams) {
+    // Use distinctly non-default hyperparams so any default-revert is visible.
+    const double lr           = 0.0123;
+    const double alpha        = 0.91;
+    const double eps          = 1e-6;
+    const double weight_decay = 0.0042;
+    const double momentum     = 0.07;
+    const bool   centered     = true;
+
+    auto src = RMSprop(params_, lr, alpha, eps, weight_decay, momentum, centered);
+    // Capture state without running steps so the buffers are zero-initialised
+    // (this test focuses on hyperparam round-trip, not buffer reproducibility).
+    auto state = src.state_dict();
+
+    // Build a destination optimiser with ALL defaults distinctly different
+    // from src so any missing field is detected by the comparison below.
+    auto dst = RMSprop(params_, /*lr=*/0.5);
+    dst.load_state_dict(state);
+
+    EXPECT_DOUBLE_EQ(dst.get_lr(), lr) << "lr not restored from state_dict";
+
+    // Round-trip through a second state_dict; values should match `state`.
+    auto state2 = dst.state_dict();
+    EXPECT_DOUBLE_EQ(state2["lr"].data<double>()[0],            lr);
+    EXPECT_DOUBLE_EQ(state2["alpha"].data<double>()[0],         alpha);
+    EXPECT_DOUBLE_EQ(state2["eps"].data<double>()[0],           eps);
+    EXPECT_DOUBLE_EQ(state2["weight_decay"].data<double>()[0],  weight_decay);
+    EXPECT_DOUBLE_EQ(state2["momentum"].data<double>()[0],      momentum);
+    EXPECT_EQ      (state2["centered"].data<int64_t>()[0],      centered ? 1 : 0);
+}
+
+// D.5 (buffer-count guard): load_state_dict must reject a checkpoint whose
+// parameter count does not match the current optimiser, mirroring Adam's
+// guard (which catches mis-aligned per-parameter buffers).
+TEST_F(OptimizersExtendedTest, RMSpropLoadStateDictRejectsParamCountMismatch) {
+    auto src = RMSprop(params_, 0.01);
+    auto state = src.state_dict();
+    // Force a count mismatch by overwriting the stored num_params.
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(params_.size() + 1);
+    auto dst = RMSprop(params_, 0.01);
+    EXPECT_THROW(dst.load_state_dict(state), std::runtime_error);
+}
+
 // ============================================================================
 // Adagrad Tests
 // ============================================================================

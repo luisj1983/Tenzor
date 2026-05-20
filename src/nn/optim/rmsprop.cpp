@@ -196,9 +196,59 @@ auto RMSprop::get_lr() const -> double {
     return lr_;
 }
 
+// Audit item D.5: state_dict / load_state_dict must persist the
+// hyperparams alongside the buffers so an optimiser restarted from
+// checkpoint resumes with the exact same configuration.  Previously
+// RMSprop dropped lr/alpha/eps/weight_decay/momentum/centered.
+
+namespace {
+
+inline Tensor scalar_f64(double v) {
+    Tensor t({1}, DType::Float64, Device::cpu());
+    t.data<double>()[0] = v;
+    return t;
+}
+
+inline Tensor scalar_i64(int64_t v) {
+    Tensor t({1}, DType::Int64, Device::cpu());
+    t.data<int64_t>()[0] = v;
+    return t;
+}
+
+inline double get_scalar_f64(const std::unordered_map<std::string, Tensor>& m,
+                             const std::string& key,
+                             double fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Float64) {
+        return it->second.data<double>()[0];
+    }
+    if (it->second.dtype() == DType::Float32) {
+        return static_cast<double>(it->second.data<float>()[0]);
+    }
+    return fallback;
+}
+
+inline int64_t get_scalar_i64(const std::unordered_map<std::string, Tensor>& m,
+                              const std::string& key,
+                              int64_t fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Int64) {
+        return it->second.data<int64_t>()[0];
+    }
+    if (it->second.dtype() == DType::Int32) {
+        return static_cast<int64_t>(it->second.data<int32_t>()[0]);
+    }
+    return fallback;
+}
+
+}  // namespace
+
 auto RMSprop::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 
+    // Per-parameter buffers
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
         state[prefix + ".square_avg"] = square_avg_[i];
@@ -212,10 +262,38 @@ auto RMSprop::state_dict() const -> std::unordered_map<std::string, Tensor> {
         }
     }
 
+    // Hyperparameters — required for full round-trip (D.5).
+    state["lr"]            = scalar_f64(lr_);
+    state["alpha"]         = scalar_f64(alpha_);
+    state["eps"]           = scalar_f64(eps_);
+    state["weight_decay"]  = scalar_f64(weight_decay_);
+    state["momentum"]      = scalar_f64(momentum_);
+    state["centered"]      = scalar_i64(centered_ ? 1 : 0);
+    state["num_params"]    = scalar_i64(static_cast<int64_t>(parameters_.size()));
+
     return state;
 }
 
 auto RMSprop::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Buffer-count validation (matches Adam's pattern).
+    int64_t expected_n = get_scalar_i64(state, "num_params",
+                                        static_cast<int64_t>(parameters_.size()));
+    if (expected_n != static_cast<int64_t>(parameters_.size())) {
+        throw std::runtime_error(
+            "RMSprop::load_state_dict: parameter count mismatch (state has " +
+            std::to_string(expected_n) + ", optimiser has " +
+            std::to_string(parameters_.size()) + ")");
+    }
+
+    // Restore hyperparameters first so derived flags (e.g. centered_) are
+    // up-to-date when we read the per-parameter buffers.
+    lr_           = get_scalar_f64(state, "lr",            lr_);
+    alpha_        = get_scalar_f64(state, "alpha",         alpha_);
+    eps_          = get_scalar_f64(state, "eps",           eps_);
+    weight_decay_ = get_scalar_f64(state, "weight_decay",  weight_decay_);
+    momentum_     = get_scalar_f64(state, "momentum",      momentum_);
+    centered_     = (get_scalar_i64(state, "centered", centered_ ? 1 : 0) != 0);
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
 
