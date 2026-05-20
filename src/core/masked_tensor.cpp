@@ -52,6 +52,66 @@ auto MaskedTensor::fill_masked(float value) const -> Tensor {
     return tenzor::where(mask_, data_, fill);
 }
 
+namespace {
+
+/// Sentinel used by MaskedTensor::max() to fill masked positions before
+/// taking a global maximum.  Integer dtypes use the minimum representable
+/// value; floating-point dtypes use -inf; complex types use -inf for the
+/// real part (audit item A.7).
+auto dtype_min_sentinel(DType dt) -> double {
+    switch (dt) {
+        case DType::Float16:
+        case DType::BFloat16:
+        case DType::Float32:
+        case DType::Float64:
+        case DType::Complex64:
+        case DType::Complex128:
+            return -std::numeric_limits<double>::infinity();
+        case DType::Int8:
+            return static_cast<double>(std::numeric_limits<int8_t>::min());
+        case DType::Int16:
+            return static_cast<double>(std::numeric_limits<int16_t>::min());
+        case DType::Int32:
+            return static_cast<double>(std::numeric_limits<int32_t>::min());
+        case DType::Int64:
+            return static_cast<double>(std::numeric_limits<int64_t>::min());
+        case DType::UInt8:
+        case DType::Bool:
+            return 0.0;
+        default:
+            return -std::numeric_limits<double>::infinity();
+    }
+}
+
+/// Sentinel used by MaskedTensor::min() — maximum representable value.
+auto dtype_max_sentinel(DType dt) -> double {
+    switch (dt) {
+        case DType::Float16:
+        case DType::BFloat16:
+        case DType::Float32:
+        case DType::Float64:
+        case DType::Complex64:
+        case DType::Complex128:
+            return std::numeric_limits<double>::infinity();
+        case DType::Int8:
+            return static_cast<double>(std::numeric_limits<int8_t>::max());
+        case DType::Int16:
+            return static_cast<double>(std::numeric_limits<int16_t>::max());
+        case DType::Int32:
+            return static_cast<double>(std::numeric_limits<int32_t>::max());
+        case DType::Int64:
+            return static_cast<double>(std::numeric_limits<int64_t>::max());
+        case DType::UInt8:
+            return static_cast<double>(std::numeric_limits<uint8_t>::max());
+        case DType::Bool:
+            return 1.0;
+        default:
+            return std::numeric_limits<double>::infinity();
+    }
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Full reductions
 // ---------------------------------------------------------------------------
@@ -73,14 +133,18 @@ auto MaskedTensor::mean() const -> Tensor {
 }
 
 auto MaskedTensor::max() const -> Tensor {
-    // Fill masked positions with -inf, then take global max.
-    auto filled = fill_masked(-std::numeric_limits<float>::infinity());
+    // Fill masked positions with the dtype-appropriate minimum so they lose
+    // every max comparison.  Using float ±inf for integer dtypes overflows
+    // / wraps on cast (audit item A.7).
+    auto fill = full_like(data_, dtype_min_sentinel(data_.dtype()));
+    auto filled = tenzor::where(mask_, data_, fill);
     return tenzor::max(filled);
 }
 
 auto MaskedTensor::min() const -> Tensor {
-    // Fill masked positions with +inf, then take global min.
-    auto filled = fill_masked(std::numeric_limits<float>::infinity());
+    // Symmetric to max() — use the dtype-appropriate maximum.
+    auto fill = full_like(data_, dtype_max_sentinel(data_.dtype()));
+    auto filled = tenzor::where(mask_, data_, fill);
     return tenzor::min(filled);
 }
 
@@ -121,27 +185,41 @@ auto MaskedTensor::mean(int64_t dim, bool keepdim) const -> MaskedTensor {
 // Element-wise binary ops
 // ---------------------------------------------------------------------------
 
+// Helper: zero out masked positions of `data` using `mask` so the result's
+// data buffer never carries NaN/Inf leakage from operations that may have
+// produced them at masked positions (audit item A.7).  Integer dtypes can't
+// represent NaN, but the same convention keeps the data buffer well-defined
+// regardless of dtype.
+namespace {
+
+auto zero_masked(const Tensor& data, const Tensor& mask) -> Tensor {
+    auto zero = zeros_like(data);
+    return tenzor::where(mask, data, zero);
+}
+
+}  // namespace
+
 auto MaskedTensor::operator+(const MaskedTensor& other) const -> MaskedTensor {
     auto combined_mask = tenzor::logical_and(mask_, other.mask_);
-    auto result_data = data_ + other.data_;
+    auto result_data = zero_masked(data_ + other.data_, combined_mask);
     return MaskedTensor(std::move(result_data), std::move(combined_mask));
 }
 
 auto MaskedTensor::operator-(const MaskedTensor& other) const -> MaskedTensor {
     auto combined_mask = tenzor::logical_and(mask_, other.mask_);
-    auto result_data = data_ - other.data_;
+    auto result_data = zero_masked(data_ - other.data_, combined_mask);
     return MaskedTensor(std::move(result_data), std::move(combined_mask));
 }
 
 auto MaskedTensor::operator*(const MaskedTensor& other) const -> MaskedTensor {
     auto combined_mask = tenzor::logical_and(mask_, other.mask_);
-    auto result_data = data_ * other.data_;
+    auto result_data = zero_masked(data_ * other.data_, combined_mask);
     return MaskedTensor(std::move(result_data), std::move(combined_mask));
 }
 
 auto MaskedTensor::operator/(const MaskedTensor& other) const -> MaskedTensor {
     auto combined_mask = tenzor::logical_and(mask_, other.mask_);
-    auto result_data = data_ / other.data_;
+    auto result_data = zero_masked(data_ / other.data_, combined_mask);
     return MaskedTensor(std::move(result_data), std::move(combined_mask));
 }
 
