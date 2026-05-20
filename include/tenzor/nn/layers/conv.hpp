@@ -568,7 +568,8 @@ public:
                     int64_t padding = 0,
                     int64_t output_padding = 0,
                     int64_t groups = 1,
-                    bool bias = true);
+                    bool bias = true,
+                    int64_t dilation = 1);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
@@ -579,6 +580,7 @@ public:
                ", stride=" + std::to_string(stride_) +
                ", padding=" + std::to_string(padding_) +
                ", output_padding=" + std::to_string(output_padding_) +
+               ", dilation=" + std::to_string(dilation_) +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
@@ -589,6 +591,7 @@ public:
     auto padding() const -> int64_t { return padding_; }
     auto output_padding() const -> int64_t { return output_padding_; }
     auto groups() const -> int64_t { return groups_; }
+    auto dilation() const -> int64_t { return dilation_; }
 
 private:
     int64_t in_channels_;
@@ -598,6 +601,7 @@ private:
     int64_t padding_;
     int64_t output_padding_;
     int64_t groups_;
+    int64_t dilation_;
 
     auto reset_parameters() -> void;
 };

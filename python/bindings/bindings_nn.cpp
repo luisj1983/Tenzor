@@ -613,7 +613,8 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::ConvTranspose1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::ConvTranspose1d>>(nn, "ConvTranspose1d")
-        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                      int64_t, bool, int64_t>(),
              py::arg("in_channels"),
              py::arg("out_channels"),
              py::arg("kernel_size"),
@@ -621,7 +622,8 @@ void register_nn(py::module_& m) {
              py::arg("padding") = 0,
              py::arg("output_padding") = 0,
              py::arg("groups") = 1,
-             py::arg("bias") = true);
+             py::arg("bias") = true,
+             py::arg("dilation") = 1);
 
     // Normalization layers
     py::class_<tenzor::nn::BatchNorm2d, tenzor::nn::Module,

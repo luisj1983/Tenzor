@@ -1713,9 +1713,10 @@ auto ConvTranspose3d::reset_parameters() -> void {
 class ConvTranspose1dBackward : public Function {
 public:
     ConvTranspose1dBackward(int64_t stride, int64_t padding, int64_t output_padding,
-                            int64_t groups, std::vector<Tensor> tensors_to_save)
+                            int64_t dilation, int64_t groups,
+                            std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), output_padding_(output_padding),
-          groups_(groups) {
+          dilation_(dilation), groups_(groups) {
         save_for_backward(std::move(tensors_to_save));
     }
 
@@ -1737,10 +1738,17 @@ public:
         auto weight_4d = weight.unsqueeze(2);         // [C_in, C_out/g, K] -> [C_in, C_out/g, 1, K]
 
         // grad_input: backward of ConvTranspose w.r.t. input is regular Conv2d
+        //
+        // Audit F.17 ConvTranspose1d dilation: when ConvTranspose1d uses
+        // dilation > 1, its conv-adjoint (Conv2d on the unsqueezed tensors)
+        // must use the same dilation on the W axis. H is the unsqueezed
+        // singleton so dH=1.
         NewOpAttributes conv_attrs;
         conv_attrs.set(AttrKey::Stride, stride_);
         conv_attrs.set(AttrKey::Padding, padding_);
-        conv_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+        conv_attrs.set(AttrKey::Dilation, dilation_);
+        conv_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+        conv_attrs.set(AttrKey::DilationW, dilation_);
         conv_attrs.set(AttrKey::Groups, groups_);
 
         std::vector<Tensor> conv_inputs = {grad_4d, weight_4d};
@@ -1767,7 +1775,9 @@ public:
         NewOpAttributes weight_grad_attrs;
         weight_grad_attrs.set(AttrKey::Stride, stride_);
         weight_grad_attrs.set(AttrKey::Padding, padding_);
-        weight_grad_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+        weight_grad_attrs.set(AttrKey::Dilation, dilation_);
+        weight_grad_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+        weight_grad_attrs.set(AttrKey::DilationW, dilation_);
         weight_grad_attrs.set(AttrKey::Groups, groups_);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
@@ -1800,12 +1810,14 @@ public:
         }
         bool has_bias = saved_tensors_.size() > 2;
 
-        // grad_input: regular conv1d(grad_output, weight) — preserves graph
+        // grad_input: regular conv1d(grad_output, weight) — preserves graph.
+        // Audit F.17 ConvTranspose1d dilation: the regular Conv1d adjoint
+        // must match the forward dilation.
         auto grad_input = ::tenzor::nn::functional::conv1d(
             grad_out_var, weight_var,
             std::nullopt,
             stride_, padding_,
-            1, // dilation=1 for ConvTranspose1d backward
+            dilation_,
             groups_);
 
         // Handle potential shape mismatch due to output_padding
@@ -1832,7 +1844,9 @@ public:
         NewOpAttributes weight_grad_attrs;
         weight_grad_attrs.set(AttrKey::Stride, stride_);
         weight_grad_attrs.set(AttrKey::Padding, padding_);
-        weight_grad_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+        weight_grad_attrs.set(AttrKey::Dilation, dilation_);
+        weight_grad_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+        weight_grad_attrs.set(AttrKey::DilationW, dilation_);
         weight_grad_attrs.set(AttrKey::Groups, groups_);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
@@ -1858,15 +1872,17 @@ private:
     int64_t stride_;
     int64_t padding_;
     int64_t output_padding_;
+    int64_t dilation_;
     int64_t groups_;
 };
 
 ConvTranspose1d::ConvTranspose1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
                                  int64_t stride, int64_t padding, int64_t output_padding,
-                                 int64_t groups, bool bias)
+                                 int64_t groups, bool bias, int64_t dilation)
     : in_channels_(in_channels), out_channels_(out_channels),
       kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), output_padding_(output_padding), groups_(groups) {
+      padding_(padding), output_padding_(output_padding), groups_(groups),
+      dilation_(dilation) {
 
     if (in_channels % groups != 0) {
         throw std::invalid_argument("in_channels must be divisible by groups");
@@ -1874,8 +1890,16 @@ ConvTranspose1d::ConvTranspose1d(int64_t in_channels, int64_t out_channels, int6
     if (out_channels % groups != 0) {
         throw std::invalid_argument("out_channels must be divisible by groups");
     }
-    if (output_padding >= stride) {
-        throw std::invalid_argument("output_padding must be smaller than stride");
+    if (dilation < 1) {
+        throw std::invalid_argument("dilation must be >= 1");
+    }
+    // Audit F.17 ConvTranspose1d dilation: PyTorch's rule is
+    // output_padding < max(stride, dilation), since increasing dilation
+    // grows the effective kernel span (k_eff = (k-1)*dilation + 1) just
+    // as stride > 1 grows the output strided spacing.
+    if (output_padding >= std::max(stride, dilation)) {
+        throw std::invalid_argument(
+            "output_padding must be smaller than max(stride, dilation)");
     }
 
     // Weight shape: [in_channels, out_channels/groups, kernel_size]
@@ -1942,11 +1966,19 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     // "padding" semantically trims output edges). Backward still sees
     // the original padding_ via ConvTranspose1dBackward, so gradients
     // flow correctly.
+    //
+    // Audit F.17 dilation: only the real spatial (W) axis is dilated;
+    // the unsqueezed H axis is a singleton so it must keep dH=1. The
+    // CPU ConvTranspose2d kernel reads DilationH / DilationW per-axis
+    // (with fallback to scalar Dilation), so we set the scalar key for
+    // backward-compat callers and override DilationH/W explicitly.
     NewOpAttributes forward_attrs;
     forward_attrs.set(AttrKey::Stride, stride_);
     forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
-    forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+    forward_attrs.set(AttrKey::Dilation, dilation_);
+    forward_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+    forward_attrs.set(AttrKey::DilationW, dilation_);
     forward_attrs.set(AttrKey::Groups, groups_);
     DType original_dtype = input.dtype();
     auto output_result = dispatch(OpId::ConvTranspose2dForward,
@@ -1984,7 +2016,8 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         }
 
         auto backward_fn = std::make_shared<ConvTranspose1dBackward>(
-            stride_, padding_, output_padding_, groups_, std::move(tensors_to_save)
+            stride_, padding_, output_padding_, dilation_, groups_,
+            std::move(tensors_to_save)
         );
 
         result.set_grad_fn(backward_fn);

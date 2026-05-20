@@ -436,6 +436,11 @@ add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 60)
 
+# ConvTranspose1d dilation regression (audit F.17)
+add_executable(test_convtranspose1d_dilation test_convtranspose1d_dilation.cpp)
+target_link_libraries(test_convtranspose1d_dilation PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_convtranspose1d_dilation DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)

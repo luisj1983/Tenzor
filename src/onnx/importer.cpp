@@ -1324,14 +1324,13 @@ auto ONNXImporter::convert_conv_transpose(const ONNXImportNode& node)
     std::shared_ptr<nn::Module> conv;
     if (spatial_dims == 1) {
         // ConvTranspose1d: only one spatial axis. Use index 0 throughout.
+        // Audit F.17: dilation is now supported in ConvTranspose1d (passed
+        // through to the underlying ConvTranspose2d kernel's W axis).
         int64_t k = kernel_shape[0], s = strides[0], d = dilations[0];
         int64_t p = pads[0];
         int64_t op = output_padding.empty() ? 0 : output_padding[0];
-        if (d != 1) {
-            throw std::runtime_error("ONNX ConvTranspose1d: dilation != 1 not supported");
-        }
         conv = std::make_shared<nn::ConvTranspose1d>(
-            in_channels, out_channels, k, s, p, op, groups, bias.has_value());
+            in_channels, out_channels, k, s, p, op, groups, bias.has_value(), d);
     } else if (spatial_dims == 2) {
         conv = std::make_shared<nn::ConvTranspose2d>(
             in_channels, out_channels,
