@@ -757,6 +757,15 @@ enum class OpId : uint16_t {
     CTCLossForward = 696,
 
     // =========================================================================
+    // Audit A.2 — virtual `Function::op_id()` returns this for subclasses that
+    // haven't opted in to the OpId-based pattern matching (graph optimiser
+    // fusion, vmap rule registry). Treated by matchers as "do not match" so
+    // un-opted-in Functions remain pattern-invisible (the previous fall-
+    // through behaviour) rather than silently mis-matching.
+    // =========================================================================
+    Unknown = 697,
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

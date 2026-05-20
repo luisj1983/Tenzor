@@ -451,6 +451,11 @@ add_executable(test_non_differentiable_ops test_non_differentiable_ops.cpp)
 target_link_libraries(test_non_differentiable_ops PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_non_differentiable_ops DISCOVERY_TIMEOUT 60)
 
+# Function::op_id() virtual regression (audit A.2)
+add_executable(test_function_op_id test_function_op_id.cpp)
+target_link_libraries(test_function_op_id PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_function_op_id DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)

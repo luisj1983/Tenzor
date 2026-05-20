@@ -16,6 +16,7 @@
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
+#include "../ops/op_id.hpp"
 #include "../sparse/sparse_tensor.hpp"
 #include "variable.hpp"
 
@@ -341,6 +342,26 @@ public:
     virtual auto name() const -> std::string;
 
     /**
+     * @brief Get the canonical forward `OpId` this Function differentiates.
+     *
+     * Audit A.2: enables `Graph::replace_nodes` / fusion-pattern matchers /
+     * vmap-rule registries to identify a Function by its forward op instead
+     * of RTTI-substring or name() string matching, which historically led
+     * to silently-broken pattern matches when class names diverged from
+     * the matcher's expected string.
+     *
+     * Subclasses *should* override and return the OpId of the matching
+     * forward op. The default returns `OpId::Unknown`, which is treated by
+     * the pattern matchers as "do not match" — opt-in, so subclasses that
+     * don't override remain pattern-invisible (the previous fall-through
+     * behaviour) rather than silently mis-matching.
+     *
+     * @return The forward OpId this Function differentiates, or
+     *         `OpId::Unknown` if the subclass hasn't opted in.
+     */
+    virtual auto op_id() const -> OpId { return OpId::Unknown; }
+
+    /**
      * @brief Set next functions in computation graph.
      *
      * Links this function to preceding functions for backpropagation.
@@ -536,6 +557,8 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // Audit A.2: opt-in to OpId-based pattern matching.
+    auto op_id() const -> OpId override { return OpId::Add; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -558,6 +581,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::Sub; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -580,6 +604,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::Mul; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -602,6 +627,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::Div; }
 
     std::vector<int64_t> input_shape_a_;
     std::vector<int64_t> input_shape_b_;
@@ -629,6 +655,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::MatMul; }
 };
 
 /**
@@ -2978,6 +3005,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "HistcBackward"; }
+    auto op_id() const -> OpId override { return OpId::Histc; }
 };
 
 class BincountBackward : public Function {
@@ -2985,6 +3013,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "BincountBackward"; }
+    auto op_id() const -> OpId override { return OpId::Bincount; }
 };
 
 class SearchSortedBackward : public Function {
@@ -2992,6 +3021,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "SearchSortedBackward"; }
+    auto op_id() const -> OpId override { return OpId::SearchSorted; }
 };
 
 /**
