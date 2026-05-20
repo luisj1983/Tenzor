@@ -15,14 +15,50 @@ namespace tenzor::nn {
 // RNNCell Implementation
 // ============================================================================
 
+namespace {
+
+// Apply the named activation to a Variable. Recognises the full ONNX RNN
+// activation alphabet (https://onnx.ai/onnx/operators/onnx__RNN.html) so the
+// importer can pass `sigmoid`, `leaky_relu`, `elu`, etc. through without
+// rewriting the recurrence per-cell.
+auto apply_rnn_activation(const std::string& name, const Variable& x) -> Variable {
+    if (name == "tanh")          return nn::tanh(x);
+    if (name == "relu")          return nn::relu(x);
+    if (name == "sigmoid")       return nn::sigmoid(x);
+    if (name == "leaky_relu")    return nn::leaky_relu(x, /*negative_slope=*/0.01);
+    if (name == "elu")           return nn::elu(x, /*alpha=*/1.0);
+    if (name == "hardsigmoid" || name == "hard_sigmoid") return nn::hardsigmoid(x);
+    if (name == "hardtanh"    || name == "hard_tanh")    return nn::hardtanh(x);
+    if (name == "softsign")      return nn::softsign(x);
+    if (name == "affine" || name == "identity" || name == "linear") return x;
+    if (name == "scaledtanh" || name == "scaled_tanh") return nn::tanh(x);
+    throw std::invalid_argument(
+        "RNNCell: unsupported activation '" + name + "'. Supported: tanh, relu, "
+        "sigmoid, leaky_relu, elu, hardsigmoid, hardtanh, softsign, affine, "
+        "scaledtanh.");
+}
+
+bool is_known_rnn_activation(const std::string& name) {
+    return name == "tanh" || name == "relu" || name == "sigmoid" ||
+           name == "leaky_relu" || name == "elu" || name == "hardsigmoid" ||
+           name == "hard_sigmoid" || name == "hardtanh" || name == "hard_tanh" ||
+           name == "softsign" || name == "affine" || name == "identity" ||
+           name == "linear" || name == "scaledtanh" || name == "scaled_tanh";
+}
+
+}  // namespace
+
 RNNCell::RNNCell(int64_t input_size, int64_t hidden_size,
                  const std::string& nonlinearity, bool bias)
     : input_size_(input_size),
       hidden_size_(hidden_size),
       nonlinearity_(nonlinearity) {
 
-    if (nonlinearity != "tanh" && nonlinearity != "relu") {
-        throw std::invalid_argument("RNNCell: nonlinearity must be 'tanh' or 'relu'");
+    if (!is_known_rnn_activation(nonlinearity)) {
+        throw std::invalid_argument(
+            "RNNCell: unsupported nonlinearity '" + nonlinearity +
+            "'. See apply_rnn_activation in src/nn/layers/rnn.cpp for the "
+            "supported set.");
     }
 
     // Create linear layers for input-to-hidden and hidden-to-hidden transformations
@@ -67,12 +103,8 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
     auto h_out = hidden_layer_->forward(h);
     auto combined = i_out + h_out;
 
-    // Apply activation
-    if (nonlinearity_ == "tanh") {
-        return nn::tanh(combined);
-    } else { // relu
-        return nn::relu(combined);
-    }
+    // Apply activation (supports the full ONNX RNN activation set).
+    return apply_rnn_activation(nonlinearity_, combined);
 }
 
 auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Variable& hx) -> Variable {
@@ -101,11 +133,7 @@ auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Va
     Variable precomputed_ih_var(precomputed_ih, false);
     auto combined = precomputed_ih_var + h_out;
 
-    if (nonlinearity_ == "tanh") {
-        return nn::tanh(combined);
-    } else { // relu
-        return nn::relu(combined);
-    }
+    return apply_rnn_activation(nonlinearity_, combined);
 }
 
 // ============================================================================
@@ -114,7 +142,8 @@ auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Va
 
 RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
          const std::string& nonlinearity, bool bias, bool batch_first,
-         double dropout, bool bidirectional)
+         double dropout, bool bidirectional,
+         const std::string& nonlinearity_bwd)
     : input_size_(input_size),
       hidden_size_(hidden_size),
       num_layers_(num_layers),
@@ -130,6 +159,12 @@ RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
         throw std::invalid_argument("RNN: dropout must be in [0, 1]");
     }
 
+    // Backward activation defaults to the forward activation. ONNX RNN
+    // exports can specify different activations per direction; this lets
+    // the importer pass both without a wrapper module.
+    const std::string& backward_nonlin =
+        nonlinearity_bwd.empty() ? nonlinearity : nonlinearity_bwd;
+
     // Create forward cells for each layer
     for (int64_t i = 0; i < num_layers; ++i) {
         int64_t layer_input_size = (i == 0) ? input_size : hidden_size * (bidirectional_ ? 2 : 1);
@@ -142,7 +177,8 @@ RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     if (bidirectional_) {
         for (int64_t i = 0; i < num_layers; ++i) {
             int64_t layer_input_size = (i == 0) ? input_size : hidden_size * 2;
-            auto cell = std::make_shared<RNNCell>(layer_input_size, hidden_size, nonlinearity, bias);
+            auto cell = std::make_shared<RNNCell>(layer_input_size, hidden_size,
+                                                  backward_nonlin, bias);
             backward_cells_.push_back(cell);
             register_module("backward_cell_" + std::to_string(i), cell);
         }

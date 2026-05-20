@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"  // broadcast_to (C.6 masked_fill)
 #include "simd_fast_math.hpp"
+#include <complex>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -522,9 +523,16 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, c
     else if (input_c.dtype() == DType::UInt16) { scatter_add_impl.template operator()<uint16_t>(); }
     else if (input_c.dtype() == DType::UInt32) { scatter_add_impl.template operator()<uint32_t>(); }
     else if (input_c.dtype() == DType::UInt64) { scatter_add_impl.template operator()<uint64_t>(); }
+    else if (input_c.dtype() == DType::Complex64) {
+        scatter_add_impl.template operator()<std::complex<float>>();
+    }
+    else if (input_c.dtype() == DType::Complex128) {
+        scatter_add_impl.template operator()<std::complex<double>>();
+    }
     else {
         // Bool: += on bool is UB-prone (no arithmetic semantics).
-        // Complex, FP8, quantized: not implemented for scatter_add.
+        // FP8, quantized: dtype-specific accumulator and scaling required;
+        // intentionally not supported here. Complex64/128 are handled above.
         throw std::runtime_error(
             "scatter_add: unsupported dtype " +
             std::string(dtype_name(input_c.dtype())));

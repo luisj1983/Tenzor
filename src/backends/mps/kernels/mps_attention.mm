@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -177,6 +178,7 @@ Tensor mps_flash_attention_forward(const Tensor& Q, const Tensor& K, const Tenso
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -257,6 +259,7 @@ std::vector<Tensor> mps_flash_attention_backward(const Tensor& dO, const Tensor&
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 2: Compute dQ
@@ -282,6 +285,7 @@ std::vector<Tensor> mps_flash_attention_backward(const Tensor& dO, const Tensor&
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 3: Compute dK, dV
@@ -308,6 +312,7 @@ std::vector<Tensor> mps_flash_attention_backward(const Tensor& dO, const Tensor&
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     return {dQ, dK, dV};
@@ -365,6 +370,7 @@ Tensor mps_gather_relative_position_bias(const Tensor& bias_table,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }

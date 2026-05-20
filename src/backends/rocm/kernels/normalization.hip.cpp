@@ -198,38 +198,51 @@ __global__ void layer_norm_forward_kernel_fp16(
     }
 }
 
-auto layer_norm_kernel(
+auto layer_norm_kernel_with_stats(
     const Tensor& input,
     const std::vector<int64_t>& normalized_shape,
     const Tensor* weight,
     const Tensor* bias,
     float eps,
     hipStream_t stream
-) -> Tensor {
-    // Float16: upcast to Float32 to prevent precision loss in mean/rstd storage
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Float16: upcast to Float32 to prevent precision loss in mean/rstd
+    // storage. Stats stay Float32 per the attention contract (CUDA cuDNN does
+    // the same: saved stats Float32 for half-precision input).
     if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         const Tensor* weight_f32_ptr = nullptr;
-        const Tensor* bias_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr   = nullptr;
         Tensor weight_f32, bias_f32;
         if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
-        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
-        auto result_f32 = layer_norm_kernel(input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
-        auto result_f16 = result_f32.to(DType::Float16);
-        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
-        return result_f16;
+        if (bias)   { bias_f32   = bias->to(DType::Float32);   bias_f32_ptr   = &bias_f32;   }
+        auto [out_f32, mean_f32, rstd_f32] = layer_norm_kernel_with_stats(
+            input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        auto out_f16 = out_f32.to(DType::Float16);
+        fp16_saturate(out_f16.data_ptr(), out_f16.numel(), stream);
+        return {out_f16, mean_f32, rstd_f32};
+    }
+
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr   = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias)   { bias_f32   = bias->to(DType::Float32);   bias_f32_ptr   = &bias_f32;   }
+        auto [out_f32, mean_f32, rstd_f32] = layer_norm_kernel_with_stats(
+            input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return {out_f32.to(DType::BFloat16), mean_f32, rstd_f32};
     }
 
     auto input_shape = input.shape();
     int64_t ndim = input_shape.size();
     int64_t norm_ndim = normalized_shape.size();
 
-    // Compute normalized_size and batch_size
     int64_t normalized_size = 1;
     for (auto dim : normalized_shape) {
         normalized_size *= dim;
     }
-
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - norm_ndim; ++i) {
         batch_size *= input_shape[i];
@@ -238,14 +251,13 @@ auto layer_norm_kernel(
     Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
 
-    // Always launch a power-of-2 thread count that is at least a full
-    // wave. warp_reduce_sum() does __shfl_down across all `warpSize` lanes;
-    // if we launch only `min(BLOCK_SIZE, normalized_size)` threads and
-    // normalized_size < warpSize, the inactive lanes return undefined
-    // values from __shfl_down and the reduction sums garbage. Rounding up
-    // to BLOCK_SIZE matches what the equivalent CUDA path does and lets
-    // threads with idx >= normalized_size start with sum=0 (since the
-    // for-loop simply doesn't execute for them).
+    // Saved stats shape is the leading (ndim - norm_ndim) batch dims.
+    std::vector<int64_t> stats_shape(input_shape.begin(),
+                                     input_shape.begin() + (ndim - norm_ndim));
+    if (stats_shape.empty()) stats_shape.push_back(1);
+    Tensor mean(stats_shape, input.dtype(), input.device());
+    Tensor rstd(stats_shape, input.dtype(), input.device());
+
     int threads = BLOCK_SIZE;
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
@@ -256,7 +268,7 @@ auto layer_norm_kernel(
             weight ? weight->data<float>() : nullptr,
             bias ? bias->data<float>() : nullptr,
             output.data<float>(),
-            nullptr, nullptr,
+            mean.data<float>(), rstd.data<float>(),
             batch_size, normalized_size, eps);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
@@ -266,32 +278,28 @@ auto layer_norm_kernel(
             weight ? weight->data<double>() : nullptr,
             bias ? bias->data<double>() : nullptr,
             output.data<double>(),
-            nullptr, nullptr,
+            mean.data<double>(), rstd.data<double>(),
             batch_size, normalized_size, static_cast<float>(eps));
         HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(layer_norm_forward_kernel_fp16,
-            dim3(batch_size), dim3(threads), shared_mem_size, stream,
-            reinterpret_cast<const __half*>(input.data<Float16>()),
-            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
-            bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
-            reinterpret_cast<__half*>(output.data<Float16>()),
-            nullptr, nullptr,
-            batch_size, normalized_size, eps);
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::BFloat16) {
-        auto input_f32 = input.to(DType::Float32);
-        const Tensor* weight_f32_ptr = nullptr;
-        const Tensor* bias_f32_ptr = nullptr;
-        Tensor weight_f32, bias_f32;
-        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
-        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
-        auto result_f32 = layer_norm_kernel(input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
-        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("layer_norm_kernel: unsupported dtype");
     }
 
+    return {output, mean, rstd};
+}
+
+// Output-only convenience wrapper (callers that don't need saved stats).
+auto layer_norm_kernel(
+    const Tensor& input,
+    const std::vector<int64_t>& normalized_shape,
+    const Tensor* weight,
+    const Tensor* bias,
+    float eps,
+    hipStream_t stream
+) -> Tensor {
+    auto [output, mean, rstd] = layer_norm_kernel_with_stats(
+        input, normalized_shape, weight, bias, eps, stream);
+    (void)mean; (void)rstd;
     return output;
 }
 

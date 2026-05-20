@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -68,6 +69,7 @@ Tensor mps_cat_kernel(const std::vector<Tensor>& inputs, int64_t dim) {
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         dst_offset += static_cast<uint32_t>(numel);
     }
@@ -185,6 +187,7 @@ Tensor mps_index_select_kernel(const Tensor& input, int64_t dim, const Tensor& i
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -235,6 +238,7 @@ Tensor mps_gather_kernel(const Tensor& input, int64_t dim, const Tensor& indices
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -288,6 +292,7 @@ Tensor mps_scatter_kernel(const Tensor& input, int64_t dim, const Tensor& indice
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -337,6 +342,7 @@ Tensor mps_scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& in
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -388,6 +394,7 @@ Tensor mps_index_add_kernel(const Tensor& input, int64_t dim, const Tensor& indi
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -435,6 +442,7 @@ Tensor mps_index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& ind
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -482,6 +490,7 @@ Tensor mps_index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& ind
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -516,6 +525,7 @@ Tensor mps_masked_fill_kernel(const Tensor& input, const Tensor& mask, float val
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -548,6 +558,7 @@ Tensor mps_take_kernel(const Tensor& input, const Tensor& indices) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -579,6 +590,7 @@ Tensor mps_put_kernel(const Tensor& input, const Tensor& indices, const Tensor& 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -632,6 +644,7 @@ Tensor mps_flip_kernel(const Tensor& input, const std::vector<int64_t>& dims) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -690,6 +703,7 @@ Tensor mps_roll_kernel(const Tensor& input, int64_t shift, int64_t dim) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -736,6 +750,7 @@ Tensor mps_repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeat
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -848,6 +863,7 @@ Tensor mps_searchsorted_kernel(const Tensor& sorted, const Tensor& values, bool 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -881,6 +897,7 @@ Tensor mps_bucketize_kernel(const Tensor& boundaries, const Tensor& input, bool 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 

@@ -319,6 +319,10 @@ namespace cpu {
     // Audit I5: per-axis overload.
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sH, int64_t sW, int64_t pH, int64_t pW, int64_t opH, int64_t opW, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                 int64_t stride_h, int64_t stride_w,
+                                 int64_t padding_h, int64_t padding_w,
+                                 int64_t dilation_h, int64_t dilation_w) -> Tensor;
 
     // Deformable Conv2d (DCNv2)
     auto deformable_conv2d_forward_kernel(const Tensor& input, const Tensor& offset, const Tensor& weight, const Tensor& bias, const Tensor& mask, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups, int64_t offset_groups) -> Tensor;
@@ -1821,12 +1825,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t pw = attrs.has(AttrKey::PaddingW)  ? attrs.get_int(AttrKey::PaddingW)  : p;
         int64_t dh = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
         int64_t dw = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
-        // Note: depthwise_conv2d_kernel currently accepts a single scalar for each
-        // of stride/padding/dilation. When the H and W values differ, we pass sh/ph/dh
-        // (H axis values). A future kernel update should accept separate H/W params.
-        (void)sw; (void)pw; (void)dw;
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::depthwise_conv2d_kernel(inputs[0], inputs[1], bias, sh, ph, dh)};
+        return std::vector<Tensor>{cpu::depthwise_conv2d_kernel(
+            inputs[0], inputs[1], bias, sh, sw, ph, pw, dh, dw)};
     });
 
     // DeformableConv2d (DCNv2)

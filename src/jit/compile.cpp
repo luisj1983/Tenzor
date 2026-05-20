@@ -6,6 +6,7 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/compiler.hpp"
 #include "tenzor/backend/dispatch_interceptor.hpp"
+#include "tenzor/utils/log.hpp"
 
 #ifdef TENZOR_HAS_MLIR_JIT
 #include "tenzor/jit/mlir/iree_compile.hpp"
@@ -123,8 +124,23 @@ auto CompiledFunction::operator()(const Variable& input) -> Variable {
             }
         }
     } catch (const std::exception& e) {
-        // Compilation failed — fall back to eager execution
-        // This is expected for certain dynamic patterns
+        // Compilation failed. The eager result above is already correct, but we
+        // do not want this to be silent: it would hide regressions in the JIT
+        // pipeline. Honour strict mode either from the per-call config or from
+        // the global TENZOR_JIT_STRICT env var. In non-strict mode log a WARN
+        // every time so callers can see exactly which graphs fail.
+        bool strict = config_.strict;
+        if (!strict) {
+            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
+                strict = true;
+            }
+        }
+        if (strict) {
+            throw;
+        }
+        TENZOR_LOG_WARN("JIT compilation failed ({} backend, target={}): {}. "
+                        "Falling back to eager execution.",
+                        config_.backend, config_.target, e.what());
     }
 
     return result;
@@ -333,9 +349,22 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     // Cache miss: trace → lower → compile → load invoker → cache.
     auto graph = trace_single_input_graph(fn_, input);
     if (!graph || graph->num_nodes() == 0) {
-        // Trace failed or produced nothing: fall back to eager so the
-        // caller still gets a result for this invocation. Subsequent
-        // calls will retry.
+        // Trace produced nothing (graph break in fullgraph mode, or the
+        // function only ran ops the interceptor doesn't capture). Either
+        // surface a hard error (strict) or log + degrade to eager.
+        bool strict = config_.strict;
+        if (!strict) {
+            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
+                strict = true;
+            }
+        }
+        if (strict) {
+            throw std::runtime_error(
+                "CompiledFunction::mlir_invoke: trace produced no graph "
+                "(TENZOR_JIT_STRICT=1).");
+        }
+        TENZOR_LOG_WARN("MLIR JIT: trace produced no graph; falling back to "
+                        "eager execution for this invocation.");
         return fn_(input);
     }
 

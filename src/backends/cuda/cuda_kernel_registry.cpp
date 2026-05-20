@@ -2029,7 +2029,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> sm_in = {scores};
             Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
             Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
+            // LSE (Float32 per attention_contract.hpp) — composed from
+            // the same scores softmax just normalised so the saved
+            // tensor matches what FlexAttentionBackward needs.
+            NewOpAttributes lse_attrs;
+            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            lse_attrs.set(AttrKey::Keepdim, false);
+            Tensor scores_f32 = (scores.dtype() == DType::Float32)
+                                ? scores : scores.to(DType::Float32);
+            std::vector<Tensor> lse_in = {scores_f32};
+            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
+            return std::vector<Tensor>{output, lse};
         }
 
                 // F6: ScoreModId >= 3 routes through the process-wide score_mod
@@ -2058,7 +2068,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> sm_in = {modified};
             Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
             Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
+            // LSE (Float32 per attention_contract.hpp) — composed from
+            // the same scores softmax just normalised so the saved
+            // tensor matches what FlexAttentionBackward needs.
+            NewOpAttributes lse_attrs;
+            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            lse_attrs.set(AttrKey::Keepdim, false);
+            Tensor scores_f32 = (scores.dtype() == DType::Float32)
+                                ? scores : scores.to(DType::Float32);
+            std::vector<Tensor> lse_in = {scores_f32};
+            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
+            return std::vector<Tensor>{output, lse};
         }
 
         throw std::runtime_error(

@@ -1392,13 +1392,13 @@ template<typename T>
 static auto segment_reduce_impl(const T* data, const int64_t* offsets,
                                  int64_t num_segments, int64_t outer_size,
                                  int64_t axis_size, int64_t inner_size,
-                                 const std::string& reduce, DType dtype, Device device) -> Tensor {
-    // Output shape: same as input but axis dimension is num_segments
-    // Layout: [outer, num_segments, inner]
-    int64_t out_numel = outer_size * num_segments * inner_size;
-    // We'll build the output shape later; for now allocate flat
-    Tensor output({out_numel}, dtype, device);
+                                 const std::string& reduce, DType dtype, Device device,
+                                 const std::vector<int64_t>& out_shape) -> Tensor {
+    // Output layout is logically [outer, num_segments, inner]; allocate with the
+    // caller's full N-D shape so no post-kernel reshape is needed.
+    Tensor output(out_shape, dtype, device);
     T* out_ptr = output.data<T>();
+    const int64_t out_numel = output.numel();
 
     // Determine identity values for each reduce mode
     auto identity = [&]() -> T {
@@ -1473,44 +1473,39 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
     int64_t inner_size = 1;
     for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
 
+    // Build the final N-D output shape up front: identical to input except the
+    // reduction axis is replaced by num_segments.
+    std::vector<int64_t> out_shape;
+    out_shape.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(i == axis ? num_segments : shape[i]);
+    }
+
     const int64_t* offsets_ptr = offs.data<int64_t>();
     auto dtype = cont.dtype();
     auto device = cont.device();
 
-    Tensor result;
     if (dtype == DType::Float32) {
-        result = segment_reduce_impl(cont.data<float>(), offsets_ptr, num_segments,
-                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+        return segment_reduce_impl(cont.data<float>(), offsets_ptr, num_segments,
+                                   outer_size, axis_size, inner_size, reduce, dtype, device, out_shape);
     } else if (dtype == DType::Float64) {
-        result = segment_reduce_impl(cont.data<double>(), offsets_ptr, num_segments,
-                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+        return segment_reduce_impl(cont.data<double>(), offsets_ptr, num_segments,
+                                   outer_size, axis_size, inner_size, reduce, dtype, device, out_shape);
     } else if (dtype == DType::Int32) {
-        result = segment_reduce_impl(cont.data<int32_t>(), offsets_ptr, num_segments,
-                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+        return segment_reduce_impl(cont.data<int32_t>(), offsets_ptr, num_segments,
+                                   outer_size, axis_size, inner_size, reduce, dtype, device, out_shape);
     } else if (dtype == DType::Int64) {
-        result = segment_reduce_impl(cont.data<int64_t>(), offsets_ptr, num_segments,
-                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+        return segment_reduce_impl(cont.data<int64_t>(), offsets_ptr, num_segments,
+                                   outer_size, axis_size, inner_size, reduce, dtype, device, out_shape);
     } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
         DType orig = dtype;
         Tensor cont_f32 = cont.to(DType::Float32);
         auto res_f32 = segment_reduce_impl(cont_f32.data<float>(), offsets_ptr, num_segments,
-                                            outer_size, axis_size, inner_size, reduce,
-                                            DType::Float32, device);
-        result = res_f32.to(orig);
-    } else {
-        throw std::runtime_error("segment_reduce: unsupported dtype");
+                                           outer_size, axis_size, inner_size, reduce,
+                                           DType::Float32, device, out_shape);
+        return res_f32.to(orig);
     }
-
-    // Reshape to the correct output shape
-    std::vector<int64_t> out_shape;
-    for (int64_t i = 0; i < ndim; ++i) {
-        if (i == axis) {
-            out_shape.push_back(num_segments);
-        } else {
-            out_shape.push_back(shape[i]);
-        }
-    }
-    return result.reshape(out_shape);
+    throw std::runtime_error("segment_reduce: unsupported dtype");
 }
 
 } // namespace cpu

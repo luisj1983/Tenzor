@@ -149,7 +149,11 @@ public:
     RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers = 1,
         const std::string& nonlinearity = "tanh",
         bool bias = true, bool batch_first = false, double dropout = 0.0,
-        bool bidirectional = false);
+        bool bidirectional = false,
+        // Optional separate activation for backward-direction cells when
+        // bidirectional. Empty string → reuse `nonlinearity`. ONNX RNN
+        // exports may specify a different activation per direction.
+        const std::string& nonlinearity_bwd = "");
 
     /**
      * @brief Forward pass through RNN.

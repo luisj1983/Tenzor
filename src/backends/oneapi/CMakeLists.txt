@@ -100,24 +100,17 @@ if(ONEMKL_SYCL_FOUND)
     # hegvd). When this probe fails, `OpId::LinalgEig` is served by the always-
     # compiled native SYCL Francis double-shift QR kernel in
     # src/backends/oneapi/kernels/linalg.cpp (`linalg_eig_qr_kernel`).
+    # The probe source lives in-tree at src/backends/oneapi/geev_probe/ so it
+    # can be inspected, version-controlled, and edited without touching CMake.
+    set(_GEEV_PROBE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/geev_probe/geev_probe.cpp")
     set(_GEEV_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/geev_probe")
     file(MAKE_DIRECTORY "${_GEEV_PROBE_DIR}")
-    file(WRITE "${_GEEV_PROBE_DIR}/geev_probe.cpp"
-"#include <oneapi/mkl.hpp>
-#include <sycl/sycl.hpp>
-int main() {
-    sycl::queue q;
-    (void)::oneapi::mkl::lapack::geev_scratchpad_size<float>(
-        q, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec, 1, 1);
-    return 0;
-}
-")
     execute_process(
         COMMAND ${SYCL_COMPILER} -fsycl -c
                 -o ${_GEEV_PROBE_DIR}/geev_probe.o
                 -I${ONEMKL_SYCL_INCLUDE_DIR}
                 -DTENZOR_HAS_ONEMKL
-                ${_GEEV_PROBE_DIR}/geev_probe.cpp
+                ${_GEEV_PROBE_SRC}
         RESULT_VARIABLE _GEEV_PROBE_RC
         OUTPUT_QUIET ERROR_QUIET
     )

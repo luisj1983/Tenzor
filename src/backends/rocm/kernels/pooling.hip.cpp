@@ -13,6 +13,7 @@
 #include "fp16_saturate.h"
 #include "../rocm_error.hpp"
 #include "../rocm_arch_detect.hpp"
+#include "tenzor/utils/logging.hpp"
 #ifdef USE_MIOPEN
 #include "../miopen_guards.hpp"
 #include "../hip_buffer.hpp"
@@ -518,8 +519,17 @@ auto maxpool2d_forward_hip(
             return maxpool2d_forward_miopen(input, kernel_h, kernel_w,
                                             stride_h, stride_w, pad_h, pad_w,
                                             return_indices, stream);
-        } catch (const std::exception&) {
-            // fall through to HIP kernel below
+        } catch (const std::exception& e) {
+            // TENZOR_STRICT_BACKEND=1 surfaces MIOpen failures; otherwise log
+            // the error so users can see when they silently degrade to the
+            // pure-HIP kernel instead of MIOpen acceleration.
+            if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+                throw std::runtime_error(
+                    std::string("ROCm maxpool2d: MIOpen failed "
+                                "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+            }
+            TENZOR_LOG_WARNING(std::format(
+                "MIOpen maxpool2d failed ({}), using native HIP fallback", e.what()));
         }
     }
 #endif
@@ -842,8 +852,14 @@ auto avgpool2d_forward_hip(
                 return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
                                                 stride_h, stride_w, pad_h, pad_w,
                                                 count_include_pad, stream);
-            } catch (const std::exception&) {
-                // fall through to HIP kernel below
+            } catch (const std::exception& e) {
+                if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+                    throw std::runtime_error(
+                        std::string("ROCm avgpool2d: MIOpen failed "
+                                    "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+                }
+                TENZOR_LOG_WARNING(std::format(
+                    "MIOpen avgpool2d failed ({}), using native HIP fallback", e.what()));
             }
         }
     }

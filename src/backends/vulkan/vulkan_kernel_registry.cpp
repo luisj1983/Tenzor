@@ -2582,10 +2582,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                     collapse_back(fa_result.second, /*drop_head_for_lse=*/true),
                     Tensor{}, Tensor{}};
         });
-    // FlashAttentionBackward — composed from Vulkan matmul + softmax backward
+    // FlashAttentionBackward — composed from Vulkan matmul + softmax backward.
+    // When the forward saved LSE (inputs[5]), use it to reconstruct
+    // attn_weights = exp(scaled_scores - LSE) directly. That replaces the
+    // separate max-reduction inside Softmax with a single elementwise
+    // subtract — what makes FlashAttention backward numerically stable in
+    // FP16 (audit C5 Vulkan FlashAttention: backward previously ignored the
+    // LSE the forward shader emits to binding 4).
     table.register_kernel(OpId::FlashAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            // inputs: [dO, Q, K, V, O] or [dO, Q, K, V, O, LSE]
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
 
@@ -2593,22 +2599,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             const Tensor& Q = inputs[1];
             const Tensor& K = inputs[2];
             const Tensor& V = inputs[3];
+            const bool have_lse = (inputs.size() > 5 &&
+                                   inputs[5].is_valid() &&
+                                   inputs[5].numel() > 0);
 
             auto* vk = get_vulkan_backend();
 
-            // Recompute attention weights: attn = softmax(Q @ K^T * scale)
+            // scores = Q @ K^T  (still needed even with LSE for the gradient
+            // computation below).
             Tensor Kt = vk->dispatchTranspose(K, -1, -2);
             Tensor scores = vk->dispatchBmm(Q, Kt);  // [B, H, S, S]
 
-            // Scale
             auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
             Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
                                            scores.dtype(), scores.device());
             scores = tenzor::mul(scores, scale_t);
 
-            // Apply causal mask if needed. Per docs/internals/attention-contract.md
-            // sentinel rule: -INFINITY, never -1e9 (audit C15 Vulkan — -1e9
-            // saturates to -65504 in FP16, leaks gradient mass through softmax).
+            // Causal mask: -INFINITY (not -1e9 — FP16 saturates to -65504 and
+            // leaks gradient mass through softmax, audit C15).
             if (causal) {
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
@@ -2622,10 +2630,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
 
-            // Softmax
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            Tensor attn_weights = vk->dispatchSoftmax(scores, -1);
+            Tensor attn_weights;
+            if (have_lse) {
+                // LSE has shape (..., S_q). Reshape to (..., S_q, 1) so it
+                // broadcasts along the trailing kv-dim of scores.
+                const Tensor& lse_raw = inputs[5];
+                std::vector<int64_t> lse_shape(lse_raw.shape().begin(), lse_raw.shape().end());
+                lse_shape.push_back(1);
+                Tensor lse = vk->dispatchReshape(lse_raw, lse_shape);
+                Tensor lse_cast = (lse.dtype() == scores.dtype())
+                                    ? lse : lse.to(scores.dtype());
+                attn_weights = tenzor::exp(tenzor::sub(scores, lse_cast));
+            } else {
+                attn_weights = vk->dispatchSoftmax(scores, -1);
+            }
 
             // Backward through attention:
             // dV = attn_weights^T @ dO

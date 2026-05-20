@@ -77,9 +77,10 @@ TEST_P(RNNMultiDTypeTest, RNNCellNoBias) {
 }
 
 TEST_P(RNNMultiDTypeTest, RNNCellInvalidNonlinearity) {
-    // Test that invalid activation throws
+    // RNNCell now accepts the full ONNX RNN activation set; a genuinely
+    // bogus name must still throw.
     EXPECT_THROW({
-        nn::RNNCell cell(10, 20, "sigmoid");
+        nn::RNNCell cell(10, 20, "notarealactivation");
         cell.to(device());
     }, std::invalid_argument);
 }

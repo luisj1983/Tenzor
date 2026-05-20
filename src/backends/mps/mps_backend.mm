@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <stdexcept>
+#include "mps_cmd_check.h"
 
 namespace tenzor {
 namespace mps {
@@ -54,6 +55,7 @@ MPSBackend::~MPSBackend() {
         if (impl_->current_command_buffer) {
             [impl_->current_command_buffer commit];
             [impl_->current_command_buffer waitUntilCompleted];
+            ::tenzor::mps::mps_cmd_check(impl_->current_command_buffer, __func__);
         }
         // Release all tracked buffers
         impl_->buffer_map.clear();
@@ -126,6 +128,7 @@ auto MPSBackend::synchronize(int device_id) -> void {
         if (impl_->current_command_buffer) {
             [impl_->current_command_buffer commit];
             [impl_->current_command_buffer waitUntilCompleted];
+            ::tenzor::mps::mps_cmd_check(impl_->current_command_buffer, __func__);
             impl_->current_command_buffer = nil;
             impl_->operations_in_batch = 0;
         }

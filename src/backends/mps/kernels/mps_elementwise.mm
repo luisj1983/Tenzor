@@ -9,6 +9,7 @@
 
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include "../mps_backend.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -21,6 +22,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -131,6 +133,7 @@ Tensor dispatch_binary(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -162,6 +165,7 @@ Tensor dispatch_unary(const std::string& shader_name, const Tensor& input) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -279,6 +283,7 @@ Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -336,6 +341,7 @@ Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
     [matmul encodeToCommandBuffer:cmd leftMatrix:mat_a rightMatrix:mat_b resultMatrix:mat_c];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -384,6 +390,7 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -425,6 +432,7 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     [enc1 endEncoding];
     [cmd1 commit];
     [cmd1 waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd1, __func__);
 
     // Pass 2: normalize
     auto pipeline_norm = get_pipeline("softmax_normalize_kernel");
@@ -440,6 +448,7 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     [enc2 endEncoding];
     [cmd2 commit];
     [cmd2 waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd2, __func__);
 
     return output;
 }
@@ -476,15 +485,14 @@ Tensor mps_batch_norm_kernel(const Tensor& input, const Tensor& mean,
 // LayerNorm (element-wise composition)
 // ============================================================================
 
-Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
-                              const Tensor& bias, float eps) {
-    // Compute mean and variance over last dimension(s)
-    // For now, use element-wise fallback; a proper implementation would use MPSGraph
-    auto shape = input.shape();
-    int64_t last_dim = shape.back();
-    int64_t outer = input.numel() / last_dim;
-
-    // Compute mean over last dim
+std::tuple<Tensor, Tensor, Tensor> mps_layer_norm_kernel_with_stats(
+    const Tensor& input, const Tensor& weight,
+    const Tensor& bias, float eps) {
+    // Compute mean and inv_std over the last dimension on device, then return
+    // both so the backward pass has the saved stats it needs. The previous
+    // shape of this kernel computed them internally and discarded both — the
+    // registry then returned empty placeholder tensors that SEGV the autograd
+    // graph (audit C5 / feedback_forward_returns_stats).
     auto mean = tenzor::mean(input, -1, true);
     auto centered = mps_sub_kernel(input, mean);
     auto sq = mps_mul_kernel(centered, centered);
@@ -499,11 +507,20 @@ Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
 
     auto normed = mps_mul_kernel(centered, inv_std);
     auto scaled = mps_mul_kernel(normed, weight);
-    return mps_add_kernel(scaled, bias);
+    auto output = mps_add_kernel(scaled, bias);
+    return {output, mean, inv_std};
+}
+
+Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
+                              const Tensor& bias, float eps) {
+    auto [output, mean, inv_std] = mps_layer_norm_kernel_with_stats(
+        input, weight, bias, eps);
+    (void)mean; (void)inv_std;
+    return output;
 }
 
 // ============================================================================
-// Conv2d (MPSCNNConvolution)
+// Conv2d (MPSGraph)
 // ============================================================================
 
 Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
@@ -511,38 +528,100 @@ Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t pad_h, int64_t pad_w, int64_t groups) {
     ensure_initialized();
 
+    // Native MPSGraph Conv2d. Uses MPSGraph's convolution2D API directly
+    // (NCHW input + OIHW weights), which handles per-axis padding, stride,
+    // dilation, and groups without needing an MPSCNNConvolutionDataSource
+    // protocol implementation.
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
+    if (in_shape.size() != 4 || w_shape.size() != 4) {
+        throw std::runtime_error("mps_conv2d_kernel: input and weight must be 4D");
+    }
     int64_t batch = in_shape[0];
-    int64_t in_c = in_shape[1];
-    int64_t in_h = in_shape[2];
-    int64_t in_w = in_shape[3];
+    int64_t in_c  = in_shape[1];
+    int64_t in_h  = in_shape[2];
+    int64_t in_w  = in_shape[3];
     int64_t out_c = w_shape[0];
+    int64_t w_in_c_per_g = w_shape[1];
     int64_t kh = w_shape[2];
     int64_t kw = w_shape[3];
+    if (groups <= 0 || in_c % groups != 0 || out_c % groups != 0 ||
+        w_in_c_per_g * groups != in_c) {
+        throw std::runtime_error(
+            "mps_conv2d_kernel: groups must divide in/out channels and "
+            "weight's in-channels-per-group must equal in_c/groups.");
+    }
     int64_t out_h = (in_h + 2 * pad_h - kh) / stride_h + 1;
     int64_t out_w = (in_w + 2 * pad_w - kw) / stride_w + 1;
 
     Tensor output({batch, out_c, out_h, out_w}, input.dtype(), input.device());
 
-    // Use MPSCNNConvolution for optimized conv
-    MPSCNNConvolutionDescriptor* desc = [MPSCNNConvolutionDescriptor
-        cnnConvolutionDescriptorWithKernelWidth:kw
-                                  kernelHeight:kh
-                          inputFeatureChannels:in_c / groups
-                         outputFeatureChannels:out_c / groups
-                                  neuronFilter:nil];
-    desc.strideInPixelsX = stride_w;
-    desc.strideInPixelsY = stride_h;
-    desc.groups = groups;
+    MPSDataType mps_dt;
+    switch (input.dtype()) {
+        case DType::Float32: mps_dt = MPSDataTypeFloat32; break;
+        case DType::Float16: mps_dt = MPSDataTypeFloat16; break;
+        default:
+            throw std::runtime_error(
+                std::string("mps_conv2d_kernel: unsupported dtype ") +
+                std::string(dtype_name(input.dtype())));
+    }
+    if (weight.dtype() != input.dtype()) {
+        throw std::runtime_error("mps_conv2d_kernel: weight dtype must match input");
+    }
 
-    // Create data source from weight tensor data
-    // Note: Full implementation would create a proper MPSCNNConvolutionDataSource
-    // This is a placeholder showing the API pattern
-    // MPSCNNConvolution requires a data source protocol implementation
+    NSArray<NSNumber*>* in_shape_arr  = @[@(batch), @(in_c), @(in_h), @(in_w)];
+    NSArray<NSNumber*>* w_shape_arr   = @[@(out_c), @(w_in_c_per_g), @(kh), @(kw)];
+    NSArray<NSNumber*>* out_shape_arr = @[@(batch), @(out_c), @(out_h), @(out_w)];
 
-    // For now, fall back to matmul-based im2col convolution
-    // TODO: Implement proper MPSCNNConvolutionDataSource for production use
+    MPSGraph* graph = [[MPSGraph alloc] init];
+
+    MPSGraphTensor* x_t = [graph placeholderWithShape:in_shape_arr dataType:mps_dt name:nil];
+    MPSGraphTensor* w_t = [graph placeholderWithShape:w_shape_arr  dataType:mps_dt name:nil];
+
+    MPSGraphConvolution2DOpDescriptor* desc =
+        [MPSGraphConvolution2DOpDescriptor
+            descriptorWithStrideInX:static_cast<NSUInteger>(stride_w)
+                          strideInY:static_cast<NSUInteger>(stride_h)
+                    dilationRateInX:1
+                    dilationRateInY:1
+                             groups:static_cast<NSUInteger>(groups)
+                        paddingLeft:static_cast<NSUInteger>(pad_w)
+                       paddingRight:static_cast<NSUInteger>(pad_w)
+                         paddingTop:static_cast<NSUInteger>(pad_h)
+                      paddingBottom:static_cast<NSUInteger>(pad_h)
+                       paddingStyle:MPSGraphPaddingStyleExplicit
+                         dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+
+    MPSGraphTensor* y_t = [graph convolution2DWithSourceTensor:x_t
+                                                weightsTensor:w_t
+                                                   descriptor:desc
+                                                         name:nil];
+
+    id<MTLBuffer> x_buf = get_buffer(input);
+    id<MTLBuffer> w_buf = get_buffer(weight);
+    id<MTLBuffer> y_buf = get_buffer(output);
+    MPSGraphTensorData* x_data = [[MPSGraphTensorData alloc] initWithMTLBuffer:x_buf
+                                                                         shape:in_shape_arr
+                                                                      dataType:mps_dt];
+    MPSGraphTensorData* w_data = [[MPSGraphTensorData alloc] initWithMTLBuffer:w_buf
+                                                                         shape:w_shape_arr
+                                                                      dataType:mps_dt];
+    MPSGraphTensorData* y_data = [[MPSGraphTensorData alloc] initWithMTLBuffer:y_buf
+                                                                         shape:out_shape_arr
+                                                                      dataType:mps_dt];
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    MPSCommandBuffer* mps_cmd = [MPSCommandBuffer commandBufferFromCommandQueue:g_command_queue];
+    [graph encodeToCommandBuffer:mps_cmd
+                            feeds:@{x_t: x_data, w_t: w_data}
+                  targetOperations:nil
+                resultsDictionary:@{y_t: y_data}
+              executionDescriptor:nil];
+    [mps_cmd commit];
+    [mps_cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(mps_cmd, __func__);
+    (void)cmd;  // mps_cmd owns the underlying command buffer.
 
     return output;
 }
@@ -579,6 +658,7 @@ static Tensor dispatch_reduce_per_row(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -605,6 +685,7 @@ static Tensor dispatch_reduce_all(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -749,6 +830,7 @@ Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     if (keepdim) {
         std::vector<int64_t> out_shape(shape.begin(), shape.end());
@@ -797,6 +879,7 @@ static Tensor dispatch_comparison(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -854,6 +937,7 @@ static Tensor dispatch_unary_scalar1(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -887,6 +971,7 @@ static Tensor dispatch_binary_scalar1(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -919,6 +1004,7 @@ static Tensor dispatch_unary_scalar2(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -953,6 +1039,7 @@ static Tensor dispatch_binary_scalar2(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1050,6 +1137,7 @@ Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& soft
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return grad_input;
 }
 
@@ -1082,6 +1170,7 @@ Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1117,6 +1206,7 @@ Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& l
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return grad_input;
 }
 
@@ -1162,6 +1252,7 @@ Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& in
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return grad_weight;
 }
@@ -1216,6 +1307,7 @@ std::pair<Tensor, Tensor> mps_dropout_kernel(const Tensor& input, float p, bool 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {output, mask};
 }
@@ -1249,6 +1341,7 @@ Tensor mps_dropout_backward_kernel(const Tensor& grad, const Tensor& mask, float
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1308,6 +1401,7 @@ std::vector<Tensor> mps_layer_norm_backward_kernel(
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {grad_input, grad_weight, grad_bias};
 }
@@ -1421,6 +1515,7 @@ static void dispatch_inplace_binary(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 Tensor mps_add_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("add_inplace_kernel", a, b); return a; }
@@ -1506,6 +1601,7 @@ Tensor mps_cast_kernel(const Tensor& input, DType target_dtype) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1545,6 +1641,7 @@ std::vector<Tensor> mps_fused_sgd_step(const Tensor& param, const Tensor& grad,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {out_param, out_momentum};
 }
@@ -1589,6 +1686,7 @@ std::vector<Tensor> mps_fused_adam_step(const Tensor& param, const Tensor& grad,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {out_param, out_m, out_v};
 }
@@ -1715,6 +1813,167 @@ Tensor mps_ldexp_kernel(const Tensor& a, const Tensor& b) {
 
 Tensor mps_hypot_kernel(const Tensor& a, const Tensor& b) {
     return dispatch_binary("hypot_kernel", a, b);
+}
+
+// ============================================================================
+// Sparse SpMV / SpMM — native Metal compute shaders (see sparse.metal).
+// Replaces the prior `mps_accelerate_single` registration which dispatched
+// the CPU sparse kernels on the unified-memory buffer; this path keeps the
+// work on the Metal command queue.
+// ============================================================================
+
+namespace {
+
+inline std::string sparse_spmv_suffix(DType dt) {
+    switch (dt) {
+        case DType::Float32: return "_f32";
+        case DType::Float64: return "_f64";
+        case DType::Float16: return "_f16";
+        default:
+            throw std::runtime_error(
+                std::string("MPS sparse: unsupported value dtype ") +
+                std::string(dtype_name(dt)));
+    }
+}
+
+inline std::string sparse_spmm_suffix(DType dt) {
+    switch (dt) {
+        case DType::Float32: return "_f32";
+        case DType::Float16: return "_f16";
+        default:
+            throw std::runtime_error(
+                std::string("MPS sparse SpMM: unsupported value dtype ") +
+                std::string(dtype_name(dt)));
+    }
+}
+
+}  // namespace
+
+Tensor mps_sparse_spmv_kernel(const Tensor& crow_indices,
+                              const Tensor& col_indices,
+                              const Tensor& values,
+                              const Tensor& x,
+                              int64_t M, int64_t K) {
+    if (crow_indices.dtype() != DType::Int64 || col_indices.dtype() != DType::Int64) {
+        throw std::runtime_error("MPS sparse SpMV: CSR indices must be Int64");
+    }
+    if (values.dtype() != x.dtype()) {
+        throw std::runtime_error("MPS sparse SpMV: values and x must share dtype");
+    }
+    if (x.numel() != K) {
+        throw std::runtime_error("MPS sparse SpMV: x.numel() must equal K");
+    }
+
+    ensure_initialized();
+    Tensor y({M}, values.dtype(), values.device());
+
+    auto pipeline = get_pipeline("sparse_spmv_kernel" + sparse_spmv_suffix(values.dtype()));
+
+    id<MTLBuffer> b_crow   = get_buffer(crow_indices);
+    id<MTLBuffer> b_col    = get_buffer(col_indices);
+    id<MTLBuffer> b_values = get_buffer(values);
+    id<MTLBuffer> b_x      = get_buffer(x);
+    id<MTLBuffer> b_y      = get_buffer(y);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:b_crow   offset:0 atIndex:0];
+    [enc setBuffer:b_col    offset:0 atIndex:1];
+    [enc setBuffer:b_values offset:0 atIndex:2];
+    [enc setBuffer:b_x      offset:0 atIndex:3];
+    [enc setBuffer:b_y      offset:0 atIndex:4];
+    uint32_t m_u = static_cast<uint32_t>(M);
+    [enc setBytes:&m_u length:sizeof(m_u) atIndex:5];
+
+    MTLSize grid = MTLSizeMake(M, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(M));
+    if (tg == 0) tg = 1;
+    MTLSize threads = MTLSizeMake(tg, 1, 1);
+    [enc dispatchThreads:grid threadsPerThreadgroup:threads];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    (void)K;
+    return y;
+}
+
+Tensor mps_sparse_spmm_kernel(const Tensor& crow_indices,
+                              const Tensor& col_indices,
+                              const Tensor& values,
+                              const Tensor& B,
+                              int64_t M, int64_t K) {
+    if (crow_indices.dtype() != DType::Int64 || col_indices.dtype() != DType::Int64) {
+        throw std::runtime_error("MPS sparse SpMM: CSR indices must be Int64");
+    }
+    if (values.dtype() != B.dtype()) {
+        throw std::runtime_error("MPS sparse SpMM: values and B must share dtype");
+    }
+    if (B.ndim() != 2 || B.shape()[0] != K) {
+        throw std::runtime_error("MPS sparse SpMM: B must be 2D with first dim K");
+    }
+    int64_t N = B.shape()[1];
+
+    ensure_initialized();
+    Tensor C({M, N}, values.dtype(), values.device());
+
+    auto pipeline = get_pipeline("sparse_spmm_kernel" + sparse_spmm_suffix(values.dtype()));
+
+    id<MTLBuffer> b_crow   = get_buffer(crow_indices);
+    id<MTLBuffer> b_col    = get_buffer(col_indices);
+    id<MTLBuffer> b_values = get_buffer(values);
+    id<MTLBuffer> b_B      = get_buffer(B);
+    id<MTLBuffer> b_C      = get_buffer(C);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:b_crow   offset:0 atIndex:0];
+    [enc setBuffer:b_col    offset:0 atIndex:1];
+    [enc setBuffer:b_values offset:0 atIndex:2];
+    [enc setBuffer:b_B      offset:0 atIndex:3];
+    [enc setBuffer:b_C      offset:0 atIndex:4];
+    uint32_t m_u = static_cast<uint32_t>(M);
+    uint32_t n_u = static_cast<uint32_t>(N);
+    [enc setBytes:&m_u length:sizeof(m_u) atIndex:5];
+    [enc setBytes:&n_u length:sizeof(n_u) atIndex:6];
+
+    MTLSize grid = MTLSizeMake(N, M, 1);
+    NSUInteger max_tg = pipeline.maxTotalThreadsPerThreadgroup;
+    NSUInteger tg_x = std::min(static_cast<NSUInteger>(N), static_cast<NSUInteger>(16));
+    if (tg_x == 0) tg_x = 1;
+    NSUInteger tg_y = std::min(static_cast<NSUInteger>(M),
+                               max_tg / std::max<NSUInteger>(tg_x, 1));
+    if (tg_y == 0) tg_y = 1;
+    MTLSize threads = MTLSizeMake(tg_x, tg_y, 1);
+    [enc dispatchThreads:grid threadsPerThreadgroup:threads];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    (void)K;
+    return C;
+}
+
+// ============================================================================
+// Inverse-trig unary wrappers (Acos / Asin / Atan)
+// ============================================================================
+// Native Metal kernels exist in elementwise.metal (acos_kernel(_f16),
+// asin_kernel(_f16), atan_kernel(_f16)). Wrappers below replace the
+// mps_accelerate_single CPU roundtrips for these ops.
+
+Tensor mps_acos_kernel(const Tensor& input) {
+    return dispatch_unary("acos_kernel", input);
+}
+
+Tensor mps_asin_kernel(const Tensor& input) {
+    return dispatch_unary("asin_kernel", input);
+}
+
+Tensor mps_atan_kernel(const Tensor& input) {
+    return dispatch_unary("atan_kernel", input);
 }
 
 } // namespace tenzor::mps

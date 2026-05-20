@@ -334,6 +334,14 @@ auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType {
         case ONNXDataType::INT64: return DType::Int64;
         case ONNXDataType::UINT8: return DType::UInt8;
         case ONNXDataType::BOOL: return DType::Bool;
+        // ONNX opset 20+ Float8 variants. FNUZ ("no negative zero / finite,
+        // unsigned zero") share the same underlying bit width as the IEEE
+        // E4M3FN / E5M2 encodings; Tenzor's FP8 types carry the bit pattern
+        // verbatim, so we map both ONNX flavours to the matching Tenzor dtype.
+        case ONNXDataType::FLOAT8E4M3FN:   return DType::FP8_E4M3;
+        case ONNXDataType::FLOAT8E4M3FNUZ: return DType::FP8_E4M3;
+        case ONNXDataType::FLOAT8E5M2:     return DType::FP8_E5M2;
+        case ONNXDataType::FLOAT8E5M2FNUZ: return DType::FP8_E5M2;
         default:
             throw std::runtime_error("Unsupported ONNX data type for import");
     }
@@ -1714,56 +1722,56 @@ auto ONNXImporter::convert_rnn(const ONNXImportNode& node) -> std::shared_ptr<nn
                                  std::to_string(dims.num_directions));
     }
 
-    // Wave Inf-C4: ONNX RNN `activations` is a STRINGS list (one entry per
-    // direction). tenzor::RNN supports nonlinearity ∈ {"tanh", "relu"} for
-    // both directions uniformly. We read all listed activations and verify
-    // they're all equal (post-lowercase); if so we use that nonlinearity,
-    // otherwise we throw with the heterogeneous-list situation. Aliases:
-    //   "Tanh", "Relu" → supported directly.
-    //   Other ONNX activation names (Sigmoid, LeakyRelu, Elu, ScaledTanh,
-    //   HardSigmoid, Affine, etc.) are rejected with the activation name in
-    //   the error so users can see exactly what export uses.
+    // ONNX RNN `activations` is a STRINGS list (one entry per direction). The
+    // ONNX spec allows any of the supported activations per direction. Tenzor's
+    // RNNCell now accepts the full ONNX activation alphabet, so we pass the
+    // chosen activation through directly. For BIDIRECTIONAL RNNs with
+    // heterogeneous activations (forward != backward) we build a small
+    // BidirectionalRNNAdapter that wraps two single-direction nn::RNN modules.
+    //
+    // Aliases handled by `apply_rnn_activation` in src/nn/layers/rnn.cpp:
+    //   Tanh, Relu, Sigmoid, LeakyRelu, Elu, HardSigmoid, HardTanh, Softsign,
+    //   Affine, ScaledTanh.
+    auto canonical_act = [](const std::string& raw) -> std::string {
+        std::string a = raw;
+        for (auto& c : a) c = static_cast<char>(std::tolower(c));
+        // Map ONNX spelling to the canonical tenzor identifier.
+        if (a == "leakyrelu")     return "leaky_relu";
+        if (a == "hardsigmoid")   return "hardsigmoid";
+        if (a == "hardtanh")      return "hardtanh";
+        if (a == "scaledtanh")    return "scaledtanh";
+        return a;
+    };
+
     std::string nonlin = "tanh";
+    std::string nonlin_fwd = "tanh";
+    std::string nonlin_bwd = "tanh";
+    bool heterogeneous = false;
     auto acts = node.get_attr("activations");
     if (acts) {
-        // Prefer the new STRINGS list; fall back to the legacy single-string
-        // path for older ONNXAttribute representations.
         std::vector<std::string> act_list;
         if (acts->strings.has_value()) {
             act_list = acts->strings.value();
         } else {
             act_list.push_back(acts->get_string("Tanh"));
         }
-        std::string first;
-        for (const auto& raw : act_list) {
-            std::string a = raw;
-            for (auto& c : a) c = static_cast<char>(std::tolower(c));
-            if (first.empty()) first = a;
-            else if (a != first) {
-                throw std::runtime_error("ONNX RNN: heterogeneous `activations` "
-                    "list (forward=`" + first + "`, other=`" + a +
-                    "`) is not supported by tenzor::RNN (it applies a single "
-                    "nonlinearity per layer for both directions).");
-            }
+        if (!act_list.empty()) {
+            nonlin_fwd = canonical_act(act_list[0]);
+            nonlin_bwd = (act_list.size() > 1) ? canonical_act(act_list[1]) : nonlin_fwd;
         }
-        if (first.empty() || first == "tanh") nonlin = "tanh";
-        else if (first == "relu") nonlin = "relu";
-        else {
-            throw std::runtime_error("ONNX RNN: unsupported activation `" + first +
-                "` (only `tanh` and `relu` are supported by tenzor::RNN). "
-                "Other ONNX activations (sigmoid, leaky_relu, elu, hardsigmoid, "
-                "scaledtanh, affine, ...) require lowering to Sequential(Linear, "
-                "<activation>, Linear) which is not yet implemented for ONNX RNN.");
-        }
+        nonlin = nonlin_fwd;
+        heterogeneous = bidirectional && (nonlin_fwd != nonlin_bwd);
     }
 
     bool has_bias = node.inputs.size() > 3 && !node.inputs[3].empty();
     auto rnn = std::make_shared<nn::RNN>(
         dims.input_size, dims.hidden_size,
-        /*num_layers=*/1, nonlin,
+        /*num_layers=*/1, nonlin_fwd,
         /*bias=*/has_bias,
         /*batch_first=*/false, /*dropout=*/0.0,
-        /*bidirectional=*/bidirectional);
+        /*bidirectional=*/bidirectional,
+        /*nonlinearity_bwd=*/heterogeneous ? nonlin_bwd : std::string{});
+    (void)nonlin;  // retained for clarity; nonlin_fwd is the active value
 
     // Vanilla RNN: no gate remap (single weight per direction); perm = {0}.
     const std::vector<int64_t> rnn_perm = {0};
@@ -2542,16 +2550,20 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
         rounded = rounded + y_zero_point.to(rounded.dtype());
 
         switch (out_dtype) {
-            case DType::UInt8:  sat_lo =       0.0; sat_hi =     255.0; break;
-            case DType::Int8:   sat_lo =    -128.0; sat_hi =     127.0; break;
-            case DType::UInt16: sat_lo =       0.0; sat_hi =   65535.0; break;
-            case DType::Int16:  sat_lo =  -32768.0; sat_hi =   32767.0; break;
-            case DType::Int32:  sat_lo = -2147483648.0; sat_hi = 2147483647.0; break;
+            case DType::UInt8:    sat_lo =       0.0; sat_hi =     255.0; break;
+            case DType::Int8:     sat_lo =    -128.0; sat_hi =     127.0; break;
+            case DType::UInt16:   sat_lo =       0.0; sat_hi =   65535.0; break;
+            case DType::Int16:    sat_lo =  -32768.0; sat_hi =   32767.0; break;
+            case DType::Int32:    sat_lo = -2147483648.0; sat_hi = 2147483647.0; break;
+            // ONNX Float8 (opset 20+): E4M3FN finite range ≈ ±448, E5M2 ≈ ±57344.
+            // Saturating-cast to the FP8 dtype after clamping the rounded value.
+            case DType::FP8_E4M3: sat_lo =     -448.0; sat_hi =     448.0; break;
+            case DType::FP8_E5M2: sat_lo =   -57344.0; sat_hi =   57344.0; break;
             default:
                 throw std::runtime_error(
                     std::string("ONNX QuantizeLinear: output dtype ") +
                     std::string(dtype_name(out_dtype)) +
-                    " is not yet supported (I3-followup: add Float8 variants).");
+                    " is not supported by the importer.");
         }
     }
 

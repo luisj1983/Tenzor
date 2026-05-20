@@ -4633,19 +4633,6 @@ auto ZeROStage3Optimizer::free_gathered_parameter_impl([[maybe_unused]] Paramete
     // This is already handled in free_gathered_parameter()
 }
 
-auto ZeROStage3Optimizer::get_next_module_in_execution_order([[maybe_unused]] Module* current_module) -> Module* {
-    // Without a modules() method, we can't traverse the execution graph
-    // Return nullptr for now
-    return nullptr;
-}
-
-auto ZeROStage3Optimizer::get_next_parameters_in_execution_order([[maybe_unused]] const ParameterInfo& state)
-    -> std::vector<Tensor*> {
-    // Without a modules() method, we can't traverse the execution graph
-    // Return empty vector for now
-    return std::vector<Tensor*>();
-}
-
 auto ZeROStage3Optimizer::flatten_tensors(const std::vector<Tensor>& tensors) -> Tensor {
     // Use the gradient_utils implementation
     return tenzor::optim::flatten_tensors(tensors);

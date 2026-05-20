@@ -69,10 +69,11 @@ TEST_P(RNNCellTestFixture, NoBias) {
 }
 
 TEST_P(RNNCellTestFixture, InvalidNonlinearity) {
-    // Test that invalid activation throws
+    // RNNCell now accepts the full ONNX RNN activation set (tanh, relu,
+    // sigmoid, leaky_relu, elu, hardsigmoid, hardtanh, softsign, affine,
+    // scaledtanh). A genuinely bogus name must still throw.
     EXPECT_THROW({
-        nn::RNNCell cell(10, 20, "sigmoid");
-
+        nn::RNNCell cell(10, 20, "notarealactivation");
         cell.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }

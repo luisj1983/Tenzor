@@ -705,6 +705,11 @@ namespace rocm {
     // Normalization operations
     auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
                           const Tensor* weight, const Tensor* bias, float eps, hipStream_t stream) -> Tensor;
+    auto layer_norm_kernel_with_stats(const Tensor& input,
+                                      const std::vector<int64_t>& normalized_shape,
+                                      const Tensor* weight, const Tensor* bias,
+                                      float eps, hipStream_t stream)
+        -> std::tuple<Tensor, Tensor, Tensor>;
     auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                     const Tensor& mean, const Tensor& rstd, const Tensor* weight,
                                     hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -1802,11 +1807,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Normalization Operations
     // ========================================================================
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Contract per docs/internals/attention-contract.md: LayerNorm forward
+        // must return {output, mean, rstd}. Previously this only returned
+        // {output}, forcing the nn layer to dispatch FusedLayerNorm instead —
+        // that workaround is removed in src/nn/layers/normalization.cpp.
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{rocm::layer_norm_kernel(inputs[0], normalized_shape, weight, bias, eps, get_hip_stream(attrs))};
+        auto [output, mean, rstd] = rocm::layer_norm_kernel_with_stats(
+            inputs[0], normalized_shape, weight, bias, eps, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, mean, rstd};
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1863,48 +1874,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // Per docs/internals/attention-contract.md: returns (output, mean, rstd).
-        // The HIP kernel computes mean/inv_std internally for normalization
-        // but historically discarded them — the dispatcher then returned a
-        // single tensor and any consumer expecting saved stats SEGVed in the
-        // nn layer (audit C5; matches feedback_forward_returns_stats).
-        // Until fused_layer_norm_hip is refactored to expose mean/inv_std as
-        // outputs, recompute them here at the host level so the contract is
-        // honored. The recomputation is O(N) — meaningful overhead but
-        // correctness wins until the kernel-level refit lands.
+        // The kernel-level refit (layer_norm_kernel_with_stats) now writes
+        // mean/rstd directly from the HIP shader so the previous host-side
+        // mean/var recomputation workaround is gone. Single shader launch,
+        // no extra device→host→device roundtrips.
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        Tensor output = rocm::fused_layer_norm_hip(
-            inputs[0], normalized_shape, inputs[1], inputs[2], eps);
-        // Compute mean and rstd from the original input for the saved-stats slots.
-        // Per the contract these stay Float32 even for FP16/BF16 inputs.
-        const Tensor& X = inputs[0];
-        int64_t norm_size = 1;
-        for (auto d : normalized_shape) norm_size *= d;
-        int64_t batch_size = X.numel() / norm_size;
-        // Reshape to [batch_size, norm_size] view for reduction.
-        Tensor X_f32 = (X.dtype() == DType::Float32) ? X : X.to(DType::Float32);
-        Tensor X_2d = tenzor::reshape(X_f32, std::vector<int64_t>{batch_size, norm_size});
-        // mean = X_2d.mean(dim=1)
-        NewOpAttributes mean_attrs;
-        mean_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-        mean_attrs.set(AttrKey::Keepdim, false);
-        std::vector<Tensor> mr_inputs = {X_2d};
-        Tensor mean = tenzor::dispatch(OpId::Mean, mr_inputs, mean_attrs)[0];
-        // var = ((X_2d - mean).pow(2)).mean(dim=1)
-        Tensor mean_unsq = tenzor::reshape(mean, std::vector<int64_t>{batch_size, 1});
-        Tensor diff = tenzor::sub(X_2d, mean_unsq);
-        Tensor diff_sq = tenzor::mul(diff, diff);
-        std::vector<Tensor> vinp = {diff_sq};
-        Tensor var = tenzor::dispatch(OpId::Mean, vinp, mean_attrs)[0];
-        // rstd = 1/sqrt(var + eps)
-        Tensor eps_t = tenzor::full(
-            std::vector<int64_t>(var.shape().begin(), var.shape().end()),
-            static_cast<double>(eps), var.dtype(), var.device());
-        Tensor var_eps = tenzor::add(var, eps_t);
-        Tensor rstd = tenzor::div(
-            tenzor::full(std::vector<int64_t>(var_eps.shape().begin(), var_eps.shape().end()),
-                         1.0, var_eps.dtype(), var_eps.device()),
-            tenzor::sqrt(var_eps));
+        const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
+        const Tensor* bias   = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
+        auto [output, mean, rstd] = rocm::layer_norm_kernel_with_stats(
+            inputs[0], normalized_shape, weight, bias, eps, get_hip_stream(attrs));
         return std::vector<Tensor>{output, mean, rstd};
     });
 
@@ -2199,7 +2178,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> sm_in = {scores};
             Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
             Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
+            // LSE (Float32 per attention_contract.hpp) — composed from
+            // the same scores softmax just normalised so the saved
+            // tensor matches what FlexAttentionBackward needs.
+            NewOpAttributes lse_attrs;
+            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            lse_attrs.set(AttrKey::Keepdim, false);
+            Tensor scores_f32 = (scores.dtype() == DType::Float32)
+                                ? scores : scores.to(DType::Float32);
+            std::vector<Tensor> lse_in = {scores_f32};
+            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
+            return std::vector<Tensor>{output, lse};
         }
 
         // Wave C: ScoreModId >= 3 routes through the process-wide score_mod
@@ -2227,7 +2216,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> sm_in = {modified};
             Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
             Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
+            // LSE (Float32 per attention_contract.hpp) — composed from
+            // the same scores softmax just normalised so the saved
+            // tensor matches what FlexAttentionBackward needs.
+            NewOpAttributes lse_attrs;
+            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            lse_attrs.set(AttrKey::Keepdim, false);
+            Tensor scores_f32 = (scores.dtype() == DType::Float32)
+                                ? scores : scores.to(DType::Float32);
+            std::vector<Tensor> lse_in = {scores_f32};
+            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
+            return std::vector<Tensor>{output, lse};
         }
 
         throw std::runtime_error(

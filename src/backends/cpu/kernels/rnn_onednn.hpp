@@ -25,8 +25,11 @@
 #endif
 #include "../cpu_thread_config.hpp"
 #include "onednn_cache.hpp"
+#include "tenzor/utils/log.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -352,8 +355,16 @@ inline bool lstm_forward_onednn(
         return true;
 
     } catch (const dnnl::error& e) {
-        // Uncomment for debugging:
-        // fprintf(stderr, "oneDNN LSTM error: %s\n", e.what());
+        // TENZOR_STRICT_BACKEND=1 promotes oneDNN failures to hard errors so
+        // silent fallbacks are auditable. Otherwise log a WARN and return
+        // false so the caller can fall back to the scalar path.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[LSTM single-layer oneDNN] failed (TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
+        }
+        TENZOR_LOG_WARN("[LSTM single-layer oneDNN] forward failed ({}); using scalar fallback",
+                        e.what());
         return false;
     } catch (...) {
         return false;
@@ -843,7 +854,14 @@ inline bool gru_forward_onednn(
         stream.wait();
         return true;
 
-    } catch (const dnnl::error&) {
+    } catch (const dnnl::error& e) {
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[GRU single-layer oneDNN] failed (TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
+        }
+        TENZOR_LOG_WARN("[GRU single-layer oneDNN] forward failed ({}); using scalar fallback",
+                        e.what());
         return false;
     } catch (...) {
         return false;
@@ -1366,7 +1384,14 @@ inline bool gru_multilayer_forward_onednn(
 
         return true;
 
-    } catch (const dnnl::error&) {
+    } catch (const dnnl::error& e) {
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[GRU multi-layer oneDNN] failed (TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
+        }
+        TENZOR_LOG_WARN("[GRU multi-layer oneDNN] forward failed ({}); using scalar fallback",
+                        e.what());
         return false;
     } catch (...) {
         return false;

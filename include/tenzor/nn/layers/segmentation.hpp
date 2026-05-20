@@ -161,8 +161,6 @@ private:
  * @brief Bilinear upsampling helper function.
  *
  * Performs bilinear interpolation to upsample feature maps to target size.
- * This is a temporary implementation until a full interpolate operation
- * is added to Tenzor core.
  *
  * @param input Input tensor of shape (N, C, H_in, W_in)
  * @param target_h Target height

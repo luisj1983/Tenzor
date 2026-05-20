@@ -17,6 +17,7 @@
 #include <hip/hip_fp16.h>
 #endif
 
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 #include <memory>
@@ -777,10 +778,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 fp16_saturate(result.data_ptr(), result.numel(), stream);
             }
             return result;
-        } catch (const std::runtime_error&) {
-            // rocBLAS failed, use fallback native kernel
-            // For simplicity, use the 2D path by reshaping
-            // This is a rare fallback path for unsupported architectures
+        } catch (const std::runtime_error& e) {
+            // TENZOR_STRICT_BACKEND=1 re-throws so silent fallback can't hide
+            // a regression. Otherwise log and use the 2D-reshape fallback.
+            if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+                throw std::runtime_error(
+                    std::string("ROCm matmul (1D path): rocBLAS failed "
+                                "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+            }
+            TENZOR_LOG_WARNING(std::format(
+                "rocBLAS 1D matmul failed ({}), using 2D-reshape fallback", e.what()));
         }
 
         // Fallback: reshape to 2D, compute, and squeeze
@@ -921,8 +928,15 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 fp16_saturate(result.data_ptr(), result.numel(), stream);
             }
             return result;
-        } catch (const std::runtime_error&) {
-            // rocBLAS failed, use fallback
+        } catch (const std::runtime_error& e) {
+            if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+                throw std::runtime_error(
+                    std::string("ROCm matmul (matrix-vector): rocBLAS failed "
+                                "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+            }
+            TENZOR_LOG_WARNING(std::format(
+                "rocBLAS matrix-vector matmul failed ({}), using 2D-reshape fallback",
+                e.what()));
         }
 
         // Fallback: reshape to 2D, compute, and squeeze
@@ -1199,17 +1213,19 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
             result = result_f32.to(DType::BFloat16);
         }
     } catch (const std::exception& e) {
-        // rocBLAS failed (e.g., unsupported architecture like gfx90c)
-        // Fall back to native HIP implementation
-        use_rocblas = false;
-
-        // Log warning once (static to avoid spam)
-        static bool warning_printed = false;
-        if (!warning_printed) {
-            TENZOR_LOG_WARNING(std::format("rocBLAS matmul failed ({}), using native HIP fallback", e.what()));
-            warning_printed = true;
+        // rocBLAS failed (e.g., unsupported architecture like gfx90c).
+        // TENZOR_STRICT_BACKEND=1 re-throws so silent fallback to the native
+        // HIP kernel cannot mask a regression. Otherwise log every failure
+        // (the previous one-shot static-bool guard hid recurring issues).
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("ROCm matmul: rocBLAS failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
         }
-
+        use_rocblas = false;
+        TENZOR_LOG_WARNING(std::format(
+            "rocBLAS matmul failed ({}), using native HIP fallback", e.what()));
         return matmul_native_hip(a_contig, b_contig, stream);
     }
 

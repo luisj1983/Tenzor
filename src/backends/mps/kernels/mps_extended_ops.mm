@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <algorithm>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -86,6 +87,7 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     // matmul: weight.reshape(out_c, col_rows) x col for each batch
     // Use Accelerate (zero-copy on Apple Silicon)
@@ -147,7 +149,7 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -190,7 +192,7 @@ Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -231,7 +233,7 @@ Tensor mps_cdist_kernel(const Tensor& x1, const Tensor& x2, float p) {
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -274,7 +276,7 @@ std::vector<Tensor> mps_sort_kernel(const Tensor& input, int64_t dim, bool desce
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(num_rows));
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return {out_values, out_indices};
     }
     // H: non-last-dim — permute on-device so dim is last, then recurse.
@@ -319,7 +321,7 @@ Tensor mps_argsort_kernel(const Tensor& input, int64_t dim, bool descending) {
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(num_rows));
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return out_indices;
     }
     // H: non-last-dim — permute on-device so dim is last, then recurse,
@@ -376,7 +378,7 @@ std::vector<Tensor> mps_topk_kernel(const Tensor& input, int64_t k, int64_t dim,
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(num_rows));
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return {out_values, out_indices};
     }
     // H: non-last-dim — permute on-device and recurse.
@@ -423,7 +425,7 @@ std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(num_rows));
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         // Extract first num_rows elements (median values written there by kernel)
         std::vector<int64_t> out_shape(shape.begin(), shape.end());
@@ -481,7 +483,7 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(num_rows));
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         std::vector<int64_t> out_shape(shape.begin(), shape.end());
         out_shape.erase(out_shape.begin() + dim);
@@ -594,7 +596,7 @@ Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid, bool alig
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:gridsz threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -629,7 +631,7 @@ Tensor mps_interpolate_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -658,7 +660,7 @@ Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2) {
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -765,6 +767,7 @@ Tensor mps_sparse_spmm_kernel(const Tensor& crow, const Tensor& col, const Tenso
     [enc endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     if (vals.dtype() == DType::Float64) {
         return output_use.to(DType::Float64);
@@ -816,6 +819,7 @@ Tensor mps_sparse_spmv_kernel(const Tensor& crow, const Tensor& col, const Tenso
     [enc endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     if (vals.dtype() == DType::Float64) {
         return output_use.to(DType::Float64);
@@ -855,7 +859,7 @@ std::vector<Tensor> mps_batchnorm_mean_var_kernel(const Tensor& input) {
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(channels));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {mean, var};
 }
 
@@ -898,7 +902,7 @@ Tensor mps_batchnorm_forward_training_kernel(const Tensor& input, const Tensor& 
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(total));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -934,7 +938,7 @@ std::vector<Tensor> mps_fused_adadelta_step(const Tensor& param, const Tensor& g
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {param, accum, delta_accum};
 }
 
@@ -966,7 +970,7 @@ std::vector<Tensor> mps_fused_adagrad_step(const Tensor& param, const Tensor& gr
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {param, sum_sq};
 }
 
@@ -996,7 +1000,7 @@ std::vector<Tensor> mps_fused_rmsprop_step(const Tensor& param, const Tensor& gr
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {param, sq_avg};
 }
 
@@ -1032,7 +1036,7 @@ std::vector<Tensor> mps_fused_adam_atan2_step(const Tensor& param, const Tensor&
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {param, exp_avg, exp_avg_sq};
 }
 
@@ -1065,7 +1069,7 @@ std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(const Tensor& logits,
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(batch));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {loss, grad};
 }
 
@@ -1107,7 +1111,7 @@ std::vector<Tensor> mps_dropout_kernel(const Tensor& input, float p) {
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return {output, mask};
 }
 

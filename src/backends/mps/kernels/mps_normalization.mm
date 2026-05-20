@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -167,6 +168,7 @@ std::vector<Tensor> mps_rmsnorm_forward(const Tensor& input, const Tensor& weigh
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {output, rrms};
 }
@@ -223,6 +225,7 @@ std::vector<Tensor> mps_rmsnorm_backward(const Tensor& grad_output, const Tensor
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 2: grad_weight
@@ -249,6 +252,7 @@ std::vector<Tensor> mps_rmsnorm_backward(const Tensor& grad_output, const Tensor
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     return {grad_input, grad_weight};
@@ -311,6 +315,7 @@ std::vector<Tensor> mps_groupnorm_forward(const Tensor& input, int64_t num_group
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {output, mean_out, rstd_out};
 }
@@ -374,6 +379,7 @@ std::vector<Tensor> mps_groupnorm_backward(const Tensor& grad_output, const Tens
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 2: grad_weight and grad_bias
@@ -404,6 +410,7 @@ std::vector<Tensor> mps_groupnorm_backward(const Tensor& grad_output, const Tens
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -464,6 +471,7 @@ std::vector<Tensor> mps_instancenorm_forward(const Tensor& input, const Tensor& 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return {output, mean_out, rstd_out};
 }
@@ -526,6 +534,7 @@ std::vector<Tensor> mps_instancenorm_backward(const Tensor& grad_output, const T
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 2: grad_weight and grad_bias
@@ -556,6 +565,7 @@ std::vector<Tensor> mps_instancenorm_backward(const Tensor& grad_output, const T
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -617,6 +627,7 @@ std::vector<Tensor> mps_fused_layernorm_backward(const Tensor& grad_output, cons
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Pass 2: grad_weight and grad_bias
@@ -647,6 +658,7 @@ std::vector<Tensor> mps_fused_layernorm_backward(const Tensor& grad_output, cons
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     return {grad_input, grad_weight, grad_bias};

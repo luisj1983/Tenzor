@@ -193,11 +193,35 @@ Tensor mps_atan2_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_fmod_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_remainder_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_copysign_kernel(const Tensor& a, const Tensor& b);
+// Additional native elementwise wrappers backing the W2 registry refit
+// (kernels/mps_elementwise.mm). They replace mps_accelerate_* CPU
+// roundtrips for ops that have a Metal shader.
+Tensor mps_ceil_kernel(const Tensor& input);
+Tensor mps_floor_kernel(const Tensor& input);
+Tensor mps_gelu_kernel(const Tensor& input);
+Tensor mps_acos_kernel(const Tensor& input);
+Tensor mps_asin_kernel(const Tensor& input);
+Tensor mps_atan_kernel(const Tensor& input);
+// Native Metal adaptive max-pool 3D backward (kernels/mps_pooling.mm).
+Tensor mps_adaptive_maxpool3d_backward_kernel(
+    const Tensor& grad_output, const Tensor& indices,
+    const std::vector<int64_t>& input_shape);
 Tensor mps_nextafter_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_float_power_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_xlog1py_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_ldexp_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_hypot_kernel(const Tensor& a, const Tensor& b);
+
+Tensor mps_sparse_spmv_kernel(const Tensor& crow_indices,
+                              const Tensor& col_indices,
+                              const Tensor& values,
+                              const Tensor& x,
+                              int64_t M, int64_t K);
+Tensor mps_sparse_spmm_kernel(const Tensor& crow_indices,
+                              const Tensor& col_indices,
+                              const Tensor& values,
+                              const Tensor& B,
+                              int64_t M, int64_t K);
 Tensor mps_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias);
 Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices);
 Tensor mps_softmax_kernel(const Tensor& input, int64_t dim);
@@ -206,6 +230,31 @@ Tensor mps_batch_norm_kernel(const Tensor& input, const Tensor& mean,
                               const Tensor& bias, float eps);
 Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
                               const Tensor& bias, float eps);
+std::tuple<Tensor, Tensor, Tensor> mps_layer_norm_kernel_with_stats(
+    const Tensor& input, const Tensor& weight,
+    const Tensor& bias, float eps);
+
+// Native Metal norm kernels (kernels/mps_normalization.mm). Forward
+// declarations so the registry can dispatch directly instead of routing
+// through mps_accelerate_* (which CPU-roundtrips via unified memory).
+std::vector<Tensor> mps_rmsnorm_forward(const Tensor& input, const Tensor& weight,
+                                         float eps);
+std::vector<Tensor> mps_rmsnorm_backward(const Tensor& grad_output, const Tensor& input,
+                                          const Tensor& weight, const Tensor& rrms);
+std::vector<Tensor> mps_groupnorm_forward(const Tensor& input, int64_t num_groups,
+                                           const Tensor& weight, const Tensor& bias,
+                                           float eps);
+std::vector<Tensor> mps_groupnorm_backward(const Tensor& grad_output, const Tensor& input,
+                                            int64_t num_groups,
+                                            const Tensor& mean_saved,
+                                            const Tensor& rstd_saved,
+                                            const Tensor& weight);
+std::vector<Tensor> mps_instancenorm_forward(const Tensor& input, const Tensor& weight,
+                                              const Tensor& bias, float eps);
+std::vector<Tensor> mps_instancenorm_backward(const Tensor& grad_output, const Tensor& input,
+                                               const Tensor& mean_saved,
+                                               const Tensor& rstd_saved,
+                                               const Tensor& weight);
 Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t stride_h, int64_t stride_w,
                           int64_t pad_h, int64_t pad_w, int64_t groups);
@@ -426,10 +475,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // ================================================================
     table.register_kernel(OpId::FusedLayerNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Per docs/internals/attention-contract.md the contract is
+            // {output, mean, inv_std}. The kernel computes both on device;
+            // return them so the autograd backward can read the saved stats
+            // without SEGVing on empty placeholders (audit C5).
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-            Tensor mean, inv_std; // placeholders for training path
-            return {mps_layer_norm_kernel(inputs[0], inputs[1], inputs[2], eps),
-                    mean, inv_std};
+            auto [output, mean, inv_std] = mps_layer_norm_kernel_with_stats(
+                inputs[0], inputs[1], inputs[2], eps);
+            return {output, mean, inv_std};
         });
 
     // ================================================================
@@ -1313,9 +1366,29 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::LinalgCholesky);
     mps_accelerate_single(OpId::LinalgLUSolve);
 
-    // Sparse ops — Accelerate sparse routines (shared memory)
-    mps_accelerate_single(OpId::SparseSpMM);
-    mps_accelerate_single(OpId::SparseSpMV);
+    // Sparse SpMM/SpMV — native Metal compute shaders (see sparse.metal).
+    // Reads CSR (crow_indices, col_indices, values) + dense input, writes
+    // dense output via the GPU command queue. No CPU dispatch.
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "MPS SparseSpMV: required attributes M and K not provided.");
+            }
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            return mps_sparse_spmv_kernel(inputs[0], inputs[1], inputs[2], inputs[3], M, K);
+        });
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "MPS SparseSpMM: required attributes M and K not provided.");
+            }
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            return mps_sparse_spmm_kernel(inputs[0], inputs[1], inputs[2], inputs[3], M, K);
+        });
     mps_accelerate_single(OpId::SparseToDense);
     mps_accelerate_multi(OpId::DenseToSparse);
     mps_accelerate_single(OpId::SparseAdd);
@@ -1331,7 +1404,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::MaxPool3dBackward);
     mps_accelerate_single(OpId::AvgPool3dBackward);
     mps_accelerate_single(OpId::AdaptiveAvgPool3dBackward);
-    mps_accelerate_single(OpId::AdaptiveMaxPool3dBackward);
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Native Metal — replaces the prior CPU-roundtrip mps_accelerate_single
+            // dispatch for this op. Inputs: {grad_output, indices}; the input
+            // shape (required to allocate grad_input) is packed in attrs.
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return mps_adaptive_maxpool3d_backward_kernel(inputs[0], inputs[1], input_shape);
+        });
 
     // 1D/2D pooling (already native or simple Accelerate)
     mps_accelerate_single(OpId::AdaptiveAvgPool1d);
@@ -1379,16 +1459,52 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // Norm variants
     mps_accelerate_multi(OpId::BatchNorm2dBackward);
     mps_accelerate_multi(OpId::BatchNorm2dUpdateRunningStats);
-    mps_accelerate_multi(OpId::GroupNorm);
-    mps_accelerate_multi(OpId::GroupNormBackward);
-    mps_accelerate_multi(OpId::InstanceNorm);
-    mps_accelerate_multi(OpId::InstanceNormBackward);
+
+    // Native Metal GroupNorm / InstanceNorm / RMSNorm wiring — replaces the
+    // CPU-roundtripping mps_accelerate_multi routing for these ops. Each
+    // lambda forwards the op's attrs and inputs to the kernel wrapper in
+    // kernels/mps_normalization.mm.
+    table.register_kernel(OpId::GroupNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return mps_groupnorm_forward(inputs[0], num_groups, inputs[1], inputs[2], eps);
+        });
+    table.register_kernel(OpId::GroupNormBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            // inputs: [grad_output, input, mean_saved, rstd_saved, weight]
+            return mps_groupnorm_backward(inputs[0], inputs[1], num_groups,
+                                          inputs[2], inputs[3], inputs[4]);
+        });
+    table.register_kernel(OpId::InstanceNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return mps_instancenorm_forward(inputs[0], inputs[1], inputs[2], eps);
+        });
+    table.register_kernel(OpId::InstanceNormBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            // inputs: [grad_output, input, mean_saved, rstd_saved, weight]
+            return mps_instancenorm_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+        });
     mps_accelerate_multi(OpId::LayerNorm);
     mps_accelerate_multi(OpId::LayerNormBackward);
     mps_accelerate_multi(OpId::FusedLayerNormBackward);
-    mps_accelerate_multi(OpId::FusedRMSNorm);
-    mps_accelerate_multi(OpId::RMSNorm);
-    mps_accelerate_multi(OpId::RMSNormBackward);
+    table.register_kernel(OpId::FusedRMSNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return mps_rmsnorm_forward(inputs[0], inputs[1], eps);
+        });
+    table.register_kernel(OpId::RMSNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return mps_rmsnorm_forward(inputs[0], inputs[1], eps);
+        });
+    table.register_kernel(OpId::RMSNormBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            // inputs: [grad_output, input, weight, rrms]
+            return mps_rmsnorm_backward(inputs[0], inputs[1], inputs[2], inputs[3]);
+        });
 
     // RNN family
     mps_accelerate_multi(OpId::LSTMCellForward);
@@ -1556,8 +1672,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // Per-op native Metal kernels can replace these registrations
     // incrementally; this block closes the 317/317 op-count gate.
     // ================================================================
-    mps_accelerate_single(OpId::Abs);
-    mps_accelerate_single(OpId::Acos);
+    table.register_single_output_kernel(OpId::Abs,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_abs_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Acos,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_acos_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::Acosh);
     mps_accelerate_single(OpId::Addcdiv);
     mps_accelerate_single(OpId::Addcmul);
@@ -1566,10 +1688,19 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::Any);
     mps_accelerate_single(OpId::ArgMax);
     mps_accelerate_single(OpId::ArgMin);
-    mps_accelerate_single(OpId::Asin);
+    table.register_single_output_kernel(OpId::Asin,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_asin_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::Asinh);
-    mps_accelerate_single(OpId::Atan);
-    mps_accelerate_single(OpId::Atan2);
+    table.register_single_output_kernel(OpId::Atan,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_atan_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Atan2,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_atan2_kernel(inputs[0], inputs[1]);
+        });
     mps_accelerate_single(OpId::Atanh);
     mps_accelerate_single(OpId::Bernoulli);
     mps_accelerate_single(OpId::BitwiseLeftShift);
@@ -1578,11 +1709,17 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::BitwiseRightShift);
     mps_accelerate_single(OpId::BitwiseXor);
     mps_accelerate_single(OpId::Bmm);
-    mps_accelerate_single(OpId::Ceil);
+    table.register_single_output_kernel(OpId::Ceil,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_ceil_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::CholeskyInverse);
     mps_accelerate_single(OpId::Clone);
     mps_accelerate_single(OpId::Contiguous);
-    mps_accelerate_single(OpId::Copysign);
+    table.register_single_output_kernel(OpId::Copysign,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_copysign_kernel(inputs[0], inputs[1]);
+        });
     mps_accelerate_single(OpId::Corrcoef);
     mps_accelerate_single(OpId::Cos);
     mps_accelerate_single(OpId::Cosh);
@@ -1601,24 +1738,48 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::Einsum);
     mps_accelerate_single(OpId::EmbeddingWithBoundsCheck);
     mps_accelerate_single(OpId::Entr);
-    mps_accelerate_single(OpId::Erf);
-    mps_accelerate_single(OpId::Erfc);
-    mps_accelerate_single(OpId::Exp);
-    mps_accelerate_single(OpId::Exp2);
-    mps_accelerate_single(OpId::Expm1);
+    table.register_single_output_kernel(OpId::Erf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_erf_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Erfc,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_erfc_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Exp,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_exp_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Exp2,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_exp2_kernel(inputs[0]);
+        });
+    table.register_single_output_kernel(OpId::Expm1,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_expm1_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::ExponentialSample);
     mps_accelerate_multi(OpId::FlexAttentionBackward);
     mps_accelerate_single(OpId::FloatPower);
-    mps_accelerate_single(OpId::Floor);
+    table.register_single_output_kernel(OpId::Floor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_floor_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::Fmax);
     mps_accelerate_single(OpId::Fmin);
     mps_accelerate_single(OpId::Fmod);
-    mps_accelerate_single(OpId::Frac);
+    table.register_single_output_kernel(OpId::Frac,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_frac_kernel(inputs[0]);
+        });
     mps_accelerate_multi(OpId::Frexp);
     mps_accelerate_single(OpId::FusedAddReLU);
     mps_accelerate_single(OpId::FusedGelu);
     mps_accelerate_single(OpId::Gcd);
-    mps_accelerate_single(OpId::Gelu);
+    table.register_single_output_kernel(OpId::Gelu,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return mps_gelu_kernel(inputs[0]);
+        });
     mps_accelerate_single(OpId::GeluBackward);
     mps_accelerate_single(OpId::GeluInplace);
     mps_accelerate_multi(OpId::Histogramdd);

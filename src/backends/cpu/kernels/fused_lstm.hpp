@@ -28,6 +28,8 @@
 #include <atomic>
 
 #include "buffer_pool.hpp"
+#include "tenzor/utils/log.hpp"
+#include <cstdlib>
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -105,7 +107,15 @@ inline void onednn_sgemm_nt(
         });
         stream.wait();
     } catch (const dnnl::error& e) {
-        fprintf(stderr, "[LSTM] oneDNN error: %s\n", e.what());
+        // TENZOR_STRICT_BACKEND=1 promotes oneDNN failures to hard errors so
+        // silent fallbacks are auditable. Otherwise we log a WARN and fall
+        // back to the scalar matmul below.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[LSTM] oneDNN matmul failed (TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
+        }
+        TENZOR_LOG_WARN("[LSTM] oneDNN matmul failed ({}); using scalar fallback", e.what());
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 float sum = 0.0f;

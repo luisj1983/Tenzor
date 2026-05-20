@@ -2024,13 +2024,6 @@ private:
      *  path so we don't have to drop and re-acquire the mutex mid-call. */
     auto prefetch_next_parameters_locked() -> void;
 
-    /** Get next module in execution order */
-    auto get_next_module_in_execution_order(Module* current_module) -> Module*;
-
-    /** Get next parameters in execution order */
-    auto get_next_parameters_in_execution_order(const ParameterInfo& state)
-        -> std::vector<Tensor*>;
-
     /** Flatten tensors into contiguous buffer */
     auto flatten_tensors(const std::vector<Tensor>& tensors) -> Tensor;
 

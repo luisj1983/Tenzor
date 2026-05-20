@@ -458,106 +458,126 @@ static void matmul_microkernel_int8(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
+#if defined(__AVX512VNNI__) || defined(__AVX2__)
+    // Pack the (K, N) tile of B into a thread-local (N, K_padded) contiguous
+    // buffer once per microkernel call. Inner K-loop then reads B_packed
+    // sequentially instead of issuing a per-iteration scatter/gather. This
+    // removes the dominant per-element cost of the previous SIMD path
+    // (the per-j 64- or 32-byte `for kk { b_buf[kk] = B[(k+kk)*ldb+j] }`
+    // gather that ran inside the hot K-loop). K is padded up to the SIMD
+    // width so the inner loop can read past the real K with zeros, avoiding
+    // a fast/slow tail split.
+#if defined(__AVX512VNNI__)
+    constexpr int64_t SIMD_K = 64;
+#else
+    constexpr int64_t SIMD_K = 32;
+#endif
+    const int64_t K_padded = (K + SIMD_K - 1) / SIMD_K * SIMD_K;
+    thread_local std::vector<int8_t> b_packed_storage;
+    if (static_cast<int64_t>(b_packed_storage.size()) < N * K_padded) {
+        b_packed_storage.assign(static_cast<size_t>(N * K_padded), 0);
+    } else {
+        // Zero only the bytes we are about to write; the tail past K must
+        // already be zero (vector grows but never shrinks; previously zeroed
+        // regions stay zero, and we re-zero the live region per call).
+        std::memset(b_packed_storage.data(), 0,
+                    static_cast<size_t>(N * K_padded));
+    }
+    int8_t* B_packed = b_packed_storage.data();
+    for (int64_t j = 0; j < N; ++j) {
+        int8_t* dst_col = B_packed + j * K_padded;
+        for (int64_t k = 0; k < K; ++k) {
+            dst_col[k] = B[k * ldb + j];
+        }
+        // dst_col[K..K_padded) is already 0 (memset above), which is a
+        // mathematical identity for the dot product.
+    }
+
+    // Per-column bias correction (sum of B column entries) for the
+    // unsigned-A offset trick used by VNNI / maddubs. Computed once,
+    // reused for every i in the outer loop.
+    thread_local std::vector<int32_t> b_col_sum_storage;
+    if (static_cast<int64_t>(b_col_sum_storage.size()) < N) {
+        b_col_sum_storage.assign(static_cast<size_t>(N), 0);
+    }
+    int32_t* b_col_sum = b_col_sum_storage.data();
+    for (int64_t j = 0; j < N; ++j) {
+        int32_t s = 0;
+        const int8_t* col = B_packed + j * K_padded;
+        for (int64_t k = 0; k < K; ++k) s += static_cast<int32_t>(col[k]);
+        b_col_sum[j] = s;
+    }
+#endif
+
 #ifdef __AVX512VNNI__
     // AVX-512 VNNI path: _mm512_dpbusd_epi32 takes unsigned×signed int8 pairs.
-    // We treat A as unsigned by offsetting: A_u = A_s + 128, then correct the
-    // bias: C -= 128 * sum(B_col). This avoids data conversion overhead.
+    // A is treated as unsigned via A_u = A_s + 128; the bias is corrected at
+    // the end as -128 * sum(B_col[0..K)). B is read from the packed
+    // contiguous panel so the inner K-loop is a stream of aligned vector
+    // loads. The SIMD pass covers the floor-aligned K region; a scalar tail
+    // handles the [K_simd, K) bytes — A is never read past K (the caller
+    // may not have allocated more than K-wide rows).
+    const int64_t K_simd = (K / 64) * 64;
     for (int64_t i = 0; i < M; ++i) {
+        const int8_t* a_row = A + i * lda;
         for (int64_t j = 0; j < N; ++j) {
             __m512i acc = _mm512_setzero_si512();
-            int32_t bias_correction = 0;
+            const int8_t* b_col = B_packed + j * K_padded;
             int64_t k = 0;
-
-            for (; k + 64 <= K; k += 64) {
-                // Load A as signed, add 128 to make unsigned for dpbusd
-                __m512i a_s = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(A + i * lda + k));
-                __m512i offset = _mm512_set1_epi8(static_cast<char>(-128));  // 0x80
-                __m512i a_u = _mm512_sub_epi8(a_s, offset);  // signed + 128 = unsigned
-
-                // Load B column values (gather stride = ldb)
-                // For small N, column access is strided — pack into contiguous buffer
-                int8_t b_buf[64];
-                for (int64_t kk = 0; kk < 64; ++kk) {
-                    b_buf[kk] = B[(k + kk) * ldb + j];
-                }
-                __m512i b_val = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(b_buf));
-
-                // dpbusd: acc += dot(unsigned_a[4], signed_b[4]) per 32-bit lane
+            for (; k < K_simd; k += 64) {
+                __m512i a_s = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(a_row + k));
+                __m512i offset = _mm512_set1_epi8(static_cast<char>(-128));
+                __m512i a_u = _mm512_sub_epi8(a_s, offset);
+                __m512i b_val = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(b_col + k));
                 acc = _mm512_dpbusd_epi32(acc, a_u, b_val);
-
-                // Accumulate bias correction: sum of B values * 128
-                // Compute horizontal sum of b_val as signed bytes
-                for (int64_t kk = 0; kk < 64; ++kk) {
-                    bias_correction += static_cast<int32_t>(b_buf[kk]);
-                }
             }
-
-            // Horizontal sum of acc
             int32_t sum = _mm512_reduce_add_epi32(acc);
-            sum -= 128 * bias_correction;
-
-            // Scalar remainder
+            // Scalar tail [K_simd, K). Uses packed-B for cache locality.
             for (; k < K; ++k) {
-                sum += static_cast<int32_t>(A[i * lda + k]) * static_cast<int32_t>(B[k * ldb + j]);
+                sum += static_cast<int32_t>(static_cast<uint8_t>(a_row[k] ^ 0x80))
+                       * static_cast<int32_t>(b_col[k]);
             }
-
+            // Bias correction: (a_u - 128) * b summed = a_u*b - 128*b; the
+            // unsigned a_u was applied to the full [0, K) region, so the
+            // correction is -128 * sum(B_col[0..K)).
+            sum -= 128 * b_col_sum[j];
             C[i * ldc + j] += sum;
         }
     }
 
 #elif defined(__AVX2__)
-    // AVX2 path: _mm256_maddubs_epi16 (unsigned × signed → int16 pairs)
-    // followed by _mm256_madd_epi16 (horizontal add pairs → int32)
+    // AVX2 path: same packed-B layout, same offset trick. maddubs produces
+    // saturating int16, then madd horizontally pairs into int32. Scalar
+    // tail again handles bytes past the SIMD-aligned floor of K so we never
+    // read A past its real K width.
+    const int64_t K_simd = (K / 32) * 32;
     for (int64_t i = 0; i < M; ++i) {
+        const int8_t* a_row = A + i * lda;
         for (int64_t j = 0; j < N; ++j) {
-            __m256i acc_lo = _mm256_setzero_si256();
-            __m256i acc_hi = _mm256_setzero_si256();
-            int32_t bias_correction = 0;
+            __m256i acc = _mm256_setzero_si256();
+            const int8_t* b_col = B_packed + j * K_padded;
             int64_t k = 0;
-
-            for (; k + 32 <= K; k += 32) {
-                // Load A as signed, convert to unsigned for maddubs
-                __m256i a_s = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(A + i * lda + k));
+            for (; k < K_simd; k += 32) {
+                __m256i a_s = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a_row + k));
                 __m256i offset = _mm256_set1_epi8(static_cast<char>(-128));
                 __m256i a_u = _mm256_sub_epi8(a_s, offset);
-
-                // Gather B column into contiguous buffer
-                int8_t b_buf[32];
-                for (int64_t kk = 0; kk < 32; ++kk) {
-                    b_buf[kk] = B[(k + kk) * ldb + j];
-                }
-                __m256i b_val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_buf));
-
-                // maddubs: pairs of (unsigned_a * signed_b) → int16 with saturation
+                __m256i b_val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_col + k));
                 __m256i prod16 = _mm256_maddubs_epi16(a_u, b_val);
-
-                // madd: horizontal add adjacent int16 pairs → int32
                 __m256i ones = _mm256_set1_epi16(1);
                 __m256i prod32 = _mm256_madd_epi16(prod16, ones);
-
-                acc_lo = _mm256_add_epi32(acc_lo, prod32);
-
-                // Bias correction for unsigned offset
-                for (int64_t kk = 0; kk < 32; ++kk) {
-                    bias_correction += static_cast<int32_t>(b_buf[kk]);
-                }
+                acc = _mm256_add_epi32(acc, prod32);
             }
-
-            // Horizontal sum of acc_lo
-            __m128i lo128 = _mm256_castsi256_si128(acc_lo);
-            __m128i hi128 = _mm256_extracti128_si256(acc_lo, 1);
+            __m128i lo128 = _mm256_castsi256_si128(acc);
+            __m128i hi128 = _mm256_extracti128_si256(acc, 1);
             __m128i sum128 = _mm_add_epi32(lo128, hi128);
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1, 0, 3, 2)));
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
             int32_t sum = _mm_cvtsi128_si32(sum128);
-
-            sum -= 128 * bias_correction;
-
-            // Scalar remainder
             for (; k < K; ++k) {
-                sum += static_cast<int32_t>(A[i * lda + k]) * static_cast<int32_t>(B[k * ldb + j]);
+                sum += static_cast<int32_t>(static_cast<uint8_t>(a_row[k] ^ 0x80))
+                       * static_cast<int32_t>(b_col[k]);
             }
-
+            sum -= 128 * b_col_sum[j];
             C[i * ldc + j] += sum;
         }
     }
@@ -576,14 +596,88 @@ static void matmul_microkernel_int8(
 #endif
 }
 
-// NOTE on cblas_gemm_s8u8s32: The MKL 2025.3 build in this environment interprets
-// the A matrix as u8 (unsigned) rather than s8 (signed), contrary to the API
-// documentation. This makes cblas_gemm_s8u8s32 unusable for general S8×S8 matmul
-// without complex sign-decomposition workarounds that would negate any perf gain.
-// The blocked scalar path (matmul_blocked_int8) accumulates in i32 with correct
-// sign semantics and is used unconditionally for now.
-// TODO: revisit with MKL 2026.x or when running with dynamic linking of MKL that
-// supports CBLAS_INT8 mode.
+// MKL's `cblas_gemm_s8u8s32` cannot be used for general s8×s8 GEMM in the
+// MKL 2025.3 build (it interprets A as u8 contrary to the docs). We avoid
+// that path entirely and use oneDNN's s8×s8→s32 matmul when oneDNN is
+// available (oneDNN handles signs correctly via its own packing). The
+// blocked scalar / SIMD path remains the always-available fallback for
+// small problems and for builds without oneDNN.
+
+#ifdef TENZOR_USE_ONEDNN
+// oneDNN int8 matmul: src and weights as s8, dst as s32. Returns true on
+// success, false on any oneDNN error so the caller can fall back to the
+// blocked SIMD path. Caching follows the same one-thread-local LRU model
+// as the Float32 path above.
+struct Int8MatMulCacheKey {
+    int64_t M, N, K;
+    bool operator==(const Int8MatMulCacheKey& o) const {
+        return M == o.M && N == o.N && K == o.K;
+    }
+};
+struct Int8MatMulCacheKeyHash {
+    size_t operator()(const Int8MatMulCacheKey& k) const {
+        size_t h = std::hash<int64_t>{}(k.M);
+        h ^= std::hash<int64_t>{}(k.N) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.K) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+struct Int8MatMulCachedPrimitive {
+    dnnl::memory::desc a_md;
+    dnnl::memory::desc b_md;
+    dnnl::memory::desc c_md;
+    dnnl::matmul prim;
+};
+using Int8MatMulPrimitiveCache =
+    OneDNNPrimitiveCache<Int8MatMulCacheKey, Int8MatMulCachedPrimitive,
+                          Int8MatMulCacheKeyHash, MATMUL_CACHE_SIZE>;
+static thread_local Int8MatMulPrimitiveCache g_matmul_int8_cache;
+
+static bool onednn_matmul_int8(
+    const int8_t* A, const int8_t* B, int32_t* C,
+    int64_t M, int64_t N, int64_t K) {
+    // Smaller threshold than F32 path — Int8 GEMM has lower compute density
+    // so the primitive setup overhead amortises at a smaller size.
+    if (M < 256 || N < 256 || K < 256) {
+        return false;
+    }
+    try {
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
+
+        Int8MatMulCacheKey cache_key{M, N, K};
+        auto cached = g_matmul_int8_cache.get(cache_key);
+        if (!cached) {
+            cached = std::make_shared<Int8MatMulCachedPrimitive>();
+            dnnl::memory::dims a_dims = {M, K};
+            dnnl::memory::dims b_dims = {K, N};
+            dnnl::memory::dims c_dims = {M, N};
+            cached->a_md = dnnl::memory::desc(a_dims,
+                dnnl::memory::data_type::s8, dnnl::memory::format_tag::ab);
+            cached->b_md = dnnl::memory::desc(b_dims,
+                dnnl::memory::data_type::s8, dnnl::memory::format_tag::ab);
+            cached->c_md = dnnl::memory::desc(c_dims,
+                dnnl::memory::data_type::s32, dnnl::memory::format_tag::ab);
+            auto matmul_pd = dnnl::matmul::primitive_desc(
+                engine, cached->a_md, cached->b_md, cached->c_md);
+            cached->prim = dnnl::matmul(matmul_pd);
+            g_matmul_int8_cache.put(cache_key, cached);
+        }
+        auto a_mem = dnnl::memory(cached->a_md, engine, const_cast<int8_t*>(A));
+        auto b_mem = dnnl::memory(cached->b_md, engine, const_cast<int8_t*>(B));
+        auto c_mem = dnnl::memory(cached->c_md, engine, C);
+        cached->prim.execute(stream, {
+            {DNNL_ARG_SRC, a_mem},
+            {DNNL_ARG_WEIGHTS, b_mem},
+            {DNNL_ARG_DST, c_mem}
+        });
+        stream.wait();
+        return true;
+    } catch (const dnnl::error&) {
+        return false;  // caller falls back to scalar / SIMD path
+    }
+}
+#endif // TENZOR_USE_ONEDNN
 
 // Cache-blocked matrix multiplication (Int8) with OpenMP parallelization
 // Accumulates in int32 to avoid overflow, then saturates back to int8
@@ -593,6 +687,21 @@ static void matmul_blocked_int8(
 
     // Allocate int32 accumulator
     std::vector<int32_t> C_i32(M * N, 0);
+
+#ifdef TENZOR_USE_ONEDNN
+    // Try the oneDNN s8×s8→s32 fast path first. It returns false (no work
+    // done, no state mutated) when below threshold or when oneDNN raises
+    // — in either case we fall through to the blocked SIMD/scalar path.
+    if (onednn_matmul_int8(A, B, C_i32.data(), M, N, K)) {
+        for (int64_t i = 0; i < M * N; ++i) {
+            int32_t val = C_i32[i];
+            if (val > 127) val = 127;
+            else if (val < -128) val = -128;
+            C[i] = static_cast<int8_t>(val);
+        }
+        return;
+    }
+#endif
 
     // Cache-friendly blocked algorithm with OpenMP parallelization
     #pragma omp parallel for collapse(2) if(M * N > 10000)

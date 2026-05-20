@@ -437,7 +437,78 @@ auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 }
 
 // ProdBackward implementation
-// Saves input and output. backward: grad * output / input (with zero handling)
+// Saves input and output. dy/dx_i = product over j != i of x_j.
+//
+// Correct handling for arbitrary numbers of zeros in the input:
+//   Let S = set of indices where x == 0 along the reduction axes, and
+//   prod_safe = product of x with zeros replaced by 1 (= product of non-zero entries).
+//   For each position i in the reduction group:
+//     * i ∉ S, |S| == 0  → dy/dx_i = prod_safe / x_i  (= full prod / x_i)
+//     * i ∈ S, |S| == 1  → dy/dx_i = prod_safe       (= product of all non-zero entries)
+//     * otherwise        → dy/dx_i = 0
+//   This is equivalent to: factor_i = prod_safe / safe_input_i when
+//   (zero_count - mask_zero_i) == 0, else 0.
+namespace {
+
+auto compute_prod_backward_factor(const Tensor& input,
+                                  std::optional<int64_t> dim_opt,
+                                  bool keepdim) -> Tensor {
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto zero_in = zeros(input_shape_vec, input.dtype(), input.device());
+    auto ones_in = ones(input_shape_vec, input.dtype(), input.device());
+
+    auto mask_zero = eq(input, zero_in);
+    auto safe_input = where(mask_zero, ones_in, input);
+
+    // prod_safe along reduction axes, then broadcast back to input shape.
+    Tensor prod_safe = prod(safe_input, dim_opt, keepdim);
+    Tensor prod_safe_expanded = prod_safe;
+    if (dim_opt.has_value() && !keepdim) {
+        prod_safe_expanded = unsqueeze(prod_safe, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        prod_safe_expanded =
+            reshape(prod_safe, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    prod_safe_expanded = expand(prod_safe_expanded, input_shape_vec);
+
+    auto factor_raw = div(prod_safe_expanded, safe_input);
+
+    // zero_count along reduction axes, broadcast back. mask cast to Int64 so
+    // arithmetic works without dtype-narrowing surprises.
+    auto mask_zero_int = mask_zero.to(DType::Int64);
+    Tensor zero_count = sum(mask_zero_int, dim_opt, keepdim);
+    Tensor zero_count_expanded = zero_count;
+    if (dim_opt.has_value() && !keepdim) {
+        zero_count_expanded = unsqueeze(zero_count, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        zero_count_expanded =
+            reshape(zero_count, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    zero_count_expanded = expand(zero_count_expanded, input_shape_vec);
+
+    // remaining_for_i = zero_count - mask_zero_i. The factor is correct iff this
+    // is zero (i.e. removing this element leaves no zeros in the product).
+    auto remaining = sub(zero_count_expanded, mask_zero_int);
+    auto zeros_int = zeros(input_shape_vec, DType::Int64, input.device());
+    auto keep = eq(remaining, zeros_int);
+
+    return where(keep, factor_raw, zero_in);
+}
+
+auto resolve_prod_dim(const Tensor& input, const Tensor& prod_out,
+                      bool has_dim, const Tensor& dim_tensor)
+    -> std::pair<std::optional<int64_t>, bool> {
+    if (!has_dim) {
+        return {std::nullopt, false};
+    }
+    int64_t dim = dim_tensor.data<int64_t>()[0];
+    if (dim < 0) dim += input.shape().size();
+    bool keepdim = (prod_out.ndim() == input.ndim());
+    return {dim, keepdim};
+}
+
+}  // namespace
+
 auto ProdBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("ProdBackward::forward should not be called");
 }
@@ -450,83 +521,36 @@ auto ProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     bool has_dim = saved_tensors_.size() > 2;
-    std::optional<int64_t> dim_opt;
-    bool keepdim;
+    auto [dim_opt, keepdim] = resolve_prod_dim(
+        input, prod_out, has_dim, has_dim ? saved_tensors_[2] : Tensor{});
 
-    if (has_dim) {
-        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
-        if (dim < 0) dim += input.shape().size();
-        dim_opt = dim;
-        keepdim = (prod_out.ndim() == input.ndim());
-    } else {
-        keepdim = false;
-    }
-
-    // Expand prod_out and grad to input shape
-    auto prod_expanded = prod_out;
+    // Broadcast incoming gradient to input shape.
     auto grad_expanded = grad;
     if (dim_opt.has_value() && !keepdim) {
-        prod_expanded = unsqueeze(prod_out, dim_opt.value());
         grad_expanded = unsqueeze(grad, dim_opt.value());
     } else if (!dim_opt.has_value()) {
-        prod_expanded = reshape(prod_out, std::vector<int64_t>(input_shape_vec.size(), 1));
         grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
     }
-    prod_expanded = expand(prod_expanded, input_shape_vec);
     grad_expanded = expand(grad_expanded, input_shape_vec);
 
-    // grad_input = grad * prod / input
-    // Handle zeros: where input == 0, the gradient is the product of all other elements
-    // For simplicity, use the formula: grad * prod / input, with input clamped away from zero
-    auto eps_val = full(input_shape_vec, 1e-12, input.dtype(), input.device());
-    auto zero_tensor = zeros(input_shape_vec, input.dtype(), input.device());
-    auto mask_zero = eq(input, zero_tensor);
-
-    // Replace zeros with ones for safe division
-    auto safe_input = where(mask_zero, ones(input_shape_vec, input.dtype(), input.device()), input);
-    auto grad_input = mul(grad_expanded, div(prod_expanded, safe_input));
-
-    // For zero elements, need to compute product of non-zero elements
-    // This is expensive; for now use the approximation which is correct when at most one zero exists
-    return {grad_input};
+    auto factor = compute_prod_backward_factor(input, dim_opt, keepdim);
+    return {mul(grad_expanded, factor)};
 }
 
-auto ProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // prod backward: grad * prod / input (with zero handling)
-    // prod and input are constants; compute factor at Tensor level
+auto ProdBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
     const auto& input = saved_tensors_[0];
     const auto& prod_out = saved_tensors_[1];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     bool has_dim = saved_tensors_.size() > 2;
-    std::optional<int64_t> dim_opt;
-    bool keepdim;
+    auto [dim_opt, keepdim] = resolve_prod_dim(
+        input, prod_out, has_dim, has_dim ? saved_tensors_[2] : Tensor{});
 
-    if (has_dim) {
-        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
-        if (dim < 0) dim += input.shape().size();
-        dim_opt = dim;
-        keepdim = (prod_out.ndim() == input.ndim());
-    } else {
-        keepdim = false;
-    }
+    // Factor is a constant w.r.t. the autograd graph (depends only on input,
+    // which is saved as a tensor); wrap in a non-grad Variable.
+    Variable factor_var(compute_prod_backward_factor(input, dim_opt, keepdim), false);
 
-    // Expand prod_out to input shape
-    auto prod_expanded = prod_out;
-    if (dim_opt.has_value() && !keepdim) {
-        prod_expanded = unsqueeze(prod_out, dim_opt.value());
-    } else if (!dim_opt.has_value()) {
-        prod_expanded = reshape(prod_out, std::vector<int64_t>(input_shape_vec.size(), 1));
-    }
-    prod_expanded = expand(prod_expanded, input_shape_vec);
-
-    // Safe division: replace zeros with ones
-    auto mask_zero = eq(input, zeros(input_shape_vec, input.dtype(), input.device()));
-    auto safe_input = where(mask_zero, ones(input_shape_vec, input.dtype(), input.device()), input);
-    auto factor = div(prod_expanded, safe_input);
-    Variable factor_var(factor, false);
-
-    // Expand grad at Variable level
     auto grad_var = grad_outputs[0];
     if (dim_opt.has_value() && !keepdim) {
         grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());

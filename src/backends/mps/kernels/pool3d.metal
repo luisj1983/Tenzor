@@ -921,3 +921,46 @@ kernel void embedding_bag_forward_kernel(
     // mode 0 = sum, mode 2 = max (simplified to sum here)
     output[id] = acc;
 }
+
+// ============================================================================
+// AdaptiveMaxPool3d Backward (Float32 + Float16)
+//
+// One thread per element of grad_output. The forward stored the input-linear
+// index of the max position in `indices`; backward atomically accumulates
+// grad_output into grad_input at that index. Mirrors the 2D adaptive max
+// pool backward pattern in pooling.metal — no new logic.
+// ============================================================================
+
+kernel void adaptive_maxpool3d_backward_kernel(
+    device const float* grad_output  [[buffer(0)]],
+    device const int* indices        [[buffer(1)]],
+    device float* grad_input         [[buffer(2)]],
+    constant uint& num_output        [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= num_output) return;
+    int idx = indices[tid];
+    if (idx >= 0) {
+        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
+        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+    }
+}
+
+kernel void adaptive_maxpool3d_backward_kernel_f16(
+    device const half* grad_output   [[buffer(0)]],
+    device const int* indices        [[buffer(1)]],
+    device half* grad_input          [[buffer(2)]],
+    constant uint& num_output        [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= num_output) return;
+    int idx = indices[tid];
+    if (idx >= 0) {
+        // Metal lacks atomic_fetch_add for half. Match the 2D-f16 fallback:
+        // single-threaded-per-output relaxed read-modify-write. Index uniqueness
+        // for max-pool backward usually keeps this contention-free; if two
+        // outputs land on the same input index, the upper-layer scatter pattern
+        // accepts last-writer-wins (same behaviour as the 2D-f16 backward).
+        grad_input[idx] = half(float(grad_input[idx]) + float(grad_output[tid]));
+    }
+}

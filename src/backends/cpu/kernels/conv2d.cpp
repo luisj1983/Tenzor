@@ -1846,7 +1846,9 @@ template<typename T>
 void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T* out_data,
                             int64_t N, int64_t C, int64_t H, int64_t W,
                             int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
-                            int64_t stride, int64_t padding, int64_t dilation) {
+                            int64_t stride_h, int64_t stride_w,
+                            int64_t padding_h, int64_t padding_w,
+                            int64_t dilation_h, int64_t dilation_w) {
     // Accumulate in double for Float64 inputs to preserve full precision;
     // otherwise accumulate in float (fine for Float32 and promotes half types).
     using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
@@ -1861,8 +1863,8 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
 
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw = 0; kw < kW; ++kw) {
-                            int64_t h = oh * stride - padding + kh * dilation;
-                            int64_t w = ow * stride - padding + kw * dilation;
+                            int64_t h = oh * stride_h - padding_h + kh * dilation_h;
+                            int64_t w = ow * stride_w - padding_w + kw * dilation_w;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 AccumT product = static_cast<AccumT>(in_data[((n * C + c) * H + h) * W + w]) *
@@ -1902,8 +1904,9 @@ void depthwise_conv2d_avx2_f32(
     float* __restrict__ out_data,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
-    int64_t padding) {
-    // stride=1, dilation=1 is assumed by the caller
+    int64_t padding_h, int64_t padding_w) {
+    // stride=1, dilation=1 (both axes) is assumed by the caller — the per-axis
+    // padding terms below are independent.
 
     #pragma omp parallel for collapse(3) if(N * C * H_out > OmpThresholds::medium())
     for (int64_t n = 0; n < N; ++n) {
@@ -1918,13 +1921,13 @@ void depthwise_conv2d_avx2_f32(
                     __m256 v_sum = _mm256_setzero_ps();
 
                     for (int64_t kh = 0; kh < kH; ++kh) {
-                        int64_t ih = oh - padding + kh;
+                        int64_t ih = oh - padding_h + kh;
                         if (ih < 0 || ih >= H) continue;
 
                         const float* in_row = in_data + ((n * C + c) * H + ih) * W;
 
                         for (int64_t kw = 0; kw < kW; ++kw) {
-                            int64_t iw_start = ow - padding + kw;
+                            int64_t iw_start = ow - padding_w + kw;
 
                             // Load filter weight and broadcast to all 8 lanes
                             __m256 v_w = _mm256_set1_ps(filter[kh * kW + kw]);
@@ -1961,13 +1964,13 @@ void depthwise_conv2d_avx2_f32(
                     float sum = 0.0f;
 
                     for (int64_t kh = 0; kh < kH; ++kh) {
-                        int64_t ih = oh - padding + kh;
+                        int64_t ih = oh - padding_h + kh;
                         if (ih < 0 || ih >= H) continue;
 
                         const float* in_row = in_data + ((n * C + c) * H + ih) * W;
 
                         for (int64_t kw = 0; kw < kW; ++kw) {
-                            int64_t iw = ow - padding + kw;
+                            int64_t iw = ow - padding_w + kw;
                             if (iw >= 0 && iw < W) {
                                 sum += in_row[iw] * filter[kh * kW + kw];
                             }
@@ -1984,8 +1987,10 @@ void depthwise_conv2d_avx2_f32(
 #endif // TENZOR_CONV_AVX2
 
 auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
-                              const Tensor* bias, int64_t stride,
-                              int64_t padding, int64_t dilation) -> Tensor {
+                              const Tensor* bias,
+                              int64_t stride_h, int64_t stride_w,
+                              int64_t padding_h, int64_t padding_w,
+                              int64_t dilation_h, int64_t dilation_w) -> Tensor {
     // Depthwise convolution: groups = in_channels = out_channels
     // input: [N, C, H, W]
     // weight: [C, 1, kH, kW]
@@ -2000,42 +2005,56 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
     int64_t kH = w_shape[2];
     int64_t kW = w_shape[3];
 
-    int64_t H_out = (H + 2 * padding - dilation * (kH - 1) - 1) / stride + 1;
-    int64_t W_out = (W + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
+    int64_t H_out = (H + 2 * padding_h - dilation_h * (kH - 1) - 1) / stride_h + 1;
+    int64_t W_out = (W + 2 * padding_w - dilation_w * (kW - 1) - 1) / stride_w + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
 #ifdef TENZOR_CONV_AVX2
-        // Use AVX2 SIMD path for stride=1, dilation=1 (contiguous spatial access pattern)
-        if (stride == 1 && dilation == 1) {
+        // AVX2 fast path requires stride==1 and dilation==1 on BOTH axes
+        // (it walks across the W axis with vectorised loads). Padding may
+        // differ per axis without changing the access pattern.
+        if (stride_h == 1 && stride_w == 1 && dilation_h == 1 && dilation_w == 1) {
             depthwise_conv2d_avx2_f32(input.data<float>(), weight.data<float>(),
                 bias ? bias->data<float>() : nullptr, output.data<float>(),
-                N, C, H, W, kH, kW, H_out, W_out, padding);
+                N, C, H, W, kH, kW, H_out, W_out, padding_h, padding_w);
         } else
 #endif
         {
             depthwise_conv2d_impl<float>(input.data<float>(), weight.data<float>(),
                 bias ? bias->data<float>() : nullptr, output.data<float>(),
-                N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+                N, C, H, W, kH, kW, H_out, W_out,
+                stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
         }
     } else if (input.dtype() == DType::Float64) {
         depthwise_conv2d_impl<double>(input.data<double>(), weight.data<double>(),
             bias ? bias->data<double>() : nullptr, output.data<double>(),
-            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+            N, C, H, W, kH, kW, H_out, W_out,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else if (input.dtype() == DType::Float16) {
         depthwise_conv2d_impl<Float16>(input.data<Float16>(), weight.data<Float16>(),
             bias ? bias->data<Float16>() : nullptr, output.data<Float16>(),
-            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+            N, C, H, W, kH, kW, H_out, W_out,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else if (input.dtype() == DType::BFloat16) {
         depthwise_conv2d_impl<BFloat16>(input.data<BFloat16>(), weight.data<BFloat16>(),
             bias ? bias->data<BFloat16>() : nullptr, output.data<BFloat16>(),
-            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+            N, C, H, W, kH, kW, H_out, W_out,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else {
         throw std::runtime_error("Unsupported dtype for depthwise_conv2d");
     }
 
     return output;
+}
+
+// Backward-compatible scalar overload — replicates scalars onto both axes.
+auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
+                              const Tensor* bias, int64_t stride,
+                              int64_t padding, int64_t dilation) -> Tensor {
+    return depthwise_conv2d_kernel(input, weight, bias,
+                                   stride, stride, padding, padding, dilation, dilation);
 }
 
 // ============================================================================

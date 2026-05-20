@@ -1,5 +1,6 @@
 #include "vulkan_ops_common.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <memory>
 
 namespace tenzor {
 
@@ -207,62 +208,56 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     int32_t device_id = input.device().index;
     bool has_bias = (bias != nullptr);
 
-    // For grouped convolution, fall back to standard path for now
-    // (Winograd with groups requires per-group transforms)
+    // Grouped Winograd: slice input/weight/bias per group on device, run the
+    // single-group Winograd path G times, then concatenate the outputs along
+    // the channel axis. Each group keeps the Winograd flop reduction. The
+    // previous branch dispatched the dense `conv2d_forward` shader, which is
+    // correct but slower. Slicing + concat both use GPU shaders — no CPU
+    // roundtrip.
     if (groups > 1) {
-        // Use the standard conv2d_forward shader directly (no Winograd for grouped conv)
-        std::string shader_name = "conv2d_forward";
-        auto* pipeline = getPipeline(shader_name, device_id);
+        if (in_channels % groups != 0 || out_channels % groups != 0) {
+            throw std::runtime_error(
+                "dispatchConv2dWinograd: in_channels and out_channels must "
+                "both be divisible by groups");
+        }
+        const int64_t in_per_group  = in_channels  / groups;
+        const int64_t out_per_group = out_channels / groups;
 
-        std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
-        Tensor output(output_shape, input.dtype(), input.device());
+        std::vector<Tensor> group_outputs;
+        group_outputs.reserve(static_cast<size_t>(groups));
+        for (int64_t g = 0; g < groups; ++g) {
+            std::vector<int64_t> in_starts  = {0, g * in_per_group, 0, 0};
+            std::vector<int64_t> in_ends    = {batch, (g + 1) * in_per_group,
+                                                in_height, in_width};
+            std::vector<int64_t> in_steps   = {1, 1, 1, 1};
+            Tensor group_input =
+                dispatchSlice(input, in_starts, in_ends, in_steps).contiguous();
 
-        const void* buffer_bias = has_bias ? bias->data_ptr() : output.data_ptr();
-        size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+            std::vector<int64_t> w_starts = {g * out_per_group, 0, 0, 0};
+            std::vector<int64_t> w_ends   = {(g + 1) * out_per_group,
+                                              weight_shape[1],
+                                              weight_shape[2],
+                                              weight_shape[3]};
+            std::vector<int64_t> w_steps  = {1, 1, 1, 1};
+            Tensor group_weight =
+                dispatchSlice(weight, w_starts, w_ends, w_steps).contiguous();
 
-        std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input.data_ptr()}, {1, weight.data_ptr()},
-            {2, buffer_bias}, {3, output.data_ptr()}
-        };
-        std::vector<size_t> sizes = {
-            static_cast<size_t>(input.numel() * input.dtype_size()),
-            static_cast<size_t>(weight.numel() * weight.dtype_size()),
-            buffer_size_bias,
-            static_cast<size_t>(output.numel() * output.dtype_size())
-        };
+            std::unique_ptr<Tensor> owned_group_bias;
+            const Tensor* group_bias_ptr = nullptr;
+            if (has_bias) {
+                std::vector<int64_t> b_starts = {g * out_per_group};
+                std::vector<int64_t> b_ends   = {(g + 1) * out_per_group};
+                std::vector<int64_t> b_steps  = {1};
+                owned_group_bias = std::make_unique<Tensor>(
+                    dispatchSlice(*bias, b_starts, b_ends, b_steps).contiguous());
+                group_bias_ptr = owned_group_bias.get();
+            }
 
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
-
-        struct {
-            uint32_t n_elements, batch, in_channels, out_channels;
-            uint32_t in_height, in_width, kernel_h, kernel_w;
-            uint32_t stride, padding, dilation, groups;
-            uint32_t out_h, out_w, has_bias;
-        } pc;
-        pc.n_elements = static_cast<uint32_t>(output.numel());
-        pc.batch = static_cast<uint32_t>(batch);
-        pc.in_channels = static_cast<uint32_t>(in_channels);
-        pc.out_channels = static_cast<uint32_t>(out_channels);
-        pc.in_height = static_cast<uint32_t>(in_height);
-        pc.in_width = static_cast<uint32_t>(in_width);
-        pc.kernel_h = 3; pc.kernel_w = 3;
-        pc.stride = 1; pc.padding = static_cast<uint32_t>(padding);
-        pc.dilation = 1; pc.groups = static_cast<uint32_t>(groups);
-        pc.out_h = static_cast<uint32_t>(out_height);
-        pc.out_w = static_cast<uint32_t>(out_width);
-        pc.has_bias = has_bias ? 1u : 0u;
-
-        vkCmdPushConstants(cmd, pipeline->layout(),
-                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
-        vkCmdDispatch(cmd, workgroups, 1, 1);
-        insertComputeOnlyBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-        return output;
+            group_outputs.push_back(
+                dispatchConv2dWinograd(group_input, group_weight,
+                                        group_bias_ptr, padding, /*groups=*/1));
+        }
+        return dispatchCat(group_outputs, /*dim=*/1);
     }
 
     // ---- Winograd F(2,3) path for groups=1 ----

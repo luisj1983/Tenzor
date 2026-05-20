@@ -2113,3 +2113,59 @@ kernel void embedding_kernel(
     int token_id = indices[idx];
     output[id] = weight[token_id * embedding_dim + dim];
 }
+
+// ============================================================================
+// Inverse trig unary ops — Acos / Asin / Atan
+// Native Metal kernels added to replace CPU-roundtrip `mps_accelerate_*`
+// routing. Half-precision variants upcast to float for the math (Metal's
+// `acos`/`asin`/`atan` are defined for both, but the cast keeps numerics
+// identical to the other half-variants in this file).
+// ============================================================================
+
+kernel void acos_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output      [[buffer(1)]],
+    uint id                   [[thread_position_in_grid]])
+{
+    output[id] = acos(input[id]);
+}
+
+kernel void acos_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)acos((float)input[id]);
+}
+
+kernel void asin_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output      [[buffer(1)]],
+    uint id                   [[thread_position_in_grid]])
+{
+    output[id] = asin(input[id]);
+}
+
+kernel void asin_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)asin((float)input[id]);
+}
+
+kernel void atan_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output      [[buffer(1)]],
+    uint id                   [[thread_position_in_grid]])
+{
+    output[id] = atan(input[id]);
+}
+
+kernel void atan_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)atan((float)input[id]);
+}

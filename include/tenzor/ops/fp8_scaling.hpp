@@ -17,26 +17,30 @@
  *   ----------|----------|------------|------------------------------------
  *   CPU       | native   | emulated   | Bit-level emulation, widens to F32
  *   CUDA      | native   | hardware   | Hopper (SM 9.0+) tensor cores via cublasLt
- *   ROCm      | fallback | fallback   | MI300 hardware path not yet wired;
- *                                       falls back via CPU roundtrip. Enable
- *                                       TENZOR_WARN_CPU_ROUNDTRIP=1 to detect.
+ *   ROCm      | native   | emulated   | Native FP8↔F32 HIP cast kernels
+ *                                       (kernels/transform.hip.cpp). Matmul
+ *                                       widens FP8 → F32 on device, runs
+ *                                       rocBLAS F32 GEMM, narrows back. No
+ *                                       CPU roundtrip on either path. MI300
+ *                                       MFMA FP8 hardware path is a future
+ *                                       perf-only enhancement.
  *   OneAPI    | native   | emulated   | No Intel GPU FP8 hardware support
- *   Vulkan    | fallback | fallback   | No portable FP8 compute-shader
- *                                       intrinsics; falls back via CPU. Enable
- *                                       TENZOR_WARN_CPU_ROUNDTRIP=1 to detect.
- *   MPS       | fallback | fallback   | macOS only; same CPU-roundtrip story.
+ *   Vulkan    | native   | emulated   | FP8 cast compute shaders are
+ *                                       registered; matmul widens to F32.
+ *   MPS       | fallback | fallback   | macOS only; CPU-roundtrip story
+ *                                       still applies.
  *
  * `native` means the backend has a registered Cast kernel for the FP8
  * dtype and computes quantize/dequantize on-device. `emulated` means
  * the backend widens to Float32 for compute but uses local hardware
- * for the FP32 work. `fallback` means tensors are moved CPU → cast
- * → back to the device, which incurs a PCIe/memory-bus round-trip per
- * FP8 op and is too slow for training loops — acceptable for ad-hoc
- * inference or experimentation.
+ * for the FP32 work (also on-device — no CPU roundtrip). `fallback`
+ * means tensors are moved CPU → cast → back to the device, which
+ * incurs a PCIe/memory-bus round-trip per FP8 op.
  *
- * Native Vulkan and ROCm FP8 paths are tracked as follow-up work and
- * require hardware access (Vulkan FP8 intrinsics + MI300 MFMA instructions)
- * that the project CI currently does not have.
+ * The MI300 MFMA FP8 hardware path and a portable Vulkan FP8 intrinsic
+ * path are both performance enhancements; current emulation is
+ * numerically equivalent because Float32 widening exactly represents
+ * every FP8 value.
  */
 
 #pragma once

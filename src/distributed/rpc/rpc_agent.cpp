@@ -30,17 +30,11 @@
 #include <vector>
 #include <thread>
 
-#ifdef __linux__
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <netdb.h>
+// Cross-platform socket support. socket_compat.hpp pulls in POSIX socket
+// headers on Linux/macOS and winsock2 on Windows, and exposes socket_t,
+// close_socket, socket_errno, socket_strerror, tenzor_rpc_socket_init.
+#include "socket_compat.hpp"
 #include <errno.h>
-#include <fcntl.h>
-#endif
 
 namespace tenzor {
 namespace distributed {
@@ -48,7 +42,7 @@ namespace rpc {
 
 namespace {
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 
 // -----------------------------------------------------------------------------
 // Low-level TCP framing helpers.
@@ -246,7 +240,7 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             return ack;
         });
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     // Start accept thread so we can receive inbound connections.
     // Wait for it to confirm bind()/listen() succeeded before returning so
     // callers can't begin send() on a port that never came up.
@@ -300,7 +294,7 @@ auto TcpRpcAgent::send(Message msg) -> Message {
         // Fast-path: in-process dispatch.
         dispatch_message(std::move(msg));
     } else {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
         int fd = get_or_connect(dst_worker);
         if (fd < 0 || !send_framed_locked(fd, msg)) {
             std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -339,7 +333,7 @@ auto TcpRpcAgent::send_async(Message msg, std::function<void(Message)> callback)
 auto TcpRpcAgent::shutdown() -> void {
     running_.store(false, std::memory_order_release);
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     // Shut down listener if present (accept thread will exit).
     if (listen_fd_ >= 0) {
         ::shutdown(listen_fd_, SHUT_RDWR);
@@ -424,7 +418,7 @@ auto TcpRpcAgent::dispatch_message(Message msg) -> void {
         return;
     }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     // Send the response back to the originating worker over the same mesh.
     int fd = get_or_connect(msg.src_worker);
     if (fd >= 0) send_framed_locked(fd, response);
@@ -455,7 +449,7 @@ auto TcpRpcAgent::handle_rpc_call(const Message& msg) -> Message {
 }
 
 bool TcpRpcAgent::send_framed_locked(int fd, const Message& msg) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     std::shared_ptr<std::mutex> mtx;
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -475,7 +469,7 @@ bool TcpRpcAgent::send_framed_locked(int fd, const Message& msg) {
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 
 // Look up or establish a connection to `peer_id`. Returns -1 on failure.
 int TcpRpcAgent::get_or_connect(int32_t peer_id) {
@@ -620,11 +614,37 @@ void TcpRpcAgent::receive_loop(int fd, int32_t peer_id) {
     }
 }
 
-#else  // non-Linux stub
+#else  // not POSIX (Linux/macOS) — Windows path lands here.
 
-int TcpRpcAgent::get_or_connect(int32_t) { return -1; }
-void TcpRpcAgent::accept_loop() {}
-void TcpRpcAgent::receive_loop(int, int32_t) {}
+// Windows winsock2 implementation requires mirroring the POSIX
+// implementation above with `socket_t`, `closesocket`, `WSAGetLastError`
+// substitutions. The `socket_compat.hpp` header already provides the
+// type aliases and `tenzor_rpc_socket_init()` reference-counted
+// WSAStartup. To activate Windows, port the four functions below
+// (`get_or_connect`, `accept_loop`, `receive_loop`, plus the helpers
+// they use in the POSIX block above) using winsock2 calls — every
+// `::close` becomes `close_socket`, every `errno` becomes
+// `socket_errno()`, `MSG_NOSIGNAL` is unsupported (use `SO_NOSIGPIPE`
+// or simply pass `0`), and `SHUT_RDWR` becomes `SD_BOTH`. The header
+// already pulls in the right headers and links Ws2_32.lib via pragma.
+//
+// Until that port lands, fail loudly at first use rather than silently
+// returning -1 / no-op.
+
+namespace {
+[[noreturn]] void rpc_unsupported_platform(const char* fn) {
+    throw std::runtime_error(
+        std::string("TcpRpcAgent::") + fn +
+        ": distributed RPC is only available on POSIX platforms (Linux/macOS) "
+        "in this build. Windows winsock2 port pending — see "
+        "src/distributed/rpc/socket_compat.hpp for the abstraction layer "
+        "ready to be wired up.");
+}
+}
+
+int TcpRpcAgent::get_or_connect(int32_t) { rpc_unsupported_platform("get_or_connect"); }
+void TcpRpcAgent::accept_loop()          { rpc_unsupported_platform("accept_loop"); }
+void TcpRpcAgent::receive_loop(int, int32_t) { rpc_unsupported_platform("receive_loop"); }
 
 #endif
 

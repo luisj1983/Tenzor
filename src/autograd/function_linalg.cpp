@@ -281,9 +281,13 @@ auto NormBackward_Linalg::backward(std::vector<Tensor> grad_outputs) -> std::vec
         return {grad_A};
     }
 
-    // For non-Frobenius norms, return zeros (unsupported)
-    auto grad_A = zeros_like(input);
-    return {grad_A};
+    // Forward (src/ops/linalg.cpp:618) only accepts ord == "fro" today; any other
+    // value must have come from a silent forward-vs-backward contract drift. Raise
+    // loudly instead of silently emitting a zero gradient.
+    throw std::runtime_error(
+        "NormBackward_Linalg::backward: unsupported norm order '" + ord_ +
+        "'. Forward `linalg::norm` only accepts 'fro'; add the explicit backward "
+        "formula before extending forward.");
 }
 
 // SlogdetBackward implementation
@@ -776,8 +780,14 @@ auto NormBackward_Linalg::backward_with_variables(std::vector<Variable> grad_out
         return {scale_expanded * input};
     }
 
-    // Unsupported norm order — return zeros (no gradient)
-    return {Variable(zeros_like(input.tensor()), false)};
+    // Forward (src/ops/linalg.cpp:618) only accepts ord == "fro" today. Any other
+    // value means the forward contract was extended without a matching backward
+    // formula. Raise loudly rather than silently emitting a zero gradient.
+    throw std::runtime_error(
+        "NormBackward_Linalg::backward_with_variables: unsupported norm order '" +
+        ord_ +
+        "'. Forward `linalg::norm` only accepts 'fro'; add the explicit backward "
+        "formula before extending forward.");
 }
 
 auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {

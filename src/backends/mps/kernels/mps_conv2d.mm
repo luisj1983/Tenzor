@@ -27,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -174,6 +175,7 @@ static Tensor dispatch_im2col(const Tensor& input, const ConvParams& params) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return columns;
 }
@@ -211,6 +213,7 @@ static Tensor dispatch_col2im(const Tensor& columns, const ConvParams& params, D
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
 }
@@ -243,6 +246,7 @@ static void dispatch_bias_add(Tensor& output, const Tensor& bias,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 // ============================================================================
@@ -304,6 +308,7 @@ static void dispatch_gemm(id<MTLBuffer> buf_a, id<MTLBuffer> buf_b, id<MTLBuffer
     [gemm encodeToCommandBuffer:cmd leftMatrix:mat_a rightMatrix:mat_b resultMatrix:mat_c];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 } // anonymous namespace
@@ -686,6 +691,7 @@ Tensor mps_conv2d_backward_bias(const Tensor& grad_output) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return grad_bias;
 }

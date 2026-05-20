@@ -23,6 +23,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -161,6 +162,7 @@ static void mps_gemm(id<MTLBuffer> buf_a, id<MTLBuffer> buf_b, id<MTLBuffer> buf
     [mm encodeToCommandBuffer:cmd leftMatrix:mat_a rightMatrix:mat_b resultMatrix:mat_c];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +191,7 @@ static void dispatch_compute(const std::string& shader,
     [enc endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +399,7 @@ std::vector<Tensor> mps_lstm_cell_backward_kernel(
         [mm encodeToCommandBuffer:cmd leftMatrix:mat_dg rightMatrix:mat_in resultMatrix:mat_out];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // grad_w_hh = d_gates^T @ hx  (4*H, B) @ (B, hidden_size)
@@ -426,6 +430,7 @@ std::vector<Tensor> mps_lstm_cell_backward_kernel(
         [mm encodeToCommandBuffer:cmd leftMatrix:mat_dg rightMatrix:mat_hx resultMatrix:mat_out];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Step 5: Bias gradients = sum of d_gates over batch dimension
@@ -971,6 +976,7 @@ std::vector<Tensor> mps_gru_cell_backward_kernel(
         [mm encodeToCommandBuffer:cmd leftMatrix:mat_dg rightMatrix:mat_in resultMatrix:mat_out];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // grad_w_hh = d_gates_hh^T @ hx
@@ -999,6 +1005,7 @@ std::vector<Tensor> mps_gru_cell_backward_kernel(
         [mm encodeToCommandBuffer:cmd leftMatrix:mat_dg rightMatrix:mat_hx resultMatrix:mat_out];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
 
     // Step 5: Bias gradients = sum of d_gates over batch

@@ -905,14 +905,20 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         attrs.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
         attrs.set(AttrKey::Eps, static_cast<double>(eps_));
 
-        // FusedLayerNorm has a uniform `{output, mean, rstd}` return contract
-        // on every backend (Vulkan and ROCm host-recompute the stats inside
-        // the registration as a workaround until their kernels expose them).
-        // OpId::LayerNorm only returns the triple on CUDA/OneAPI/CPU; ROCm
-        // and Vulkan return `{output}` only — using LayerNorm there would
-        // out-of-bounds-read in the backward graph.
+        // OpId::LayerNorm now returns the {output, mean, rstd} triple on every
+        // backend (CPU, CUDA, ROCm, Vulkan, OneAPI). Previously this code
+        // dispatched FusedLayerNorm as a workaround for ROCm/Vulkan returning
+        // only {output}; those backends were refit to compute and return the
+        // stats from their forward kernel directly. Contract-enforced below.
         std::vector<Tensor> inputs_vec = {x, weight_dev, bias_dev};
-        auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
+        auto results = dispatch<OpId::LayerNorm>(inputs_vec, attrs);
+        if (results.size() < 3) {
+            throw std::runtime_error(
+                "LayerNorm: backend kernel returned " +
+                std::to_string(results.size()) +
+                " tensors; the contract requires {output, mean, rstd}. Fix "
+                "the backend kernel registration.");
+        }
         Tensor out_dev  = results[0];
         Tensor mean_dev = results[1];
         Tensor rstd_dev = results[2];
@@ -2952,8 +2958,20 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         std::vector<Tensor> inputs_vec = {x, weight_dev};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
 
+        // Contract: every backend's FusedRMSNorm must return {output, rrms}.
+        // Anything less means the backward cannot reconstruct the
+        // 1/sqrt(mean(x^2)+eps) factor and will silently miscompute or read
+        // past the saved-tensor vector. Surface the contract violation here
+        // instead of letting it manifest as a backward-time SEGV.
+        if (results.size() < 2) {
+            throw std::runtime_error(
+                "RMSNorm: backend FusedRMSNorm kernel returned " +
+                std::to_string(results.size()) +
+                " tensors; the contract requires {output, rrms}. Fix the "
+                "backend kernel registration to emit the saved rrms tensor.");
+        }
         Tensor output = results[0];
-        Tensor saved_rrms = results.size() > 1 ? results[1] : Tensor();
+        Tensor saved_rrms = results[1];
         jit_record_rms_norm(x, weight_dev, output, eps_, normalized_shape_);
 
         if (needs_grad) {

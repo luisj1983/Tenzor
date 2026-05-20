@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -219,6 +220,7 @@ std::pair<Tensor, Tensor> mps_maxpool2d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return {output, indices};
     }
@@ -252,6 +254,7 @@ Tensor mps_maxpool2d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -300,6 +303,7 @@ Tensor mps_avgpool2d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return output;
     }
@@ -344,6 +348,7 @@ Tensor mps_avgpool2d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -385,6 +390,7 @@ Tensor mps_adaptive_avgpool2d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return output;
     }
@@ -423,6 +429,7 @@ Tensor mps_adaptive_avgpool2d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -468,6 +475,7 @@ std::pair<Tensor, Tensor> mps_adaptive_maxpool2d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return {output, indices};
     }
@@ -500,6 +508,47 @@ Tensor mps_adaptive_maxpool2d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
+
+        return grad_input;
+    }
+}
+
+Tensor mps_adaptive_maxpool3d_backward_kernel(
+    const Tensor& grad_output, const Tensor& indices,
+    const std::vector<int64_t>& input_shape)
+{
+    // 3D analogue of the 2D adaptive max-pool backward above. The forward
+    // (`adaptive_maxpool3d_forward_kernel` in pool3d.metal) emits a linear
+    // input index per output element; backward atomically accumulates
+    // grad_output into grad_input at that index. Native Metal — replaces
+    // the previous mps_accelerate_single CPU roundtrip for
+    // OpId::AdaptiveMaxPool3dBackward.
+    @autoreleasepool {
+        Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+        size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
+        std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
+
+        uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+
+        auto pipeline = get_pipeline(shader_for_dtype(
+            "adaptive_maxpool3d_backward_kernel", grad_output.dtype()));
+        id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
+        id<MTLBuffer> buf_indices  = get_buffer(indices);
+        id<MTLBuffer> buf_grad_in  = get_buffer(grad_input);
+
+        id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:buf_grad_out offset:0 atIndex:0];
+        [enc setBuffer:buf_indices  offset:0 atIndex:1];
+        [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        dispatch_1d(enc, pipeline, num_output);
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -549,6 +598,7 @@ std::pair<Tensor, Tensor> mps_maxpool1d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return {output, indices};
     }
@@ -581,6 +631,7 @@ Tensor mps_maxpool1d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -624,6 +675,7 @@ Tensor mps_avgpool1d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return output;
     }
@@ -663,6 +715,7 @@ Tensor mps_avgpool1d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -702,6 +755,7 @@ Tensor mps_adaptive_avgpool1d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return output;
     }
@@ -738,6 +792,7 @@ Tensor mps_adaptive_avgpool1d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }
@@ -781,6 +836,7 @@ std::pair<Tensor, Tensor> mps_adaptive_maxpool1d_forward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return {output, indices};
     }
@@ -813,6 +869,7 @@ Tensor mps_adaptive_maxpool1d_backward_kernel(
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         return grad_input;
     }

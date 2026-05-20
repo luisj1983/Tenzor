@@ -18,6 +18,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include "../mps_cmd_check.h"
 
 namespace tenzor::mps {
 
@@ -56,6 +57,7 @@ static Tensor dispatch_simple_unary(const std::string& shader_name, const Tensor
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -86,6 +88,7 @@ static Tensor dispatch_simple_binary(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -116,6 +119,7 @@ static Tensor dispatch_reduction_per_row(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -141,6 +145,7 @@ static Tensor dispatch_reduction_all(const std::string& shader_name,
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -238,6 +243,7 @@ Tensor mps_nan_to_num_kernel(const Tensor& input, double nan_val, double posinf_
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -275,6 +281,7 @@ Tensor mps_rrelu_kernel(const Tensor& input, float lower, float upper, bool /*tr
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -306,6 +313,7 @@ Tensor mps_rrelu_backward_kernel(const Tensor& grad, const Tensor& input, float 
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -422,6 +430,7 @@ std::pair<Tensor, Tensor> mps_aminmax_kernel(const Tensor& input, int64_t dim, b
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return {out_min, out_max};
     }
     if (dim == ndim - 1) {
@@ -451,6 +460,7 @@ std::pair<Tensor, Tensor> mps_aminmax_kernel(const Tensor& input, int64_t dim, b
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
         auto sv = std::vector<int64_t>(shape.begin(), shape.end());
         return {reshape_reduction_output(out_min, sv, dim, keepdim),
@@ -490,6 +500,7 @@ Tensor mps_var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
     if (dim == ndim - 1) {
@@ -516,6 +527,7 @@ Tensor mps_var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
     // H: non-last-dim — permute on MPS so dim is last, then recurse.
@@ -552,6 +564,7 @@ Tensor mps_std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
     if (dim == ndim - 1) {
@@ -577,6 +590,7 @@ Tensor mps_std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t co
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
     // H: non-last-dim — permute on MPS so dim is last, then recurse.
@@ -612,6 +626,7 @@ Tensor mps_norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) 
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
     if (dim == ndim - 1) {
@@ -637,6 +652,7 @@ Tensor mps_norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) 
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return reshape_reduction_output(output, std::vector<int64_t>(shape.begin(), shape.end()), dim, keepdim);
     }
     // H: non-last-dim — permute on MPS so dim is last, then recurse.
@@ -682,6 +698,7 @@ Tensor mps_lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -707,6 +724,7 @@ Tensor mps_trace_kernel(const Tensor& input) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -733,6 +751,7 @@ Tensor mps_fill_kernel(const Tensor& input, float value) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -772,6 +791,7 @@ Tensor mps_diag_kernel(const Tensor& input, int64_t diagonal) {
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     } else {
         // Create diagonal matrix from 1D input
@@ -801,6 +821,7 @@ Tensor mps_diag_kernel(const Tensor& input, int64_t diagonal) {
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
 }
@@ -836,6 +857,7 @@ Tensor mps_tril_kernel(const Tensor& input, int64_t diagonal) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -870,6 +892,7 @@ Tensor mps_triu_kernel(const Tensor& input, int64_t diagonal) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -903,6 +926,7 @@ Tensor mps_cumsum_kernel(const Tensor& input, int64_t dim) {
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
     // H: non-last-dim — permute on MPS so dim is last, recurse, then
@@ -952,6 +976,7 @@ Tensor mps_cumprod_kernel(const Tensor& input, int64_t dim) {
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
         return output;
     }
     // H: non-last-dim — permute on MPS so dim is last, recurse, then
@@ -1001,6 +1026,7 @@ Tensor mps_polygamma_kernel(const Tensor& input, int64_t order) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1029,6 +1055,7 @@ Tensor mps_leaky_relu_kernel(const Tensor& input, float neg_slope) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1059,6 +1086,7 @@ Tensor mps_leaky_relu_backward_kernel(const Tensor& grad, const Tensor& input, f
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1087,6 +1115,7 @@ Tensor mps_elu_kernel(const Tensor& input, float alpha) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1117,6 +1146,7 @@ Tensor mps_elu_backward_kernel(const Tensor& grad, const Tensor& input, float al
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1146,6 +1176,7 @@ Tensor mps_softplus_kernel(const Tensor& input, float beta, float threshold) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1177,6 +1208,7 @@ Tensor mps_softplus_backward_kernel(const Tensor& grad, const Tensor& input, flo
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1205,6 +1237,7 @@ Tensor mps_clamp_min_kernel(const Tensor& input, float min_val) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1233,6 +1266,7 @@ Tensor mps_clamp_max_kernel(const Tensor& input, float max_val) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1267,6 +1301,7 @@ Tensor mps_log_softmax_kernel(const Tensor& input, int64_t dim) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1306,6 +1341,7 @@ Tensor mps_ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device de
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     } else {
         int32_t* ptr = static_cast<int32_t*>(const_cast<void*>(output.data_ptr()));
         for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
@@ -1336,6 +1372,7 @@ Tensor mps_full_kernel(const std::vector<int64_t>& shape, float value, DType dty
         [encoder endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
     }
     return output;
 }
@@ -1362,6 +1399,7 @@ Tensor mps_eye_kernel(int64_t n, DType dtype, Device device) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1389,6 +1427,7 @@ Tensor mps_arange_kernel(float start, float end, float step, DType dtype, Device
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1416,6 +1455,7 @@ Tensor mps_linspace_kernel(float start, float end, int64_t steps, DType dtype, D
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 
@@ -1495,6 +1535,7 @@ Tensor mps_one_hot_kernel(const Tensor& indices, int64_t num_classes) {
     [encoder endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
     return output;
 }
 

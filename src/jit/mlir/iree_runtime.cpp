@@ -25,6 +25,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -79,24 +80,45 @@ auto device_for_target(const std::string& target) -> std::string {
 auto dtype_to_iree_element(::tenzor::DType d) -> std::string {
     using ::tenzor::DType;
     switch (d) {
-        case DType::Float32: return "f32";
-        case DType::Float64: return "f64";
-        case DType::Int32:   return "i32";
-        case DType::Int64:   return "i64";
+        case DType::Float32:    return "f32";
+        case DType::Float64:    return "f64";
+        case DType::Float16:    return "f16";
+        case DType::BFloat16:   return "bf16";
+        case DType::Int8:       return "i8";
+        case DType::Int16:      return "i16";
+        case DType::Int32:      return "i32";
+        case DType::Int64:      return "i64";
+        case DType::UInt8:      return "ui8";
+        case DType::UInt16:     return "ui16";
+        case DType::UInt32:     return "ui32";
+        case DType::UInt64:     return "ui64";
+        case DType::Bool:       return "i1";
+        case DType::Complex64:  return "complex<f32>";
+        case DType::Complex128: return "complex<f64>";
         default: break;
     }
     throw std::invalid_argument(
-        "iree-run-module marshaling: dtype not yet supported (only Float32, "
-        "Float64, Int32, Int64). value=" +
+        "iree-run-module marshaling: dtype not supported. value=" +
         std::to_string(static_cast<int>(d)));
 }
 
 auto iree_element_to_dtype(const std::string& s) -> ::tenzor::DType {
     using ::tenzor::DType;
-    if (s == "f32") return DType::Float32;
-    if (s == "f64") return DType::Float64;
-    if (s == "i32") return DType::Int32;
-    if (s == "i64") return DType::Int64;
+    if (s == "f32")           return DType::Float32;
+    if (s == "f64")           return DType::Float64;
+    if (s == "f16")           return DType::Float16;
+    if (s == "bf16")          return DType::BFloat16;
+    if (s == "i8")            return DType::Int8;
+    if (s == "i16")           return DType::Int16;
+    if (s == "i32")           return DType::Int32;
+    if (s == "i64")           return DType::Int64;
+    if (s == "ui8")           return DType::UInt8;
+    if (s == "ui16")          return DType::UInt16;
+    if (s == "ui32")          return DType::UInt32;
+    if (s == "ui64")          return DType::UInt64;
+    if (s == "i1")            return DType::Bool;
+    if (s == "complex<f32>")  return DType::Complex64;
+    if (s == "complex<f64>")  return DType::Complex128;
     throw JitInvokeError("Unsupported IREE element type in output: " + s);
 }
 
@@ -136,6 +158,75 @@ auto render_input_flag(const ::tenzor::Tensor& t) -> std::string {
         for (int64_t i = 0; i < n; ++i) {
             if (i != 0) os << ' ';
             os << p[i];
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Int8) {
+        const int8_t* p = cpu.data<int8_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << static_cast<int>(p[i]);
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Int16) {
+        const int16_t* p = cpu.data<int16_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << p[i];
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::UInt8) {
+        const uint8_t* p = cpu.data<uint8_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << static_cast<unsigned>(p[i]);
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::UInt16) {
+        const uint16_t* p = cpu.data<uint16_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << p[i];
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::UInt32) {
+        const uint32_t* p = cpu.data<uint32_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << p[i];
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::UInt64) {
+        const uint64_t* p = cpu.data<uint64_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << p[i];
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Bool) {
+        const bool* p = cpu.data<bool>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << (p[i] ? 1 : 0);
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Float16) {
+        // IREE accepts f16 input values as ASCII floats; upcast each element via
+        // the Float16 → float conversion operator.
+        const ::tenzor::Float16* p = cpu.data<::tenzor::Float16>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << static_cast<float>(p[i]);
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::BFloat16) {
+        const ::tenzor::BFloat16* p = cpu.data<::tenzor::BFloat16>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << static_cast<float>(p[i]);
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Complex64) {
+        // IREE's iree-run-module accepts complex values as "(re,im)" pairs.
+        const std::complex<float>* p = cpu.data<std::complex<float>>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << '(' << p[i].real() << ',' << p[i].imag() << ')';
+        }
+    } else if (cpu.dtype() == ::tenzor::DType::Complex128) {
+        const std::complex<double>* p = cpu.data<std::complex<double>>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (i != 0) os << ' ';
+            os << '(' << p[i].real() << ',' << p[i].imag() << ')';
         }
     } else {
         (void)dtype_to_iree_element(cpu.dtype());  // throws
@@ -271,20 +362,22 @@ auto parse_output_line(const std::string& shape_and_data)
     for (auto d : shape) numel *= d;
     if (shape.empty()) numel = 1;
 
+    // Strip iree-run-module formatting punctuation. For complex values we
+    // additionally turn the "(re,im)" wrappers into whitespace-separated pairs
+    // so the same stream-based reader works.
+    const bool is_complex =
+        (dt == ::tenzor::DType::Complex64 || dt == ::tenzor::DType::Complex128);
     for (auto& c : values) {
-        if (c == '[' || c == ']' || c == ',') c = ' ';
+        if (c == '[' || c == ']') c = ' ';
+        if (c == ',' && !is_complex) c = ' ';
+    }
+    if (is_complex) {
+        for (auto& c : values) {
+            if (c == '(' || c == ')' || c == ',') c = ' ';
+        }
     }
 
-    ::tenzor::Tensor out;
-    if (dt == ::tenzor::DType::Float32) {
-        out = ::tenzor::full(shape, 0.0f, dt);
-    } else if (dt == ::tenzor::DType::Float64) {
-        out = ::tenzor::full(shape, 0.0, dt);
-    } else if (dt == ::tenzor::DType::Int32) {
-        out = ::tenzor::full(shape, 0.0f, dt);
-    } else if (dt == ::tenzor::DType::Int64) {
-        out = ::tenzor::full(shape, 0.0f, dt);
-    }
+    ::tenzor::Tensor out = ::tenzor::full(shape, 0.0, dt);
     std::istringstream is(values);
     if (dt == ::tenzor::DType::Float32) {
         float* p = out.data<float>();
@@ -292,12 +385,73 @@ auto parse_output_line(const std::string& shape_and_data)
     } else if (dt == ::tenzor::DType::Float64) {
         double* p = out.data<double>();
         for (int64_t i = 0; i < numel; ++i) is >> p[i];
+    } else if (dt == ::tenzor::DType::Float16) {
+        ::tenzor::Float16* p = out.data<::tenzor::Float16>();
+        for (int64_t i = 0; i < numel; ++i) {
+            float v = 0.0f;
+            is >> v;
+            p[i] = ::tenzor::Float16(v);
+        }
+    } else if (dt == ::tenzor::DType::BFloat16) {
+        ::tenzor::BFloat16* p = out.data<::tenzor::BFloat16>();
+        for (int64_t i = 0; i < numel; ++i) {
+            float v = 0.0f;
+            is >> v;
+            p[i] = ::tenzor::BFloat16(v);
+        }
+    } else if (dt == ::tenzor::DType::Int8) {
+        int8_t* p = out.data<int8_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            int v = 0;
+            is >> v;
+            p[i] = static_cast<int8_t>(v);
+        }
+    } else if (dt == ::tenzor::DType::Int16) {
+        int16_t* p = out.data<int16_t>();
+        for (int64_t i = 0; i < numel; ++i) is >> p[i];
     } else if (dt == ::tenzor::DType::Int32) {
         int32_t* p = out.data<int32_t>();
         for (int64_t i = 0; i < numel; ++i) is >> p[i];
     } else if (dt == ::tenzor::DType::Int64) {
         int64_t* p = out.data<int64_t>();
         for (int64_t i = 0; i < numel; ++i) is >> p[i];
+    } else if (dt == ::tenzor::DType::UInt8) {
+        uint8_t* p = out.data<uint8_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            unsigned v = 0;
+            is >> v;
+            p[i] = static_cast<uint8_t>(v);
+        }
+    } else if (dt == ::tenzor::DType::UInt16) {
+        uint16_t* p = out.data<uint16_t>();
+        for (int64_t i = 0; i < numel; ++i) is >> p[i];
+    } else if (dt == ::tenzor::DType::UInt32) {
+        uint32_t* p = out.data<uint32_t>();
+        for (int64_t i = 0; i < numel; ++i) is >> p[i];
+    } else if (dt == ::tenzor::DType::UInt64) {
+        uint64_t* p = out.data<uint64_t>();
+        for (int64_t i = 0; i < numel; ++i) is >> p[i];
+    } else if (dt == ::tenzor::DType::Bool) {
+        bool* p = out.data<bool>();
+        for (int64_t i = 0; i < numel; ++i) {
+            int v = 0;
+            is >> v;
+            p[i] = (v != 0);
+        }
+    } else if (dt == ::tenzor::DType::Complex64) {
+        std::complex<float>* p = out.data<std::complex<float>>();
+        for (int64_t i = 0; i < numel; ++i) {
+            float re = 0.0f, im = 0.0f;
+            is >> re >> im;
+            p[i] = std::complex<float>(re, im);
+        }
+    } else if (dt == ::tenzor::DType::Complex128) {
+        std::complex<double>* p = out.data<std::complex<double>>();
+        for (int64_t i = 0; i < numel; ++i) {
+            double re = 0.0, im = 0.0;
+            is >> re >> im;
+            p[i] = std::complex<double>(re, im);
+        }
     }
     return out;
 }

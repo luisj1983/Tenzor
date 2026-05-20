@@ -495,11 +495,15 @@ auto OffloadContext::drain_all_pending() -> void {
     }
 }
 
-auto OffloadContext::offload_single_tensor(Tensor* tensor_ptr) -> bool {
-    // Phase C (C6): public wrapper around the private offload_tensor() so the
-    // free function tenzor::nn::offload_param can drive a manual eviction
-    // without exposing the whole private API.
-    return offload_tensor(tensor_ptr);
+auto OffloadContext::offload_single_tensor(Tensor* tensor_ptr,
+                                           OffloadPriority priority) -> bool {
+    // Public wrapper around the private offload_tensor() so
+    // tenzor::nn::offload_param can drive a manual eviction without exposing
+    // the whole private API. The caller-supplied priority is forwarded so the
+    // per-tensor OffloadPriority is honored end-to-end: HIGH keeps the tensor
+    // on the device, LOW bypasses the size threshold to force an offload, and
+    // NORMAL follows the standard rules.
+    return offload_tensor(tensor_ptr, priority, /*priority_explicit=*/true);
 }
 
 auto OffloadContext::finalize_completed_offloads() -> size_t {
@@ -569,7 +573,9 @@ auto OffloadContext::finalize_pending(TensorInfo& info, Tensor* tensor_ptr) -> v
     info.pending_is_offload = false;
 }
 
-auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
+auto OffloadContext::offload_tensor(Tensor* tensor_ptr,
+                                    OffloadPriority priority,
+                                    bool priority_explicit) -> bool {
     if (!tensor_ptr) {
         return false;
     }
@@ -586,12 +592,25 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
 
     auto& info = it->second;
 
+    // Honour caller-supplied priority for manual offload paths
+    // (offload_single_tensor → offload_param). HIGH means "keep on device"
+    // (skip offload), LOW means "force offload" (bypass size threshold),
+    // NORMAL follows the standard `should_offload` predicate.
+    if (priority_explicit) {
+        info.priority = priority;
+        if (priority == OffloadPriority::HIGH) {
+            return false;  // HIGH = pin to device, never offload via this path
+        }
+    }
+
     // If a previous async transfer for this tensor is still pending, drain it so we have a
     // consistent view before deciding whether a new offload is needed.
     finalize_pending(info, tensor_ptr);
 
-    // Check if should offload
-    if (!should_offload(info) || info.is_offloaded) {
+    // Check if should offload. LOW priority bypasses the size threshold so a
+    // user can force a small tensor off the device.
+    const bool force = priority_explicit && (priority == OffloadPriority::LOW);
+    if ((!force && !should_offload(info)) || info.is_offloaded) {
         return false;
     }
 
@@ -720,6 +739,11 @@ auto OffloadContext::should_offload(const TensorInfo& info) const -> bool {
     // Don't offload pinned tensors
     if (info.is_pinned) return false;
 
+    // HIGH-priority tensors are pinned to the device by policy: they bypass
+    // the auto-offload predicate entirely. (Manual offload via offload_param
+    // also skips them — see offload_tensor.)
+    if (info.priority == OffloadPriority::HIGH) return false;
+
     // Check size threshold
     if (info.size_bytes < config_.offload_threshold) return false;
 
@@ -731,6 +755,27 @@ auto OffloadContext::should_offload(const TensorInfo& info) const -> bool {
     }
 
     return true;
+}
+
+// Comparator for ranking offload candidates during eviction. Tensors that
+// should be evicted first compare "less than" tensors that should be kept.
+// Ordering: LOW evicts before NORMAL before HIGH; within the same priority,
+// older (lower) use_count evicts first. Static member so the comparator has
+// access to the private nested TensorInfo type.
+bool OffloadContext::priority_lt(const OffloadContext::TensorInfo& a,
+                                  const OffloadContext::TensorInfo& b) {
+    auto rank = [](OffloadPriority p) -> int {
+        switch (p) {
+            case OffloadPriority::LOW:    return 0;
+            case OffloadPriority::NORMAL: return 1;
+            case OffloadPriority::HIGH:   return 2;
+        }
+        return 1;
+    };
+    int ra = rank(a.priority);
+    int rb = rank(b.priority);
+    if (ra != rb) return ra < rb;
+    return a.use_count < b.use_count;
 }
 
 // ============================================================================
@@ -1061,21 +1106,21 @@ auto ComputeContext::synchronize() -> void {
 // Global Functions
 // ============================================================================
 
-auto offload_param(Tensor& param, [[maybe_unused]] OffloadPriority priority) -> void {
-    // Phase C (C6): previously a documented-only stub. Now forwards to
-    // OffloadContext::offload_single_tensor (added in offload.hpp), which
-    // drives the standard offload_tensor() path under the tensor_map_mutex_.
-    // Priority would feed initialize_tensor_info via TensorInfo::priority --
-    // currently the auto-eviction path is the only consumer of priority and
-    // it reads from tensor_map_; that's a separate plumbing change tracked
-    // under C2 (LRU + priority + size eviction). Manual offload still works
-    // with default priority for now.
+auto offload_param(Tensor& param, OffloadPriority priority) -> void {
+    // Forward the caller's priority into the per-tensor TensorInfo. The
+    // semantics:
+    //   HIGH   → pin to device (skip offload via this manual path).
+    //   NORMAL → standard `should_offload` predicate applies.
+    //   LOW    → force offload, bypassing the size threshold.
+    // The priority is also recorded on the TensorInfo so eviction-time
+    // comparators (priority_lt) and quantization-on-offload decisions read
+    // a consistent value.
     auto* ctx = get_global_offload_context();
     if (!ctx) {
         std::cerr << "Warning: offload_param called but no global offload context set\n";
         return;
     }
-    ctx->offload_single_tensor(&param);
+    ctx->offload_single_tensor(&param, priority);
 }
 
 auto get_global_offload_context() -> OffloadContext* {

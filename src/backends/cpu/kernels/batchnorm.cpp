@@ -26,6 +26,8 @@
 
 // Import shared Float16/BFloat16 operator overloads and safe_sqrt helpers
 #include "half_operators.hpp"
+#include "tenzor/utils/log.hpp"
+#include <cstdlib>
 
 namespace tenzor {
 namespace cpu {
@@ -607,7 +609,16 @@ static bool batchnorm2d_forward_affine_onednn(
         return true;
 
     } catch (const dnnl::error& e) {
-        // oneDNN error, fall back to scalar implementation
+        // TENZOR_STRICT_BACKEND=1 makes oneDNN failures unrecoverable so silent
+        // fallback to the scalar implementation cannot mask a real bug.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[BatchNorm] oneDNN forward failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") +
+                e.what());
+        }
+        TENZOR_LOG_WARN("[BatchNorm] oneDNN forward failed ({}); using scalar fallback",
+                        e.what());
         return false;
     }
 }

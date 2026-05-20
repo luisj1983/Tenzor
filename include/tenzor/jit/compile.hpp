@@ -82,6 +82,14 @@ struct CompileConfig {
     /// One of: "auto" (pick from input device), "llvm-cpu", "cuda",
     /// "vulkan-spirv", "rocm".
     std::string target{"auto"};
+
+    /// When true, a compilation failure inside `CompiledFunction::operator()`
+    /// is re-thrown rather than silently degrading to eager execution. The
+    /// environment variable `TENZOR_JIT_STRICT=1` flips this on for any
+    /// caller that did not set it explicitly. Defaults to false to preserve
+    /// historical "compile-or-eager" behaviour for callers that opt out
+    /// (`TENZOR_JIT_STRICT=0`).
+    bool strict{false};
 };
 
 /**

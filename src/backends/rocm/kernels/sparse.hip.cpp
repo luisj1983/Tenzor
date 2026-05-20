@@ -16,6 +16,9 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/math.hpp"
 
 #include "tenzor/backend/loader_fwd.hpp"
 
@@ -23,8 +26,10 @@
 #include <hip/hip_runtime.h>
 #include "../hip_buffer.hpp"
 #include "../rocsparse_handle_pool.hpp"
+#include <array>
 #include <climits>
 #include <cstdint>
+#include <span>
 #include <functional>
 #include <limits>
 #include <list>
@@ -488,6 +493,53 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     }
 
     DType dtype = dense.dtype();
+
+    // Complex64/Complex128: rocSPARSE doesn't expose native complex SpMM.
+    // Decompose on-device into 4 real SpMMs (no host roundtrip):
+    //   A = A_re + i*A_im,  B = B_re + i*B_im
+    //   C_re = A_re@B_re - A_im@B_im
+    //   C_im = A_re@B_im + A_im@B_re
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        if (sparse.values().dtype() != dtype) {
+            throw std::runtime_error(
+                "rocm_spmm: complex path requires sparse.values().dtype() == dense.dtype()");
+        }
+        DType real_dtype = (dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+
+        Tensor val_real_view = ::tenzor::view_as_real(sparse.values());      // (nnz, 2)
+        Tensor val_re = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor val_im = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        Tensor dense_real_view = ::tenzor::view_as_real(dense);              // (K, N, 2)
+        Tensor B_re = ::tenzor::select(dense_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor B_im = ::tenzor::select(dense_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        auto build_real_sparse = [&](const Tensor& v) {
+            return (sparse.layout() == SparseLayout::COO)
+                ? SparseTensor::sparse_coo(sparse.indices(), v, sparse.shape())
+                : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                           v, sparse.shape());
+        };
+        SparseTensor A_re = build_real_sparse(val_re);
+        SparseTensor A_im = build_real_sparse(val_im);
+
+        Tensor ARe_BRe = rocm_spmm_kernel(A_re, B_re);
+        Tensor AIm_BIm = rocm_spmm_kernel(A_im, B_im);
+        Tensor ARe_BIm = rocm_spmm_kernel(A_re, B_im);
+        Tensor AIm_BRe = rocm_spmm_kernel(A_im, B_re);
+
+        Tensor C_re = ::tenzor::sub(ARe_BRe, AIm_BIm);
+        Tensor C_im = ::tenzor::add(ARe_BIm, AIm_BRe);
+
+        // Stack real and imag into a (M, N, 2) real tensor, then view as
+        // complex to get (M, N) of the original complex dtype.
+        std::array<Tensor, 2> parts = {C_re, C_im};
+        std::span<const Tensor> parts_span(parts.data(), parts.size());
+        Tensor stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+        (void)real_dtype;
+        return ::tenzor::view_as_complex(stacked);
+    }
+
     // Wave G6 (deferred → landed): F16/BF16 supported via widen-narrow
     // through F32. rocSPARSE doesn't expose half-precision SpMM directly;
     // widening at the dispatch boundary keeps correctness at the cost of
@@ -637,6 +689,46 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     }
 
     DType dtype = vec.dtype();
+
+    // Complex64/Complex128: decompose into 4 real SpMVs on device. Mirrors
+    // the SpMM complex path above. No host roundtrip.
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        if (sparse.values().dtype() != dtype) {
+            throw std::runtime_error(
+                "rocm_spmv: complex path requires sparse.values().dtype() == vec.dtype()");
+        }
+
+        Tensor val_real_view = ::tenzor::view_as_real(sparse.values());      // (nnz, 2)
+        Tensor val_re = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor val_im = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        Tensor vec_real_view = ::tenzor::view_as_real(vec);                  // (K, 2)
+        Tensor v_re = ::tenzor::select(vec_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor v_im = ::tenzor::select(vec_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        auto build_real_sparse = [&](const Tensor& v) {
+            return (sparse.layout() == SparseLayout::COO)
+                ? SparseTensor::sparse_coo(sparse.indices(), v, sparse.shape())
+                : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                           v, sparse.shape());
+        };
+        SparseTensor A_re = build_real_sparse(val_re);
+        SparseTensor A_im = build_real_sparse(val_im);
+
+        Tensor ARe_vRe = rocm_spmv_kernel(A_re, v_re);
+        Tensor AIm_vIm = rocm_spmv_kernel(A_im, v_im);
+        Tensor ARe_vIm = rocm_spmv_kernel(A_re, v_im);
+        Tensor AIm_vRe = rocm_spmv_kernel(A_im, v_re);
+
+        Tensor y_re = ::tenzor::sub(ARe_vRe, AIm_vIm);
+        Tensor y_im = ::tenzor::add(ARe_vIm, AIm_vRe);
+
+        std::array<Tensor, 2> parts = {y_re, y_im};
+        std::span<const Tensor> parts_span(parts.data(), parts.size());
+        Tensor stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+        return ::tenzor::view_as_complex(stacked);
+    }
+
     // Wave G6 (deferred → landed): F16/BF16 via widen-narrow.
     if (dtype == DType::Float16 || dtype == DType::BFloat16) {
         auto sparse_f32_vals = sparse.values().to(DType::Float32);
@@ -1458,6 +1550,47 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     }
 
     DType dtype = dense.dtype();
+
+    // Complex64/Complex128: decompose into 4 real SpMMs on device — same
+    // strategy as the rocSPARSE path, since this fallback only has real
+    // CSR SpMM kernels.
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        if (sparse.values().dtype() != dtype) {
+            throw std::runtime_error(
+                "rocm_spmm (HIP fallback): complex path requires "
+                "sparse.values().dtype() == dense.dtype()");
+        }
+        Tensor val_real_view = ::tenzor::view_as_real(sparse.values());
+        Tensor val_re = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor val_im = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        Tensor dense_real_view = ::tenzor::view_as_real(dense);
+        Tensor B_re = ::tenzor::select(dense_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor B_im = ::tenzor::select(dense_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        auto build_real_sparse = [&](const Tensor& v) {
+            return (sparse.layout() == SparseLayout::COO)
+                ? SparseTensor::sparse_coo(sparse.indices(), v, sparse.shape())
+                : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                           v, sparse.shape());
+        };
+        SparseTensor A_re = build_real_sparse(val_re);
+        SparseTensor A_im = build_real_sparse(val_im);
+
+        Tensor ARe_BRe = rocm_spmm_kernel(A_re, B_re);
+        Tensor AIm_BIm = rocm_spmm_kernel(A_im, B_im);
+        Tensor ARe_BIm = rocm_spmm_kernel(A_re, B_im);
+        Tensor AIm_BRe = rocm_spmm_kernel(A_im, B_re);
+
+        Tensor C_re = ::tenzor::sub(ARe_BRe, AIm_BIm);
+        Tensor C_im = ::tenzor::add(ARe_BIm, AIm_BRe);
+
+        std::array<Tensor, 2> parts = {C_re, C_im};
+        std::span<const Tensor> parts_span(parts.data(), parts.size());
+        Tensor stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+        return ::tenzor::view_as_complex(stacked);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
 
     auto dense_gpu = (dense.device().type != Device::Type::ROCm)
@@ -1505,6 +1638,45 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     }
 
     DType dtype = vec.dtype();
+
+    // Complex64/Complex128: same on-device decomposition as SpMM.
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        if (sparse.values().dtype() != dtype) {
+            throw std::runtime_error(
+                "rocm_spmv (HIP fallback): complex path requires "
+                "sparse.values().dtype() == vec.dtype()");
+        }
+        Tensor val_real_view = ::tenzor::view_as_real(sparse.values());
+        Tensor val_re = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor val_im = ::tenzor::select(val_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        Tensor vec_real_view = ::tenzor::view_as_real(vec);
+        Tensor v_re = ::tenzor::select(vec_real_view, /*dim=*/-1, /*index=*/0).contiguous();
+        Tensor v_im = ::tenzor::select(vec_real_view, /*dim=*/-1, /*index=*/1).contiguous();
+
+        auto build_real_sparse = [&](const Tensor& v) {
+            return (sparse.layout() == SparseLayout::COO)
+                ? SparseTensor::sparse_coo(sparse.indices(), v, sparse.shape())
+                : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                           v, sparse.shape());
+        };
+        SparseTensor A_re = build_real_sparse(val_re);
+        SparseTensor A_im = build_real_sparse(val_im);
+
+        Tensor ARe_vRe = rocm_spmv_kernel(A_re, v_re);
+        Tensor AIm_vIm = rocm_spmv_kernel(A_im, v_im);
+        Tensor ARe_vIm = rocm_spmv_kernel(A_re, v_im);
+        Tensor AIm_vRe = rocm_spmv_kernel(A_im, v_re);
+
+        Tensor y_re = ::tenzor::sub(ARe_vRe, AIm_vIm);
+        Tensor y_im = ::tenzor::add(ARe_vIm, AIm_vRe);
+
+        std::array<Tensor, 2> parts = {y_re, y_im};
+        std::span<const Tensor> parts_span(parts.data(), parts.size());
+        Tensor stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+        return ::tenzor::view_as_complex(stacked);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
 
     auto vec_gpu = (vec.device().type != Device::Type::ROCm)

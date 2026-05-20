@@ -241,7 +241,8 @@ public:
      * tensor isn't tracked, the engine is disabled, or should_offload() rejects
      * the request.
      */
-    auto offload_single_tensor(Tensor* tensor_ptr) -> bool;
+    auto offload_single_tensor(Tensor* tensor_ptr,
+                               OffloadPriority priority = OffloadPriority::NORMAL) -> bool;
 
 private:
     // Reference to managed model
@@ -392,7 +393,9 @@ private:
      * @param tensor_ptr Pointer to tensor to offload
      * @return true if offload succeeded
      */
-    auto offload_tensor(Tensor* tensor_ptr) -> bool;
+    auto offload_tensor(Tensor* tensor_ptr,
+                        OffloadPriority priority = OffloadPriority::NORMAL,
+                        bool priority_explicit = false) -> bool;
 
     /**
      * @brief Prefetch single tensor to GPU
@@ -409,6 +412,15 @@ private:
      * @return true if tensor meets offload criteria
      */
     auto should_offload(const TensorInfo& info) const -> bool;
+
+    /**
+     * @brief Comparator for eviction ranking.
+     *
+     * Returns true if `a` should be evicted before `b`. Ordering is
+     * (priority asc, use_count asc) so LOW evicts before NORMAL before HIGH,
+     * and within a priority older (lower use_count) entries evict first.
+     */
+    static bool priority_lt(const TensorInfo& a, const TensorInfo& b);
 
     /**
      * @brief Drain a pending async transfer for `info` and finalize the tensor swap.
