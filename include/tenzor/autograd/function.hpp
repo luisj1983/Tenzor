@@ -3154,6 +3154,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "MultinomialSampleBackward"; }
+    auto op_id() const -> OpId override { return OpId::Multinomial; }
 };
 
 /**
@@ -3167,6 +3168,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "BernoulliSampleBackward"; }
+    auto op_id() const -> OpId override { return OpId::Bernoulli; }
 };
 
 /**
@@ -3181,6 +3183,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "ArgmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::ArgMax; }
 };
 
 class ArgminBackward : public Function {
@@ -3188,6 +3191,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "ArgminBackward"; }
+    auto op_id() const -> OpId override { return OpId::ArgMin; }
 };
 
 /**
