@@ -169,4 +169,26 @@ TEST_F(NonDifferentiableOpsTest, ArgmaxArgminBucketizeBackwardThrow) {
     check(buck, "bucketize", "sigmoid-of-distance");
 }
 
+TEST_F(NonDifferentiableOpsTest, ArgSortModeBackwardThrow) {
+    auto check = [](Function& fn, const std::string& expected_op,
+                    const std::string& expected_hint) {
+        std::vector<Tensor> dummy_grads;
+        dummy_grads.emplace_back(std::vector<int64_t>{1},
+                                  DType::Float32, Device::cpu());
+        try {
+            (void) fn.backward(std::move(dummy_grads));
+            FAIL() << "expected NonDifferentiable, got no exception";
+        } catch (const NonDifferentiable& e) {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find(expected_op), std::string::npos)
+                << "actual: " << msg;
+            EXPECT_NE(msg.find(expected_hint), std::string::npos)
+                << "actual: " << msg;
+        }
+    };
+
+    ArgSortBackward as;
+    check(as, "argsort", "tenzor::sort");
+}
+
 }  // namespace

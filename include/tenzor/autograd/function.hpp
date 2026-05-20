@@ -3053,4 +3053,22 @@ public:
     auto name() const -> std::string override { return "BucketizeBackward"; }
 };
 
+/**
+ * @brief argsort. Returns the permutation indices that would sort the
+ *        input. Integer output ⇒ no Jacobian w.r.t. the input values.
+ *        For gradient-aware sorting, use `sort` (which returns a
+ *        differentiable values+indices tuple — only the values branch
+ *        carries gradient via gather-then-scatter).
+ */
+class ArgSortBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ArgSortBackward"; }
+};
+
+// NOTE: ModeBackward is already declared earlier in this file with a real
+// "scatter to first-occurrence-of-mode-value" implementation; that one
+// stands. We do not re-add a NonDifferentiable stub for mode().
+
 } // namespace tenzor

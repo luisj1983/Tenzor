@@ -1756,4 +1756,19 @@ auto BucketizeBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::v
         "need gradients.");
 }
 
+auto ArgSortBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("ArgSortBackward::forward should not be called directly");
+}
+auto ArgSortBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "argsort: returned permutation indices are integers and are not "
+        "differentiable in the input values. Use `tenzor::sort` if you need "
+        "the differentiable values branch alongside the indices.");
+}
+
+// NOTE: Mode is treated as differentiable (gradient = scatter-to-first-
+// occurrence-of-mode-value); the ModeBackward implementation lives in the
+// existing reduction-backward translation unit. We do not re-define it
+// here as a NonDifferentiable stub — that was an early-iteration mistake.
+
 } // namespace tenzor
