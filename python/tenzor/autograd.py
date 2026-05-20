@@ -101,3 +101,47 @@ grad = _autograd_cpp.grad
 # the runtime.
 gradcheck = _autograd_cpp.gradcheck
 gradgradcheck = _autograd_cpp.gradgradcheck
+
+
+def backward(tensors, grad_tensors=None, retain_graph: bool = False,
+             create_graph: bool = False):
+    """Compute gradients of a set of output tensors via reverse mode.
+
+    Mirrors ``torch.autograd.backward``: walks the autograd graph backward
+    from each tensor with the corresponding incoming gradient, accumulating
+    gradients on every leaf Variable that has ``requires_grad=True``.
+
+    Parameters
+    ----------
+    tensors : Variable or sequence of Variable
+        The output Variable(s) whose gradients to propagate. A scalar
+        Variable can be passed without a grad_tensor; non-scalars require
+        an explicit corresponding grad_tensor.
+    grad_tensors : Tensor or sequence of Tensor, optional
+        Per-output incoming gradients. ``None`` is allowed only when the
+        matching `tensors` entry is scalar.
+    retain_graph : bool, default False
+        If True, the autograd graph is kept after the backward pass so
+        the same outputs can be used in a second backward.
+    create_graph : bool, default False
+        If True, the backward pass is itself differentiable (higher-order
+        gradients).
+    """
+    if not isinstance(tensors, (list, tuple)):
+        tensors = [tensors]
+    if grad_tensors is None:
+        grad_tensors = [None] * len(tensors)
+    elif not isinstance(grad_tensors, (list, tuple)):
+        grad_tensors = [grad_tensors]
+    if len(grad_tensors) != len(tensors):
+        raise ValueError(
+            f"backward: tensors and grad_tensors must have matching length "
+            f"({len(tensors)} vs {len(grad_tensors)})"
+        )
+    for i, (t, g) in enumerate(zip(tensors, grad_tensors)):
+        # Retain the graph if any subsequent output still needs to fire,
+        # mirroring the C++ side's `retain_graph=true` for non-final
+        # outputs.
+        last = (i == len(tensors) - 1)
+        retain = retain_graph or create_graph or not last
+        t.backward(g, retain, create_graph)
