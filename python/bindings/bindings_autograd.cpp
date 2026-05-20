@@ -13,6 +13,7 @@
 #include <tenzor/autograd/function.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/functional.hpp>
+#include <tenzor/autograd/gradcheck.hpp>
 #include <tenzor/autograd/graph_optimizer.hpp>
 #include <tenzor/autograd/graph_viz.hpp>
 #include <tenzor/autograd/vmap.hpp>
@@ -254,6 +255,50 @@ void register_autograd(py::module_& m) {
         return py::make_tuple(out, vjp_result);
     }, py::arg("f"), py::arg("x"), py::arg("cotangent"),
     "Vector-Jacobian product (reverse-mode). Returns (output, v^T @ J_f(x)).");
+
+    // Audit E.11: expose gradcheck / gradgradcheck. The C++ helpers exist
+    // and are heavily used internally, but had no Python bindings — the
+    // autograd.pyi declarations were a documentation lie.
+    autograd_mod.def("gradcheck",
+        [](py::function f, const tenzor::Variable& input,
+           double eps, double atol, double rtol,
+           bool raise_exception) -> bool {
+            auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
+                py::object result = f(x);
+                return result.cast<tenzor::Variable>();
+            };
+            return tenzor::gradcheck(cpp_fn, input, eps, atol, rtol, raise_exception);
+        },
+        py::arg("func"),
+        py::arg("input"),
+        py::arg("eps") = 1e-6,
+        py::arg("atol") = 1e-5,
+        py::arg("rtol") = 1e-3,
+        py::arg("raise_exception") = false,
+        "First-order gradient check via finite differences. Returns true if "
+        "analytical gradients match the numerical estimate within `atol+rtol`.");
+
+    autograd_mod.def("gradgradcheck",
+        [](py::function f, const tenzor::Variable& input,
+           double eps, double atol, double rtol,
+           bool raise_exception) -> bool {
+            auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
+                py::gil_scoped_acquire inner_gil;
+                py::object result = f(x);
+                return result.cast<tenzor::Variable>();
+            };
+            return tenzor::gradgradcheck(cpp_fn, input, eps, atol, rtol, raise_exception);
+        },
+        py::arg("func"),
+        py::arg("input"),
+        py::arg("eps") = 1e-6,
+        py::arg("atol") = 1e-5,
+        py::arg("rtol") = 1e-3,
+        py::arg("raise_exception") = false,
+        "Second-order gradient check: gradcheck applied to the analytical "
+        "gradient function. Returns true if Hessian-vector products match the "
+        "numerical estimate.");
 }
 
 } // namespace tenzor::python

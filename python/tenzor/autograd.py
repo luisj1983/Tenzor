@@ -95,3 +95,9 @@ class Function:
 # FunctionCtx is registered on the root module, not the autograd submodule
 FunctionCtx = _core.FunctionCtx
 grad = _autograd_cpp.grad
+
+# Audit E.11: gradcheck / gradgradcheck now have Python bindings. Surface
+# them through `tenzor.autograd` so the autograd.pyi declarations match
+# the runtime.
+gradcheck = _autograd_cpp.gradcheck
+gradgradcheck = _autograd_cpp.gradgradcheck
