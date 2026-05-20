@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
+#include <optional>
 #include "bindings/register.hpp"  // split-out submodule registrars
 #include <cassert>                 // 5th-audit B6 PyGILState_Check assertions
 #include <iostream>
@@ -3214,7 +3215,11 @@ void bind_compression(py::module& m) {
              "Serialize the exported program to a binary file")
         .def_static("load", &tenzor::export_::ExportedProgram::load,
              py::arg("path"),
-             "Load an exported program from a binary file")
+             py::arg("map_location") = std::nullopt,
+             "Load an exported program from a binary file.  Pass "
+             "map_location=Device.cpu() (or another device) to move every "
+             "state tensor to that device on load; defaults to the device "
+             "the program was originally saved on.")
         .def("run", &tenzor::export_::ExportedProgram::run,
              py::arg("inputs"),
              "Execute the exported program with runtime inputs")
