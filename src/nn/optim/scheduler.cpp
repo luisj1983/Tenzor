@@ -251,4 +251,8 @@ auto ChainedScheduler::get_last_lr() const -> double {
     return schedulers_.back()->get_last_lr();
 }
 
+//==============================================================================
+// MultiStepLR + LambdaLR are implemented in scheduler_advanced.cpp.
+//==============================================================================
+
 } // namespace tenzor::optim

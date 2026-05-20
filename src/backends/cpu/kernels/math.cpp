@@ -57,13 +57,15 @@
 
 // OpenMP thresholds — uses shared definition with env var override support.
 // See omp_thresholds.hpp for TENZOR_OMP_THRESHOLD_* environment variables.
-#include "omp_thresholds.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"  // unified (F.5)
 
 // Convenience macros — delegate to shared lazy-init function
-#define OMP_THRESHOLD_SIMPLE  (tenzor::cpu::get_omp_thresholds().simple)
-#define OMP_THRESHOLD_MEDIUM  (tenzor::cpu::get_omp_thresholds().medium)
-#define OMP_THRESHOLD_COMPLEX (tenzor::cpu::get_omp_thresholds().complex)
-#define OMP_THRESHOLD_MATMUL  (tenzor::cpu::get_omp_thresholds().matmul)
+// Audit item F.5: prefer the project-wide OmpThresholds (in
+// tenzor::, not tenzor::cpu::) so there is a single source of truth.
+#define OMP_THRESHOLD_SIMPLE  (::tenzor::OmpThresholds::simple())
+#define OMP_THRESHOLD_MEDIUM  (::tenzor::OmpThresholds::medium())
+#define OMP_THRESHOLD_COMPLEX (::tenzor::OmpThresholds::complex())
+#define OMP_THRESHOLD_MATMUL  (::tenzor::OmpThresholds::matmul())
 
 namespace tenzor {
 
@@ -429,7 +431,7 @@ static void matmul_blocked_int32(
     std::fill_n(C, M * N, 0);
 
     // Cache-friendly blocked algorithm with OpenMP parallelization over row blocks
-    #pragma omp parallel for collapse(2) if(M * N > tenzor::cpu::get_omp_thresholds().medium)
+    #pragma omp parallel for collapse(2) if(M * N > ::tenzor::OmpThresholds::medium())
     for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
         for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
             int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
@@ -721,7 +723,7 @@ static void matmul_blocked_int8(
 #endif
 
     // Cache-friendly blocked algorithm with OpenMP parallelization
-    #pragma omp parallel for collapse(2) if(M * N > tenzor::cpu::get_omp_thresholds().medium)
+    #pragma omp parallel for collapse(2) if(M * N > ::tenzor::OmpThresholds::medium())
     for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
         for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
             int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
@@ -775,7 +777,7 @@ static void matmul_blocked_float16(
     // 'static thread_local' vectors are NOT safe here because this code runs inside
     // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
     // initialization machinery, leaving the vectors empty (data() == nullptr).
-    #pragma omp parallel if(M * N > tenzor::cpu::get_omp_thresholds().simple)
+    #pragma omp parallel if(M * N > ::tenzor::OmpThresholds::simple())
     {
     std::vector<float> A_fp32_buf(TILE_M * TILE_K);
     std::vector<float> B_fp32_buf(TILE_K * TILE_N);
@@ -942,7 +944,7 @@ static void matmul_blocked_bfloat16(
     // 'static thread_local' vectors are NOT safe here because this code runs inside
     // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
     // initialization machinery, leaving the vectors empty (data() == nullptr).
-    #pragma omp parallel if(M * N > tenzor::cpu::get_omp_thresholds().simple)
+    #pragma omp parallel if(M * N > ::tenzor::OmpThresholds::simple())
     {
     std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
 
@@ -1088,7 +1090,7 @@ static void matmul_blocked_bfloat16(
     // 'static thread_local' vectors are NOT safe here because this code runs inside
     // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
     // initialization machinery, leaving the vectors empty (data() == nullptr).
-    #pragma omp parallel if(M * N > tenzor::cpu::get_omp_thresholds().simple)
+    #pragma omp parallel if(M * N > ::tenzor::OmpThresholds::simple())
     {
     std::vector<float> A_fp32_buf_bf16(TILE_M * TILE_K);
     std::vector<float> B_fp32_buf_bf16(TILE_K * TILE_N);
@@ -2444,14 +2446,14 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
     } else if (input.dtype() == DType::Complex64) {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
@@ -3073,14 +3075,14 @@ auto log_kernel(const Tensor& input) -> Tensor {
     } else if (input.dtype() == DType::Complex64) {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
@@ -3230,14 +3232,14 @@ auto exp_kernel(const Tensor& input) -> Tensor {
     } else if (input.dtype() == DType::Complex64) {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
@@ -4163,7 +4165,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             float sum = 0.0f;
-            #pragma omp parallel for reduction(+:sum) if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for reduction(+:sum) if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
             output.data<float>()[0] = sum;
             break;
@@ -4172,7 +4174,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             double sum = 0.0;
-            #pragma omp parallel for reduction(+:sum) if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for reduction(+:sum) if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) sum += a_data[i] * b_data[i];
             output.data<double>()[0] = sum;
             break;
@@ -4278,7 +4280,7 @@ auto sin_kernel(const Tensor& input) -> Tensor {
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::sin_batch_avx2(in_data, out_data, static_cast<size_t>(n));
 #else
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
             }
@@ -4291,7 +4293,7 @@ auto sin_kernel(const Tensor& input) -> Tensor {
 #if defined(TENZOR_USE_MKL)
             vdSin(static_cast<int>(n), in_data, out_data);
 #else
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
             }
@@ -4301,14 +4303,14 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Complex64: {
             const auto* in_data = input.data<std::complex<float>>();
             auto* out_data = output.data<std::complex<float>>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) out_data[i] = std::sin(in_data[i]);
             break;
         }
         case DType::Complex128: {
             const auto* in_data = input.data<std::complex<double>>();
             auto* out_data = output.data<std::complex<double>>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) out_data[i] = std::sin(in_data[i]);
             break;
         }
@@ -4340,7 +4342,7 @@ auto cos_kernel(const Tensor& input) -> Tensor {
 #elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
             fast_math::cos_batch_avx2(in_data, out_data, static_cast<size_t>(n));
 #else
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
@@ -4353,7 +4355,7 @@ auto cos_kernel(const Tensor& input) -> Tensor {
 #if defined(TENZOR_USE_MKL)
             vdCos(static_cast<int>(n), in_data, out_data);
 #else
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
@@ -4363,14 +4365,14 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Complex64: {
             const auto* in_data = input.data<std::complex<float>>();
             auto* out_data = output.data<std::complex<float>>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) out_data[i] = std::cos(in_data[i]);
             break;
         }
         case DType::Complex128: {
             const auto* in_data = input.data<std::complex<double>>();
             auto* out_data = output.data<std::complex<double>>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) out_data[i] = std::cos(in_data[i]);
             break;
         }
@@ -4615,7 +4617,7 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] += b_data[i];
                 }
@@ -4629,7 +4631,7 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] += b_data[i];
                 }
@@ -4643,7 +4645,7 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] += b_data[i];
                 }
@@ -4657,7 +4659,7 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] += b_data[i];
                 }
@@ -4722,7 +4724,7 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] -= b_data[i];
                 }
@@ -4736,7 +4738,7 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] -= b_data[i];
                 }
@@ -4750,7 +4752,7 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] -= b_data[i];
                 }
@@ -4764,7 +4766,7 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] -= b_data[i];
                 }
@@ -4829,7 +4831,7 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] *= b_data[i];
                 }
@@ -4843,7 +4845,7 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] *= b_data[i];
                 }
@@ -4857,7 +4859,7 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] *= b_data[i];
                 }
@@ -4871,7 +4873,7 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] *= b_data[i];
                 }
@@ -4936,7 +4938,7 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] /= b_data[i];
                 }
@@ -4950,7 +4952,7 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] /= b_data[i];
                 }
@@ -4964,7 +4966,7 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] /= b_data[i];
                 }
@@ -4978,7 +4980,7 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     a_data[i] /= b_data[i];
                 }
@@ -5082,7 +5084,7 @@ auto unary_vml_kernel(const Tensor& input,
 #if defined(TENZOR_USE_MKL)
         vml_f32(static_cast<int>(n), in_data, out_data);
 #else
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().simple)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
 #endif
     } else if (input.dtype() == DType::Float64) {
@@ -5091,7 +5093,7 @@ auto unary_vml_kernel(const Tensor& input,
 #if defined(TENZOR_USE_MKL)
         vml_f64(static_cast<int>(n), in_data, out_data);
 #else
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().simple)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
 #endif
     } else if (input.dtype() == DType::Float16) {
@@ -5704,7 +5706,7 @@ auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
     int64_t dim_stride = inner;
 
     auto cross_typed = [&](auto* a_ptr, auto* b_ptr, auto* c_ptr) {
-        #pragma omp parallel for if(outer * inner > tenzor::cpu::get_omp_thresholds().complex)
+        #pragma omp parallel for if(outer * inner > ::tenzor::OmpThresholds::complex())
         for (int64_t idx = 0; idx < outer * inner; ++idx) {
             int64_t o = idx / inner, i = idx % inner;
             int64_t base = o * 3 * inner + i;
@@ -5830,7 +5832,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
                     }
                     b_sq[static_cast<size_t>(j)] = sum;
                 }
-                #pragma omp parallel for collapse(2) if(P * R > tenzor::cpu::get_omp_thresholds().complex)
+                #pragma omp parallel for collapse(2) if(P * R > ::tenzor::OmpThresholds::complex())
                 for (int64_t i = 0; i < P; ++i) {
                     for (int64_t j = 0; j < R; ++j) {
                         T dot = T(0);
@@ -5854,7 +5856,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
                 const T* b_batch = b_data + b2 * R * M;
                 T* o_batch = out_data + batch * P * R;
 
-                #pragma omp parallel for collapse(2) if(P * R > tenzor::cpu::get_omp_thresholds().complex)
+                #pragma omp parallel for collapse(2) if(P * R > ::tenzor::OmpThresholds::complex())
                 for (int64_t i = 0; i < P; ++i) {
                     for (int64_t j = 0; j < R; ++j) {
                         if (p == std::numeric_limits<double>::infinity()) {

@@ -24,12 +24,17 @@
 #define TENZOR_REDUCTION_SSE2 1
 #endif
 
+// Audit item F.5: include OmpThresholds at file scope (NOT inside the
+// `namespace tenzor::cpu { ... }` below — doing so would nest the
+// struct under tenzor::cpu::tenzor::OmpThresholds and break the
+// `::tenzor::OmpThresholds` references in the macro below).
+#include "tenzor/backend/omp_thresholds.hpp"
+
 namespace tenzor {
 namespace cpu {
 
 // Use adaptive OpenMP thresholds scaled to thread count
-#include "omp_thresholds.hpp"
-#define REDUCTION_OMP_THRESHOLD static_cast<int64_t>(tenzor::cpu::get_omp_thresholds().medium)
+#define REDUCTION_OMP_THRESHOLD static_cast<int64_t>(::tenzor::OmpThresholds::medium())
 
 // ============================================================================
 // SIMD Horizontal Reduction Helpers
@@ -1189,7 +1194,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         const float scale = 1.0f / static_cast<float>(count);
         const int64_t n = sum_result.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; i++) {
             data[i] = Float16(static_cast<float>(data[i]) * scale);
         }
@@ -1198,7 +1203,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         const float scale = 1.0f / static_cast<float>(count);
         const int64_t n = sum_result.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; i++) {
             data[i] = BFloat16(static_cast<float>(data[i]) * scale);
         }
@@ -1207,7 +1212,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         const float scale = 1.0f / static_cast<float>(count);
         const int64_t n = sum_result.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; i++) {
             data[i] *= scale;
         }
@@ -1216,7 +1221,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         const double scale = 1.0 / static_cast<double>(count);
         const int64_t n = sum_result.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; i++) {
             data[i] *= scale;
         }
@@ -1975,7 +1980,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 const int64_t dim_size = input_shape[dim];
                 const int64_t output_size = output.numel();
 
-                #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
@@ -2277,7 +2282,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 const int64_t dim_size = input_shape[dim];
                 const int64_t output_size = output.numel();
 
-                #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
@@ -2361,7 +2366,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 const int64_t dim_size = input_shape[dim];
                 const int64_t output_size = output.numel();
 
-                #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
@@ -2620,7 +2625,7 @@ void argsort_along_dim(const T* input_data, int64_t* output_data,
     int64_t outer_size = total_elems / (dim_size * inner_size);
 
     // For each outer x inner combination, sort along dim
-    #pragma omp parallel for if(outer_size * inner_size > tenzor::cpu::get_omp_thresholds().matmul)
+    #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
             // Collect values along the dimension
@@ -2722,7 +2727,7 @@ auto prod_impl(const T* input_data, int64_t n) -> T {
     if (n == 0) return T(1);  // Empty product is 1
 
     T result = T(1);
-    #pragma omp parallel for reduction(*:result) if(n > tenzor::cpu::get_omp_thresholds().medium)
+    #pragma omp parallel for reduction(*:result) if(n > ::tenzor::OmpThresholds::medium())
     for (int64_t i = 0; i < n; i++) {
         result *= input_data[i];
     }
@@ -2749,7 +2754,7 @@ void prod_along_dim(const T* input_data,
     // Initialize output to 1 (identity for multiplication)
     std::fill(output_data, output_data + output_size, T(1));
 
-    #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
         // Compute indices for this output position
         std::vector<int64_t> indices(ndim);
@@ -2960,7 +2965,7 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 }
                 float mean = sum_impl(input_data, n) / static_cast<float>(n);
                 float var_sum = 0.0f;
-                #pragma omp parallel for reduction(+:var_sum) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:var_sum) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float diff = input_data[i] - mean;
                     var_sum += diff * diff;
@@ -2979,7 +2984,7 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 }
                 double mean = sum_impl(input_data, n) / static_cast<double>(n);
                 double var_sum = 0.0;
-                #pragma omp parallel for reduction(+:var_sum) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:var_sum) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     double diff = input_data[i] - mean;
                     var_sum += diff * diff;
@@ -3171,7 +3176,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
         case DType::Float32: {
             auto* var_data = var_result.data<float>();
             auto* output_data = output.data<float>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 output_data[i] = std::sqrt(var_data[i]);
             }
@@ -3180,7 +3185,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
         case DType::Float64: {
             auto* var_data = var_result.data<double>();
             auto* output_data = output.data<double>();
-            #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().medium)
+            #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 output_data[i] = std::sqrt(var_data[i]);
             }
@@ -3326,20 +3331,20 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
 
             if (p == 1.0f) {
                 // L1 norm: sum of absolute values
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::abs(input_data[i]);
                 }
             } else if (p == 2.0f) {
                 // L2 norm: sqrt of sum of squares
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += input_data[i] * input_data[i];
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
                 // L-inf norm: max absolute value (parallelized)
-                #pragma omp parallel for reduction(max:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(input_data[i]);
                     if (abs_val > norm_value) {
@@ -3352,21 +3357,21 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 // norm = max_val * (sum(|x/max_val|^p))^(1/p)
                 if (p > 10.0f) {
                     float max_val = 0.0f;
-                    #pragma omp parallel for reduction(max:max_val) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                    #pragma omp parallel for reduction(max:max_val) if(n > ::tenzor::OmpThresholds::medium())
                     for (int64_t i = 0; i < n; i++) {
                         float abs_val = std::abs(input_data[i]);
                         if (abs_val > max_val) max_val = abs_val;
                     }
                     if (max_val > 0.0f) {
                         float inv_max = 1.0f / max_val;
-                        #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                        #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                         for (int64_t i = 0; i < n; i++) {
                             norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
                         }
                         norm_value = max_val * std::pow(norm_value, 1.0f / p);
                     }
                 } else {
-                    #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                    #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                     for (int64_t i = 0; i < n; i++) {
                         norm_value += std::pow(std::abs(input_data[i]), p);
                     }
@@ -3385,20 +3390,20 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
 
             if (p == 1.0) {
                 // L1 norm: sum of absolute values
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::abs(input_data[i]);
                 }
             } else if (p == 2.0) {
                 // L2 norm: sqrt of sum of squares
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += input_data[i] * input_data[i];
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
                 // L-inf norm: max absolute value (parallelized)
-                #pragma omp parallel for reduction(max:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     double abs_val = std::abs(input_data[i]);
                     if (abs_val > norm_value) {
@@ -3410,21 +3415,21 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 // For large p, use max-normalization to avoid overflow
                 if (p > 10.0) {
                     double max_val = 0.0;
-                    #pragma omp parallel for reduction(max:max_val) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                    #pragma omp parallel for reduction(max:max_val) if(n > ::tenzor::OmpThresholds::medium())
                     for (int64_t i = 0; i < n; i++) {
                         double abs_val = std::abs(input_data[i]);
                         if (abs_val > max_val) max_val = abs_val;
                     }
                     if (max_val > 0.0) {
                         double inv_max = 1.0 / max_val;
-                        #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                        #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                         for (int64_t i = 0; i < n; i++) {
                             norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
                         }
                         norm_value = max_val * std::pow(norm_value, 1.0 / p);
                     }
                 } else {
-                    #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                    #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                     for (int64_t i = 0; i < n; i++) {
                         norm_value += std::pow(std::abs(input_data[i]), p);
                     }
@@ -3444,19 +3449,19 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             float norm_value = 0.0f;
 
             if (p == 1.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::abs(static_cast<float>(input_data[i]));
                 }
             } else if (p == 2.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float v = static_cast<float>(input_data[i]);
                     norm_value += v * v;
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
-                #pragma omp parallel for reduction(max:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(static_cast<float>(input_data[i]));
                     if (abs_val > norm_value) {
@@ -3464,7 +3469,7 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                     }
                 }
             } else {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
                 }
@@ -3483,19 +3488,19 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             float norm_value = 0.0f;
 
             if (p == 1.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::abs(static_cast<float>(input_data[i]));
                 }
             } else if (p == 2.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float v = static_cast<float>(input_data[i]);
                     norm_value += v * v;
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
-                #pragma omp parallel for reduction(max:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(static_cast<float>(input_data[i]));
                     if (abs_val > norm_value) {
@@ -3503,7 +3508,7 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                     }
                 }
             } else {
-                #pragma omp parallel for reduction(+:norm_value) if(n > tenzor::cpu::get_omp_thresholds().medium)
+                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
                 }
@@ -3605,7 +3610,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         int64_t output_size = output.numel();
         const int64_t shape_ndim = ndim;
 
-        #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
         for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
             // Use stack allocation for common case (<=16 dims), heap for rare large dims
             std::vector<int64_t> indices_vec;
@@ -3730,7 +3735,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         int64_t output_size = output.numel();
         const int64_t shape_ndim = ndim;
 
-        #pragma omp parallel for if(output_size > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
         for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
             // Use stack allocation for common case (<=16 dims), heap for rare large dims
             std::vector<int64_t> indices_vec;

@@ -21,7 +21,7 @@ inline std::vector<int64_t> shape_vec(const tenzor::Tensor& t) {
     return {s.begin(), s.end()};
 }
 } // anonymous namespace
-#include "omp_thresholds.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"  // unified (F.5)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

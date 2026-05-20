@@ -11,6 +11,7 @@
 #include "optimizer.hpp"
 #include <functional>
 #include <memory>
+#include <vector>
 #include <cmath>
 #include <numbers>
 
@@ -194,6 +195,8 @@ private:
 
     auto update_lr() -> void;
 };
+
+
 
 /**
  * @brief Cosine annealing learning rate scheduler

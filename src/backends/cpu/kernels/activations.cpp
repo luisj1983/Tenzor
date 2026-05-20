@@ -24,8 +24,8 @@
 #endif
 
 // Use adaptive OpenMP thresholds scaled to thread count
-#include "omp_thresholds.hpp"
-#define ACTIVATION_OMP_THRESHOLD (tenzor::cpu::get_omp_thresholds().simple)
+#include "tenzor/backend/omp_thresholds.hpp"  // unified (F.5)
+#define ACTIVATION_OMP_THRESHOLD (::tenzor::OmpThresholds::simple())
 
 // oneDNN threshold - use oneDNN for tensors larger than this.
 // Lowered from 256K to 64K — primitive caching amortizes setup cost.
@@ -2585,7 +2585,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             // Numerically stable softplus
@@ -2602,7 +2602,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
@@ -2619,7 +2619,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
@@ -2637,7 +2637,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
         BFloat16* out_data = output.data<BFloat16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
@@ -2668,7 +2668,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             float sigmoid_x;
@@ -2687,7 +2687,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
@@ -2707,7 +2707,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
@@ -2726,7 +2726,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(n > tenzor::cpu::get_omp_thresholds().matmul)
+        #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::matmul())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;

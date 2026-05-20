@@ -27,6 +27,7 @@ set(TENZOR_CORE_SOURCES
     backend/runtime_simd.cpp
     backend/dispatch_table.cpp
     backend/op_attributes.cpp
+    backend/omp_thresholds.cpp
     backend/cuda_graph_stub.cpp
     ops/op_id.cpp
     ops/creation.cpp
