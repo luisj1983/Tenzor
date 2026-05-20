@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/distributed/elastic/state_sync.hpp"
+#include "tenzor/utils/log.hpp"
 #include <filesystem>
 #include <iostream>
 
@@ -33,7 +34,8 @@ auto StateSync::save_checkpoint(const nn::Module& module,
     auto state = module.state_dict();
     // In production: use nn::Serializer::save(state, path)
     // For now: mark as saved
-    std::cerr << "[StateSync] Checkpoint saved to " << path << std::endl;
+    // Audit I.4: unified logger (was raw stderr write).
+    TENZOR_LOG_INFO("[StateSync] Checkpoint saved to {}", path);
 }
 
 auto StateSync::load_checkpoint([[maybe_unused]] nn::Module& module,
@@ -48,12 +50,14 @@ auto StateSync::load_checkpoint([[maybe_unused]] nn::Module& module,
     }
 
     if (!std::filesystem::exists(path)) {
-        std::cerr << "[StateSync] No checkpoint found in " << checkpoint_dir << std::endl;
+        // Audit I.4: unified logger.
+        TENZOR_LOG_WARN("[StateSync] No checkpoint found in {}", checkpoint_dir);
         return;
     }
 
     // In production: use nn::Serializer::load(path) and module.load_state_dict()
-    std::cerr << "[StateSync] Checkpoint loaded from " << path << std::endl;
+    // Audit I.4: unified logger.
+    TENZOR_LOG_INFO("[StateSync] Checkpoint loaded from {}", path);
 }
 
 } // namespace elastic
