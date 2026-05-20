@@ -7,6 +7,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
+#include "tenzor/utils/log.hpp"
 #ifdef TENZOR_HAS_VMA
 #include "tenzor/backend/vulkan_vma_allocator.hpp"
 #endif
@@ -40,7 +41,8 @@ VulkanBackend::VulkanBackend() {
     try {
         initVulkan();
     } catch (const std::exception& e) {
-        std::cerr << "Failed to initialize Vulkan backend: " << e.what() << std::endl;
+        // Audit I.4: unified logger.
+        TENZOR_LOG_ERROR("Failed to initialize Vulkan backend: {}", e.what());
         // Cleanup if partially initialized
         if (instance_ != VK_NULL_HANDLE) {
             vkDestroyInstance(instance_, nullptr);
@@ -213,7 +215,8 @@ void VulkanBackend::createInstance() {
     if (enable_validation) {
         layers.push_back("VK_LAYER_KHRONOS_validation");
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        std::cerr << "Vulkan validation layers enabled (TENZOR_VULKAN_VALIDATION=1)\n";
+        // Audit I.4: unified logger.
+        TENZOR_LOG_INFO("Vulkan validation layers enabled (TENZOR_VULKAN_VALIDATION=1)");
     }
 
     createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
@@ -241,8 +244,12 @@ void VulkanBackend::createInstance() {
                 [[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT types,
                 const VkDebugUtilsMessengerCallbackDataEXT* data,
                 [[maybe_unused]] void* user) -> VkBool32 {
-                const char* level = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" : "WARNING";
-                std::cerr << "[Vulkan " << level << "] " << data->pMessage << "\n";
+                // Audit I.4: unified logger; map Vulkan severity → log level.
+                if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+                    TENZOR_LOG_ERROR("[Vulkan validation] {}", data->pMessage);
+                } else {
+                    TENZOR_LOG_WARN("[Vulkan validation] {}", data->pMessage);
+                }
                 return VK_FALSE;
             };
             vkCreateDebugUtilsMessengerEXT(instance_, &debugInfo, nullptr, &debug_messenger_);
@@ -637,16 +644,18 @@ void VulkanBackend::createLogicalDevices() {
             VkResult cacheResult = vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
             if (cacheResult != VK_SUCCESS) {
                 // Non-fatal: pipelines work without cache, just slower startup
-                std::cerr << "[Vulkan] Warning: pipeline cache load failed (corrupt disk cache?). "
-                          << "Shader compilation will be slower on first run.\n";
+                // Audit I.4: unified logger.
+                TENZOR_LOG_WARN("[Vulkan] pipeline cache load failed (corrupt disk "
+                                "cache?). Shader compilation will be slower on "
+                                "first run.");
                 ctx.pipelineCache = VK_NULL_HANDLE;
                 // Retry with empty cache
                 cacheCreateInfo.initialDataSize = 0;
                 cacheCreateInfo.pInitialData = nullptr;
                 VkResult retryResult = vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
                 if (retryResult != VK_SUCCESS) {
-                    std::cerr << "[Vulkan] Warning: pipeline cache retry also failed. "
-                              << "Proceeding without pipeline cache.\n";
+                    TENZOR_LOG_WARN("[Vulkan] pipeline cache retry also failed. "
+                                    "Proceeding without pipeline cache.");
                     ctx.pipelineCache = VK_NULL_HANDLE;
                 }
             }
