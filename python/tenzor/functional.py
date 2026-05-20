@@ -1975,9 +1975,273 @@ def lobpcg(A, X0, k, B=None, max_iter=100, tol=1e-6):
     return _core.linalg.lobpcg(A, X0, k, b_tensor, max_iter, tol)
 
 
+# ============================================================================
+# Audit item E.8 — functions declared in functional.pyi that previously
+# had no runtime implementation.  Each is a thin wrapper around the
+# corresponding nn::Module class so the autograd path is preserved.
+# ============================================================================
+
+def relu6(input: Variable) -> Variable:
+    """Apply ReLU6: ``min(max(0, x), 6)`` element-wise."""
+    return _nn.ReLU6()(input)
+
+
+def prelu(input: Variable, weight: Variable) -> Variable:
+    """Parametric ReLU: ``max(0, x) + a * min(0, x)`` with learnable ``a``.
+
+    Uses the supplied ``weight`` tensor as the per-channel slope.
+    """
+    # PReLU expects the slope tensor to be a Parameter; bind into a fresh
+    # nn.PReLU instance and overwrite its weight before invoking forward.
+    num_parameters = int(weight.tensor().numel())
+    layer = _nn.PReLU(num_parameters=num_parameters)
+    # Replace the layer's weight with the caller-supplied one so gradient
+    # flow lands on the caller's Variable rather than the throwaway layer.
+    layer.weight.tensor().copy_(weight.tensor())
+    return layer(input)
+
+
+def conv1d(input: Variable, weight: Variable, bias=None,
+           stride: int = 1, padding: int = 0, dilation: int = 1,
+           groups: int = 1) -> Variable:
+    """Functional 1-D convolution wrapping nn.Conv1d (audit E.8)."""
+    in_channels = int(weight.tensor().shape()[1] * groups)
+    out_channels = int(weight.tensor().shape()[0])
+    kernel_size = int(weight.tensor().shape()[2])
+    layer = _nn.Conv1d(in_channels, out_channels, kernel_size,
+                        stride=stride, padding=padding, dilation=dilation,
+                        groups=groups, bias=(bias is not None))
+    layer.weight.tensor().copy_(weight.tensor())
+    if bias is not None:
+        layer.bias.tensor().copy_(bias.tensor())
+    return layer(input)
+
+
+def conv3d(input: Variable, weight: Variable, bias=None,
+           stride=1, padding=0, dilation=1, groups: int = 1) -> Variable:
+    """Functional 3-D convolution wrapping nn.Conv3d (audit E.8)."""
+    in_channels = int(weight.tensor().shape()[1] * groups)
+    out_channels = int(weight.tensor().shape()[0])
+    kernel_size = tuple(weight.tensor().shape()[2:])
+    layer = _nn.Conv3d(in_channels, out_channels, kernel_size,
+                        stride=stride, padding=padding, dilation=dilation,
+                        groups=groups, bias=(bias is not None))
+    layer.weight.tensor().copy_(weight.tensor())
+    if bias is not None:
+        layer.bias.tensor().copy_(bias.tensor())
+    return layer(input)
+
+
+def conv_transpose2d(input: Variable, weight: Variable, bias=None,
+                     stride=1, padding=0, output_padding=0,
+                     groups: int = 1, dilation: int = 1) -> Variable:
+    """Functional 2-D transposed convolution wrapping nn.ConvTranspose2d."""
+    in_channels = int(weight.tensor().shape()[0])
+    out_channels = int(weight.tensor().shape()[1] * groups)
+    kernel_size = tuple(weight.tensor().shape()[2:])
+    layer = _nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
+                                 stride=stride, padding=padding,
+                                 output_padding=output_padding,
+                                 groups=groups, dilation=dilation,
+                                 bias=(bias is not None))
+    layer.weight.tensor().copy_(weight.tensor())
+    if bias is not None:
+        layer.bias.tensor().copy_(bias.tensor())
+    return layer(input)
+
+
+def max_pool1d(input: Variable, kernel_size: int,
+               stride=None, padding: int = 0) -> Variable:
+    """Functional 1-D max pooling (audit E.8)."""
+    if stride is None or stride == -1:
+        stride = kernel_size
+    return _nn.MaxPool1d(kernel_size, stride=stride, padding=padding)(input)
+
+
+def max_pool3d(input: Variable, kernel_size,
+               stride=None, padding=0) -> Variable:
+    """Functional 3-D max pooling (audit E.8)."""
+    if stride is None or stride == -1:
+        stride = kernel_size
+    return _nn.MaxPool3d(kernel_size, stride=stride, padding=padding)(input)
+
+
+def avg_pool1d(input: Variable, kernel_size: int,
+               stride=None, padding: int = 0,
+               count_include_pad: bool = True) -> Variable:
+    """Functional 1-D average pooling (audit E.8)."""
+    if stride is None or stride == -1:
+        stride = kernel_size
+    return _nn.AvgPool1d(kernel_size, stride=stride, padding=padding,
+                          count_include_pad=count_include_pad)(input)
+
+
+def avg_pool3d(input: Variable, kernel_size,
+               stride=None, padding=0,
+               count_include_pad: bool = True) -> Variable:
+    """Functional 3-D average pooling (audit E.8)."""
+    if stride is None or stride == -1:
+        stride = kernel_size
+    return _nn.AvgPool3d(kernel_size, stride=stride, padding=padding,
+                          count_include_pad=count_include_pad)(input)
+
+
+def adaptive_avg_pool1d(input: Variable, output_size: int) -> Variable:
+    """Functional adaptive 1-D average pooling (audit E.8)."""
+    return _nn.AdaptiveAvgPool1d(output_size)(input)
+
+
+def adaptive_avg_pool3d(input: Variable, output_size) -> Variable:
+    """Functional adaptive 3-D average pooling (audit E.8)."""
+    return _nn.AdaptiveAvgPool3d(output_size)(input)
+
+
+def adaptive_max_pool1d(input: Variable, output_size: int) -> Variable:
+    """Functional adaptive 1-D max pooling (audit E.8)."""
+    return _nn.AdaptiveMaxPool1d(output_size)(input)
+
+
+def adaptive_max_pool3d(input: Variable, output_size) -> Variable:
+    """Functional adaptive 3-D max pooling (audit E.8)."""
+    return _nn.AdaptiveMaxPool3d(output_size)(input)
+
+
+def dropout2d(input: Variable, p: float = 0.5,
+              training: bool = True) -> Variable:
+    """Functional 2D dropout — zeros entire channels with probability p
+    during training, scales the survivors by 1/(1-p) (audit E.8).
+
+    Channels are the second dimension of an (N, C, H, W) input.
+    """
+    if not training or p == 0.0:
+        return input
+    import tenzor as tz
+    shape = list(input.tensor().shape())
+    if len(shape) < 4:
+        raise ValueError(
+            "dropout2d expects a 4D input (N, C, H, W); got shape " + str(shape))
+    # Bernoulli mask over channels: shape (N, C, 1, 1) so it broadcasts.
+    n, c = shape[0], shape[1]
+    mask = (tz.rand([n, c, 1, 1], dtype=input.tensor().dtype()) >= p).to(input.tensor().dtype())
+    scale = 1.0 / (1.0 - p)
+    return Variable(input.tensor() * mask * scale,
+                    requires_grad=input.requires_grad())
+
+
+def alpha_dropout(input: Variable, p: float = 0.5,
+                  training: bool = True) -> Variable:
+    """Alpha Dropout: maintains zero mean / unit variance under SELU
+    activations (audit E.8).
+
+    Follows the formulation from torch.nn.functional.alpha_dropout —
+    elements survive with probability 1-p; killed elements are mapped to
+    a fixed constant `α'`, then the result is affinely rescaled so the
+    SELU-equivariant statistics are preserved.
+    """
+    if not training or p == 0.0:
+        return input
+    import tenzor as tz
+    alpha = -1.7580993408473766  # SELU's negative saturation value
+    # Bernoulli keep-mask.
+    shape = list(input.tensor().shape())
+    keep = (tz.rand(shape, dtype=input.tensor().dtype()) >= p).to(input.tensor().dtype())
+    # Affine constants: a * (mask * x + (1 - mask) * alpha) + b.
+    a = ((1 - p) * (1 + p * alpha * alpha)) ** -0.5
+    b = -a * alpha * p
+    x = input.tensor()
+    one_minus_keep = tz.full(list(x.shape()), 1.0, dtype=x.dtype()) - keep
+    out = a * (keep * x + one_minus_keep * alpha) + b
+    return Variable(out, requires_grad=input.requires_grad())
+
+
+def focal_loss(input: Variable, target: Variable, alpha: float = 0.25,
+               gamma: float = 2.0, reduction: str = "mean") -> Variable:
+    """Focal loss for binary classification (Lin et al. 2017)
+    (audit E.8).
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t).
+
+    Assumes ``input`` contains logits and ``target`` contains 0/1
+    labels (or class probabilities) matching ``input.shape``.
+    """
+    import tenzor as tz
+    # Stable sigmoid + log: BCE with logits formulation.
+    log_p = -tz.log1p(tz.exp(-input.tensor()))             # log sigmoid(x)
+    log_1mp = -input.tensor() - tz.log1p(tz.exp(-input.tensor()))  # log (1 - sigmoid(x))
+    p = sigmoid(input).tensor()
+    one_minus_p = tz.full(list(p.shape()), 1.0, dtype=p.dtype()) - p
+    t = target.tensor()
+    one_minus_t = tz.full(list(t.shape()), 1.0, dtype=t.dtype()) - t
+
+    # alpha_t = alpha for positives, (1 - alpha) for negatives.
+    alpha_t = alpha * t + (1.0 - alpha) * one_minus_t
+    # (1 - p_t)^gamma with p_t = p when t=1 else (1-p).
+    p_t = p * t + one_minus_p * one_minus_t
+    one_minus_pt = tz.full(list(p_t.shape()), 1.0, dtype=p_t.dtype()) - p_t
+    weight = alpha_t * tz.pow(one_minus_pt, gamma)
+    # log p_t = log p when t=1 else log(1-p)
+    log_pt = log_p * t + log_1mp * one_minus_t
+    loss = -(weight * log_pt)
+
+    if reduction == "mean":
+        return Variable(tz.mean(loss), requires_grad=input.requires_grad())
+    if reduction == "sum":
+        return Variable(tz.sum(loss), requires_grad=input.requires_grad())
+    return Variable(loss, requires_grad=input.requires_grad())
+
+
+def dice_loss(input: Variable, target: Variable, smooth: float = 1.0,
+              reduction: str = "mean") -> Variable:
+    """Sorensen–Dice loss for segmentation (audit E.8).
+
+    DL = 1 - (2 * |X ∩ Y| + smooth) / (|X| + |Y| + smooth).
+    ``input`` is treated as probabilities in [0, 1]; pass a sigmoid /
+    softmax output.
+    """
+    import tenzor as tz
+    intersection = tz.sum(input.tensor() * target.tensor())
+    denom = tz.sum(input.tensor()) + tz.sum(target.tensor())
+    loss = 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
+    if reduction == "mean" or reduction == "sum":
+        return Variable(loss, requires_grad=input.requires_grad())
+    return Variable(loss, requires_grad=input.requires_grad())
+
+
+def margin_ranking_loss(input1: Variable, input2: Variable, target: Variable,
+                        margin: float = 0.0,
+                        reduction: str = "mean") -> Variable:
+    """Functional margin ranking loss (audit E.8).
+
+    Wraps tenzor_core.nn.margin_ranking_loss.
+    """
+    return _nn.margin_ranking_loss(input1, input2, target, margin, reduction)
+
+
 __all__ = [
     # Activations
     "relu",
+    "relu6",
+    "prelu",
+    # Conv (1D/3D/transposed — 2D already listed below)
+    "conv1d",
+    "conv3d",
+    "conv_transpose2d",
+    # Pooling (1D/3D + adaptive 1D/3D — 2D already listed below)
+    "max_pool1d",
+    "max_pool3d",
+    "avg_pool1d",
+    "avg_pool3d",
+    "adaptive_avg_pool1d",
+    "adaptive_avg_pool3d",
+    "adaptive_max_pool1d",
+    "adaptive_max_pool3d",
+    # Dropout variants
+    "dropout2d",
+    "alpha_dropout",
+    # Losses
+    "focal_loss",
+    "dice_loss",
+    "margin_ranking_loss",
     "leaky_relu",
     "elu",
     "gelu",
