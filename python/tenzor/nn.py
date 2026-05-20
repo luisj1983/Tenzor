@@ -783,11 +783,15 @@ from .tenzor_core.nn import RNNCell, LSTMCell, GRUCell
 # Alias the quantization submodule under tz.nn.quantization — the C++
 # bindings register it at the top level (tenzor_core.quantization) but
 # PyTorch-compatible code expects torch.nn.quantization / tz.nn.quantization.
+# Audit item H.1: do not silently swallow every exception here — only the
+# expected "C++ extension not built with quantization" failure modes.
 try:
     from . import tenzor_core as _tc_for_quant
     if hasattr(_tc_for_quant, 'quantization'):
         import sys as _sys_quant
         quantization = _tc_for_quant.quantization
         _sys_quant.modules['tenzor.nn.quantization'] = _tc_for_quant.quantization
-except Exception:
+except (ImportError, AttributeError):
+    # quantization submodule was not built into this tenzor_core — that is
+    # legal (CMake option), so leave tenzor.nn.quantization unbound.
     pass

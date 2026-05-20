@@ -54,8 +54,18 @@ if 'OMP_NUM_THREADS' not in _os.environ:
         except (OSError, IOError):
             pass  # Non-Linux: use cpu_count() directly
         _os.environ['OMP_NUM_THREADS'] = str(max(1, physical_cores))
-    except Exception:
-        pass  # Use default if detection fails
+    except Exception as _omp_detect_exc:
+        # Audit item H.1: replace bare `except Exception: pass`.  CPU-count
+        # detection isn't critical — the user's OMP_NUM_THREADS / system
+        # default still applies — but a bare swallow hid real bugs in the
+        # past.  Print a one-line breadcrumb to stderr at WARN level
+        # equivalent (Python doesn't have stdlib logging configured yet at
+        # this point in module init).
+        import sys as _sys_for_warn
+        _sys_for_warn.stderr.write(
+            f"[tenzor] OMP_NUM_THREADS detection failed: "
+            f"{type(_omp_detect_exc).__name__}: {_omp_detect_exc}\n"
+        )
 
 # Import C++ core module first
 # NOTE: This will also register tenzor.nn in sys.modules pointing to C++ nn

@@ -37,7 +37,7 @@ import signal
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sized
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
 
 T = TypeVar("T")
@@ -748,7 +748,12 @@ def _worker_loop(
                     msg = index_queue.get_nowait()
                     if msg is None:
                         return
-                except Exception:
+                except Empty:
+                    # Audit item H.1: narrow the catch from bare Exception
+                    # to the specific "queue is empty" case so real bugs
+                    # (e.g. a corrupted queue handle, ImportError on a
+                    # late-binding inside the worker) propagate to the
+                    # main thread instead of being silently swallowed.
                     pass
                 if len(batch) >= 1:
                     output_queue.put((worker_id, collate_fn(batch)))
@@ -832,7 +837,10 @@ class _MultiProcessLoader:
         for q in self._index_queues:
             try:
                 q.put_nowait(None)
-            except Exception:
+            except Full:
+                # Queue is full and the worker is busy; the worker will
+                # see the next poison-pill on the subsequent iteration.
+                # (Audit item H.1 — was bare `except Exception: pass`.)
                 pass
         for w in self._workers:
             w.join(timeout=5)
