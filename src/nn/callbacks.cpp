@@ -5,6 +5,7 @@
 
 #include <tenzor/nn/callbacks.hpp>
 #include <tenzor/nn/serialize.hpp>
+#include <tenzor/utils/log.hpp>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -232,8 +233,9 @@ auto ModelCheckpointCallback::on_epoch_end(int epoch, float train_loss, float va
             std::cout << "[ModelCheckpoint] Model saved to: " << checkpoint_path
                       << std::endl;
         } catch (const std::exception& e) {
-            std::cerr << "[ModelCheckpoint] Error saving model: " << e.what()
-                      << std::endl;
+            // Audit I.4: route to the unified logger so the log-level
+            // filter applies (previously raw stderr ignored TENZOR_LOG_LEVEL).
+            TENZOR_LOG_ERROR("[ModelCheckpoint] Error saving model: {}", e.what());
         }
     }
 }
@@ -263,8 +265,9 @@ LRSchedulerCallback::LRSchedulerCallback(
     }
 
     if (decay_factor_ <= 0.0f || decay_factor_ >= 1.0f) {
-        std::cerr << "[LRScheduler] Warning: decay_factor should be in (0, 1), got "
-                  << decay_factor_ << ". Using 0.1" << std::endl;
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_WARN("[LRScheduler] decay_factor should be in (0, 1), got {}. "
+                        "Falling back to 0.1.", decay_factor_);
         decay_factor_ = 0.1f;
     }
 
@@ -340,8 +343,9 @@ auto LRSchedulerCallback::on_epoch_end(int epoch, [[maybe_unused]] float train_l
             }
         }
     } else {
-        std::cerr << "[LRScheduler] Unknown schedule type: " << schedule_type_
-                  << ". No LR adjustment performed." << std::endl;
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_WARN("[LRScheduler] Unknown schedule type '{}'; no LR adjustment "
+                        "performed.", schedule_type_);
         return;
     }
 
