@@ -10,11 +10,12 @@
  * `OpAttributes` map keyed by `AttrKey`. This bridge owns the per-OpId
  * mapping that says "for OpId::Conv2dForward, attrs.i[0] is StrideH, etc.".
  *
- * Phase 1 supports the small set of OpIds exercised by the in-tree tests
- * (Add/Sub/Mul/Div/MatMul/ReLU/Sigmoid/Tanh, plus a stub for Softmax). The
- * coverage grows as later phases need it; an OpId without an entry in the
- * mapping table is invoked with empty attributes — fine for nullary-attr ops,
- * an error caught at kernel-level for ops that require attrs.
+ * Audit I.3: docstring previously said "stub for Softmax" — Softmax /
+ * LogSoftmax now read `attrs.i[0]` as the dim attribute (see
+ * dispatch_bridge.cpp). Coverage continues to grow as later phases need
+ * it; an OpId without an entry in the mapping table is invoked with
+ * empty attributes — fine for nullary-attr ops, an error caught at
+ * kernel-level for ops that require attrs.
  */
 
 #pragma once
