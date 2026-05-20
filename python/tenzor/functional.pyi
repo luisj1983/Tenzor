@@ -217,3 +217,65 @@ def affine_grid(theta: Tensor, size: Sequence[int],
 # Gradient checkpointing
 # ============================================================================
 def checkpoint(fn: Callable[..., Tensor], *args: Any, **kwargs: Any) -> Tensor: ...
+
+# ============================================================================
+# Audit E.10: stubs for runtime functions previously missing from this .pyi.
+# Tracked by tools/check_pyi_drift.py (the runtime set is the source of truth;
+# anything declared here that the runtime stops exposing fails CI).
+# ============================================================================
+
+def channel_shuffle(input: Tensor, groups: int) -> Tensor: ...
+
+def corrcoef(input: Tensor) -> Tensor: ...
+
+def cosine_similarity(x1: Tensor, x2: Tensor, dim: int = 1,
+                       eps: float = 1e-08) -> Tensor: ...
+
+def cov(input: Tensor, correction: int = 1,
+        fweights: Optional[Tensor] = None,
+        aweights: Optional[Tensor] = None) -> Tensor: ...
+
+def dct(input: Tensor, type: int = 2, n: Optional[int] = None,
+        dim: int = -1, norm: str = "backward") -> Tensor: ...
+
+def idct(input: Tensor, type: int = 2, n: Optional[int] = None,
+         dim: int = -1, norm: str = "backward") -> Tensor: ...
+
+def deformable_conv2d(input: Tensor, offset: Tensor, weight: Tensor,
+                       bias: Optional[Tensor] = None,
+                       mask: Optional[Tensor] = None,
+                       stride: Union[int, Tuple[int, int]] = 1,
+                       padding: Union[int, Tuple[int, int]] = 0,
+                       dilation: Union[int, Tuple[int, int]] = 1,
+                       groups: int = 1,
+                       offset_groups: int = 1) -> Tensor: ...
+
+def diff(input: Tensor, n: int = 1, dim: int = -1) -> Tensor: ...
+
+def lobpcg(A: Tensor, X0: Tensor, k: int,
+           B: Optional[Tensor] = None,
+           max_iter: int = 100,
+           tol: float = 1e-06) -> Tuple[Tensor, Tensor]: ...
+
+def logaddexp(a: Tensor, b: Tensor) -> Tensor: ...
+def logaddexp2(a: Tensor, b: Tensor) -> Tensor: ...
+
+def mel_scale(spectrogram: Tensor, n_mels: int = 128,
+               f_min: float = 0.0, f_max: float = 0.0,
+               sample_rate: int = 16000) -> Tensor: ...
+
+def mfcc(waveform: Tensor, sample_rate: int = 16000, n_mfcc: int = 40,
+         n_mels: int = 128, n_fft: int = 400, hop_length: int = 160,
+         f_min: float = 0.0, f_max: float = 0.0) -> Tensor: ...
+
+def normalize(input: Tensor, p: float = 2.0, dim: int = 1,
+               eps: float = 1e-12) -> Tensor: ...
+
+def pairwise_distance(x1: Tensor, x2: Tensor, p: float = 2.0) -> Tensor: ...
+
+def pdist(input: Tensor, p: float = 2.0) -> Tensor: ...
+
+def tensordot(a: Tensor, b: Tensor,
+              dims: Union[int, Tuple[List[int], List[int]]] = 2) -> Tensor: ...
+
+def xlogy(x: Tensor, y: Tensor) -> Tensor: ...
