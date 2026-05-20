@@ -8,8 +8,11 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <algorithm>
 #include <queue>
 #include <stack>
@@ -903,74 +906,43 @@ auto execute_fused_op(
         return {fused_linear_relu(inputs[0], inputs[1], bias)};
 
     } else if (fused_op.fused_op_name == "conv_bn_relu") {
-        // Expected inputs: [input, weight, bias (optional), bn_mean, bn_var, bn_gamma, bn_beta]
-        // Minimum 6 inputs (without bias), maximum 7 (with bias)
-        if (inputs.size() < 6) {
+        // Canonical input order (matches OpId::FusedConv2dBnReLU dispatch):
+        //   [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+        // conv_bias is required (use a zero tensor when conv had no bias).
+        if (inputs.size() != 7) {
             throw std::runtime_error(
-                "execute_fused_op: conv_bn_relu requires at least 6 inputs "
-                "(input, weight, bn_mean, bn_var, bn_gamma, bn_beta), got " +
+                "execute_fused_op: conv_bn_relu requires exactly 7 inputs "
+                "(input, weight, conv_bias, bn_gamma, bn_beta, "
+                "bn_running_mean, bn_running_var), got " +
                 std::to_string(inputs.size())
             );
         }
 
-        // Parse attributes for stride, padding, and eps
+        // Parse stride/padding/eps attributes.  Inference fusion ⇒ training=false,
+        // running stats are used directly; momentum is irrelevant but must be passed.
         int64_t stride = 1;
         int64_t padding = 0;
-        float eps = 1e-5f;
+        double eps = 1e-5;
 
-        auto stride_it = attributes.find("stride");
-        if (stride_it != attributes.end()) {
-            stride = std::stoll(stride_it->second);
+        if (auto it = attributes.find("stride"); it != attributes.end()) {
+            stride = std::stoll(it->second);
+        }
+        if (auto it = attributes.find("padding"); it != attributes.end()) {
+            padding = std::stoll(it->second);
+        }
+        if (auto it = attributes.find("eps"); it != attributes.end()) {
+            eps = std::stod(it->second);
         }
 
-        auto padding_it = attributes.find("padding");
-        if (padding_it != attributes.end()) {
-            padding = std::stoll(padding_it->second);
-        }
+        OpAttributes attrs;
+        attrs.set(AttrKey::Stride, stride);
+        attrs.set(AttrKey::Padding, padding);
+        attrs.set(AttrKey::Momentum, 0.1);
+        attrs.set(AttrKey::Eps, eps);
+        attrs.set(AttrKey::Training, false);
 
-        auto eps_it = attributes.find("eps");
-        if (eps_it != attributes.end()) {
-            eps = std::stof(eps_it->second);
-        }
-
-        // Check if bias is present (7 inputs) or not (6 inputs)
-        const Tensor* bias = nullptr;
-        size_t bn_offset = 2;  // Offset to batchnorm parameters
-
-        if (inputs.size() == 7) {
-            bias = &inputs[2];
-            bn_offset = 3;
-        }
-
-        // Compose fused operation: Conv2D -> BatchNorm -> ReLU
-        // First do conv2d with bias
-        Tensor conv_out;
-        if (bias != nullptr) {
-            conv_out = fused_conv2d_relu(inputs[0], inputs[1], bias, stride, padding);
-            // Apply batchnorm on top (will override relu, so we need different approach)
-            // For now, use sequential with final relu
-            Tensor bn_out = fused_batchnorm_relu(
-                conv_out,
-                inputs[bn_offset],     // bn_mean
-                inputs[bn_offset + 1], // bn_var
-                inputs[bn_offset + 2], // bn_gamma
-                inputs[bn_offset + 3], // bn_beta
-                eps
-            );
-            return {bn_out};
-        } else {
-            // Without bias - do conv, then batchnorm+relu
-            conv_out = fused_conv2d_relu(inputs[0], inputs[1], nullptr, stride, padding);
-            Tensor bn_out = fused_batchnorm_relu(
-                conv_out,
-                inputs[bn_offset],     // bn_mean
-                inputs[bn_offset + 1], // bn_var
-                inputs[bn_offset + 2], // bn_gamma
-                inputs[bn_offset + 3], // bn_beta
-                eps
-            );
-            return {bn_out};
-        }
+        // Dispatch the single-pass fused kernel: y = ReLU(BN(Conv(x,w,b))).
+        return {dispatch(OpId::FusedConv2dBnReLU, inputs, attrs)[0]};
 
     } else if (fused_op.fused_op_name == "matmul_add") {
         // Expected inputs: [A, B, bias]
@@ -1013,21 +985,23 @@ auto execute_fused_op(
         if (inputs.size() == 3) {
             Tensor result;
             switch (op_type) {
-                case 0:  // (a + b) * c + relu
+                case 0:  // ReLU((a + b) * c)
                     result = mul(add(inputs[0], inputs[1]), inputs[2]);
-                    return {fused_add_relu(result, zeros_like(result))};  // relu(result + 0)
-                case 1:  // (a * b) + c + relu
+                    break;
+                case 1:  // ReLU((a * b) + c)
                     result = add(mul(inputs[0], inputs[1]), inputs[2]);
-                    return {fused_add_relu(result, zeros_like(result))};
+                    break;
                 default:
                     throw std::runtime_error(
                         "execute_fused_op: elementwise_chain op_type " +
                         std::to_string(op_type) + " not supported"
                     );
             }
+            std::vector<Tensor> relu_inputs = {result};
+            return {dispatch(OpId::ReLU, relu_inputs)[0]};
         }
 
-        // For longer chains, compose element-wise operations sequentially
+        // For longer chains, compose element-wise add sequentially.
         Tensor result = inputs[0];
         for (size_t i = 1; i < inputs.size(); ++i) {
             result = add(result, inputs[i]);
@@ -1036,13 +1010,18 @@ auto execute_fused_op(
         // Apply final activation if specified
         auto activation_it = attributes.find("activation");
         if (activation_it != attributes.end() && activation_it->second == "relu") {
-            return {fused_add_relu(result, zeros_like(result))};
+            std::vector<Tensor> relu_inputs = {result};
+            return {dispatch(OpId::ReLU, relu_inputs)[0]};
         }
 
         return {result};
 
     } else if (fused_op.fused_op_name == "attention") {
-        // Expected inputs: [Q, K, V] or [Q, K, V, mask]
+        // Expected inputs: [Q, K, V] or [Q, K, V, mask].
+        //
+        // Mask convention (matches PyTorch scaled_dot_product_attention(attn_mask=…)):
+        //   mask is ADDED to the scaled scores before softmax.  Float mask uses
+        //   0 for kept positions and -inf for masked positions.
         if (inputs.size() < 3) {
             throw std::runtime_error(
                 "execute_fused_op: attention requires at least 3 inputs (Q, K, V), got " +
@@ -1061,11 +1040,10 @@ auto execute_fused_op(
             scale = 1.0f / std::sqrt(static_cast<float>(d_k));
         }
 
-        // Simplified attention: Q @ K.T -> Softmax -> @ V
-        // Compute attention scores: Q @ K.T
+        // Q @ K.T
         Tensor scores = matmul(inputs[0], inputs[1].transpose(-1, -2));
 
-        // Scale scores
+        // Scale
         if (scale != 1.0f) {
             auto shape_span = scores.shape();
             std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
@@ -1073,17 +1051,19 @@ auto execute_fused_op(
             scores = mul(scores, scale_tensor);
         }
 
-        // Apply softmax (create Variable wrapper for nn::softmax)
+        // Additive mask BEFORE softmax — this is the contract that lets
+        // masked positions reach zero probability while preserving
+        // normalisation across the kept positions.
+        if (inputs.size() >= 4) {
+            scores = add(scores, inputs[3]);
+        }
+
+        // softmax(scores) along the last (key) dimension
         Variable scores_var(scores);
         Variable attention_weights_var = nn::softmax(scores_var, -1);
         Tensor attention_weights = attention_weights_var.tensor();
 
-        // Optional: Apply mask if provided
-        if (inputs.size() >= 4) {
-            attention_weights = mul(attention_weights, inputs[3]);
-        }
-
-        // Compute output: attention_weights @ V
+        // attention_weights @ V
         Tensor output = matmul(attention_weights, inputs[2]);
 
         return {output};

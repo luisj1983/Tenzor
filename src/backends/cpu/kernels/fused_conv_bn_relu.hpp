@@ -192,64 +192,65 @@ inline void conv_bn_relu_folded(
     int64_t out_h,
     int64_t out_w
 ) {
-    // Allocate im2col buffer from pool
-    const int64_t col_rows = batch * out_h * out_w;
+    // Per-batch im2col + GEMM so the GEMM output lands directly in NCHW
+    // (out_channels, out_h*out_w) for each batch element.  Producing the
+    // GEMM result as weight @ col^T (rather than col @ weight^T) keeps the
+    // channel dimension as the outer one, which matches the per-channel
+    // bias-add + ReLU pass below and the canonical [N, C, H, W] output
+    // tensor layout.  (Previous implementation called col @ weight^T whose
+    // (col_rows, out_channels) NHWC-flat layout did not match the post-GEMM
+    // NCHW indexing — see audit item A.1.)
     const int64_t col_cols = in_channels * kernel_h * kernel_w;
-
-    auto col_buffer = acquire_buffer<float>(col_rows * col_cols);
-    float* col = col_buffer.data();
-
-    // Step 1: im2col transformation
-    im2col_optimized(
-        input, col,
-        batch, in_channels, height, width,
-        kernel_h, kernel_w, stride, padding, 1, // dilation = 1
-        out_h, out_w
-    );
-
-    // Step 2: GEMM (col @ weight^T)
-    // col: (batch * out_h * out_w, in_channels * kH * kW)
-    // weight: (out_channels, in_channels * kH * kW)
-    // output: (batch * out_h * out_w, out_channels)
-
-    // Zero output
-    std::memset(output, 0, batch * out_channels * out_h * out_w * sizeof(float));
-
-    // Use optimized GEMM
-    gemm::gemm_transB_optimized(
-        col, weight, output,
-        col_rows, out_channels, col_cols
-    );
-
-    // Step 3: Add bias + ReLU (fused)
     const int64_t spatial_size = out_h * out_w;
 
-#ifdef TENZOR_FUSED_AVX512
-    #pragma omp parallel for collapse(2) if(batch * out_channels > 32)
+    auto col_buffer = acquire_buffer<float>(spatial_size * col_cols);
+    float* col = col_buffer.data();
+
     for (int64_t b = 0; b < batch; ++b) {
+        const float* input_b = input + b * in_channels * height * width;
+        float* output_b = output + b * out_channels * spatial_size;
+
+        // im2col for a single batch element (batch=1).
+        im2col_optimized(
+            input_b, col,
+            /*batch=*/1, in_channels, height, width,
+            kernel_h, kernel_w, stride, padding, /*dilation=*/1,
+            out_h, out_w
+        );
+
+        // GEMM: output_b = weight @ col^T, i.e. C(M,N) = A(M,K) * B(N,K)^T.
+        //   weight is (out_channels=M, col_cols=K)
+        //   col    is (spatial_size=N, col_cols=K)
+        //   output_b is (M, N) = (out_channels, out_h * out_w) — NCHW layout.
+        gemm::gemm_transB_optimized(
+            weight, col, output_b,
+            out_channels, spatial_size, col_cols
+        );
+
+        // Add bias + ReLU per output channel.
+#ifdef TENZOR_FUSED_AVX512
+        #pragma omp parallel for if(out_channels > 32)
         for (int64_t oc = 0; oc < out_channels; ++oc) {
-            float* out_ptr = output + b * out_channels * spatial_size + oc * spatial_size;
+            float* out_ptr = output_b + oc * spatial_size;
             __m512 vbias = _mm512_set1_ps(bias[oc]);
             __m512 vzero = _mm512_setzero_ps();
 
             int64_t s = 0;
             for (; s + 16 <= spatial_size; s += 16) {
                 __m512 v = _mm512_loadu_ps(out_ptr + s);
-                v = _mm512_add_ps(v, vbias);        // Add bias
-                v = _mm512_max_ps(v, vzero);        // ReLU
+                v = _mm512_add_ps(v, vbias);
+                v = _mm512_max_ps(v, vzero);
                 _mm512_storeu_ps(out_ptr + s, v);
             }
             for (; s < spatial_size; ++s) {
                 out_ptr[s] = std::max(0.0f, out_ptr[s] + bias[oc]);
             }
         }
-    }
 
 #elif defined(TENZOR_FUSED_AVX2)
-    #pragma omp parallel for collapse(2) if(batch * out_channels > 32)
-    for (int64_t b = 0; b < batch; ++b) {
+        #pragma omp parallel for if(out_channels > 32)
         for (int64_t oc = 0; oc < out_channels; ++oc) {
-            float* out_ptr = output + b * out_channels * spatial_size + oc * spatial_size;
+            float* out_ptr = output_b + oc * spatial_size;
             __m256 vbias = _mm256_set1_ps(bias[oc]);
             __m256 vzero = _mm256_setzero_ps();
 
@@ -264,20 +265,18 @@ inline void conv_bn_relu_folded(
                 out_ptr[s] = std::max(0.0f, out_ptr[s] + bias[oc]);
             }
         }
-    }
 
 #else
-    #pragma omp parallel for collapse(2)
-    for (int64_t b = 0; b < batch; ++b) {
+        #pragma omp parallel for
         for (int64_t oc = 0; oc < out_channels; ++oc) {
             float b_val = bias[oc];
+            float* out_ptr = output_b + oc * spatial_size;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                int64_t idx = b * out_channels * spatial_size + oc * spatial_size + s;
-                output[idx] = std::max(0.0f, output[idx] + b_val);
+                out_ptr[s] = std::max(0.0f, out_ptr[s] + b_val);
             }
         }
-    }
 #endif
+    }
 }
 
 /**
@@ -309,33 +308,38 @@ inline void conv_bn_relu_training(
     float momentum = 0.1f,
     float eps = 1e-5f
 ) {
-    // Step 1: Convolution
-    const int64_t col_rows = batch * out_h * out_w;
+    // Step 1: Convolution.  Per-batch im2col + GEMM keeps the output in
+    // canonical NCHW layout — see comment in conv_bn_relu_folded for the
+    // reason this is required (audit item A.1).
     const int64_t col_cols = in_channels * kernel_h * kernel_w;
+    const int64_t spatial_size = out_h * out_w;
 
-    auto col_buffer = acquire_buffer<float>(col_rows * col_cols);
+    auto col_buffer = acquire_buffer<float>(spatial_size * col_cols);
     float* col = col_buffer.data();
 
-    im2col_optimized(
-        input, col,
-        batch, in_channels, height, width,
-        kernel_h, kernel_w, stride, padding, 1,
-        out_h, out_w
-    );
-
-    // GEMM
-    auto conv_out_buffer = acquire_buffer<float>(batch * out_channels * out_h * out_w);
+    auto conv_out_buffer = acquire_buffer<float>(batch * out_channels * spatial_size);
     float* conv_out = conv_out_buffer.data();
-    std::memset(conv_out, 0, batch * out_channels * out_h * out_w * sizeof(float));
 
-    gemm::gemm_transB_optimized(
-        col, weight, conv_out,
-        col_rows, out_channels, col_cols
-    );
+    for (int64_t b = 0; b < batch; ++b) {
+        const float* input_b = input + b * in_channels * height * width;
+        float* conv_out_b = conv_out + b * out_channels * spatial_size;
+
+        im2col_optimized(
+            input_b, col,
+            /*batch=*/1, in_channels, height, width,
+            kernel_h, kernel_w, stride, padding, /*dilation=*/1,
+            out_h, out_w
+        );
+
+        // conv_out_b (out_channels, out_h*out_w) = weight @ col^T  ⇒ NCHW.
+        gemm::gemm_transB_optimized(
+            weight, col, conv_out_b,
+            out_channels, spatial_size, col_cols
+        );
+    }
 
     // Add conv bias if present
     if (conv_bias) {
-        const int64_t spatial_size = out_h * out_w;
         #pragma omp parallel for collapse(2)
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t oc = 0; oc < out_channels; ++oc) {
@@ -348,7 +352,6 @@ inline void conv_bn_relu_training(
     }
 
     // Step 2: BatchNorm (compute batch statistics + normalize + ReLU)
-    const int64_t spatial_size = out_h * out_w;
     const int64_t samples_per_channel = batch * spatial_size;
 
     // Allocate temporary storage for batch mean/var

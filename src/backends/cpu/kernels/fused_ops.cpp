@@ -2079,12 +2079,29 @@ auto fused_conv2d_bn_relu_kernel(
             out_channels, kernel_h, kernel_w, stride, padding,
             out_h, out_w, bn_momentum, bn_eps);
     } else {
-        // Inference path: fold BN into conv weights
-        auto weight_folded = weight.contiguous();
-        auto bias_folded = conv_bias.numel() > 0 ? conv_bias.contiguous()
-            : Tensor({out_channels}, DType::Float32, input.device());
-        if (conv_bias.numel() == 0) {
-            std::memset(bias_folded.data<float>(), 0, out_channels * sizeof(float));
+        // Inference path: fold BN into conv weights.
+        //
+        // fold_bn_params MUTATES the weight and bias buffers it is handed.
+        // Tensor::contiguous() can return a view sharing storage with the
+        // input — folding into that view would silently corrupt the caller's
+        // weight tensor across subsequent calls (audit item A.1).  Materialise
+        // a private buffer per call.
+        Tensor weight_folded({out_channels, in_channels, kernel_h, kernel_w},
+                             DType::Float32, input.device());
+        {
+            Tensor weight_src = weight.contiguous();
+            std::memcpy(weight_folded.data<float>(), weight_src.data<float>(),
+                        static_cast<size_t>(out_channels) * in_channels *
+                            kernel_h * kernel_w * sizeof(float));
+        }
+        Tensor bias_folded({out_channels}, DType::Float32, input.device());
+        if (conv_bias.numel() > 0) {
+            Tensor bias_src = conv_bias.contiguous();
+            std::memcpy(bias_folded.data<float>(), bias_src.data<float>(),
+                        static_cast<size_t>(out_channels) * sizeof(float));
+        } else {
+            std::memset(bias_folded.data<float>(), 0,
+                        static_cast<size_t>(out_channels) * sizeof(float));
         }
 
         fused::fold_bn_params(
