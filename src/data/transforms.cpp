@@ -138,22 +138,77 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    // Apply contrast: blend toward the per-channel mean
-    // result = mean + contrast_factor * (value - mean)
+    // Apply contrast: blend each channel toward the per-image luminance
+    // mean (audit item I.11 — previous code used a single global mean
+    // across the entire batch / all channels, which is not what
+    // torchvision.transforms.ColorJitter does).
+    //
+    // PyTorch contract: contrast_factor ~ U[1-contrast_, 1+contrast_];
+    // output = (input - mean_grayscale) * factor + mean_grayscale.
+    // For non-3-channel inputs we fall back to per-image per-channel
+    // mean (no luminance is defined for grayscale/multi-channel non-RGB
+    // tensors).
     if (contrast_ > 0) {
         std::uniform_real_distribution<float> dist(
             1.0f - contrast_, 1.0f + contrast_);
-        float factor = dist(rng);
+        const float factor = dist(rng);
+        const bool is_rgb = shape.size() >= 3 && shape[shape.size() - 3] == 3;
 
-        // Compute global mean (simplified)
-        float sum = 0.0f;
-        for (int64_t i = 0; i < numel; ++i) {
-            sum += data[i];
-        }
-        float mean = sum / static_cast<float>(numel);
-
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = mean + factor * (data[i] - mean);
+        if (is_rgb) {
+            const int64_t C = shape[shape.size() - 3];
+            int64_t spatial = 1;
+            for (size_t d = shape.size() - 2; d < shape.size(); ++d) {
+                spatial *= shape[d];
+            }
+            const int64_t num_images = numel / (C * spatial);
+            for (int64_t img = 0; img < num_images; ++img) {
+                float* base = data + img * C * spatial;
+                const float* r = base;
+                const float* g = base + spatial;
+                const float* b = base + 2 * spatial;
+                // Compute the per-image luminance mean.
+                double gray_sum = 0.0;
+                for (int64_t j = 0; j < spatial; ++j) {
+                    gray_sum += 0.299 * r[j] + 0.587 * g[j] + 0.114 * b[j];
+                }
+                const float mean = static_cast<float>(
+                    gray_sum / static_cast<double>(spatial));
+                for (int64_t c = 0; c < C; ++c) {
+                    float* ch = base + c * spatial;
+                    for (int64_t j = 0; j < spatial; ++j) {
+                        ch[j] = mean + factor * (ch[j] - mean);
+                    }
+                }
+            }
+        } else {
+            // Non-RGB: per-image per-channel mean (no luminance defined).
+            const int64_t per_image = numel;
+            int64_t image_count = 1;
+            if (shape.size() >= 3) {
+                int64_t spatial = 1;
+                for (size_t d = shape.size() - 2; d < shape.size(); ++d) spatial *= shape[d];
+                const int64_t C = shape[shape.size() - 3];
+                image_count = numel / (C * spatial);
+                for (int64_t img = 0; img < image_count; ++img) {
+                    float* base = data + img * C * spatial;
+                    for (int64_t c = 0; c < C; ++c) {
+                        float* ch = base + c * spatial;
+                        double s = 0.0;
+                        for (int64_t j = 0; j < spatial; ++j) s += ch[j];
+                        const float m = static_cast<float>(s / static_cast<double>(spatial));
+                        for (int64_t j = 0; j < spatial; ++j) {
+                            ch[j] = m + factor * (ch[j] - m);
+                        }
+                    }
+                }
+            } else {
+                double s = 0.0;
+                for (int64_t i = 0; i < per_image; ++i) s += data[i];
+                const float m = static_cast<float>(s / static_cast<double>(per_image));
+                for (int64_t i = 0; i < per_image; ++i) {
+                    data[i] = m + factor * (data[i] - m);
+                }
+            }
         }
     }
 
@@ -183,6 +238,75 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
                 r_ch[j] = gray + factor * (r_ch[j] - gray);
                 g_ch[j] = gray + factor * (g_ch[j] - gray);
                 b_ch[j] = gray + factor * (b_ch[j] - gray);
+            }
+        }
+    }
+
+    // Apply hue: rotate the hue channel of each pixel in HSV space.
+    // Audit item I.11 — header previously noted "not applied in this
+    // simplified version".  PyTorch's contract: hue_factor ~ U[-hue_,
+    // hue_] and is interpreted as a hue rotation in [-0.5, 0.5] where
+    // ±0.5 = ±180°.  Implementation follows torchvision's RGB↔HSV
+    // formulas; only applies on a 3-channel RGB input.
+    if (hue_ > 0 && shape.size() >= 3 && shape[shape.size() - 3] == 3) {
+        std::uniform_real_distribution<float> dist(-hue_, hue_);
+        const float hue_shift = dist(rng);  // in [-0.5, 0.5] ⇒ ±180°
+
+        const int64_t C = shape[shape.size() - 3];
+        int64_t spatial = 1;
+        for (size_t d = shape.size() - 2; d < shape.size(); ++d) spatial *= shape[d];
+        const int64_t num_images = numel / (C * spatial);
+
+        for (int64_t img = 0; img < num_images; ++img) {
+            float* base = data + img * C * spatial;
+            float* r_ch = base;
+            float* g_ch = base + spatial;
+            float* b_ch = base + 2 * spatial;
+            for (int64_t j = 0; j < spatial; ++j) {
+                const float r = r_ch[j], g = g_ch[j], b = b_ch[j];
+
+                // RGB → HSV (hue in [0, 1)).
+                const float max_v = std::max({r, g, b});
+                const float min_v = std::min({r, g, b});
+                const float delta = max_v - min_v;
+                float h = 0.0f;
+                if (delta > 0.0f) {
+                    if (max_v == r) {
+                        h = std::fmod((g - b) / delta, 6.0f);
+                    } else if (max_v == g) {
+                        h = (b - r) / delta + 2.0f;
+                    } else {
+                        h = (r - g) / delta + 4.0f;
+                    }
+                    h /= 6.0f;
+                    if (h < 0.0f) h += 1.0f;
+                }
+                const float s = (max_v > 0.0f) ? delta / max_v : 0.0f;
+                const float v = max_v;
+
+                // Apply hue shift, wrapping into [0, 1).
+                h = std::fmod(h + hue_shift, 1.0f);
+                if (h < 0.0f) h += 1.0f;
+
+                // HSV → RGB.
+                const float h6 = h * 6.0f;
+                const int sector = static_cast<int>(std::floor(h6)) % 6;
+                const float f = h6 - std::floor(h6);
+                const float p = v * (1.0f - s);
+                const float q = v * (1.0f - s * f);
+                const float t = v * (1.0f - s * (1.0f - f));
+                float new_r = 0.0f, new_g = 0.0f, new_b = 0.0f;
+                switch (sector) {
+                    case 0: new_r = v; new_g = t; new_b = p; break;
+                    case 1: new_r = q; new_g = v; new_b = p; break;
+                    case 2: new_r = p; new_g = v; new_b = t; break;
+                    case 3: new_r = p; new_g = q; new_b = v; break;
+                    case 4: new_r = t; new_g = p; new_b = v; break;
+                    default: new_r = v; new_g = p; new_b = q; break;
+                }
+                r_ch[j] = new_r;
+                g_ch[j] = new_g;
+                b_ch[j] = new_b;
             }
         }
     }

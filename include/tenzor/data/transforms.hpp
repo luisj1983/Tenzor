@@ -204,7 +204,9 @@ public:
      * @param brightness Maximum brightness adjustment factor
      * @param contrast Maximum contrast adjustment factor
      * @param saturation Maximum saturation adjustment factor
-     * @param hue Maximum hue shift (not applied in this simplified version)
+     * @param hue Maximum hue shift in [0, 0.5] where 0.5 corresponds to ±180°
+     *            rotation in HSV space.  Applied per-pixel via RGB↔HSV
+     *            conversion; matches torchvision's adjust_hue contract.
      */
     ColorJitter(float brightness = 0, float contrast = 0,
                 float saturation = 0, float hue = 0);

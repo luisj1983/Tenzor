@@ -822,6 +822,11 @@ add_executable(test_reduction_half_dtype test_reduction_half_dtype.cpp)
 target_link_libraries(test_reduction_half_dtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_reduction_half_dtype LABELS "unit" DISCOVERY_TIMEOUT 60)
 
+# ColorJitter contrast (per-image luminance) + hue (HSV rotation) — audit I.11.
+add_executable(test_color_jitter test_color_jitter.cpp)
+target_link_libraries(test_color_jitter PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_color_jitter LABELS "unit" DISCOVERY_TIMEOUT 60)
+
 # test_cublas_cudnn.cpp orphan removed: rotted APIs (Tensor::ones/randn/matmul methods no longer exist)
 
 # Quantization observers and FakeQuantize specifics (16 tests, complements canonical test_quantization)
