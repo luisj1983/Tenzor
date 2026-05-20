@@ -2,6 +2,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/utils/log.hpp"
 #include "buffer_pool.hpp"
 #include "fused_conv_bn_relu.hpp"
 #include <cmath>
@@ -1475,8 +1476,9 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
         // the kernel simple and still correct.
         static bool warned = false;
         if (!warned) {
-            std::cerr << "[tenzor] Warning: fused_attention computing Float64 in Float32 precision. "
-                      << "Cast inputs to Float32 explicitly to suppress this warning.\n";
+            // Audit I.4: unified logger so TENZOR_LOG_LEVEL filter applies.
+            TENZOR_LOG_WARN("fused_attention computing Float64 in Float32 precision. "
+                            "Cast inputs to Float32 explicitly to suppress this warning.");
             warned = true;
         }
         Tensor q32 = Q.to(DType::Float32);
