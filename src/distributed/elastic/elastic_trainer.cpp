@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/distributed/elastic/elastic_trainer.hpp"
+#include "tenzor/utils/log.hpp"
 #include <filesystem>  // Audit J15: checkpoint dir creation
 #include <fstream>     // Audit J15: marker file write
 #include <iostream>
@@ -26,7 +27,8 @@ auto ElasticTrainer::run(TrainFunction train_fn) -> void {
             current_rank_ = result.rank;
             current_world_size_ = result.world_size;
         } catch (const std::exception& e) {
-            std::cerr << "[ElasticTrainer] Rendezvous failed: " << e.what() << std::endl;
+            // Audit I.4: route to unified logger.
+            TENZOR_LOG_ERROR("[ElasticTrainer] Rendezvous failed: {}", e.what());
             if (restart_count_ >= config_.max_restarts) {
                 throw;
             }
@@ -40,9 +42,11 @@ auto ElasticTrainer::run(TrainFunction train_fn) -> void {
             // Training completed successfully
             return;
         } catch (const std::exception& e) {
-            std::cerr << "[ElasticTrainer] Training failed (attempt "
-                      << restart_count_ + 1 << "/" << config_.max_restarts + 1
-                      << "): " << e.what() << std::endl;
+            // Audit I.4: route to unified logger.
+            TENZOR_LOG_ERROR("[ElasticTrainer] Training failed (attempt {}/{}): {}",
+                             restart_count_ + 1,
+                             config_.max_restarts + 1,
+                             e.what());
 
             // Audit J15: real checkpoint hook.
             //
@@ -70,8 +74,9 @@ auto ElasticTrainer::run(TrainFunction train_fn) -> void {
                           << "exception=" << e.what() << "\n";
                     }
                 } catch (const std::exception& ce) {
-                    std::cerr << "[ElasticTrainer] auto_checkpoint hook failed: "
-                              << ce.what() << " (continuing recovery)" << std::endl;
+                    // Audit I.4: route to unified logger.
+                    TENZOR_LOG_ERROR("[ElasticTrainer] auto_checkpoint hook failed: "
+                                     "{} (continuing recovery)", ce.what());
                 }
             }
 
@@ -97,8 +102,9 @@ auto ElasticTrainer::check_and_recover() -> bool {
     auto dead = health_monitor_->dead_workers();
     if (dead.empty()) return false;
 
-    std::cerr << "[ElasticTrainer] Detected " << dead.size() << " dead worker(s), recovering..."
-              << std::endl;
+    // Audit I.4: route to unified logger.
+    TENZOR_LOG_WARN("[ElasticTrainer] Detected {} dead worker(s), recovering...",
+                    dead.size());
 
     // Audit J15: real checkpoint hook (mirror of the failure-path branch
     // above). Invoked on health-monitor-detected dead workers.
@@ -119,8 +125,9 @@ auto ElasticTrainer::check_and_recover() -> bool {
                   << current_rank_ << "\n";
             }
         } catch (const std::exception& ce) {
-            std::cerr << "[ElasticTrainer] auto_checkpoint hook failed: "
-                      << ce.what() << " (continuing recovery)" << std::endl;
+            // Audit I.4: route to unified logger.
+            TENZOR_LOG_ERROR("[ElasticTrainer] auto_checkpoint hook failed: "
+                             "{} (continuing recovery)", ce.what());
         }
     }
 
