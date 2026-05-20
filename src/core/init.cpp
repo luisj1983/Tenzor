@@ -1,6 +1,7 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/utils/log.hpp"  // TENZOR_LOG_INFO / WARN / ERROR (audit I.4)
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -46,7 +47,7 @@ auto initialize() -> void {
         void* handle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
             // Debug-level log: TBB may not be needed if not using CPU backend with TBB
-            std::cerr << "[tenzor] Note: Could not preload " << lib << ": " << dlerror() << std::endl;
+            TENZOR_LOG_WARN("[tenzor] Note: Could not preload {}: {}", lib, dlerror());
         }
     }
 #endif
@@ -97,7 +98,7 @@ auto initialize() -> void {
     }
 #endif
 
-    std::cout << "Initializing Tenzor library v0.1.0" << std::endl;
+    TENZOR_LOG_INFO("Initializing Tenzor library v0.1.0");
 
     // Load CPU backend dynamically
     auto& loader = backend_registry();
@@ -129,11 +130,11 @@ auto initialize() -> void {
     std::filesystem::path bin_path = find_backend_dir();
     std::filesystem::path cpu_backend_path = bin_path / "tenzor_backend_cpu.so";
 
-    std::cout << "Loading CPU backend from: " << cpu_backend_path << std::endl;
+    TENZOR_LOG_INFO("Loading CPU backend from: {}", cpu_backend_path.string());
 
     auto result = loader.load_backend(cpu_backend_path);
     if (!result) {
-        std::cerr << "Error: Failed to load CPU backend: " << result.error() << std::endl;
+        TENZOR_LOG_ERROR("Error: Failed to load CPU backend: {}", result.error());
         throw std::runtime_error("Failed to initialize Tenzor: CPU backend not available");
     }
 
@@ -144,7 +145,7 @@ auto initialize() -> void {
     // Register by name
     loader.register_backend(cpu_backend_ptr->name(), std::move(cpu_backend_unique));
 
-    std::cout << "CPU backend registered: " << cpu_backend_ptr->name() << std::endl;
+    TENZOR_LOG_INFO("CPU backend registered: {}", cpu_backend_ptr->name());
 
     // Now cpu_backend_ptr points to the registered backend
     auto* cpu_backend = cpu_backend_ptr;
@@ -167,22 +168,22 @@ auto initialize() -> void {
             register_fn(&cpu_table);
             DispatchTableRegistry::mark_ready(Device::Type::CPU);
             auto cpu_op_count = cpu_table.op_count();
-            std::cout << "CPU dispatch table initialized (" << cpu_op_count << " operations registered)" << std::endl;
+            TENZOR_LOG_INFO("CPU dispatch table initialized ({} operations registered)", cpu_op_count);
             if (cpu_op_count == 0) {
-                std::cerr << "Warning: CPU backend registered 0 operations" << std::endl;
+                TENZOR_LOG_WARN("Warning: CPU backend registered 0 operations");
             }
         } else {
-            std::cerr << "Warning: Could not find register_kernels in CPU backend" << std::endl;
+            TENZOR_LOG_WARN("Warning: Could not find register_kernels in CPU backend");
         }
     } else {
-        std::cerr << "Warning: No library handle for CPU backend kernel registration" << std::endl;
+        TENZOR_LOG_WARN("Warning: No library handle for CPU backend kernel registration");
     }
 
     // Try to load CUDA backend if available
     std::filesystem::path cuda_backend_path = bin_path / "tenzor_backend_cuda.so";
 
     if (std::filesystem::exists(cuda_backend_path)) {
-        std::cout << "Loading CUDA backend from: " << cuda_backend_path << std::endl;
+        TENZOR_LOG_INFO("Loading CUDA backend from: {}", cuda_backend_path.string());
 
         auto cuda_result = loader.load_backend(cuda_backend_path);
         if (cuda_result) {
@@ -192,8 +193,8 @@ auto initialize() -> void {
             // Check if CUDA is actually available
             if (cuda_backend_ptr->is_available()) {
                 loader.register_backend(cuda_backend_ptr->name(), std::move(cuda_backend_unique));
-                std::cout << "CUDA backend registered: " << cuda_backend_ptr->name() << std::endl;
-                std::cout << "Found " << cuda_backend_ptr->device_count() << " CUDA device(s)" << std::endl;
+                TENZOR_LOG_INFO("CUDA backend registered: {}", cuda_backend_ptr->name());
+                TENZOR_LOG_INFO("Found {} CUDA device(s)", cuda_backend_ptr->device_count());
 
                 auto* cuda_backend = cuda_backend_ptr;
 
@@ -212,25 +213,25 @@ auto initialize() -> void {
                         register_fn(&cuda_table);
                         DispatchTableRegistry::mark_ready(Device::Type::CUDA);
                         auto cuda_op_count = cuda_table.op_count();
-                        std::cout << "CUDA dispatch table initialized (" << cuda_op_count << " operations registered)" << std::endl;
+                        TENZOR_LOG_INFO("CUDA dispatch table initialized ({} operations registered)", cuda_op_count);
                         if (cuda_op_count == 0) {
-                            std::cerr << "Warning: CUDA backend registered 0 operations" << std::endl;
+                            TENZOR_LOG_WARN("Warning: CUDA backend registered 0 operations");
                         }
                     } else {
-                        std::cerr << "Warning: Could not find register_kernels in CUDA backend" << std::endl;
+                        TENZOR_LOG_WARN("Warning: Could not find register_kernels in CUDA backend");
                     }
                 } else {
-                    std::cerr << "Warning: No library handle for CUDA backend kernel registration" << std::endl;
+                    TENZOR_LOG_WARN("Warning: No library handle for CUDA backend kernel registration");
                 }
 
             } else {
-                std::cout << "CUDA backend loaded but no CUDA devices available" << std::endl;
+                TENZOR_LOG_INFO("CUDA backend loaded but no CUDA devices available");
             }
         } else {
-            std::cout << "Warning: Failed to load CUDA backend: " << cuda_result.error() << std::endl;
+            TENZOR_LOG_WARN("Warning: Failed to load CUDA backend: {}", cuda_result.error());
         }
     } else {
-        std::cout << "CUDA backend not found at: " << cuda_backend_path << std::endl;
+        TENZOR_LOG_INFO("CUDA backend not found at: {}", cuda_backend_path.string());
     }
 
     // Try to load ROCm backend if available
@@ -239,11 +240,11 @@ auto initialize() -> void {
     // Allow disabling ROCm loading via environment variable
     bool skip_rocm = (std::getenv("TENZOR_DISABLE_ROCM") != nullptr);
     if (skip_rocm) {
-        std::cout << "ROCm backend skipped (TENZOR_DISABLE_ROCM set)" << std::endl;
+        TENZOR_LOG_INFO("ROCm backend skipped (TENZOR_DISABLE_ROCM set)");
     }
 
     if (!skip_rocm && std::filesystem::exists(rocm_backend_path)) {
-        std::cout << "Loading ROCm backend from: " << rocm_backend_path << std::endl;
+        TENZOR_LOG_INFO("Loading ROCm backend from: {}", rocm_backend_path.string());
 
         auto rocm_result = loader.load_backend(rocm_backend_path);
         if (rocm_result) {
@@ -253,8 +254,8 @@ auto initialize() -> void {
             // Check if ROCm is actually available
             if (rocm_backend_ptr->is_available()) {
                 loader.register_backend(rocm_backend_ptr->name(), std::move(rocm_backend_unique));
-                std::cout << "ROCm backend registered: " << rocm_backend_ptr->name() << std::endl;
-                std::cout << "Found " << rocm_backend_ptr->device_count() << " ROCm device(s)" << std::endl;
+                TENZOR_LOG_INFO("ROCm backend registered: {}", rocm_backend_ptr->name());
+                TENZOR_LOG_INFO("Found {} ROCm device(s)", rocm_backend_ptr->device_count());
 
                 auto* rocm_backend = rocm_backend_ptr;
 
@@ -273,25 +274,25 @@ auto initialize() -> void {
                         register_fn(&rocm_table);
                         DispatchTableRegistry::mark_ready(Device::Type::ROCm);
                         auto rocm_op_count = rocm_table.op_count();
-                        std::cout << "ROCm dispatch table initialized (" << rocm_op_count << " operations registered)" << std::endl;
+                        TENZOR_LOG_INFO("ROCm dispatch table initialized ({} operations registered)", rocm_op_count);
                         if (rocm_op_count == 0) {
-                            std::cerr << "Warning: ROCm backend registered 0 operations" << std::endl;
+                            TENZOR_LOG_WARN("Warning: ROCm backend registered 0 operations");
                         }
                     } else {
-                        std::cerr << "Warning: Could not find register_kernels in ROCm backend" << std::endl;
+                        TENZOR_LOG_WARN("Warning: Could not find register_kernels in ROCm backend");
                     }
                 } else {
-                    std::cerr << "Warning: No library handle for ROCm backend kernel registration" << std::endl;
+                    TENZOR_LOG_WARN("Warning: No library handle for ROCm backend kernel registration");
                 }
 
             } else {
-                std::cout << "ROCm backend loaded but no ROCm devices available" << std::endl;
+                TENZOR_LOG_INFO("ROCm backend loaded but no ROCm devices available");
             }
         } else {
-            std::cout << "Warning: Failed to load ROCm backend: " << rocm_result.error() << std::endl;
+            TENZOR_LOG_WARN("Warning: Failed to load ROCm backend: {}", rocm_result.error());
         }
     } else if (!skip_rocm) {
-        std::cout << "ROCm backend not found at: " << rocm_backend_path << std::endl;
+        TENZOR_LOG_INFO("ROCm backend not found at: {}", rocm_backend_path.string());
     }
 
     // Try to load OneAPI backend if available
@@ -341,7 +342,7 @@ auto initialize() -> void {
 #endif
 
     if (std::filesystem::exists(oneapi_backend_path)) {
-        std::cout << "Loading OneAPI backend from: " << oneapi_backend_path << std::endl;
+        TENZOR_LOG_INFO("Loading OneAPI backend from: {}", oneapi_backend_path.string());
 
         auto oneapi_result = loader.load_backend(oneapi_backend_path, oneapi_skip_probe);
         if (oneapi_result) {
@@ -351,8 +352,8 @@ auto initialize() -> void {
             // Check if OneAPI is actually available
             if (oneapi_backend_ptr->is_available()) {
                 loader.register_backend(oneapi_backend_ptr->name(), std::move(oneapi_backend_unique));
-                std::cout << "OneAPI backend registered: " << oneapi_backend_ptr->name() << std::endl;
-                std::cout << "Found " << oneapi_backend_ptr->device_count() << " OneAPI device(s)" << std::endl;
+                TENZOR_LOG_INFO("OneAPI backend registered: {}", oneapi_backend_ptr->name());
+                TENZOR_LOG_INFO("Found {} OneAPI device(s)", oneapi_backend_ptr->device_count());
 
                 auto* oneapi_backend = oneapi_backend_ptr;
 
@@ -371,32 +372,32 @@ auto initialize() -> void {
                         register_fn(&oneapi_table);
                         DispatchTableRegistry::mark_ready(Device::Type::OneAPI);
                         auto oneapi_op_count = oneapi_table.op_count();
-                        std::cout << "OneAPI dispatch table initialized (" << oneapi_op_count << " operations registered)" << std::endl;
+                        TENZOR_LOG_INFO("OneAPI dispatch table initialized ({} operations registered)", oneapi_op_count);
                         if (oneapi_op_count == 0) {
-                            std::cerr << "Warning: OneAPI backend registered 0 operations" << std::endl;
+                            TENZOR_LOG_WARN("Warning: OneAPI backend registered 0 operations");
                         }
                     } else {
-                        std::cerr << "Warning: Could not find register_kernels in OneAPI backend" << std::endl;
+                        TENZOR_LOG_WARN("Warning: Could not find register_kernels in OneAPI backend");
                     }
                 } else {
-                    std::cerr << "Warning: No library handle for OneAPI backend kernel registration" << std::endl;
+                    TENZOR_LOG_WARN("Warning: No library handle for OneAPI backend kernel registration");
                 }
 
             } else {
-                std::cout << "OneAPI backend loaded but no OneAPI devices available" << std::endl;
+                TENZOR_LOG_INFO("OneAPI backend loaded but no OneAPI devices available");
             }
         } else {
-            std::cout << "Warning: Failed to load OneAPI backend: " << oneapi_result.error() << std::endl;
+            TENZOR_LOG_WARN("Warning: Failed to load OneAPI backend: {}", oneapi_result.error());
         }
     } else {
-        std::cout << "OneAPI backend not found at: " << oneapi_backend_path << std::endl;
+        TENZOR_LOG_INFO("OneAPI backend not found at: {}", oneapi_backend_path.string());
     }
 
     // Try to load Vulkan backend if available
     std::filesystem::path vulkan_backend_path = bin_path / "tenzor_backend_vulkan.so";
 
     if (std::filesystem::exists(vulkan_backend_path)) {
-        std::cout << "Loading Vulkan backend from: " << vulkan_backend_path << std::endl;
+        TENZOR_LOG_INFO("Loading Vulkan backend from: {}", vulkan_backend_path.string());
 
         auto vulkan_result = loader.load_backend(vulkan_backend_path);
         if (vulkan_result) {
@@ -406,8 +407,8 @@ auto initialize() -> void {
             // Check if Vulkan is actually available
             if (vulkan_backend_ptr->is_available()) {
                 loader.register_backend(vulkan_backend_ptr->name(), std::move(vulkan_backend_unique));
-                std::cout << "Vulkan backend registered: " << vulkan_backend_ptr->name() << std::endl;
-                std::cout << "Found " << vulkan_backend_ptr->device_count() << " Vulkan device(s)" << std::endl;
+                TENZOR_LOG_INFO("Vulkan backend registered: {}", vulkan_backend_ptr->name());
+                TENZOR_LOG_INFO("Found {} Vulkan device(s)", vulkan_backend_ptr->device_count());
 
                 auto* vulkan_backend = vulkan_backend_ptr;
 
@@ -426,27 +427,27 @@ auto initialize() -> void {
                         register_fn(&vulkan_table);
                         DispatchTableRegistry::mark_ready(Device::Type::Vulkan);
                         auto vulkan_op_count = vulkan_table.op_count();
-                        std::cout << "Vulkan dispatch table initialized (" << vulkan_op_count << " operations registered)" << std::endl;
+                        TENZOR_LOG_INFO("Vulkan dispatch table initialized ({} operations registered)", vulkan_op_count);
                         if (vulkan_op_count == 0) {
-                            std::cerr << "Warning: Vulkan backend registered 0 operations" << std::endl;
+                            TENZOR_LOG_WARN("Warning: Vulkan backend registered 0 operations");
                         }
 
 
                     } else {
-                        std::cerr << "Warning: Could not find register_kernels in Vulkan backend" << std::endl;
+                        TENZOR_LOG_WARN("Warning: Could not find register_kernels in Vulkan backend");
                     }
                 } else {
-                    std::cerr << "Warning: No library handle for Vulkan backend kernel registration" << std::endl;
+                    TENZOR_LOG_WARN("Warning: No library handle for Vulkan backend kernel registration");
                 }
 
             } else {
-                std::cout << "Vulkan backend loaded but no Vulkan devices available" << std::endl;
+                TENZOR_LOG_INFO("Vulkan backend loaded but no Vulkan devices available");
             }
         } else {
-            std::cout << "Warning: Failed to load Vulkan backend: " << vulkan_result.error() << std::endl;
+            TENZOR_LOG_WARN("Warning: Failed to load Vulkan backend: {}", vulkan_result.error());
         }
     } else {
-        std::cout << "Vulkan backend not found at: " << vulkan_backend_path << std::endl;
+        TENZOR_LOG_INFO("Vulkan backend not found at: {}", vulkan_backend_path.string());
     }
 
     // Now that every backend that intends to register has done so, scan
@@ -456,7 +457,7 @@ auto initialize() -> void {
     // var) it throws so CI can catch coverage regressions.
     DispatchTableRegistry::validate_coverage(/*strict=*/false);
 
-    std::cout << "Tenzor initialization complete" << std::endl;
+    TENZOR_LOG_INFO("Tenzor initialization complete");
 
     g_initialized.store(true, std::memory_order_release);
 
