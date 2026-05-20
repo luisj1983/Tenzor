@@ -91,5 +91,27 @@ class Poisson(Distribution):
             return result.reshape(())
         return result
 
+    def cdf(self, value):
+        """CDF of Poisson (audit item E.5).
+
+        P(X <= k) = Q(floor(k) + 1, lambda)    (regularised upper incomplete gamma)
+        Equivalently 1 - P(floor(k) + 1, lambda).
+        For k < 0 the CDF is 0.
+        """
+        from scipy.special import gammaincc
+        value = np.asarray(value, dtype=np.float64)
+        k = np.floor(value)
+        cdf_val = gammaincc(k + 1.0, self.rate)
+        return np.where(value < 0.0, np.zeros_like(value), cdf_val)
+
+    def icdf(self, q):
+        """Inverse CDF of Poisson (audit item E.5).
+
+        No closed form — invert the CDF via scipy.stats.poisson.ppf.
+        """
+        from scipy.stats import poisson as _poisson
+        q = np.asarray(q, dtype=np.float64)
+        return _poisson.ppf(q, self.rate).astype(np.float64)
+
     def support(self):
         return "{0, 1, 2, ...}"

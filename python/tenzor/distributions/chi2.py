@@ -52,5 +52,24 @@ class Chi2(Distribution):
         return (k / 2.0 + math.log(2.0) + gammaln(k / 2.0)
                 + (1.0 - k / 2.0) * digamma(k / 2.0))
 
+    def cdf(self, value):
+        """CDF of Chi2(df=k) (audit item E.5).
+
+        P(X <= x) = P(k/2, x/2) (regularised lower incomplete gamma).
+        """
+        from scipy.special import gammainc
+        value = np.asarray(value, dtype=np.float64)
+        k = self.df
+        return np.where(value <= 0.0,
+                        np.zeros_like(value),
+                        gammainc(k / 2.0, value / 2.0))
+
+    def icdf(self, q):
+        """Inverse CDF of Chi2 (audit item E.5)."""
+        from scipy.special import gammaincinv
+        q = np.asarray(q, dtype=np.float64)
+        k = self.df
+        return 2.0 * gammaincinv(k / 2.0, q)
+
     def support(self):
         return "(0, inf)"

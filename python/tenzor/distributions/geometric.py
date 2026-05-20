@@ -44,5 +44,30 @@ class Geometric(Distribution):
         p = np.clip(self.probs, eps, 1.0 - eps)
         return -(np.log(p) + (1.0 - p) * np.log(1.0 - p) / p)
 
+    def cdf(self, value):
+        """CDF of Geometric (audit item E.5).
+
+        P(X <= k) = 1 - (1 - p)^(floor(k) + 1)   for k >= 0
+                  = 0                            for k <  0
+        """
+        value = np.asarray(value, dtype=np.float64)
+        k = np.floor(value)
+        cdf_val = 1.0 - np.power(1.0 - self.probs, k + 1.0)
+        return np.where(value < 0.0, np.zeros_like(value), cdf_val)
+
+    def icdf(self, q):
+        """Inverse CDF of Geometric (audit item E.5).
+
+        For Geometric counting failures-before-success:
+            q = P(X <= k) = 1 - (1 - p)^(k + 1)
+            k = ceil(log(1 - q) / log(1 - p)) - 1
+        """
+        q = np.asarray(q, dtype=np.float64)
+        eps = 1e-7
+        p = np.clip(self.probs, eps, 1.0 - eps)
+        # Avoid log(0) at q == 1.0 — pin to a finite large value.
+        q_clip = np.clip(q, 0.0, 1.0 - eps)
+        return np.ceil(np.log(1.0 - q_clip) / np.log(1.0 - p)) - 1.0
+
     def support(self):
         return "{0, 1, 2, ...}"

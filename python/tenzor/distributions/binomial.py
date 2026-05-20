@@ -73,5 +73,35 @@ class Binomial(Distribution):
         # For p ∈ {0, 1} the distribution is a point mass ⇒ entropy 0.
         return out
 
+    def cdf(self, value):
+        """CDF of Binomial(n, p) (audit item E.5).
+
+        P(X <= k) = I_{1-p}(n-k, k+1)   (regularised incomplete beta)
+        For k < 0 the CDF is 0; for k >= n it is 1.
+        """
+        from scipy.special import betainc
+        value = np.asarray(value, dtype=np.float64)
+        k = np.floor(value)
+        n = float(self.total_count)
+        eps = 1e-12
+        p = np.clip(self.probs, eps, 1.0 - eps)
+        # betainc(n-k, k+1, 1-p) = P(X <= k) for Binomial(n, p).
+        # Clip k to [0, n] before passing in; we re-apply the
+        # below-/above-range checks afterwards.
+        k_clip = np.clip(k, 0.0, n)
+        cdf_val = betainc(n - k_clip, k_clip + 1.0, 1.0 - p)
+        out = np.where(value < 0.0, np.zeros_like(value), cdf_val)
+        out = np.where(value >= n, np.ones_like(value), out)
+        return out
+
+    def icdf(self, q):
+        """Inverse CDF of Binomial (audit item E.5).
+
+        No closed form — invert via scipy.stats.binom.ppf.
+        """
+        from scipy.stats import binom as _binom
+        q = np.asarray(q, dtype=np.float64)
+        return _binom.ppf(q, self.total_count, self.probs).astype(np.float64)
+
     def support(self):
         return f"{{0, 1, ..., {self.total_count}}}"

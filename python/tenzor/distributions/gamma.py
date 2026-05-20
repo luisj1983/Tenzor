@@ -51,5 +51,30 @@ class Gamma(Distribution):
         # H = a - log(b) + lgamma(a) + (1-a)*digamma(a)
         return a - np.log(b) + gammaln(a) + (1.0 - a) * digamma(a)
 
+    def cdf(self, value):
+        """CDF of Gamma(concentration=a, rate=b) (audit item E.5).
+
+        P(X <= x) = P(a, b * x)  (regularised lower incomplete gamma).
+        """
+        from scipy.special import gammainc
+        value = np.asarray(value, dtype=np.float64)
+        a = self.concentration
+        b = self.rate
+        return np.where(value <= 0.0,
+                        np.zeros_like(value),
+                        gammainc(a, b * value))
+
+    def icdf(self, q):
+        """Inverse CDF of Gamma (audit item E.5).
+
+        Uses scipy.special.gammaincinv to invert the regularised lower
+        incomplete gamma.
+        """
+        from scipy.special import gammaincinv
+        q = np.asarray(q, dtype=np.float64)
+        a = self.concentration
+        b = self.rate
+        return gammaincinv(a, q) / b
+
     def support(self):
         return "(0, inf)"

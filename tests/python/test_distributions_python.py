@@ -728,3 +728,119 @@ class TestBinomialEntropyExact:
         gaussian = 0.5 * math.log(2 * math.pi * math.e * n * p * (1 - p))
         # ≤ 1% relative error.
         assert abs(b.entropy() - gaussian) / gaussian < 0.01
+
+
+# ===========================================================================
+# A.5 / E.5 — cdf / icdf coverage added for several previously-missing
+# distributions.
+# ===========================================================================
+
+class TestBernoulliCdfIcdf:
+    def test_cdf_below_support(self):
+        b = Bernoulli(0.3)
+        assert b.cdf(-0.5) == 0.0
+
+    def test_cdf_at_zero(self):
+        b = Bernoulli(0.3)
+        assert allclose(b.cdf(0.0), 0.7)  # P(X<=0) = 1-p
+
+    def test_cdf_at_one(self):
+        b = Bernoulli(0.3)
+        assert b.cdf(1.0) == 1.0
+
+    def test_icdf_roundtrip(self):
+        b = Bernoulli(0.3)
+        # Below threshold ⇒ 0; above ⇒ 1.
+        assert b.icdf(0.5) == 0.0   # 0.5 < 0.7 (= 1-p)
+        assert b.icdf(0.8) == 1.0   # 0.8 > 0.7
+
+
+class TestPoissonCdfIcdf:
+    def test_cdf_below_zero(self):
+        p = Poisson(2.5)
+        assert p.cdf(-1.0) == 0.0
+
+    def test_cdf_zero_known(self):
+        # P(X<=0; lambda) = exp(-lambda)
+        p = Poisson(1.5)
+        assert allclose(p.cdf(0.0), math.exp(-1.5))
+
+    def test_icdf_roundtrip(self):
+        p = Poisson(3.0)
+        # ppf(0.999) should land at some integer k for lambda=3.
+        k = p.icdf(0.999)
+        assert k >= 5 and k <= 12, f"ppf(0.999) gave {k}"
+
+
+class TestGammaCdfIcdf:
+    def test_cdf_below_zero(self):
+        g = Gamma(2.0, 1.0)
+        assert g.cdf(-1.0) == 0.0
+
+    def test_icdf_roundtrip(self):
+        g = Gamma(2.0, 3.0)
+        q = np.array([0.1, 0.5, 0.9])
+        x = g.icdf(q)
+        assert np.allclose(g.cdf(x), q, atol=1e-6)
+
+
+class TestChi2CdfIcdf:
+    def test_cdf_below_zero(self):
+        c = Chi2(df=3)
+        assert c.cdf(-1.0) == 0.0
+
+    def test_icdf_roundtrip(self):
+        c = Chi2(df=5)
+        q = np.array([0.05, 0.5, 0.95])
+        x = c.icdf(q)
+        assert np.allclose(c.cdf(x), q, atol=1e-6)
+
+
+class TestBetaIcdf:
+    def test_icdf_roundtrip(self):
+        b = Beta(2.0, 3.0)
+        q = np.array([0.1, 0.5, 0.9])
+        x = b.icdf(q)
+        assert np.allclose(b.cdf(x), q, atol=1e-6)
+
+
+class TestLogNormalIcdf:
+    def test_icdf_roundtrip(self):
+        ln = LogNormal(loc=0.0, scale=1.0)
+        q = np.array([0.1, 0.5, 0.9])
+        x = ln.icdf(q)
+        assert np.allclose(ln.cdf(x), q, atol=1e-6)
+
+
+class TestGeometricCdfIcdf:
+    def test_cdf_below_zero(self):
+        g = Geometric(0.5)
+        assert g.cdf(-1.0) == 0.0
+
+    def test_cdf_known(self):
+        g = Geometric(0.5)
+        # P(X<=0; p=0.5) = p = 0.5
+        assert allclose(g.cdf(0.0), 0.5)
+
+    def test_icdf_roundtrip(self):
+        g = Geometric(0.4)
+        # cdf(icdf(q)) should be >= q (CDF is a step function).
+        for q in [0.1, 0.5, 0.8]:
+            k = g.icdf(q)
+            assert g.cdf(k) >= q - 1e-9
+
+
+class TestBinomialCdf:
+    def test_cdf_below(self):
+        b = Binomial(5, 0.5)
+        assert b.cdf(-1.0) == 0.0
+
+    def test_cdf_above(self):
+        b = Binomial(5, 0.5)
+        assert b.cdf(5.0) == 1.0
+
+    def test_cdf_known(self):
+        # Binomial(2, 0.5): P(X<=0) = 0.25, P(X<=1) = 0.75
+        b = Binomial(2, 0.5)
+        assert allclose(b.cdf(0.0), 0.25)
+        assert allclose(b.cdf(1.0), 0.75)

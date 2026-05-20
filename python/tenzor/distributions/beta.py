@@ -64,5 +64,15 @@ class Beta(Distribution):
                 - (b - 1.0) * digamma(b)
                 + (a + b - 2.0) * digamma(a + b))
 
+    def icdf(self, q):
+        """Inverse CDF of Beta(a, b) (audit item E.5).
+
+        Inverts the regularised incomplete beta function via
+        scipy.special.betaincinv.
+        """
+        from scipy.special import betaincinv
+        q = np.asarray(q, dtype=np.float64)
+        return betaincinv(self.concentration1, self.concentration0, q)
+
     def support(self):
         return "(0, 1)"
