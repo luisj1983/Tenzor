@@ -43,6 +43,21 @@ TEST_F(FunctionOpIdTest, NonDifferentiableBackwardsReturnForwardOpId) {
     EXPECT_EQ(SearchSortedBackward{}.op_id(), OpId::SearchSorted);
 }
 
+TEST_F(FunctionOpIdTest, BatchedOptInsReturnForwardOpId) {
+    // Sample from the ~35 op_id() overrides applied in the audit-A.2 batch
+    // sweep. Verify a representative subset.
+    EXPECT_EQ(LogBackward{}.op_id(), OpId::Log);
+    EXPECT_EQ(ExpBackward{}.op_id(), OpId::Exp);
+    EXPECT_EQ(SqrtBackward{}.op_id(), OpId::Sqrt);
+    EXPECT_EQ(SinBackward{}.op_id(), OpId::Sin);
+    EXPECT_EQ(CosBackward{}.op_id(), OpId::Cos);
+    EXPECT_EQ(GeluBackward{}.op_id(), OpId::Gelu);
+    EXPECT_EQ(SoftmaxBackward{-1}.op_id(), OpId::Softmax);
+    EXPECT_EQ(ConjBackward{}.op_id(), OpId::Conj);
+    EXPECT_EQ(NegBackward{}.op_id(), OpId::Neg);
+    EXPECT_EQ(AbsBackward{}.op_id(), OpId::Abs);
+}
+
 namespace {
 // Test scaffold: a Function subclass that does NOT override op_id().
 class UnoptInFunction : public Function {
