@@ -447,6 +447,23 @@ auto AdamW::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Audit item D.5: buffer-count guard matching Adam::load_state_dict.
+    // Without this, a checkpoint with N exp_avg slots would silently
+    // load into an AdamW with M ≠ N parameters and mis-align every
+    // subsequent step.
+    size_t saved_count = 0;
+    for (const auto& [key, _] : state) {
+        if (key.starts_with("exp_avg_") && !key.starts_with("exp_avg_sq_")) {
+            ++saved_count;
+        }
+    }
+    if (saved_count > 0 && saved_count != exp_avg_.size()) {
+        throw std::runtime_error(
+            "AdamW::load_state_dict: momentum buffer count mismatch - "
+            "saved " + std::to_string(saved_count) + " but have " +
+            std::to_string(exp_avg_.size()) + " parameters");
+    }
+
     // Load optimizer configuration
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];
