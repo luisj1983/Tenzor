@@ -114,15 +114,15 @@ OffloadContext::~OffloadContext() {
                     *tensor_ptr = restored;
                     info.is_offloaded = false;
                 } catch (const std::exception& e) {
-                    std::cerr << "OffloadContext: failed to restore offloaded "
-                              << "tensor to " << info.original_device.to_string()
-                              << " on shutdown: " << e.what()
-                              << " -- tensor will remain on CPU\n";
+                    // Audit I.4: route to unified logger.
+                    TENZOR_LOG_WARN("OffloadContext: failed to restore offloaded "
+                                    "tensor to {} on shutdown: {} -- tensor will remain on CPU",
+                                    info.original_device.to_string(), e.what());
                 }
             }
         } catch (const std::exception& e) {
-            std::cerr << "OffloadContext: error draining pending transfers on "
-                      << "shutdown: " << e.what() << "\n";
+            TENZOR_LOG_WARN("OffloadContext: error draining pending transfers on "
+                            "shutdown: {}", e.what());
         }
 
         // Final sync to catch the restore-side DMAs (and anything finalize_pending
@@ -692,7 +692,8 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr,
 
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Offload failed: " << e.what() << "\n";
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_WARN("OffloadContext::offload_tensor failed: {}", e.what());
         return false;
     }
 }
@@ -731,7 +732,8 @@ auto OffloadContext::prefetch_tensor(Tensor* tensor_ptr) -> bool {
 
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Prefetch failed: " << e.what() << "\n";
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_WARN("OffloadContext::prefetch_tensor failed: {}", e.what());
         return false;
     }
 }
@@ -824,7 +826,9 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
                 it->second.is_offloaded = false;
                 stats_.current_cpu_memory.fetch_sub(it->second.size_bytes, std::memory_order_relaxed);
             } catch (const std::exception& e) {
-                std::cerr << "Failed to load tensor to GPU: " << e.what() << "\n";
+                // Audit I.4: route to unified logger.
+                TENZOR_LOG_WARN("OffloadContext::load_to_gpu: failed to load offloaded "
+                                "tensor to GPU: {}", e.what());
             }
         }
         // Case 2: Tensor on CPU and not in map - CPU-start model, load to target device
@@ -843,7 +847,9 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
                     it->second.is_offloaded = false;  // Currently on GPU
                 }
             } catch (const std::exception& e) {
-                std::cerr << "Failed to load CPU tensor to GPU: " << e.what() << "\n";
+                // Audit I.4: route to unified logger.
+                TENZOR_LOG_WARN("OffloadContext::load_to_gpu: failed to load CPU tensor "
+                                "to GPU: {}", e.what());
             }
         }
     };
@@ -1094,7 +1100,9 @@ ComputeContext::~ComputeContext() {
                 Tensor cpu_tensor = transfer_engine_->gpu_to_cpu(*tensor_ptr);
                 *tensor_ptr = cpu_tensor;
             } catch (const std::exception& e) {
-                std::cerr << "ComputeContext: Failed to restore tensor to CPU: " << e.what() << "\n";
+                // Audit I.4: route to unified logger.
+                TENZOR_LOG_WARN("ComputeContext: failed to restore tensor to CPU: {}",
+                                e.what());
             }
         }
     }
@@ -1126,7 +1134,8 @@ auto offload_param(Tensor& param, OffloadPriority priority) -> void {
     // a consistent value.
     auto* ctx = get_global_offload_context();
     if (!ctx) {
-        std::cerr << "Warning: offload_param called but no global offload context set\n";
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_WARN("offload_param called but no global offload context set");
         return;
     }
     ctx->offload_single_tensor(&param, priority);
