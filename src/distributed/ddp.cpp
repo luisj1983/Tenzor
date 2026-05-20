@@ -16,6 +16,7 @@
 #include "tenzor/distributed/ddp.hpp"
 #include "tenzor/distributed/process_group.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/utils/log.hpp"
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
@@ -267,7 +268,8 @@ auto DistributedDataParallel::synchronize_gradients() -> void {
             if (unused_names.size() > 5) {
                 msg += " ... and " + std::to_string(unused_names.size() - 5) + " more";
             }
-            std::cerr << "[WARNING] " << msg << std::endl;
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("{}", msg);
         }
     }
 
