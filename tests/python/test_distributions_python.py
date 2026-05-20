@@ -529,6 +529,16 @@ class TestVonMises:
         v = VonMises(loc=0.0, concentration=1e-7)
         assert allclose(v.entropy(), math.log(2 * math.pi), atol=1e-3)
 
+    def test_cdf_at_loc(self):
+        # Audit E.5: cdf(mu; mu, kappa) == 0.5 by symmetry.
+        v = VonMises(loc=0.5, concentration=2.0)
+        assert allclose(v.cdf(0.5), 0.5, atol=1e-6)
+
+    def test_cdf_icdf_roundtrip(self):
+        v = VonMises(loc=0.0, concentration=3.0)
+        p = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
+        assert np.allclose(v.cdf(v.icdf(p)), p, atol=1e-5)
+
 
 # ===========================================================================
 # Laplace  (new)
@@ -615,6 +625,32 @@ class TestNegativeBinomial:
         nb = NegativeBinomial(total_count=5.0, probs=0.4)
         s = nb.sample((10000,))
         assert abs(s.mean() - 3.333) < 0.5
+
+    def test_cdf_monotone_and_in_unit_interval(self):
+        # Audit E.5: cdf must be monotone non-decreasing and in [0, 1].
+        nb = NegativeBinomial(total_count=5.0, probs=0.4)
+        ks = np.array([0.0, 1.0, 2.0, 5.0, 10.0, 20.0])
+        c = nb.cdf(ks)
+        assert np.all(c >= 0.0) and np.all(c <= 1.0)
+        assert np.all(np.diff(c) >= -1e-12)
+        # As k grows, cdf -> 1.
+        assert nb.cdf(1000.0) > 0.999
+
+    def test_cdf_below_zero(self):
+        # k < 0 has zero probability mass.
+        nb = NegativeBinomial(total_count=3.0, probs=0.5)
+        assert allclose(nb.cdf(-1.0), 0.0)
+
+    def test_icdf_matches_cdf(self):
+        # cdf(icdf(q)) >= q for the smallest integer support point.
+        nb = NegativeBinomial(total_count=4.0, probs=0.3)
+        qs = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
+        ks = nb.icdf(qs)
+        # icdf returns integers (failure counts).
+        assert np.allclose(ks, np.round(ks))
+        # cdf(k) >= q and cdf(k-1) < q.
+        assert np.all(nb.cdf(ks) >= qs - 1e-9)
+        assert np.all(nb.cdf(ks - 1.0) < qs + 1e-9)
 
 
 # ===========================================================================

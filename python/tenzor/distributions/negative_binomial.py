@@ -1,6 +1,6 @@
 """NegativeBinomial distribution."""
 import numpy as np
-from scipy.special import gammaln
+from scipy.special import gammaln, betainc
 from .distribution import Distribution, _to_numpy
 
 
@@ -96,6 +96,66 @@ class NegativeBinomial(Distribution):
                    + r_b * np.log(1.0 - p_b) + samples * np.log(p_b))
         # H ≈ -E[log P]
         return -log_p_x.mean(axis=0)
+
+    def cdf(self, value):
+        """CDF of NegativeBinomial via the regularised incomplete beta
+        identity (audit item E.5).
+
+        For X ~ NegativeBinomial(r, p) counting failures-before-r-successes
+        with `probs` = p the failure prob (PyTorch convention),
+            P(X <= k) = I_{1-p}(r, floor(k)+1)
+        where I_x(a,b) is the regularised incomplete beta. For k < 0 the
+        CDF is 0.
+        """
+        value = _to_numpy(value)
+        eps = 1e-7
+        p = np.clip(self.probs, eps, 1.0 - eps)
+        r = self.total_count
+        k = np.floor(value)
+        # I_{1-p}(r, k+1).  betainc is the regularised lower-incomplete beta.
+        cdf_val = betainc(r, k + 1.0, 1.0 - p)
+        return np.where(value < 0.0, np.zeros_like(value, dtype=np.float64), cdf_val)
+
+    def icdf(self, q):
+        """Inverse CDF of NegativeBinomial (audit item E.5).
+
+        We invert the regularised incomplete beta identity numerically by
+        finding the smallest non-negative integer k with `cdf(k) >= q`. The
+        continuous inverse via `betaincinv` gives a real-valued seed; we
+        then ceil-and-clamp.
+        """
+        q = _to_numpy(q)
+        eps = 1e-7
+        p = np.clip(self.probs, eps, 1.0 - eps)
+        r = self.total_count
+        q_clip = np.clip(q, 0.0, 1.0 - eps)
+        # betaincinv(a, b, y) = x s.t. I_x(a, b) = y.  Solve for k:
+        #   I_{1-p}(r, k+1) = q   ⇒  k+1 follows from inverse w.r.t. b.
+        # SciPy's betaincinv inverts in the x-argument only, but here we
+        # need to invert in the b-argument (k+1), so fall back to a
+        # bracketed binary search on k using the cdf to find the smallest
+        # k with cdf(k) >= q. Use an upper bound from mean + 50*sqrt(var) to keep
+        # the search short for non-degenerate parameters.
+        mean = r * p / (1.0 - p)
+        var = r * p / (1.0 - p) ** 2
+        upper = (mean + 50.0 * np.sqrt(var + 1.0)).astype(np.float64)
+
+        # Vectorise the search via a binary search on integer k.
+        k_lo = np.zeros_like(q_clip, dtype=np.float64)
+        k_hi = np.broadcast_to(upper, q_clip.shape).copy()
+        # Expand k_hi until cdf(k_hi) >= q_clip everywhere.
+        for _ in range(50):
+            insufficient = self.cdf(k_hi) < q_clip
+            if not np.any(insufficient):
+                break
+            k_hi = np.where(insufficient, k_hi * 2.0 + 1.0, k_hi)
+        # Binary search.
+        for _ in range(60):
+            mid = np.floor((k_lo + k_hi) / 2.0)
+            cdf_mid = self.cdf(mid)
+            k_lo = np.where(cdf_mid < q_clip, mid + 1.0, k_lo)
+            k_hi = np.where(cdf_mid >= q_clip, mid, k_hi)
+        return k_lo
 
     def support(self):
         return "{0, 1, 2, ...}"

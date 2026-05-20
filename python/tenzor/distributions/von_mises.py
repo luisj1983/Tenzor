@@ -2,6 +2,7 @@
 import math
 import numpy as np
 from scipy.special import i0, i1
+from scipy.stats import vonmises as _scipy_vonmises
 from .distribution import Distribution, _to_numpy
 
 
@@ -49,6 +50,26 @@ class VonMises(Distribution):
         i0k = i0(kappa)
         i1k = i1(kappa)
         return math.log(2 * math.pi) + np.log(i0k) - kappa * i1k / i0k
+
+    def cdf(self, value):
+        """CDF of VonMises (audit item E.5).
+
+        Uses the Marsaglia series via SciPy's vonmises.cdf, which sums
+
+            F(x; mu, kappa) = (x - mu) / (2 pi)
+                            + (1 / (pi I_0(kappa)))
+                              * Sum_{j>=1} (I_j(kappa) / j) * sin(j (x - mu))
+
+        and returns CDF in [0, 1] over the principal branch (-pi, pi].
+        """
+        value = _to_numpy(value)
+        # scipy parameterises VonMises as kappa with loc=mu; broadcast manually.
+        return _scipy_vonmises.cdf(value, self.concentration, loc=self.loc)
+
+    def icdf(self, q):
+        """Inverse CDF (PPF) of VonMises (audit item E.5)."""
+        q = _to_numpy(q)
+        return _scipy_vonmises.ppf(q, self.concentration, loc=self.loc)
 
     def support(self):
         return "(-pi, pi]"
