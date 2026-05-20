@@ -579,16 +579,27 @@ class WeightedRandomSampler(Sampler[int]):
                 range(len(self.weights)), weights=self.weights, k=self.num_samples
             )
         else:
-            # Weighted sampling without replacement
-            pool = list(range(len(self.weights)))
-            w = list(self.weights)
-            indices = []
-            for _ in range(self.num_samples):
-                chosen = g.choices(pool, weights=w, k=1)[0]
-                idx = pool.index(chosen)
-                indices.append(chosen)
-                pool.pop(idx)
-                w.pop(idx)
+            # Weighted sampling without replacement — audit item I.10.
+            # Previous implementation was O(N²) because each draw did a
+            # linear pool.index(chosen) lookup followed by pool.pop(idx)
+            # (also O(N)).  Use Efraimidis–Spirakis (2006) instead: assign
+            # each item a key u^(1/w), sort descending by key, take the
+            # top num_samples.  O(N log N), single pass.  Equivalent
+            # distribution to repeated weighted draw-without-replacement.
+            n = len(self.weights)
+            # Generate keys u_i^(1/w_i).  Items with w=0 get key 0 so
+            # they never compete with positive-weight items.
+            keys = []
+            for i in range(n):
+                w_i = self.weights[i]
+                if w_i <= 0.0:
+                    keys.append((0.0, i))
+                else:
+                    u = g.random()
+                    # u is in (0, 1); take key as u**(1.0/w_i)
+                    keys.append((u ** (1.0 / w_i), i))
+            keys.sort(key=lambda t: t[0], reverse=True)
+            indices = [i for _, i in keys[: self.num_samples]]
         return iter(indices)
 
     def __len__(self) -> int:
