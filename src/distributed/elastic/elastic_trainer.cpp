@@ -138,7 +138,8 @@ auto ElasticTrainer::check_and_recover() -> bool {
         current_rank_ = result.rank;
         current_world_size_ = result.world_size;
     } catch (const std::exception& e) {
-        std::cerr << "[ElasticTrainer] Re-rendezvous failed: " << e.what() << std::endl;
+        // Audit I.4: route to unified logger.
+        TENZOR_LOG_ERROR("[ElasticTrainer] Re-rendezvous failed: {}", e.what());
         return false;
     }
 

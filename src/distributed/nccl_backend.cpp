@@ -8,6 +8,7 @@
 #if defined(TENZOR_HAS_NCCL)
 
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/log.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
@@ -893,8 +894,9 @@ auto NCCLBackend::create_socket_connection(bool is_master) -> int {
                 }
                 freeifaddrs(ifaddr);
                 if (!found) {
-                    std::cerr << "[WARNING] NCCL_SOCKET_IFNAME=" << ifname
-                              << " not found, falling back to INADDR_ANY" << std::endl;
+                    // Audit I.4: unified logger.
+                    TENZOR_LOG_WARN("NCCL_SOCKET_IFNAME={} not found, falling back "
+                                    "to INADDR_ANY", ifname);
                 }
             }
         }

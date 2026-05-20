@@ -5,6 +5,7 @@
 
 #include "tenzor/core/transfer_engine.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/utils/log.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <cstring>
@@ -84,7 +85,8 @@ auto TransferEngine::cleanup_oneapi_resources() -> void {
         try {
             q.wait();
         } catch (const sycl::exception& e) {
-            std::cerr << "SYCL queue wait failed during cleanup: " << e.what() << std::endl;
+            // Audit I.4: unified logger.
+            TENZOR_LOG_WARN("SYCL queue wait failed during cleanup: {}", e.what());
         }
     }
     sycl_queues_.clear();
