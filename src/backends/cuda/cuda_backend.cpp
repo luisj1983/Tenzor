@@ -2,6 +2,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/core/device_guard.hpp"
+#include "tenzor/utils/log.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #else
@@ -492,10 +493,13 @@ public:
             cudaPointerAttributes dst_attrs, src_attrs;
             cudaPointerGetAttributes(&dst_attrs, dst);
             cudaPointerGetAttributes(&src_attrs, src);
-            std::cerr << "[COPY ERROR] dst=" << dst << " src=" << src << " bytes=" << bytes
-                      << " kind=" << static_cast<int>(kind)
-                      << " dst_type=" << dst_attrs.type << " src_type=" << src_attrs.type
-                      << std::endl;
+            // Audit I.4: unified logger so this diagnostic is filterable.
+            TENZOR_LOG_ERROR("[CUDA copy] failed: dst={} src={} bytes={} kind={} "
+                             "dst_type={} src_type={}",
+                             dst, src, bytes,
+                             static_cast<int>(kind),
+                             static_cast<int>(dst_attrs.type),
+                             static_cast<int>(src_attrs.type));
             throw std::runtime_error(
                 std::string("CUDA copy failed: ") + cudaGetErrorString(err)
             );
