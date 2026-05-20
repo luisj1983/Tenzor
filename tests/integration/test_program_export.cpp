@@ -104,3 +104,35 @@ TEST(ProgramExport, NumInputsOutputs) {
     // assert the trace recorded at least one output.
     EXPECT_GE(exported.num_outputs(), 1u);
 }
+
+// Audit D.2: load(path, map_location=cpu) materialises every state
+// tensor on the requested device, even if the saved device was different.
+// We exercise the CPU->CPU override (always available) and verify the
+// loaded tensors live on CPU and produce the right numerics.
+TEST(ProgramExport, LoadMapLocationCpu) {
+    auto model = std::make_shared<TwoLayerMLP>(4, 4, 2);
+    model->eval();
+    auto x = randn({2, 4}, DType::Float32, Device::cpu());
+    auto exported = export_::export_model(*model, {x});
+
+    const std::string path = "/tmp/tenzor_test_program_export_maploc.tzep";
+    exported.save(path);
+    auto loaded = export_::ExportedProgram::load(path, Device::cpu());
+    std::remove(path.c_str());
+
+    // Every state tensor lives on CPU.
+    for (const auto& [name, t] : loaded.state_dict()) {
+        EXPECT_EQ(t.device().type, Device::Type::CPU)
+            << "state tensor '" << name
+            << "' was not retargeted to CPU";
+    }
+    // Numeric parity with the original.
+    auto out_orig   = exported.run({x})[0].contiguous();
+    auto out_loaded = loaded.run({x})[0].contiguous();
+    ASSERT_EQ(out_orig.numel(), out_loaded.numel());
+    const auto* op = out_orig.data<float>();
+    const auto* lp = out_loaded.data<float>();
+    for (int64_t i = 0; i < out_orig.numel(); ++i) {
+        EXPECT_FLOAT_EQ(op[i], lp[i]) << "i=" << i;
+    }
+}

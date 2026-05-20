@@ -14,6 +14,7 @@
 #include "../core/tensor.hpp"
 #include "../nn/module.hpp"
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -63,11 +64,21 @@ public:
     /**
      * @brief Load an exported program from a binary file.
      *
+     * Tensors are deserialised onto the device recorded at save() time
+     * unless `map_location` is provided, in which case every state tensor
+     * is materialised on that device (mirrors `torch.load(..., map_location)`).
+     * This makes a CUDA-saved program loadable on a CPU-only machine.
+     *
      * @param path Input file path
+     * @param map_location Optional device override applied to every state
+     *        tensor. When `std::nullopt`, the saved device is used.
      * @return Loaded ExportedProgram
-     * @throws std::runtime_error on format errors
+     * @throws std::runtime_error on format errors or if `map_location` is
+     *         absent and the saved device is not available on this build.
      */
-    static auto load(const std::string& path) -> ExportedProgram;
+    static auto load(const std::string& path,
+                     std::optional<Device> map_location = std::nullopt)
+        -> ExportedProgram;
 
     /**
      * @brief Execute the exported program with runtime inputs.

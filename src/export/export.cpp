@@ -65,14 +65,28 @@ auto write_tensor(std::ofstream& f, const Tensor& t) -> void {
     const auto& shape = t.shape();
     write_uint64(f, shape.size());
     for (auto dim : shape) write_int64(f, dim);
-    // dtype + device
+    // dtype + device (the *original* device the tensor lived on at save
+    // time, which load() restores by default).
     write_uint32(f, static_cast<uint32_t>(t.dtype()));
     write_uint32(f, static_cast<uint32_t>(t.device().type));
     write_int64(f, t.device().index);
-    // raw data
-    size_t bytes = t.numel() * t.dtype_size();
+    // Audit D.2: previously this wrote raw bytes from `t.data_ptr()`
+    // regardless of device or stride layout. That was both unsafe (the
+    // raw pointer for a non-CPU tensor isn't host-accessible) and
+    // non-portable (the receiver couldn't reconstruct a non-contiguous
+    // tensor from a packed byte stream that didn't include strides).
+    //
+    // Now we *always* serialise the host-contiguous form: move the tensor
+    // to CPU, materialise contiguous, then write its bytes. The receiver
+    // gets a fully-packed buffer and reconstructs the tensor on either
+    // the saved device (default) or `map_location` (load argument).
+    Tensor host = t.device().type == Device::Type::CPU
+                      ? t.contiguous()
+                      : t.to(Device::cpu()).contiguous();
+    size_t bytes = host.numel() * host.dtype_size();
     write_uint64(f, bytes);
-    f.write(reinterpret_cast<const char*>(t.data_ptr()), static_cast<std::streamsize>(bytes));
+    f.write(reinterpret_cast<const char*>(host.data_ptr()),
+            static_cast<std::streamsize>(bytes));
 }
 
 auto read_uint32(std::ifstream& f) -> uint32_t {
@@ -100,7 +114,8 @@ auto read_string(std::ifstream& f) -> std::string {
     return s;
 }
 
-auto read_tensor(std::ifstream& f) -> Tensor {
+auto read_tensor(std::ifstream& f,
+                 const std::optional<Device>& map_location) -> Tensor {
     uint64_t ndim = read_uint64(f);
     std::vector<int64_t> shape(ndim);
     for (uint64_t i = 0; i < ndim; ++i) shape[i] = read_int64(f);
@@ -108,12 +123,23 @@ auto read_tensor(std::ifstream& f) -> Tensor {
     DType dtype = static_cast<DType>(read_uint32(f));
     auto dev_type = static_cast<Device::Type>(read_uint32(f));
     int64_t dev_index = read_int64(f);
-    Device device(dev_type, dev_index);
+    Device saved_device(dev_type, dev_index);
 
-    Tensor tensor(shape, dtype, device);
+    // Audit D.2: read the host-contiguous bytes into a CPU tensor first,
+    // then move to either `map_location` (caller override) or the saved
+    // device. The save side guarantees the bytes are CPU-contiguous, so
+    // the read is a pure host-side memcpy that doesn't require the saved
+    // device to be available on this machine.
+    Tensor host_tensor(shape, dtype, Device::cpu());
     uint64_t bytes = read_uint64(f);
-    f.read(reinterpret_cast<char*>(tensor.data_ptr()), static_cast<std::streamsize>(bytes));
-    return tensor;
+    f.read(reinterpret_cast<char*>(host_tensor.data_ptr()),
+           static_cast<std::streamsize>(bytes));
+
+    Device target = map_location.value_or(saved_device);
+    if (target.type == Device::Type::CPU) {
+        return host_tensor;
+    }
+    return host_tensor.to(target);
 }
 
 }  // anonymous namespace
@@ -170,7 +196,8 @@ auto ExportedProgram::save(const std::string& path) const -> void {
     file.write(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
 }
 
-auto ExportedProgram::load(const std::string& path) -> ExportedProgram {
+auto ExportedProgram::load(const std::string& path,
+                           std::optional<Device> map_location) -> ExportedProgram {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("ExportedProgram::load: failed to open " + path);
@@ -196,11 +223,12 @@ auto ExportedProgram::load(const std::string& path) -> ExportedProgram {
     impl->n_inputs  = read_uint64(file);
     impl->n_outputs = read_uint64(file);
 
-    // State dict
+    // State dict (audit D.2: map_location overrides the saved device on
+    // every state tensor — torch.load(..., map_location=...) parity).
     uint64_t num_entries = read_uint64(file);
     for (uint64_t i = 0; i < num_entries; ++i) {
         std::string name = read_string(file);
-        Tensor tensor = read_tensor(file);
+        Tensor tensor = read_tensor(file, map_location);
         impl->state[std::move(name)] = std::move(tensor);
     }
 
