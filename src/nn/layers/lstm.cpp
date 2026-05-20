@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/utils/log.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -682,10 +683,11 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     if (input.device().type == Device::Type::CUDA) {
         static std::once_flag warned;
         std::call_once(warned, []() {
-            std::cerr << "[Tenzor] WARNING: CUDA LSTM training uses the "
-                      << "per-timestep autograd path and is significantly slower "
-                      << "than PyTorch's cuDNN RNN. See known issues in CHANGELOG. "
-                      << "Use eval-mode forward, train on CPU, or wait for v0.2.\n";
+            // Audit I.4: unified logger so TENZOR_LOG_LEVEL applies.
+            TENZOR_LOG_WARN("CUDA LSTM training uses the per-timestep autograd "
+                            "path and is significantly slower than PyTorch's "
+                            "cuDNN RNN. See known issues in CHANGELOG. Use "
+                            "eval-mode forward, train on CPU, or wait for v0.2.");
         });
     }
     auto split_states_per_layer = [&](const Variable& stacked_states,
