@@ -502,9 +502,9 @@ __all__ = [
     "jit",      # @tz.jit decorator (Phase 13 MLIR pipeline)
     "_jit_mod", # full jit submodule for show_*/cache_stats helpers
 
-    # Special functions (also accessible via tz.special.*)
-    "erf",
-    "erfc",
+    # Special functions (also accessible via tz.special.*) — erf, erfc,
+    # xlogy are exported from the earlier "Math operations" block to keep
+    # __all__ free of duplicates (audit item H.4).
     "erfinv",
     "lgamma",
     "digamma",
@@ -512,7 +512,6 @@ __all__ = [
     "sinc",
     "zeta",
     "ndtri",
-    "xlogy",
     "xlog1py",
     "bessel_j0",
     "bessel_j1",
@@ -558,7 +557,6 @@ __all__ = [
     "isneginf",
     "isposinf",
     "isreal",
-    "kl_divergence",
     "kron",
     "ldexp",
     "logit",
