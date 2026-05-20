@@ -1652,4 +1652,52 @@ auto BetaIncBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     return out;
 }
 
+// ============================================================================
+// Audit E.7 — Function wrappers for intrinsically non-differentiable ops.
+//
+// Each forward() calls the underlying Tensor op (so the wrapper Variable
+// carries the realised output), but backward() throws a typed
+// `tenzor::NonDifferentiable` exception so callers who route gradient flow
+// through a histogram / bincount / searchsorted result get a clear,
+// actionable message rather than the previous mystery "Function has no
+// backward".
+//
+// Surrogate-gradient users (Gumbel-softmax / STE / etc.) should still
+// build their own custom Function with the chosen relaxation; these
+// wrappers explicitly *opt out* of providing a default surrogate.
+// ============================================================================
+
+auto HistcBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("HistcBackward::forward should not be called directly");
+}
+auto HistcBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "histc: histogram counts are intrinsically non-differentiable in the "
+        "input tensor (the gradient is a delta-of-Diracs distribution). Wrap "
+        "the call in a custom autograd::Function with a surrogate gradient "
+        "(e.g. straight-through estimator) if you need gradients through it.");
+}
+
+auto BincountBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BincountBackward::forward should not be called directly");
+}
+auto BincountBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bincount: integer count tensor is non-differentiable in the input "
+        "indices. The optional `weights` argument *is* differentiable (the "
+        "Jacobian is a scatter-by-index); wrap with a custom Function that "
+        "exposes only that branch if you need gradients.");
+}
+
+auto SearchSortedBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SearchSortedBackward::forward should not be called directly");
+}
+auto SearchSortedBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "searchsorted: returned indices are integer positions and are not "
+        "differentiable in either the sorted_sequence or the values tensor. "
+        "Use a soft-argmin/argmax relaxation (e.g. softmax over distances) "
+        "if you need a differentiable approximation.");
+}
+
 } // namespace tenzor

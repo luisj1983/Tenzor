@@ -2960,4 +2960,38 @@ private:
     bool has_block_mask_;
 };
 
+// ============================================================================
+// Audit E.7 — typed non-differentiable Function wrappers.
+//
+// These ops have a well-defined forward but are *intrinsically*
+// non-differentiable in their primary input (histogram counts,
+// bin assignments, sort positions, discrete samples). Their Function
+// wrappers exist so the autograd graph carries the dependency (no
+// silent un-tracked Variable returned) and so any caller who hits
+// backward() through one of these gets a typed `NonDifferentiable`
+// exception with the op name — instead of the previous mystery
+// "Function 'unknown' has no backward".
+// ============================================================================
+
+class HistcBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "HistcBackward"; }
+};
+
+class BincountBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BincountBackward"; }
+};
+
+class SearchSortedBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SearchSortedBackward"; }
+};
+
 } // namespace tenzor

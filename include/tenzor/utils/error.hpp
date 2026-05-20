@@ -138,6 +138,23 @@ class RuntimeError : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/**
+ * @brief Raised when a Function's backward() is invoked on an op whose
+ *        forward is intrinsically non-differentiable (histogram counts,
+ *        bin assignments, sort positions, discrete samples).  Audit E.7
+ *        replaces the previous silent "no backward registered" behaviour
+ *        — those ops now route through Function wrappers whose backward()
+ *        throws this typed exception with the offending op name.
+ *
+ *        Recoverable contract: callers that want to support such ops in
+ *        a gradient graph must wrap them in a custom Function that
+ *        explicitly provides a surrogate gradient (e.g. straight-through
+ *        estimator, Gumbel-softmax, etc.).
+ */
+class NonDifferentiable : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
 // Error checking macros
 #define TENZOR_CHECK(condition, message) \
     do { \

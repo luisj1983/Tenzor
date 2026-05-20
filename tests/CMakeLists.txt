@@ -446,6 +446,11 @@ add_executable(test_training_callbacks_lifecycle test_training_callbacks_lifecyc
 target_link_libraries(test_training_callbacks_lifecycle PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_training_callbacks_lifecycle DISCOVERY_TIMEOUT 60)
 
+# Non-differentiable Function wrappers (audit E.7)
+add_executable(test_non_differentiable_ops test_non_differentiable_ops.cpp)
+target_link_libraries(test_non_differentiable_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_non_differentiable_ops DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)
