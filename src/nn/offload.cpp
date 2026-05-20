@@ -7,6 +7,7 @@
 #include "tenzor/ops/math.hpp"          // for clamp, abs, round (G3)
 #include "tenzor/ops/reduction.hpp"     // for tenzor::max (G3)
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/utils/log.hpp"         // TENZOR_LOG_WARN (D.1)
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
@@ -1054,7 +1055,11 @@ ComputeContext::ComputeContext(const std::vector<Tensor*>& tensors)
 
         original_devices_.push_back(tensor_ptr->device());
 
-        // If on CPU, transfer to GPU
+        // If on CPU, transfer to GPU.  Push exactly ONE entry into
+        // cpu_copies_ per CPU tensor, regardless of whether the transfer
+        // succeeds (audit item D.1 — previous code double-pushed on
+        // failure, desyncing cpu_copies_ from tensors_ and corrupting
+        // the destructor's restore loop).
         if (tensor_ptr->device().type == Device::Type::CPU) {
             cpu_copies_.push_back(*tensor_ptr);  // Save CPU copy
 
@@ -1062,8 +1067,12 @@ ComputeContext::ComputeContext(const std::vector<Tensor*>& tensors)
                 Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(*tensor_ptr, Device::cuda(0));
                 *tensor_ptr = gpu_tensor;
             } catch (const std::exception& e) {
-                std::cerr << "ComputeContext: Failed to load tensor to GPU: " << e.what() << "\n";
-                cpu_copies_.push_back(Tensor());  // Empty placeholder
+                // Transfer failed — tensor_ptr still points at the CPU
+                // tensor, so original_devices_[i] (CPU) is correct and
+                // the destructor's "restore to original device" path is
+                // a no-op for this slot.  No extra placeholder needed.
+                TENZOR_LOG_WARN("ComputeContext: failed to load tensor to GPU: {}",
+                                e.what());
             }
         } else {
             cpu_copies_.push_back(Tensor());  // No copy needed
