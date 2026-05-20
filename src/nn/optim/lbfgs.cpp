@@ -544,11 +544,27 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
     return loss_var;
 }
 
+// Audit item D.5: persist every LBFGS field needed to resume training
+// from a checkpoint — hyperparameters, the previous-step flat grad and
+// scalar loss, the has_prev_state_ guard, plus the existing s/y/rho
+// history.  Previously only n_iter and the histories were stored, so a
+// non-default LBFGS lost its tolerances/limits and any in-flight
+// line-search state when round-tripped.
 auto LBFGS::state_dict() const -> std::unordered_map<std::string, Tensor> {
-    // Persist history as stacked tensors. s and y are stored as [m, N]; rho
-    // as a 1D tensor. n_iter is stored as a 1-element Int64 tensor.
     std::unordered_map<std::string, Tensor> state;
-    state["n_iter"] = full({1}, static_cast<double>(n_iter_), DType::Int64, Device::cpu());
+
+    auto scalar_i64 = [](int64_t v) {
+        Tensor t({1}, DType::Int64, Device::cpu());
+        t.data<int64_t>()[0] = v;
+        return t;
+    };
+    auto scalar_f64 = [](double v) {
+        Tensor t({1}, DType::Float64, Device::cpu());
+        t.data<double>()[0] = v;
+        return t;
+    };
+
+    state["n_iter"] = scalar_i64(static_cast<int64_t>(n_iter_));
 
     if (!s_history_.empty()) {
         std::vector<Tensor> s_vec(s_history_.begin(), s_history_.end());
@@ -560,6 +576,22 @@ auto LBFGS::state_dict() const -> std::unordered_map<std::string, Tensor> {
         for (size_t i = 0; i < rho_history_.size(); ++i) rho_data[i] = rho_history_[i];
         state["rho"] = rho_t;
     }
+
+    // Hyperparameters.
+    state["lr"]                = scalar_f64(lr_);
+    state["max_iter"]          = scalar_i64(static_cast<int64_t>(max_iter_));
+    state["max_eval"]          = scalar_i64(static_cast<int64_t>(max_eval_));
+    state["tolerance_grad"]    = scalar_f64(tolerance_grad_);
+    state["tolerance_change"]  = scalar_f64(tolerance_change_);
+    state["history_size"]      = scalar_i64(static_cast<int64_t>(history_size_));
+
+    // Convergence state.
+    state["has_prev_state"]    = scalar_i64(has_prev_state_ ? 1 : 0);
+    state["prev_loss"]         = scalar_f64(prev_loss_);
+    if (has_prev_state_ && prev_flat_grad_.numel() > 0) {
+        state["prev_flat_grad"] = prev_flat_grad_.clone();
+    }
+
     return state;
 }
 
@@ -569,11 +601,36 @@ auto LBFGS::load_state_dict(const std::unordered_map<std::string, Tensor>& state
     rho_history_.clear();
     has_prev_state_ = false;
 
-    auto it_n = state.find("n_iter");
-    if (it_n != state.end()) {
-        auto cpu = (it_n->second.device() == Device::cpu())
-            ? it_n->second : it_n->second.to(Device::cpu());
-        n_iter_ = static_cast<int>(cpu.data<int64_t>()[0]);
+    auto get_i64 = [&](const std::string& key, int64_t fallback) -> int64_t {
+        auto it = state.find(key);
+        if (it == state.end()) return fallback;
+        auto cpu = (it->second.device() == Device::cpu()) ? it->second : it->second.to(Device::cpu());
+        if (cpu.dtype() == DType::Int64)  return cpu.data<int64_t>()[0];
+        if (cpu.dtype() == DType::Int32)  return static_cast<int64_t>(cpu.data<int32_t>()[0]);
+        return fallback;
+    };
+    auto get_f64 = [&](const std::string& key, double fallback) -> double {
+        auto it = state.find(key);
+        if (it == state.end()) return fallback;
+        auto cpu = (it->second.device() == Device::cpu()) ? it->second : it->second.to(Device::cpu());
+        if (cpu.dtype() == DType::Float64) return cpu.data<double>()[0];
+        if (cpu.dtype() == DType::Float32) return static_cast<double>(cpu.data<float>()[0]);
+        return fallback;
+    };
+
+    n_iter_           = static_cast<int>(get_i64("n_iter",       static_cast<int64_t>(n_iter_)));
+    lr_               = get_f64("lr",                lr_);
+    max_iter_         = static_cast<int>(get_i64("max_iter",     static_cast<int64_t>(max_iter_)));
+    max_eval_         = static_cast<int>(get_i64("max_eval",     static_cast<int64_t>(max_eval_)));
+    tolerance_grad_   = get_f64("tolerance_grad",    tolerance_grad_);
+    tolerance_change_ = get_f64("tolerance_change",  tolerance_change_);
+    history_size_     = static_cast<int>(get_i64("history_size", static_cast<int64_t>(history_size_)));
+
+    has_prev_state_ = (get_i64("has_prev_state", 0) != 0);
+    prev_loss_      = get_f64("prev_loss",      prev_loss_);
+    auto it_pg = state.find("prev_flat_grad");
+    if (it_pg != state.end()) {
+        prev_flat_grad_ = it_pg->second.clone();
     }
 
     auto it_s = state.find("s");
