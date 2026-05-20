@@ -89,6 +89,49 @@ TEST_F(SAMSWATest, SAMSecondStepRestoresAndSteps) {
         << "second_step should restore weights and step";
 }
 
+// Audit item D.7 — SAM must work with the polymorphic Optimizer::step(closure)
+// API.  Previously SAM::step_impl threw, so step(closure) (which calls
+// step_impl after the first forward+backward) was unusable.  After the
+// fix, SAM overrides step(closure) directly to drive the required
+// two-pass forward+backward sequence.
+TEST_F(SAMSWATest, SAMStepWithClosurePolymorphic) {
+    auto params = make_params();
+    auto base_opt = std::make_shared<optim::SGD>(params, /*lr=*/0.1);
+    optim::SAM sam(base_opt, /*rho=*/0.05);
+
+    float original = param_sum(params);
+    int closure_calls = 0;
+
+    auto closure = [&]() -> tenzor::Variable {
+        ++closure_calls;
+        sam.zero_grad();
+        set_unit_grad(params);
+        // Return a Variable representing the loss; value isn't used by
+        // SAM (it returns the first-call loss back to the caller).
+        return tenzor::Variable(
+            tenzor::full({1}, static_cast<float>(closure_calls),
+                          tenzor::DType::Float32, tenzor::Device::cpu()),
+            false);
+    };
+
+    auto loss = sam.step(closure);
+    float final_val = param_sum(params);
+
+    // The closure must be called twice — once at original weights, once
+    // at the perturbed weights.
+    EXPECT_EQ(closure_calls, 2)
+        << "SAM step(closure) must invoke the closure exactly twice "
+           "(once before first_step, once after to refresh gradients)";
+
+    // Weights should have moved from their original value (base optimizer
+    // stepped with the perturbed-point gradients).
+    EXPECT_NE(final_val, original)
+        << "step(closure) must update parameters after the SAM two-pass dance";
+
+    // The returned loss should be the first-call loss (per SAM convention).
+    EXPECT_FLOAT_EQ(loss.tensor().data<float>()[0], 1.0f);
+}
+
 TEST_F(SAMSWATest, SAMLrGetSet) {
     auto params = make_params();
     auto base_opt = std::make_shared<optim::SGD>(params, /*lr=*/0.01);

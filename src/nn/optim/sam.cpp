@@ -78,9 +78,46 @@ auto SAM::second_step() -> void {
 }
 
 auto SAM::step_impl() -> void {
+    // step_impl is only invoked by the no-closure Optimizer::step(),
+    // which can't drive SAM's two-pass requirement.  Users should call
+    // step(closure) (which dispatches to our override below) or the
+    // explicit first_step() / second_step() API.
     throw std::runtime_error(
-        "SAM::step_impl: Direct step() is not supported. "
-        "Use first_step() followed by forward+backward, then second_step().");
+        "SAM::step_impl: SAM requires two forward+backward passes around "
+        "a weight perturbation, so step() with no closure is not supported. "
+        "Either pass a closure to step(), or call first_step() and "
+        "second_step() explicitly with the forward+backward pass in between.");
+}
+
+auto SAM::step(std::function<Variable()> closure) -> Variable {
+    // 1. The caller's closure is expected to zero grads, run forward,
+    //    backward, and return the loss at the current (unperturbed)
+    //    weights.  We invoke it once to compute the initial gradients.
+    if (!closure) {
+        throw std::runtime_error(
+            "SAM::step: closure must be non-null — SAM requires a way to "
+            "re-evaluate the model at the perturbed weights.");
+    }
+    auto initial_loss = closure();
+
+    // 2. Move weights along the gradient direction (ascent) to find a
+    //    nearby maximum of the loss landscape.
+    first_step();
+
+    // 3. Re-run the closure at the perturbed weights to recompute the
+    //    gradients at this neighbour-maximum.  Discard the perturbed
+    //    loss value — what matters is that grads now reflect the
+    //    perturbed point.
+    {
+        auto _ = closure();
+        (void)_;
+    }
+
+    // 4. Restore the original weights and step the base optimizer using
+    //    the (now perturbation-aware) gradients.
+    second_step();
+
+    return initial_loss;
 }
 
 auto SAM::set_lr(double lr) -> void {

@@ -103,6 +103,25 @@ public:
      */
     auto step_impl() -> void override;
 
+    /**
+     * @brief Polymorphic SAM step using the standard Optimizer::step(closure)
+     *        interface.
+     *
+     * SAM requires two forward+backward passes around a weight perturbation,
+     * so we override step(closure) (rather than step_impl) to drive both:
+     *   1. Run closure to get gradients at the original weights
+     *   2. first_step() — perturb weights toward the gradient ascent direction
+     *   3. Run closure again to get gradients at the perturbed weights
+     *   4. second_step() — restore original weights and step the base optimizer
+     *      using the gradients from the perturbed point
+     *
+     * Audit item D.7: previously SAM only worked via the manual
+     * first_step()/second_step() API; calling the polymorphic
+     * Optimizer::step(closure) threw at step_impl().  Now SAM behaves
+     * polymorphically with the rest of the optimizer hierarchy.
+     */
+    auto step(std::function<Variable()> closure) -> Variable override;
+
     /** @brief Set learning rate on the base optimizer */
     auto set_lr(double lr) -> void override;
 

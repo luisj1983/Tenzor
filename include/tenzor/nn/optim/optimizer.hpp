@@ -151,7 +151,11 @@ public:
      * });
      * @endcode
      */
-    auto step(std::function<Variable()> closure) -> Variable;
+    // Virtual so derived classes that need a different control flow
+    // (e.g. SAM, which requires two forward+backward passes around a
+    // weight perturbation) can override the whole step(closure) path,
+    // not just step_impl().
+    virtual auto step(std::function<Variable()> closure) -> Variable;
 
     /**
      * @brief Implementation of the parameter update step.
