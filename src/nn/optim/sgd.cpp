@@ -143,10 +143,36 @@ auto SGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["velocity_" + std::to_string(i)] = velocity_buffers_[i].clone();
     }
 
+    // Audit item D.5: buffer-count guard (matches Adam pattern).
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(velocity_buffers_.size());
+
     return state;
 }
 
 auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Audit item D.5: validate buffer count before any restore so we
+    // never silently mis-align velocity buffers to the wrong parameters.
+    size_t saved_count = 0;
+    for (const auto& [key, _] : state) {
+        if (key.rfind("velocity_", 0) == 0) ++saved_count;
+    }
+    if (saved_count > 0 && saved_count != velocity_buffers_.size()) {
+        throw std::runtime_error(
+            "SGD::load_state_dict: velocity buffer count mismatch - "
+            "saved " + std::to_string(saved_count) + " but have " +
+            std::to_string(velocity_buffers_.size()) + " parameters");
+    }
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(velocity_buffers_.size())) {
+            throw std::runtime_error(
+                "SGD::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(velocity_buffers_.size()));
+        }
+    }
+
     // Load optimizer configuration
     if (state.count("lr")) {
         lr_ = state.at("lr").data<double>()[0];
