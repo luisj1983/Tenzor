@@ -89,12 +89,27 @@ auto LAMB::initialize_buffers() -> void {
 auto LAMB::set_lr(double lr) -> void { lr_ = lr; }
 auto LAMB::get_lr() const -> double { return lr_; }
 
+// Audit item D.5: persist beta1 / beta2 / eps / weight_decay alongside
+// lr / step / per-parameter exp_avg buffers.  Previously dropped.
 auto LAMB::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
     state["step_count"] = Tensor({1}, DType::Int64, Device::cpu());
     state["step_count"].data<int64_t>()[0] = step_count_;
-    state["lr"] = Tensor({1}, DType::Float64, Device::cpu());
-    state["lr"].data<double>()[0] = lr_;
+    auto scalar_f64 = [](double v) {
+        Tensor t({1}, DType::Float64, Device::cpu());
+        t.data<double>()[0] = v;
+        return t;
+    };
+    state["lr"]           = scalar_f64(lr_);
+    state["beta1"]        = scalar_f64(beta1_);
+    state["beta2"]        = scalar_f64(beta2_);
+    state["eps"]          = scalar_f64(eps_);
+    state["weight_decay"] = scalar_f64(weight_decay_);
+
+    Tensor n({1}, DType::Int64, Device::cpu());
+    n.data<int64_t>()[0] = static_cast<int64_t>(exp_avg_.size());
+    state["num_params"] = n;
+
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_" + std::to_string(i)] = exp_avg_[i].clone();
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
@@ -103,10 +118,34 @@ auto LAMB::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto LAMB::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Parameter-count guard (matches Adam's protection against silently
+    // mis-aligned per-parameter buffers).
+    if (state.count("num_params")) {
+        int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(exp_avg_.size())) {
+            throw std::runtime_error(
+                "LAMB::load_state_dict: parameter count mismatch (state has " +
+                std::to_string(expected) + ", optimiser has " +
+                std::to_string(exp_avg_.size()) + ")");
+        }
+    }
+
+    auto get_f64 = [&](const std::string& key, double fallback) {
+        auto it = state.find(key);
+        if (it == state.end()) return fallback;
+        if (it->second.dtype() == DType::Float64) return it->second.data<double>()[0];
+        if (it->second.dtype() == DType::Float32) return static_cast<double>(it->second.data<float>()[0]);
+        return fallback;
+    };
+
     if (state.count("step_count"))
         step_count_ = state.at("step_count").data<int64_t>()[0];
-    if (state.count("lr"))
-        lr_ = state.at("lr").data<double>()[0];
+    lr_           = get_f64("lr",           lr_);
+    beta1_        = get_f64("beta1",        beta1_);
+    beta2_        = get_f64("beta2",        beta2_);
+    eps_          = get_f64("eps",          eps_);
+    weight_decay_ = get_f64("weight_decay", weight_decay_);
+
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string ea_key = "exp_avg_" + std::to_string(i);
         std::string eas_key = "exp_avg_sq_" + std::to_string(i);
