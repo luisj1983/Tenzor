@@ -1036,6 +1036,27 @@ class DataLoader(Generic[T_co]):
         self.worker_init_fn = worker_init_fn
         self.persistent_workers = persistent_workers
         self.timeout = timeout
+        # Audit item E.13: pin_memory=True silently no-op'd when the C++
+        # backend lacked a `pin_memory` symbol (non-CUDA build).  Users
+        # who asked for pinned memory lost the async-transfer guarantees
+        # without any warning.  Validate up-front so the constructor
+        # fails loudly instead of producing a silently-pageable loader.
+        if pin_memory:
+            try:
+                from . import tenzor_core as _core_pm
+                if not hasattr(_core_pm, "pin_memory"):
+                    raise RuntimeError(
+                        "DataLoader: pin_memory=True requires the C++ "
+                        "core to expose `pin_memory`, but this build does "
+                        "not.  Either rebuild with the pinned allocator "
+                        "enabled (CUDA / OS-level page-lock paths) or "
+                        "pass pin_memory=False."
+                    )
+            except ImportError as e:
+                raise RuntimeError(
+                    "DataLoader: pin_memory=True requires tenzor_core, "
+                    "which failed to import: " + str(e)
+                )
         self.pin_memory = pin_memory
         self.rank = rank
         self.world_size = world_size
