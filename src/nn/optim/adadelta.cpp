@@ -164,6 +164,42 @@ auto Adadelta::get_lr() const -> double {
     return lr_;
 }
 
+// Audit item D.5: persist hyperparams (lr / rho / eps / weight_decay)
+// in addition to the per-parameter buffers.
+
+namespace {
+
+inline Tensor adadelta_scalar_f64(double v) {
+    Tensor t({1}, DType::Float64, Device::cpu());
+    t.data<double>()[0] = v;
+    return t;
+}
+
+inline Tensor adadelta_scalar_i64(int64_t v) {
+    Tensor t({1}, DType::Int64, Device::cpu());
+    t.data<int64_t>()[0] = v;
+    return t;
+}
+
+inline double adadelta_get_f64(const std::unordered_map<std::string, Tensor>& m,
+                               const std::string& key, double fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Float64) return it->second.data<double>()[0];
+    if (it->second.dtype() == DType::Float32) return static_cast<double>(it->second.data<float>()[0]);
+    return fallback;
+}
+
+inline int64_t adadelta_get_i64(const std::unordered_map<std::string, Tensor>& m,
+                                const std::string& key, int64_t fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Int64) return it->second.data<int64_t>()[0];
+    return fallback;
+}
+
+}  // namespace
+
 auto Adadelta::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 
@@ -173,10 +209,31 @@ auto Adadelta::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state[prefix + ".acc_delta"] = acc_delta_[i];
     }
 
+    state["lr"]           = adadelta_scalar_f64(lr_);
+    state["rho"]          = adadelta_scalar_f64(rho_);
+    state["eps"]          = adadelta_scalar_f64(eps_);
+    state["weight_decay"] = adadelta_scalar_f64(weight_decay_);
+    state["num_params"]   = adadelta_scalar_i64(
+        static_cast<int64_t>(parameters_.size()));
+
     return state;
 }
 
 auto Adadelta::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    int64_t expected_n = adadelta_get_i64(state, "num_params",
+                                          static_cast<int64_t>(parameters_.size()));
+    if (expected_n != static_cast<int64_t>(parameters_.size())) {
+        throw std::runtime_error(
+            "Adadelta::load_state_dict: parameter count mismatch (state has " +
+            std::to_string(expected_n) + ", optimiser has " +
+            std::to_string(parameters_.size()) + ")");
+    }
+
+    lr_           = adadelta_get_f64(state, "lr",           lr_);
+    rho_          = adadelta_get_f64(state, "rho",          rho_);
+    eps_          = adadelta_get_f64(state, "eps",          eps_);
+    weight_decay_ = adadelta_get_f64(state, "weight_decay", weight_decay_);
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
 
