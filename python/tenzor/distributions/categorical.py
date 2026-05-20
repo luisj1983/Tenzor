@@ -55,8 +55,15 @@ class Categorical(Distribution):
         if value.ndim == 0:
             # Scalar value broadcast across all (if any) batches.
             return lp[..., int(value)]
-        # value.shape must match lp.shape[:-1] so we can gather one entry
-        # per batched probability vector.
+        # Audit H.3 — Categorical with unbatched probs(K,) needs to accept
+        # any-shape value array (matches torch.distributions semantics:
+        # log_prob output shape == value shape). The take_along_axis path
+        # requires value.shape == lp.shape[:-1], which fails when the
+        # batch is empty.  For the unbatched case fall back to direct
+        # indexing along the single axis.
+        if lp.ndim == 1:
+            return lp[value]
+        # Batched probs case: value.shape must match lp.shape[:-1].
         return np.take_along_axis(lp, value[..., np.newaxis], axis=-1).squeeze(-1)
 
     def entropy(self):

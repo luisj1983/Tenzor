@@ -694,6 +694,24 @@ class TestCategoricalBatchedLogProb:
         lp = cat.log_prob(np.array(2, dtype=np.int64))
         assert allclose(lp, math.log(0.2))
 
+    def test_unbatched_with_1d_value(self):
+        # Audit H.3 regression: Categorical(probs=(K,)).log_prob(value=(N,))
+        # previously threw "indices and arr must have the same number of
+        # dimensions" because the take_along_axis path required
+        # value.shape == lp.shape[:-1] which is () for an unbatched K-only
+        # distribution.  Fix: special-case `lp.ndim == 1` to direct-index.
+        cat = Categorical(np.array([0.4, 0.3, 0.3]))
+        lp = cat.log_prob(np.array([0, 1, 2], dtype=np.int64))
+        expected = np.log(np.array([0.4, 0.3, 0.3]))
+        assert np.allclose(lp, expected, atol=1e-6), (
+            f"expected {expected}, got {lp}"
+        )
+
+        # Single-element 1-D array.
+        lp = cat.log_prob(np.array([1], dtype=np.int64))
+        assert lp.shape == (1,)
+        assert np.allclose(lp, [math.log(0.3)], atol=1e-6)
+
 
 class TestDirichletBatchedSample:
     """Audit item A.9.b — Dirichlet.sample(()) with batched concentration
