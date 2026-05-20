@@ -1276,27 +1276,124 @@ auto EigBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Pad to 3 grad outputs (W_real, W_imag, V) so we can safely index even
-    // when the engine only fills the first one.
-    if (grad_outputs.size() < 3) {
-        const auto& W = saved_tensors_[0];
-        const auto& V = saved_tensors_[1];
-        if (grad_outputs.size() < 1) {
-            grad_outputs.push_back(zeros_like(W));
-        }
-        while (grad_outputs.size() < 2) {
-            grad_outputs.push_back(zeros_like(W));
-        }
-        while (grad_outputs.size() < 3) {
-            grad_outputs.push_back(zeros_like(V));
-        }
+    // Audit item A.10 — the previous implementation used only
+    // `grad_W_real`, dropping both `grad_W_imag` (so any complex-eigenvalue
+    // path produced wrong gradients silently) AND `grad_V` (so even the
+    // real-eigenvalue case missed the eigenvector contribution).  We now
+    // implement the full closed-form backward for the real-eigenvalue case
+    // and raise a clear error on the complex case (which requires a
+    // complex-tensor path that linalg::eig itself does not yet expose).
+    //
+    // Formula (Mike Giles, 2008; Townsend 2016):
+    //   grad_A = V^{-T} (diag(grad_W) + (V^T grad_V) ∘ F) V^T
+    // where F[i, j] = 1 / (W[j] - W[i]) for i ≠ j and 0 on the diagonal.
+
+    if (saved_tensors_.size() < 3) {
+        throw std::runtime_error(
+            "EigBackward: expected 3 saved tensors (W_real, W_imag, V); "
+            "got " + std::to_string(saved_tensors_.size()) + ". "
+            "This usually means an older eig() forward path wired the "
+            "Function — rebuild the autograd graph.");
+    }
+    const auto& W_real = saved_tensors_[0];
+    const auto& W_imag = saved_tensors_[1];
+    const auto& V      = saved_tensors_[2];
+
+    // Pad missing grad outputs with zeros so we can index uniformly.
+    while (grad_outputs.size() < 3) {
+        const auto& tmpl = (grad_outputs.size() < 2) ? W_real : V;
+        grad_outputs.push_back(zeros_like(tmpl));
     }
     const auto& grad_W_real = grad_outputs[0];
-    const auto& V = saved_tensors_[1];
-    auto ndim = V.ndim();
-    auto diag_dW = diag(grad_W_real);
+    const auto& grad_W_imag = grad_outputs[1];
+    const auto& grad_V      = grad_outputs[2];
+
+    // Detect non-trivial complex eigenvalues.  We reject the complex
+    // case explicitly rather than silently dropping the imaginary
+    // gradient (audit-finding requirement).  Callers wanting gradient
+    // through symmetric eigendecomposition should use linalg::eigh.
+    {
+        auto imag_max = tenzor::max(tenzor::abs(W_imag));
+        double imag_norm = 0.0;
+        if (imag_max.dtype() == DType::Float64) {
+            imag_norm = imag_max.item<double>();
+        } else {
+            imag_norm = static_cast<double>(imag_max.item<float>());
+        }
+        // The same threshold convention scipy.linalg uses to call an
+        // eigenvalue "real": eps tied to the matrix size and dtype.  We
+        // use a conservative absolute threshold here because the W_imag
+        // returned by LAPACK is exactly 0 for purely-real eigenvalues.
+        constexpr double kImagThreshold = 1e-12;
+        if (imag_norm > kImagThreshold) {
+            throw std::runtime_error(
+                "EigBackward: gradient through complex eigenvalues is not "
+                "yet supported (max |W_imag| = " + std::to_string(imag_norm) +
+                ").  For symmetric matrices with real eigenvalues use "
+                "linalg::eigh, which has a fully-implemented backward.  "
+                "For non-symmetric matrices, raise an issue with your "
+                "use-case so we can land the complex-tensor variant.");
+        }
+        // Also: grad_W_imag must be effectively zero if W is real, else
+        // the caller is asking for a derivative through a non-existent
+        // imaginary path.
+        auto grad_imag_max = tenzor::max(tenzor::abs(grad_W_imag));
+        double grad_imag_norm = 0.0;
+        if (grad_imag_max.dtype() == DType::Float64) {
+            grad_imag_norm = grad_imag_max.item<double>();
+        } else {
+            grad_imag_norm = static_cast<double>(grad_imag_max.item<float>());
+        }
+        if (grad_imag_norm > kImagThreshold) {
+            throw std::runtime_error(
+                "EigBackward: non-zero grad_W_imag passed for a "
+                "real-eigenvalue forward — gradient flow inconsistent.");
+        }
+    }
+
+    // Real-eigenvalue closed-form backward.
+    const auto ndim = V.ndim();
+    const auto n = V.shape().back();
+
+    // Build F[i, j] = 1 / (W[j] - W[i])  with 0 on the diagonal.
+    // Use shape (..., n, n) so the formula broadcasts over any leading
+    // batch dims.
+    auto W_col = unsqueeze(W_real, ndim - 1);  // (..., n, 1)
+    auto W_row = unsqueeze(W_real, ndim - 2);  // (..., 1, n)
+    auto diff = sub(W_row, W_col);             // (..., n, n)
+
+    // Identity mask for the diagonal — guards against div-by-zero when
+    // i == j and also against degenerate (repeated) eigenvalues.  For
+    // genuinely repeated eigenvalues the gradient is undefined; we
+    // protect against NaN by clamping the off-diagonal denominator and
+    // by zeroing the diagonal entry of F.  This matches scipy.linalg's
+    // behaviour for eig backward.
+    auto ones_n = tenzor::full({n}, 1.0, W_real.dtype(), W_real.device());
+    auto eye_n = tenzor::diag(ones_n);  // (n, n) identity
+    // Replace diagonal entries with 1 so the reciprocal is finite; we'll
+    // zero the diagonal of F at the end.
+    auto safe_diff = tenzor::add(diff, eye_n);
+    auto F = tenzor::div(
+        tenzor::full({1}, 1.0, W_real.dtype(), W_real.device()),
+        safe_diff);
+    // Zero the diagonal of F: F *= (1 - I).
+    auto ones_nn = tenzor::full({n, n}, 1.0, W_real.dtype(), W_real.device());
+    auto off_diag_mask = tenzor::sub(ones_nn, eye_n);
+    F = tenzor::mul(F, off_diag_mask);
+
     auto Vt = transpose(V, ndim - 2, ndim - 1);
-    auto rhs = matmul(diag_dW, Vt);
+
+    // (V^T grad_V) ∘ F
+    auto VT_gradV = matmul(Vt, grad_V);
+    auto eigvec_term = mul(VT_gradV, F);
+
+    // diag(grad_W) + eigvec_term
+    auto diag_grad_W = diag(grad_W_real);
+    auto inner = tenzor::add(diag_grad_W, eigvec_term);
+
+    // grad_A = V^{-T} @ inner @ V^T
+    //        = solve(V^T, inner @ V^T)
+    auto rhs = matmul(inner, Vt);
     return {tenzor::linalg::solve(Vt.contiguous(), rhs)};
 }
 

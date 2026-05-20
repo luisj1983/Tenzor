@@ -2040,6 +2040,47 @@ TEST_P(GradCheckMultiBackendTest, LinalgEig_Eigvals) {
         << "eig (eigenvalues only) gradcheck failed on " << device().to_string();
 }
 
+// Audit item A.10 — backward through V (the eigenvector output) must
+// flow non-trivially even when grad_W = 0.  Previously EigBackward dropped
+// grad_V silently, so a loss that depended only on V produced an
+// all-zeros input gradient.  Test it directly: build a loss = sum(V),
+// run backward, and assert the input gradient is non-zero.
+//
+// We deliberately avoid full numerical gradcheck here because numerical
+// finite-difference perturbations can swap close eigenvalues / flip
+// eigenvector signs on random SPD inputs — the gradient is genuinely
+// non-smooth at eigenvalue crossings.  PyTorch's test suite has the
+// same caveat.  This test catches the bug the audit cared about
+// (grad_V being silently dropped) without flapping on that numerical
+// subtlety.
+TEST_P(GradCheckMultiBackendTest, LinalgEig_GradVIsNotDropped) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (dtype() == DType::Float32) {
+        GTEST_SKIP() << "Eig V-gradient test uses Float64 for tolerance margin";
+    }
+    int64_t n = 3;
+    auto x = Variable(make_spd(n, dtype(), device()), true);
+    auto [W_re, W_im, V] = ::tenzor::eig(x);
+    auto loss = tenzor::sum(V);  // depends only on V, not on W_re/W_im
+    loss.backward();
+
+    ASSERT_TRUE(x.has_grad()) << "no gradient on x after backward(sum(V))";
+    auto g = *x.grad();
+    double max_abs = 0.0;
+    if (g.dtype() == DType::Float64) {
+        const auto* p = g.data<double>();
+        for (int64_t i = 0; i < g.numel(); ++i)
+            max_abs = std::max(max_abs, std::abs(p[i]));
+    } else {
+        const auto* p = g.data<float>();
+        for (int64_t i = 0; i < g.numel(); ++i)
+            max_abs = std::max(max_abs, static_cast<double>(std::abs(p[i])));
+    }
+    EXPECT_GT(max_abs, 1e-6)
+        << "loss = sum(V) produced zero gradient on " << device().to_string()
+        << " — EigBackward is dropping grad_V";
+}
+
 TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
     if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
     if (dtype() == DType::Float32) {

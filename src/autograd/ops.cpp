@@ -1727,7 +1727,10 @@ auto eig(const Variable& A) -> std::tuple<Variable, Variable, Variable> {
     auto [W_re_t, W_im_t, V_t] = tenzor::linalg::eig(A.tensor());
 
     auto grad_fn = std::make_shared<EigBackward>();
-    grad_fn->save_for_backward({W_re_t, V_t});
+    // Save W_real, W_imag, V so the backward can use all of them.
+    // Previously only W_real and V were saved, which prevented
+    // EigBackward from detecting complex eigenvalues (audit item A.10).
+    grad_fn->save_for_backward({W_re_t, W_im_t, V_t});
     grad_fn->set_next_functions({A.grad_fn()});
     grad_fn->set_input_variables({A});
 
