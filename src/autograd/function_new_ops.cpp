@@ -1723,4 +1723,37 @@ auto BernoulliSampleBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> 
         "a straight-through estimator for differentiable variants.");
 }
 
+auto ArgmaxBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("ArgmaxBackward::forward should not be called directly");
+}
+auto ArgmaxBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "argmax: returned integer index is non-differentiable in the input "
+        "tensor (gradient is delta-of-Diracs at the maximiser). Use "
+        "soft-argmax (softmax-weighted index) for a differentiable "
+        "approximation, or attach a straight-through estimator.");
+}
+
+auto ArgminBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("ArgminBackward::forward should not be called directly");
+}
+auto ArgminBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "argmin: returned integer index is non-differentiable in the input "
+        "tensor. Use soft-argmin (softmax-weighted index over the negated "
+        "input) for a differentiable approximation.");
+}
+
+auto BucketizeBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BucketizeBackward::forward should not be called directly");
+}
+auto BucketizeBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bucketize: bucket-index output is non-differentiable in either the "
+        "input values or the sorted boundaries (gradient w.r.t. a step "
+        "function is the delta-of-Diracs distribution at each boundary). "
+        "Use a smooth bucketing surrogate (e.g. sigmoid-of-distance) if you "
+        "need gradients.");
+}
+
 } // namespace tenzor

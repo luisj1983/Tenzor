@@ -3020,4 +3020,37 @@ public:
     auto name() const -> std::string override { return "BernoulliSampleBackward"; }
 };
 
+/**
+ * @brief argmax / argmin. Returns integer indices of extrema; the
+ *        Jacobian w.r.t. the input tensor is the delta-of-Diracs at
+ *        the maximiser (zero everywhere except at the argmax, where
+ *        it's undefined).  Use soft-argmax (softmax-weighted indices)
+ *        for a differentiable approximation.
+ */
+class ArgmaxBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ArgmaxBackward"; }
+};
+
+class ArgminBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ArgminBackward"; }
+};
+
+/**
+ * @brief Bucketize. Returns bucket-index Tensor (Int64) of input values
+ *        in sorted-boundaries via binary search; non-differentiable
+ *        for the same reason as searchsorted (integer position output).
+ */
+class BucketizeBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BucketizeBackward"; }
+};
+
 } // namespace tenzor
