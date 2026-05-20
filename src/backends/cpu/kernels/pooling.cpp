@@ -5,9 +5,11 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
 #include "tenzor/backends/cpu/simd.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <omp.h>
@@ -191,7 +193,15 @@ static bool onednn_avgpool2d_forward(
         stream.wait();
 
         return true;
-    } catch (const dnnl::error&) {
+    } catch (const dnnl::error& e) {
+        // Audit item F.4: log + honour TENZOR_STRICT_BACKEND.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[Pooling] oneDNN forward failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+        }
+        TENZOR_LOG_WARN("[Pooling] oneDNN forward failed ({}); using scalar fallback",
+                        e.what());
         return false;
     }
 }

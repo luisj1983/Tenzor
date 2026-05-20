@@ -2,7 +2,9 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
 #include "broadcast.hpp"
+#include <cstdlib>  // std::getenv for TENZOR_STRICT_BACKEND
 #include "gemm_optimized.hpp"
 #include "simd_fast_math.hpp"
 #include "float16_simd.hpp"
@@ -283,8 +285,16 @@ static bool onednn_matmul_f32(
         stream.wait();
 
         return true;
-    } catch (const dnnl::error&) {
-        return false;  // Fall back to MKL/custom GEMM
+    } catch (const dnnl::error& e) {
+        // Audit item F.4: log + honour TENZOR_STRICT_BACKEND.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[GEMM] oneDNN matmul failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+        }
+        TENZOR_LOG_WARN("[GEMM] oneDNN matmul failed ({}); using MKL/custom GEMM fallback",
+                        e.what());
+        return false;
     }
 }
 #endif // !TENZOR_USE_MKL
@@ -673,8 +683,15 @@ static bool onednn_matmul_int8(
         });
         stream.wait();
         return true;
-    } catch (const dnnl::error&) {
-        return false;  // caller falls back to scalar / SIMD path
+    } catch (const dnnl::error& e) {
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[Int8 GEMM] oneDNN matmul failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+        }
+        TENZOR_LOG_WARN("[Int8 GEMM] oneDNN matmul failed ({}); using scalar / SIMD fallback",
+                        e.what());
+        return false;
     }
 }
 #endif // TENZOR_USE_ONEDNN

@@ -2,7 +2,9 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
 #include "tenzor/ops/creation.hpp"
+#include <cstdlib>  // std::getenv for TENZOR_STRICT_BACKEND
 #include "simd_elementwise.hpp"
 #include "simd_fast_math.hpp"
 #include "float16_simd.hpp"
@@ -175,8 +177,17 @@ static bool onednn_eltwise_forward(
         stream.wait();
 
         return true;
-    } catch (const dnnl::error&) {
-        return false;  // Fall back to SIMD
+    } catch (const dnnl::error& e) {
+        // Audit item F.4: log + honour TENZOR_STRICT_BACKEND so a real
+        // oneDNN failure cannot be masked by a silent SIMD fallback.
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[Activation] oneDNN primitive failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+        }
+        TENZOR_LOG_WARN("[Activation] oneDNN primitive failed ({}); using SIMD fallback",
+                        e.what());
+        return false;
     }
 }
 
@@ -236,7 +247,14 @@ static bool onednn_softmax_forward(
         stream.wait();
 
         return true;
-    } catch (const dnnl::error&) {
+    } catch (const dnnl::error& e) {
+        if (const char* s = std::getenv("TENZOR_STRICT_BACKEND"); s && *s && *s != '0') {
+            throw std::runtime_error(
+                std::string("[Softmax] oneDNN forward failed "
+                            "(TENZOR_STRICT_BACKEND=1): ") + e.what());
+        }
+        TENZOR_LOG_WARN("[Softmax] oneDNN forward failed ({}); using SIMD fallback",
+                        e.what());
         return false;
     }
 }
