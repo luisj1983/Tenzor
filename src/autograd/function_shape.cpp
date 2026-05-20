@@ -407,12 +407,32 @@ auto ViewAsRealBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return {tenzor::view_as_complex(grad_outputs[0])};
 }
 
+// Audit B.3 closed-form higher-order: ViewAsReal is a linear isomorphism
+// (complex(C) -> real(C, 2) with the same byte layout), so its Jacobian
+// is constant. The backward of the backward is itself the forward op
+// (view_as_complex on the second-order grad), expressed at the Variable
+// level so the resulting graph keeps grad_fn pointers and supports
+// further differentiation.
+auto ViewAsRealBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    return {tenzor::view_as_complex(grad_outputs[0])};
+}
+
 auto ViewAsComplexBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     auto result = tenzor::view_as_complex(inputs[0].tensor());
     return {Variable(result, inputs[0].requires_grad())};
 }
 
 auto ViewAsComplexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    return {tenzor::view_as_real(grad_outputs[0])};
+}
+
+// Audit B.3 closed-form higher-order: ViewAsComplex is a linear
+// isomorphism (real(C, 2) -> complex(C)), so its Jacobian is constant.
+// The second-order grad pushes back through view_as_real on the
+// Variable, preserving the differentiation graph.
+auto ViewAsComplexBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
     return {tenzor::view_as_real(grad_outputs[0])};
 }
 

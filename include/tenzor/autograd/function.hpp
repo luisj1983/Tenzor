@@ -2842,7 +2842,12 @@ public:
     ViewAsRealBackward() = default;
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: ViewAsReal is a linear isomorphism with a closed-form
+    // higher-order backward (view_as_complex on the Variable). No stub.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "ViewAsRealBackward"; }
 };
 
@@ -2857,7 +2862,12 @@ public:
     ViewAsComplexBackward() = default;
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: ViewAsComplex is a linear isomorphism with a closed-form
+    // higher-order backward (view_as_real on the Variable). No stub.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "ViewAsComplexBackward"; }
 };
 
