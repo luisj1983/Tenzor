@@ -182,6 +182,54 @@ auto Adagrad::get_lr() const -> double {
     return effective_lr();
 }
 
+// Audit item D.5: persist hyperparams and use Int64 for step_count to
+// avoid precision loss past 2^24 steps (previous code stored as
+// Float32).
+
+namespace {
+
+inline Tensor adagrad_scalar_f64(double v) {
+    Tensor t({1}, DType::Float64, Device::cpu());
+    t.data<double>()[0] = v;
+    return t;
+}
+
+inline Tensor adagrad_scalar_i64(int64_t v) {
+    Tensor t({1}, DType::Int64, Device::cpu());
+    t.data<int64_t>()[0] = v;
+    return t;
+}
+
+inline double adagrad_get_f64(const std::unordered_map<std::string, Tensor>& m,
+                              const std::string& key,
+                              double fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Float64) {
+        return it->second.data<double>()[0];
+    }
+    if (it->second.dtype() == DType::Float32) {
+        return static_cast<double>(it->second.data<float>()[0]);
+    }
+    return fallback;
+}
+
+inline int64_t adagrad_get_i64(const std::unordered_map<std::string, Tensor>& m,
+                               const std::string& key,
+                               int64_t fallback) {
+    auto it = m.find(key);
+    if (it == m.end()) return fallback;
+    if (it->second.dtype() == DType::Int64) {
+        return it->second.data<int64_t>()[0];
+    }
+    if (it->second.dtype() == DType::Float32) {
+        return static_cast<int64_t>(it->second.data<float>()[0]);
+    }
+    return fallback;
+}
+
+}  // namespace
+
 auto Adagrad::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 
@@ -190,31 +238,46 @@ auto Adagrad::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state[prefix + ".sum"] = sum_[i];
     }
 
-    // Store step count as scalar tensor
-    auto step_tensor = zeros({1});
-    auto step_ptr = step_tensor.data<float>();
-    step_ptr[0] = static_cast<float>(step_count_);
-    state["step_count"] = step_tensor;
+    // Int64 step count avoids the Float32 precision cliff at 2^24 steps.
+    state["step_count"] = adagrad_scalar_i64(step_count_);
+
+    // Hyperparameters.
+    state["lr"]                          = adagrad_scalar_f64(lr_);
+    state["lr_decay"]                    = adagrad_scalar_f64(lr_decay_);
+    state["weight_decay"]                = adagrad_scalar_f64(weight_decay_);
+    state["initial_accumulator_value"]   = adagrad_scalar_f64(initial_accumulator_value_);
+    state["eps"]                         = adagrad_scalar_f64(eps_);
+    state["num_params"]                  = adagrad_scalar_i64(
+        static_cast<int64_t>(parameters_.size()));
 
     return state;
 }
 
 auto Adagrad::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    int64_t expected_n = adagrad_get_i64(state, "num_params",
+                                         static_cast<int64_t>(parameters_.size()));
+    if (expected_n != static_cast<int64_t>(parameters_.size())) {
+        throw std::runtime_error(
+            "Adagrad::load_state_dict: parameter count mismatch (state has " +
+            std::to_string(expected_n) + ", optimiser has " +
+            std::to_string(parameters_.size()) + ")");
+    }
+
+    lr_                        = adagrad_get_f64(state, "lr",                        lr_);
+    lr_decay_                  = adagrad_get_f64(state, "lr_decay",                  lr_decay_);
+    weight_decay_              = adagrad_get_f64(state, "weight_decay",              weight_decay_);
+    initial_accumulator_value_ = adagrad_get_f64(state, "initial_accumulator_value", initial_accumulator_value_);
+    eps_                       = adagrad_get_f64(state, "eps",                       eps_);
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
-
         auto it = state.find(prefix + ".sum");
         if (it != state.end()) {
             sum_[i] = it->second;
         }
     }
 
-    // Load step count
-    auto it = state.find("step_count");
-    if (it != state.end()) {
-        auto step_ptr = it->second.data<float>();
-        step_count_ = static_cast<int64_t>(step_ptr[0]);
-    }
+    step_count_ = adagrad_get_i64(state, "step_count", step_count_);
 }
 
 } // namespace optim
