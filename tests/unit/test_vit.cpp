@@ -8,6 +8,7 @@
 #include "../../include/tenzor/models/vit.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -53,7 +54,7 @@ TEST_F(ViTTest, PatchEmbeddingGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = patch_embed->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -93,7 +94,7 @@ TEST_F(ViTTest, ViTEmbeddingsGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -133,7 +134,7 @@ TEST_F(ViTTest, ViTBasePatch16GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -189,7 +190,7 @@ TEST_F(ViTTest, ViTBasePatch32GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -227,7 +228,7 @@ TEST_F(ViTTest, ViTLargePatch16GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(ViTTest, ViTLargePatch16ParameterCount) {
@@ -301,7 +302,7 @@ TEST_F(ViTTest, ViTHugePatch14GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(ViTTest, ViTHugePatch14ParameterCount) {

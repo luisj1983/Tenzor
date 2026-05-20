@@ -354,12 +354,7 @@ auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) 
     check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");
 }
 
-auto ROCmBackend::dispatch([[maybe_unused]] const std::string& op_name,
-                           [[maybe_unused]] std::span<const Tensor> inputs,
-                           [[maybe_unused]] const OpAttributes& attrs) -> std::vector<Tensor> {
-    throw std::runtime_error("ROCmBackend::dispatch(string): operation '" + op_name +
-        "' not available via legacy string dispatch. Use OpId-based dispatch instead.");
-}
+// Legacy string-keyed dispatch removed (audit Phase C).
 
 auto ROCmBackend::get_device_properties(int32_t device_id) const -> hipDeviceProp_t {
     hipDeviceProp_t props;

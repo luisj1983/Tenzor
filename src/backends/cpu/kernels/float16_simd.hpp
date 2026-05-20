@@ -17,6 +17,7 @@
 #include <cstring>
 #include <algorithm>
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -645,7 +646,7 @@ inline void gemm_f16_transB(
     int64_t M, int64_t N, int64_t K
 ) {
 #ifdef TENZOR_F16C_AVAILABLE
-    #pragma omp parallel for if(M * N > 1000)
+    #pragma omp parallel for if(M * N > ::tenzor::OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = dot_f16(A + i * K, B + j * K, K);
@@ -653,7 +654,7 @@ inline void gemm_f16_transB(
         }
     }
 #else
-    #pragma omp parallel for if(M * N > 1000)
+    #pragma omp parallel for if(M * N > ::tenzor::OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = dot_f16(A + i * K, B + j * K, K);

@@ -5,6 +5,7 @@
 
 #include "tenzor/models/deeplabv3plus.hpp"
 #include "tenzor/models/mobilenet.hpp"
+#include "tenzor/models/hub.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/checkpoint.hpp"
@@ -346,6 +347,35 @@ auto DeepLabV3Plus_MobileNetV2(int64_t num_classes,
 {
     return std::make_shared<DeepLabV3Plus>(
         num_classes, "mobilenetv2", output_stride, pretrained);
+}
+
+// Sibling factories that load the full-model COCO weights (encoder + decoder)
+// via ModelHub. The hub registry has `deeplabv3_resnet50` / `_resnet101` /
+// `_mobilenet_v3_large` keys pointing at torchvision's published COCO models.
+auto deeplabv3_resnet50(int64_t num_classes,
+                        int64_t output_stride,
+                        bool pretrained) -> std::shared_ptr<DeepLabV3Plus>
+{
+    auto model = std::make_shared<DeepLabV3Plus>(
+        num_classes, "resnet50", output_stride, /*pretrained=*/false);
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("deeplabv3_resnet50");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
+    return model;
+}
+
+auto deeplabv3_resnet101(int64_t num_classes,
+                         int64_t output_stride,
+                         bool pretrained) -> std::shared_ptr<DeepLabV3Plus>
+{
+    auto model = std::make_shared<DeepLabV3Plus>(
+        num_classes, "resnet101", output_stride, /*pretrained=*/false);
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("deeplabv3_resnet101");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
+    return model;
 }
 
 } // namespace models

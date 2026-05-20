@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/unet.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -35,7 +36,7 @@ TEST_F(UNetTest, UNetGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value());
+    EXPECT_GRAD_FLOWS(images);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }

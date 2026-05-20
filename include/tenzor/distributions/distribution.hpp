@@ -1093,46 +1093,48 @@ public:
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
-        // -0.5 * (d * log(2*pi) + log|cov| + (x-mu)^T cov^{-1} (x-mu))
-        // Use Cholesky for log|cov| = 2 * sum(log(diag(L))) and
-        // for the Mahalanobis term by solving L * y = (x - mu).
-        auto diff = value - loc_;  // shape (D,) or (..., D)
-        int64_t D = loc_.shape().back();
+        // log_prob(x) = -0.5 * (D * log(2*pi) + log|cov| + (x-mu)^T cov^{-1} (x-mu))
+        //
+        // We Cholesky-factor cov = L L^T at construction (scale_tril_, lower).
+        // Then:
+        //   * log|cov| = 2 * sum(log(diag(L)))
+        //   * (x-mu)^T cov^{-1} (x-mu) = ||L^{-1} (x-mu)||_2^2
+        //
+        // Supports unbatched value (shape (D,)) and arbitrarily batched value
+        // (shape (..., D)). scale_tril_ stays unbatched (D, D); the batched
+        // triangular solve broadcasts it across the leading dims.
+        const int64_t D = loc_.shape().back();
+        auto diff = value - loc_;                              // (..., D) or (D,)
 
-        // Promote diff to column (D, 1) for triangular solve (simplest path).
-        auto diff_col = (diff.shape().size() == 1)
-            ? diff.reshape({D, 1})
-            : diff.reshape(std::vector<int64_t>(diff.shape().begin(), diff.shape().end()) /*dummy*/);
-        // For this P1 pass we support the unbatched case only.
-        if (diff.shape().size() != 1) {
-            throw std::runtime_error(
-                "MultivariateNormal::log_prob: batched log_prob not yet implemented");
-        }
+        // Promote to column (..., D, 1) for triangular solve.
+        auto diff_col = unsqueeze(diff, -1);                   // (..., D, 1)
 
-        // Solve L y = diff  ->  y = L^{-1} diff. Mahalanobis = y^T y.
-        auto y = linalg::solve(scale_tril_, diff_col);
-        auto mahal = tenzor::sum(y * y);
+        // Solve L y = diff (lower triangular).  scale_tril_ is (D, D), diff_col
+        // is (..., D, 1); solve_triangular broadcasts the system over the
+        // leading batch dims.
+        auto y_col = linalg::solve_triangular(scale_tril_, diff_col,
+                                              /*upper=*/false);  // (..., D, 1)
+        // Drop the trailing 1 axis: (..., D, 1) → (..., D).
+        const auto& diff_shape = diff.shape();
+        std::vector<int64_t> y_shape(diff_shape.begin(), diff_shape.end());
+        auto y = y_col.reshape(y_shape);
 
-        // log|cov| = 2 * sum(log(diag(L)))
-        double log_det = 0.0;
-        auto L_cpu = scale_tril_.to(Device::cpu()).contiguous();
-        if (L_cpu.dtype() == DType::Float32) {
-            const float* p = L_cpu.data<float>();
-            for (int64_t i = 0; i < D; ++i) {
-                log_det += std::log(static_cast<double>(p[i * D + i]));
-            }
-        } else {
-            const double* p = L_cpu.data<double>();
-            for (int64_t i = 0; i < D; ++i) {
-                log_det += std::log(p[i * D + i]);
-            }
-        }
-        log_det *= 2.0;
+        // Mahalanobis term = sum over last axis of y^2 → shape (...,).
+        auto mahal = sum(y * y, /*dim=*/static_cast<int64_t>(-1));
 
-        auto lpf = full({1}, -0.5 * (static_cast<double>(D) * std::log(2.0 * M_PI) + log_det),
-                        loc_.dtype(), Device::cpu());
-        auto result = lpf.to(loc_.device()) - mahal * 0.5f;
-        return result;
+        // log|cov| = 2 * sum(log(diag(L))). scale_tril_ is 2D so diag() returns
+        // a 1D vector of the diagonal elements — kept on-device throughout.
+        auto diag_L      = diag(scale_tril_);                       // (D,)
+        auto log_det_scl = sum(log(diag_L)) * full_like(sum(log(diag_L)), 2.0);
+
+        // Constant term: -0.5 * (D * log(2π) + log_det)
+        auto two_pi  = full_like(log_det_scl,
+                                 static_cast<double>(D) * std::log(2.0 * M_PI));
+        auto const_t = (two_pi + log_det_scl) * full_like(log_det_scl, -0.5);
+
+        // Broadcast the scalar constant against the (...,) Mahalanobis tensor.
+        auto half_mahal = mahal * full_like(mahal, 0.5);
+        return const_t - half_mahal;
     }
 
     auto mean() -> Tensor override { return loc_; }

@@ -18,6 +18,7 @@
 #include "../../include/tenzor/models/googlenet.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -75,7 +76,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
     loss.backward();
 
     // Check input gradients
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     // Always check parameter gradients
@@ -128,7 +129,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG16GradientFlow) {
 
     // Check input gradients (may not work on all backends due to device transfer)
     if (device() == Device::cpu()) {
-        EXPECT_TRUE(input.grad().has_value());
+        EXPECT_GRAD_FLOWS(input);
     }
 
     // Always check parameter gradients
@@ -203,7 +204,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -267,7 +268,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 

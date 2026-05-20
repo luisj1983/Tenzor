@@ -52,101 +52,35 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         // grad_outputs[0]: gradient w.r.t output [N, C, H_out, W_out]
         // saved_tensors_[0]: input [N, C, H_in, W_in]
-        // saved_tensors_[1]: indices [N, C, H_out, W_out]
+        // saved_tensors_[1]: indices [N, C, H_out, W_out] (2D-local, format
+        //                    used by the kernel registry).
         // saved_tensors_[2]: output [N, C, H_out, W_out] (for cuDNN backward)
-
         const auto& grad_output = grad_outputs[0];
-        const auto& input = saved_tensors_[0];
-        const auto& indices = saved_tensors_[1];
-        const auto& output = saved_tensors_[2];
+        const auto& input       = saved_tensors_[0];
+        const auto& indices     = saved_tensors_[1];
+        const auto& output      = saved_tensors_[2];
+
+        // Always route through the OpId dispatch table — the registry's
+        // backward kernel knows the index format produced by its own
+        // forward kernel (2D-local on CPU). The inline nn-layer scatter
+        // path that used to live here assumed 4D-flat indices and broke
+        // once forward was unified through the registry.
+        std::vector<Tensor> inputs = {grad_output, indices, input, output};
+        OpAttributes bwd_attrs;
+        bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+        bwd_attrs.set(AttrKey::Stride,     stride_);
+        bwd_attrs.set(AttrKey::Padding,    padding_);
 
         auto input_shape = input.shape();
-        int64_t N = input_shape[0];
-        int64_t C = input_shape[1];
-        int64_t H_in = input_shape[2];
-        int64_t W_in = input_shape[3];
+        bwd_attrs.set(AttrKey::InputShape,
+            std::to_string(input_shape[0]) + "," +
+            std::to_string(input_shape[1]) + "," +
+            std::to_string(input_shape[2]) + "," +
+            std::to_string(input_shape[3]));
 
-        // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
-        if (grad_output.device().type != Device::Type::CPU) {
-            std::vector<Tensor> inputs = {grad_output, indices, input, output};
-            OpAttributes bwd_attrs;
-            bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-            bwd_attrs.set(AttrKey::Stride, stride_);
-            bwd_attrs.set(AttrKey::Padding, padding_);
-            bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in) + "," + std::to_string(W_in));
-            auto result = dispatch_to_device(OpId::MaxPool2dBackward, grad_output.device().type,
-                inputs, bwd_attrs);
-            return {result[0]};
-        }
-
-        // CPU path
-        auto grad_shape = grad_output.shape();
-        int64_t H_out = grad_shape[2];
-        int64_t W_out = grad_shape[3];
-
-        auto dtype = grad_output.dtype();
-        auto grad_input = zeros({N, C, H_in, W_in}, dtype, Device::cpu());
-
-        // Distribute gradients to max element positions with proper dtype handling
-        // Indices are always stored as Int64
-        const int64_t* indices_data = indices.data<int64_t>();
-
-        if (dtype == DType::Float32) {
-            float* grad_input_data = grad_input.data<float>();
-            const float* grad_output_data = grad_output.data<float>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = indices_data[out_idx];
-                            grad_input_data[max_idx] += grad_output_data[out_idx];
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            double* grad_input_data = grad_input.data<double>();
-            const double* grad_output_data = grad_output.data<double>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = indices_data[out_idx];
-                            grad_input_data[max_idx] += grad_output_data[out_idx];
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float16) {
-            // Accumulate in Float32 buffer for precision, convert back at end
-            std::vector<int64_t> gi_shape(grad_input.shape().begin(), grad_input.shape().end());
-            Tensor grad_input_f32(gi_shape, DType::Float32, grad_input.device());
-            grad_input_f32.zero_();
-            float* gi_f32_data = grad_input_f32.data<float>();
-            const Float16* grad_output_data = grad_output.data<Float16>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = indices_data[out_idx];
-                            gi_f32_data[max_idx] += static_cast<float>(grad_output_data[out_idx]);
-                        }
-                    }
-                }
-            }
-            // Convert accumulated Float32 gradients back to Float16
-            grad_input = grad_input_f32.to(DType::Float16);
-        } else {
-            throw std::runtime_error("MaxPool2dBackward: Unsupported dtype");
-        }
-
-        return {grad_input};
+        auto result = dispatch_to_device(OpId::MaxPool2dBackward,
+            grad_output.device().type, inputs, bwd_attrs);
+        return {result[0]};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
@@ -174,15 +108,33 @@ private:
 
 MaxPool2d::MaxPool2d(int64_t kernel_size, int64_t stride, int64_t padding,
                      bool ceil_mode, bool return_indices)
-    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding), ceil_mode_(ceil_mode), return_indices_(return_indices) {
-    if (kernel_size <= 0) {
-        throw std::runtime_error("MaxPool2d: kernel_size must be positive, got " +
-            std::to_string(kernel_size));
-    }
-    if (padding < 0) {
-        throw std::runtime_error("MaxPool2d: padding must be non-negative, got " +
-            std::to_string(padding));
+    : MaxPool2d(std::array<int64_t, 2>{kernel_size, kernel_size},
+                std::array<int64_t, 2>{stride, stride},
+                std::array<int64_t, 2>{padding, padding},
+                ceil_mode, return_indices) {
+}
+
+MaxPool2d::MaxPool2d(std::array<int64_t, 2> kernel_size,
+                     std::array<int64_t, 2> stride,
+                     std::array<int64_t, 2> padding,
+                     bool ceil_mode, bool return_indices)
+    : kernel_size_h_(kernel_size[0]), kernel_size_w_(kernel_size[1]),
+      stride_h_(stride[0]  < 0 ? kernel_size[0] : stride[0]),
+      stride_w_(stride[1]  < 0 ? kernel_size[1] : stride[1]),
+      padding_h_(padding[0]), padding_w_(padding[1]),
+      kernel_size_(kernel_size[0]),   // legacy scalar = H-axis
+      stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      padding_(padding[0]),
+      ceil_mode_(ceil_mode), return_indices_(return_indices) {
+    for (int i = 0; i < 2; ++i) {
+        if (kernel_size[i] <= 0) {
+            throw std::runtime_error("MaxPool2d: kernel_size must be positive (axis " +
+                std::to_string(i) + "), got " + std::to_string(kernel_size[i]));
+        }
+        if (padding[i] < 0) {
+            throw std::runtime_error("MaxPool2d: padding must be non-negative (axis " +
+                std::to_string(i) + "), got " + std::to_string(padding[i]));
+        }
     }
 }
 
@@ -193,201 +145,37 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    // Pool kernels on every backend (CPU's pointer-arithmetic loop, cuDNN,
-    // Vulkan, etc.) read with shape-derived offsets and assume the input is
-    // contiguous NCHW. Materialize a contiguous copy once at the entry
-    // point when the caller passed a non-contig view (slice, transpose,
-    // narrow). This is cheaper than each backend re-doing it.
+    // Contiguous on entry — pool kernels expect NCHW contiguous layout.
     Variable contig_input = input;
     if (!input.tensor().is_contiguous()) {
         contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
     }
 
-    Device original_device = contig_input.tensor().device();
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t H_in = input_shape[2];
-    int64_t W_in = input_shape[3];
+    // Always route through OpId dispatch — the kernel registry handles every
+    // backend (CPU, CUDA, ROCm, Vulkan, OneAPI, MPS) and reads per-axis
+    // attrs with scalar fallback. This eliminates inline-CPU/inline-GPU
+    // duplication in the nn layer.
+    std::vector<Tensor> inputs = {contig_input.tensor()};
+    OpAttributes fwd_attrs;
+    // Set per-axis (registry reads per-axis first, scalar as fallback).
+    fwd_attrs.set(AttrKey::KernelSizeH, kernel_size_h_);
+    fwd_attrs.set(AttrKey::KernelSizeW, kernel_size_w_);
+    fwd_attrs.set(AttrKey::StrideH, stride_h_);
+    fwd_attrs.set(AttrKey::StrideW, stride_w_);
+    fwd_attrs.set(AttrKey::PaddingH, padding_h_);
+    fwd_attrs.set(AttrKey::PaddingW, padding_w_);
+    // Set scalar as compat for backends that read scalar only (none should,
+    // but defensive). Use H-axis as the canonical scalar.
+    fwd_attrs.set(AttrKey::KernelSize, kernel_size_h_);
+    fwd_attrs.set(AttrKey::Stride,     stride_h_);
+    fwd_attrs.set(AttrKey::Padding,    padding_h_);
 
-    Tensor output, indices;
+    auto dispatch_result = dispatch_to_device(OpId::MaxPool2dForward,
+        contig_input.tensor().device().type, inputs, fwd_attrs);
+    Tensor output  = dispatch_result[0];
+    Tensor indices = dispatch_result[1];
 
-    // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
-    if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {contig_input.tensor()};
-        OpAttributes fwd_attrs;
-        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-        fwd_attrs.set(AttrKey::Stride, stride_);
-        fwd_attrs.set(AttrKey::Padding, padding_);
-        auto result = dispatch_to_device(OpId::MaxPool2dForward, original_device.type,
-            inputs, fwd_attrs);
-        output = result[0];
-        indices = result[1];
-    } else {
-        // CPU path
-        // Calculate output dimensions
-        int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_, ceil_mode_);
-        int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_, ceil_mode_);
-
-        // Create output tensor and indices tensor on CPU
-        auto dtype = contig_input.tensor().dtype();
-        output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
-        // Always store indices as Int64 for precision (Float16 can't represent large indices)
-        indices = zeros({N, C, H_out, W_out}, DType::Int64, Device::cpu());
-
-        // Perform max pooling with proper dtype handling
-        if (dtype == DType::Float32) {
-            const float* input_data = contig_input.tensor().data<float>();
-            float* output_data = output.data<float>();
-            int64_t* indices_data = indices.data<int64_t>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            int64_t max_idx = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        if (input_data[input_idx] > max_val) {
-                                            max_val = input_data[input_idx];
-                                            max_idx = input_idx;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = max_val;
-                            indices_data[out_idx] = max_idx;
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* input_data = contig_input.tensor().data<double>();
-            double* output_data = output.data<double>();
-            int64_t* indices_data = indices.data<int64_t>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            double max_val = -std::numeric_limits<double>::infinity();
-                            int64_t max_idx = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        if (input_data[input_idx] > max_val) {
-                                            max_val = input_data[input_idx];
-                                            max_idx = input_idx;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = max_val;
-                            indices_data[out_idx] = max_idx;
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float16) {
-            const Float16* input_data = contig_input.tensor().data<Float16>();
-            Float16* output_data = output.data<Float16>();
-            int64_t* indices_data = indices.data<int64_t>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            int64_t max_idx = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        float val = static_cast<float>(input_data[input_idx]);
-                                        if (val > max_val) {
-                                            max_val = val;
-                                            max_idx = input_idx;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = Float16(max_val);
-                            indices_data[out_idx] = max_idx;
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::BFloat16) {
-            const BFloat16* input_data = contig_input.tensor().data<BFloat16>();
-            BFloat16* output_data = output.data<BFloat16>();
-            int64_t* indices_data = indices.data<int64_t>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            int64_t max_idx = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        float val = static_cast<float>(input_data[input_idx]);
-                                        if (val > max_val) {
-                                            max_val = val;
-                                            max_idx = input_idx;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = BFloat16(max_val);
-                            indices_data[out_idx] = max_idx;
-                        }
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("MaxPool2d: Unsupported dtype");
-        }
-    } // end CPU path
-
-    // Record into the active JIT trace if any. CPU's pointer loop above
-    // bypasses dispatch, so the dispatch interceptor never sees this op.
+    // Record into the active JIT trace if any.
     {
         auto& tracer = ::tenzor::jit::Tracer::get_instance();
         if (tracer.is_tracing()) {
@@ -395,35 +183,25 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
             auto out_id = tracer.register_new_tensor(output);
             ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::MaxPool2d,
                                        {in_id}, {out_id});
-            op.int_attrs["kernel_size"] = kernel_size_;
-            op.int_attrs["stride"]      = stride_;
-            op.int_attrs["padding"]     = padding_;
+            op.int_attrs["kernel_size"] = kernel_size_h_;
+            op.int_attrs["stride"]      = stride_h_;
+            op.int_attrs["padding"]     = padding_h_;
             tracer.record_op(std::move(op));
         }
     }
 
-    // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad());
 
-    // Setup backward function if gradient is required
     if (input.requires_grad()) {
         std::vector<Tensor> tensors_to_save = {contig_input.tensor(), indices, output};
-
         auto backward_fn = std::make_shared<MaxPool2dBackward>(
-            kernel_size_, stride_, padding_, std::move(tensors_to_save)
-        );
-
+            kernel_size_h_, stride_h_, padding_h_, std::move(tensors_to_save));
         result.set_grad_fn(backward_fn);
-
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
-
-        // CRITICAL: Connect to input's grad_fn to continue the backward chain
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
-        }
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
         backward_fn->set_next_functions(next_funcs);
     }
 
@@ -621,176 +399,93 @@ private:
 };
 
 AvgPool2d::AvgPool2d(int64_t kernel_size, int64_t stride, int64_t padding)
-    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding) {}
+    : AvgPool2d(std::array<int64_t, 2>{kernel_size, kernel_size},
+                std::array<int64_t, 2>{stride, stride},
+                std::array<int64_t, 2>{padding, padding}) {}
+
+AvgPool2d::AvgPool2d(std::array<int64_t, 2> kernel_size,
+                     std::array<int64_t, 2> stride,
+                     std::array<int64_t, 2> padding)
+    : kernel_size_h_(kernel_size[0]), kernel_size_w_(kernel_size[1]),
+      stride_h_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      stride_w_(stride[1] < 0 ? kernel_size[1] : stride[1]),
+      padding_h_(padding[0]), padding_w_(padding[1]),
+      kernel_size_(kernel_size[0]),
+      stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      padding_(padding[0]) {
+    for (int i = 0; i < 2; ++i) {
+        if (kernel_size[i] <= 0) {
+            throw std::runtime_error("AvgPool2d: kernel_size must be positive (axis " +
+                std::to_string(i) + "), got " + std::to_string(kernel_size[i]));
+        }
+        if (padding[i] < 0) {
+            throw std::runtime_error("AvgPool2d: padding must be non-negative (axis " +
+                std::to_string(i) + "), got " + std::to_string(padding[i]));
+        }
+    }
+}
 
 auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
-    // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::runtime_error("AvgPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    // Materialize contiguous NCHW once at the top — every kernel below
-    // (CPU pointer arithmetic, cuDNN, Vulkan) assumes contiguous storage.
     Variable contig_input = input;
     if (!input.tensor().is_contiguous()) {
         contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
     }
 
-    Device original_device = contig_input.tensor().device();
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
+    int64_t N    = input_shape[0];
+    int64_t C    = input_shape[1];
     int64_t H_in = input_shape[2];
     int64_t W_in = input_shape[3];
 
-    Tensor output;
+    std::vector<Tensor> inputs = {contig_input.tensor()};
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::KernelSize,  kernel_size_h_);
+    fwd_attrs.set(AttrKey::KernelSizeH, kernel_size_h_);
+    fwd_attrs.set(AttrKey::KernelSizeW, kernel_size_w_);
+    fwd_attrs.set(AttrKey::Stride,  stride_h_);
+    fwd_attrs.set(AttrKey::StrideH, stride_h_);
+    fwd_attrs.set(AttrKey::StrideW, stride_w_);
+    fwd_attrs.set(AttrKey::Padding,  padding_h_);
+    fwd_attrs.set(AttrKey::PaddingH, padding_h_);
+    fwd_attrs.set(AttrKey::PaddingW, padding_w_);
 
-    // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
-    if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {contig_input.tensor()};
-        OpAttributes fwd_attrs;
-        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-        fwd_attrs.set(AttrKey::Stride, stride_);
-        fwd_attrs.set(AttrKey::Padding, padding_);
-        auto result = dispatch_to_device(OpId::AvgPool2dForward, original_device.type,
-            inputs, fwd_attrs);
-        output = result[0];
-    } else {
-        // CPU path
-        // Calculate output dimensions
-        int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
-        int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
+    auto dispatch_result = dispatch_to_device(OpId::AvgPool2dForward,
+        contig_input.tensor().device().type, inputs, fwd_attrs);
+    Tensor output = dispatch_result[0];
 
-        // Create output tensor on CPU
-        auto dtype = contig_input.tensor().dtype();
-        output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
-
-        if (dtype == DType::Float32) {
-            const float* input_data = contig_input.tensor().data<float>();
-            float* output_data = output.data<float>();
-
-            // Perform average pooling
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            float sum = 0.0f;
-                            int64_t count = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        sum += input_data[input_idx];
-                                        count++;
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = sum / static_cast<float>(count);
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* input_data = contig_input.tensor().data<double>();
-            double* output_data = output.data<double>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            double sum = 0.0;
-                            int64_t count = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        sum += input_data[input_idx];
-                                        count++;
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = sum / static_cast<double>(count);
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float16) {
-            const Float16* input_data = contig_input.tensor().data<Float16>();
-            Float16* output_data = output.data<Float16>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-                            int64_t h_end = h_start + kernel_size_;
-                            int64_t w_end = w_start + kernel_size_;
-
-                            float sum = 0.0f;
-                            int64_t count = 0;
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                        sum += static_cast<float>(input_data[input_idx]);
-                                        count++;
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            output_data[out_idx] = Float16(sum / static_cast<float>(count));
-                        }
-                    }
-                }
-            }
+    {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        if (tracer.is_tracing()) {
+            auto in_id  = tracer.register_tensor(contig_input.tensor());
+            auto out_id = tracer.register_new_tensor(output);
+            ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::AvgPool2d,
+                                       {in_id}, {out_id});
+            op.int_attrs["kernel_size"] = kernel_size_h_;
+            op.int_attrs["stride"]      = stride_h_;
+            op.int_attrs["padding"]     = padding_h_;
+            tracer.record_op(std::move(op));
         }
     }
 
-    // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad());
-
-    // Setup backward function if gradient is required
     if (input.requires_grad()) {
-        std::vector<Tensor> tensors_to_save = {input.tensor()};  // Save input for cuDNN backward
-
+        std::vector<Tensor> tensors_to_save = {contig_input.tensor()};
         auto backward_fn = std::make_shared<AvgPool2dBackward>(
-            kernel_size_, stride_, padding_, H_in, W_in, std::move(tensors_to_save)
-        );
-
+            kernel_size_h_, stride_h_, padding_h_, H_in, W_in,
+            std::move(tensors_to_save));
         result.set_grad_fn(backward_fn);
-
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
-
-        // CRITICAL: Connect to input's grad_fn to continue the backward chain
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
-        }
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
         backward_fn->set_next_functions(next_funcs);
     }
-
+    (void)N; (void)C;
     return result;
 }
 
@@ -1303,13 +998,34 @@ inline void wire_grad_fn(Variable& result, const Variable& input,
 
 MaxPool3d::MaxPool3d(int64_t kernel_size, int64_t stride, int64_t padding,
                      bool ceil_mode, bool return_indices)
-    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding), ceil_mode_(ceil_mode), return_indices_(return_indices) {
-    if (kernel_size <= 0) {
-        throw std::runtime_error("MaxPool3d: kernel_size must be positive");
-    }
-    if (padding < 0) {
-        throw std::runtime_error("MaxPool3d: padding must be non-negative");
+    : MaxPool3d(std::array<int64_t, 3>{kernel_size, kernel_size, kernel_size},
+                std::array<int64_t, 3>{stride, stride, stride},
+                std::array<int64_t, 3>{padding, padding, padding},
+                ceil_mode, return_indices) {
+}
+
+MaxPool3d::MaxPool3d(std::array<int64_t, 3> kernel_size,
+                     std::array<int64_t, 3> stride,
+                     std::array<int64_t, 3> padding,
+                     bool ceil_mode, bool return_indices)
+    : kernel_size_d_(kernel_size[0]), kernel_size_h_(kernel_size[1]), kernel_size_w_(kernel_size[2]),
+      stride_d_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      stride_h_(stride[1] < 0 ? kernel_size[1] : stride[1]),
+      stride_w_(stride[2] < 0 ? kernel_size[2] : stride[2]),
+      padding_d_(padding[0]), padding_h_(padding[1]), padding_w_(padding[2]),
+      kernel_size_(kernel_size[0]),
+      stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      padding_(padding[0]),
+      ceil_mode_(ceil_mode), return_indices_(return_indices) {
+    for (int i = 0; i < 3; ++i) {
+        if (kernel_size[i] <= 0) {
+            throw std::runtime_error("MaxPool3d: kernel_size must be positive (axis " +
+                std::to_string(i) + "), got " + std::to_string(kernel_size[i]));
+        }
+        if (padding[i] < 0) {
+            throw std::runtime_error("MaxPool3d: padding must be non-negative (axis " +
+                std::to_string(i) + "), got " + std::to_string(padding[i]));
+        }
     }
 }
 
@@ -1323,9 +1039,18 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
     OpAttributes fwd_attrs;
-    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-    fwd_attrs.set(AttrKey::Stride, stride_);
-    fwd_attrs.set(AttrKey::Padding, padding_);
+    fwd_attrs.set(AttrKey::KernelSize,  kernel_size_d_);
+    fwd_attrs.set(AttrKey::KernelSizeD, kernel_size_d_);
+    fwd_attrs.set(AttrKey::KernelSizeH, kernel_size_h_);
+    fwd_attrs.set(AttrKey::KernelSizeW, kernel_size_w_);
+    fwd_attrs.set(AttrKey::Stride,  stride_d_);
+    fwd_attrs.set(AttrKey::StrideD, stride_d_);
+    fwd_attrs.set(AttrKey::StrideH, stride_h_);
+    fwd_attrs.set(AttrKey::StrideW, stride_w_);
+    fwd_attrs.set(AttrKey::Padding,  padding_d_);
+    fwd_attrs.set(AttrKey::PaddingD, padding_d_);
+    fwd_attrs.set(AttrKey::PaddingH, padding_h_);
+    fwd_attrs.set(AttrKey::PaddingW, padding_w_);
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::MaxPool3dForward, device.type, inputs, fwd_attrs);
@@ -1348,13 +1073,30 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
 // ============================================================================
 
 AvgPool3d::AvgPool3d(int64_t kernel_size, int64_t stride, int64_t padding)
-    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding) {
-    if (kernel_size <= 0) {
-        throw std::runtime_error("AvgPool3d: kernel_size must be positive");
-    }
-    if (padding < 0) {
-        throw std::runtime_error("AvgPool3d: padding must be non-negative");
+    : AvgPool3d(std::array<int64_t, 3>{kernel_size, kernel_size, kernel_size},
+                std::array<int64_t, 3>{stride, stride, stride},
+                std::array<int64_t, 3>{padding, padding, padding}) {}
+
+AvgPool3d::AvgPool3d(std::array<int64_t, 3> kernel_size,
+                     std::array<int64_t, 3> stride,
+                     std::array<int64_t, 3> padding)
+    : kernel_size_d_(kernel_size[0]), kernel_size_h_(kernel_size[1]), kernel_size_w_(kernel_size[2]),
+      stride_d_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      stride_h_(stride[1] < 0 ? kernel_size[1] : stride[1]),
+      stride_w_(stride[2] < 0 ? kernel_size[2] : stride[2]),
+      padding_d_(padding[0]), padding_h_(padding[1]), padding_w_(padding[2]),
+      kernel_size_(kernel_size[0]),
+      stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
+      padding_(padding[0]) {
+    for (int i = 0; i < 3; ++i) {
+        if (kernel_size[i] <= 0) {
+            throw std::runtime_error("AvgPool3d: kernel_size must be positive (axis " +
+                std::to_string(i) + "), got " + std::to_string(kernel_size[i]));
+        }
+        if (padding[i] < 0) {
+            throw std::runtime_error("AvgPool3d: padding must be non-negative (axis " +
+                std::to_string(i) + "), got " + std::to_string(padding[i]));
+        }
     }
 }
 
@@ -1368,9 +1110,18 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
     OpAttributes fwd_attrs;
-    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-    fwd_attrs.set(AttrKey::Stride, stride_);
-    fwd_attrs.set(AttrKey::Padding, padding_);
+    fwd_attrs.set(AttrKey::KernelSize,  kernel_size_d_);
+    fwd_attrs.set(AttrKey::KernelSizeD, kernel_size_d_);
+    fwd_attrs.set(AttrKey::KernelSizeH, kernel_size_h_);
+    fwd_attrs.set(AttrKey::KernelSizeW, kernel_size_w_);
+    fwd_attrs.set(AttrKey::Stride,  stride_d_);
+    fwd_attrs.set(AttrKey::StrideD, stride_d_);
+    fwd_attrs.set(AttrKey::StrideH, stride_h_);
+    fwd_attrs.set(AttrKey::StrideW, stride_w_);
+    fwd_attrs.set(AttrKey::Padding,  padding_d_);
+    fwd_attrs.set(AttrKey::PaddingD, padding_d_);
+    fwd_attrs.set(AttrKey::PaddingH, padding_h_);
+    fwd_attrs.set(AttrKey::PaddingW, padding_w_);
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::AvgPool3dForward, device.type, inputs, fwd_attrs);
@@ -1380,7 +1131,7 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
 
     if (input.requires_grad()) {
         auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AvgPool3dBackward>>(
-            in_shape_vec, kernel_size_, stride_, padding_);
+            in_shape_vec, kernel_size_d_, stride_d_, padding_d_);
         wire_grad_fn(result, input, backward_fn);
     }
 

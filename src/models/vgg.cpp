@@ -5,8 +5,10 @@
 
 #include "../../include/tenzor/models/vgg.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <cctype>
 
 namespace tenzor {
 namespace models {
@@ -146,14 +148,11 @@ auto vgg11(int64_t num_classes, bool batch_norm, bool pretrained) -> std::shared
     auto model = std::make_shared<VGG>(VGGConfig::vgg11(), num_classes, batch_norm);
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained VGG11 weights not available. "
-            "To use pretrained weights:\n"
-            "  1. Download ImageNet pretrained weights for VGG11\n"
-            "  2. Convert to Tenzor checkpoint format\n"
-            "  3. Load using: nn::ModelCheckpoint().load_model(\"vgg11.pt\")\n"
-            "For training from scratch, set pretrained=false"
-        );
+        std::string key = std::string(batch_norm ? "VGG11_bn" : "VGG11");
+        // Lower-case to match registry naming convention (vgg11, vgg11_bn, ...).
+        for (auto& c : key) c = static_cast<char>(std::tolower(c));
+        auto _path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -163,11 +162,11 @@ auto vgg13(int64_t num_classes, bool batch_norm, bool pretrained) -> std::shared
     auto model = std::make_shared<VGG>(VGGConfig::vgg13(), num_classes, batch_norm);
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained VGG13 weights not available. "
-            "To use pretrained weights, convert from PyTorch/TensorFlow and load using ModelCheckpoint. "
-            "For training from scratch, set pretrained=false"
-        );
+        std::string key = std::string(batch_norm ? "VGG13_bn" : "VGG13");
+        // Lower-case to match registry naming convention (vgg11, vgg11_bn, ...).
+        for (auto& c : key) c = static_cast<char>(std::tolower(c));
+        auto _path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -177,11 +176,11 @@ auto vgg16(int64_t num_classes, bool batch_norm, bool pretrained) -> std::shared
     auto model = std::make_shared<VGG>(VGGConfig::vgg16(), num_classes, batch_norm);
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained VGG16 weights not available. "
-            "To use pretrained weights, convert from PyTorch/TensorFlow and load using ModelCheckpoint. "
-            "For training from scratch, set pretrained=false"
-        );
+        std::string key = std::string(batch_norm ? "VGG16_bn" : "VGG16");
+        // Lower-case to match registry naming convention (vgg11, vgg11_bn, ...).
+        for (auto& c : key) c = static_cast<char>(std::tolower(c));
+        auto _path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -191,11 +190,11 @@ auto vgg19(int64_t num_classes, bool batch_norm, bool pretrained) -> std::shared
     auto model = std::make_shared<VGG>(VGGConfig::vgg19(), num_classes, batch_norm);
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained VGG19 weights not available. "
-            "To use pretrained weights, convert from PyTorch/TensorFlow and load using ModelCheckpoint. "
-            "For training from scratch, set pretrained=false"
-        );
+        std::string key = std::string(batch_norm ? "VGG19_bn" : "VGG19");
+        // Lower-case to match registry naming convention (vgg11, vgg11_bn, ...).
+        for (auto& c : key) c = static_cast<char>(std::tolower(c));
+        auto _path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;

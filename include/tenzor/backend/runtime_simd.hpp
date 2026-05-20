@@ -41,7 +41,7 @@ enum class SIMDLevel : uint8_t {
     AVX512VNNI = 7,   ///< AVX-512 VNNI (int8/int16 dot product)
     AVX512BF16 = 8,   ///< AVX-512 BF16 (bfloat16 conversion/dot product)
     NEON       = 20,  ///< ARM NEON (128-bit SIMD, mandatory in AArch64)
-    SVE        = 21,  ///< ARM SVE (scalable vector, stub for future use)
+    SVE        = 21,  ///< ARM SVE (scalable vector, detected via HWCAP_SVE on AArch64 Linux)
 };
 
 /**

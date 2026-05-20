@@ -17,6 +17,7 @@
 #include "../../include/tenzor/models/unet.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -192,7 +193,7 @@ TEST_P(UNetMultiDTypeTest, GradientFlowThroughSkips) {
     loss.backward();
 
     // Input should have gradients (gradient flows through skip connections)
-    EXPECT_TRUE(images.grad().has_value());
+    EXPECT_GRAD_FLOWS(images);
 
     // All parameters should have gradients
     auto params = model->parameters();
@@ -446,8 +447,8 @@ TEST_P(UNetMultiDTypeTest, UpsamplingWithGradients) {
     loss_t.backward();
 
     // Both should propagate gradients
-    EXPECT_TRUE(images_b.grad().has_value());
-    EXPECT_TRUE(images_t.grad().has_value());
+    EXPECT_GRAD_FLOWS(images_b);
+    EXPECT_GRAD_FLOWS(images_t);
 }
 
 // ============================================================================
@@ -465,7 +466,7 @@ TEST_P(UNetMultiDTypeTest, TrainingMode) {
     loss.backward();
 
     // Should compute gradients in training mode
-    EXPECT_TRUE(images.grad().has_value());
+    EXPECT_GRAD_FLOWS(images);
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
@@ -501,7 +502,7 @@ TEST_P(UNetMultiDTypeTest, ModeToggling) {
     loss.backward();
 
     // Should have gradients in train mode
-    EXPECT_TRUE(images_train.grad().has_value());
+    EXPECT_GRAD_FLOWS(images_train);
 }
 
 // ============================================================================

@@ -10,6 +10,8 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -88,11 +90,8 @@ TEST_F(VulkanOpsTest, MaxPool2dForward) {
     attrs.set(AttrKey::StrideW, 2);
     attrs.set(AttrKey::PaddingH, 0);
     attrs.set(AttrKey::PaddingW, 0);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("maxpool2d_forward", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::MaxPool2dForward, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     ASSERT_EQ(outputs.size(), 2);  // output and indices
     auto output = outputs[0].to(cpu_device);
@@ -126,11 +125,8 @@ TEST_F(VulkanOpsTest, AvgPool2dForward) {
     attrs.set(AttrKey::KernelSizeW, 2);
     attrs.set(AttrKey::StrideH, 2);
     attrs.set(AttrKey::StrideW, 2);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("avgpool2d_forward", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::AvgPool2dForward, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -159,11 +155,8 @@ TEST_F(VulkanOpsTest, AdaptiveMaxPool2d) {
     OpAttributes attrs;
     attrs.set(AttrKey::OutputSizeH, 2);
     attrs.set(AttrKey::OutputSizeW, 2);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("adaptive_maxpool2d", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::AdaptiveMaxPool2d, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -186,11 +179,8 @@ TEST_F(VulkanOpsTest, AdaptiveAvgPool2d) {
     OpAttributes attrs;
     attrs.set(AttrKey::OutputSizeH, 2);
     attrs.set(AttrKey::OutputSizeW, 2);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("adaptive_avgpool2d", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::AdaptiveAvgPool2d, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -216,11 +206,8 @@ TEST_F(VulkanOpsTest, Softmax) {
 
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, -1);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("softmax", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Softmax, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto out_data = output.data<float>();
@@ -250,11 +237,8 @@ TEST_F(VulkanOpsTest, LogSoftmax) {
 
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, -1);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("log_softmax", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::LogSoftmax, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto out_data = output.data<float>();
@@ -280,11 +264,8 @@ TEST_F(VulkanOpsTest, Argmax) {
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, 1);
     attrs.set(AttrKey::Keepdim, false);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("argmax", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::ArgMax, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     ASSERT_EQ(output.dtype(), DType::Int64);
@@ -305,11 +286,8 @@ TEST_F(VulkanOpsTest, Argmin) {
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, 1);
     attrs.set(AttrKey::Keepdim, false);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("argmin", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::ArgMin, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     ASSERT_EQ(output.dtype(), DType::Int64);
@@ -330,11 +308,8 @@ TEST_F(VulkanOpsTest, Variance) {
     attrs.set(AttrKey::Dim, 1);
     attrs.set(AttrKey::Unbiased, false);
     attrs.set(AttrKey::Keepdim, false);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("var", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Var, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto out_data = output.data<float>();
@@ -354,11 +329,8 @@ TEST_F(VulkanOpsTest, Std) {
     attrs.set(AttrKey::Dim, 1);
     attrs.set(AttrKey::Unbiased, false);
     attrs.set(AttrKey::Keepdim, false);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("std", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Std, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto out_data = output.data<float>();
@@ -377,11 +349,8 @@ TEST_F(VulkanOpsTest, Prod) {
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, 1);
     attrs.set(AttrKey::Keepdim, false);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input};
-    auto outputs = backend->dispatch("prod", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Prod, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto out_data = output.data<float>();
@@ -413,11 +382,8 @@ TEST_F(VulkanOpsTest, Embedding) {
 
     OpAttributes attrs;
     attrs.set(AttrKey::PaddingIdx, static_cast<int64_t>(-1));
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {weight, indices};
-    auto outputs = backend->dispatch("embedding", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Embedding, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
 
@@ -449,11 +415,8 @@ TEST_F(VulkanOpsTest, Gather) {
 
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, static_cast<int64_t>(1));
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input, indices};
-    auto outputs = backend->dispatch("gather", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Gather, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
     auto output_shape = output.shape();
@@ -483,11 +446,8 @@ TEST_F(VulkanOpsTest, IndexSelect) {
 
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, 0);
-
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
     std::vector<Tensor> inputs_vec = {input, indices};
-    auto outputs = backend->dispatch("index_select", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::IndexSelect, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
 
     auto output = outputs[0].to(cpu_device);
 
@@ -525,12 +485,11 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeConv2d) {
     attrs.set(AttrKey::Stride, 1);
     attrs.set(AttrKey::Padding, 1);
 
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
-
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<Tensor> inputs_vec = {input, weight};
-    auto outputs = backend->dispatch("conv2d_forward", inputs_vec, attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::Conv2dForward, tenzor::Device::Type::Vulkan, inputs_vec, attrs);
+    auto& registry_for_sync = backend_registry();
+    auto* backend = registry_for_sync.get_backend("vulkan");
     backend->synchronize(vulkan_device.index);
     auto end = std::chrono::high_resolution_clock::now();
 
@@ -543,13 +502,13 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeMatmul) {
     Tensor a({1024, 1024}, DType::Float32, vulkan_device);
     Tensor b({1024, 1024}, DType::Float32, vulkan_device);
 
-    auto& registry = backend_registry();
-    auto* backend = registry.get_backend("vulkan");
-
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<Tensor> inputs_vec = {a, b};
     OpAttributes empty_attrs;
-    auto outputs = backend->dispatch("matmul", inputs_vec, empty_attrs);
+    auto outputs = tenzor::dispatch_to_device(tenzor::OpId::MatMul,
+        tenzor::Device::Type::Vulkan, inputs_vec, empty_attrs);
+    auto& registry = backend_registry();
+    auto* backend = registry.get_backend("vulkan");
     backend->synchronize(vulkan_device.index);
     auto end = std::chrono::high_resolution_clock::now();
 

@@ -28,6 +28,7 @@
 #include "half_operators.hpp"
 #include "tenzor/utils/log.hpp"
 #include <cstdlib>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 namespace tenzor {
 namespace cpu {
@@ -658,7 +659,7 @@ static void batchnorm_forward_affine_simd_f32(
 #endif
 
     // Process by batch and channel
-    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > 10000)
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > ::tenzor::OmpThresholds::medium())
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             __m256 vscale = _mm256_set1_ps(scale[c]);
@@ -720,7 +721,7 @@ void batchnorm_forward_affine_impl(const T* input,
 
     // Process by batch and channel for better cache locality
     // Each (n, c) slice is contiguous in memory
-    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > 10000)
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > ::tenzor::OmpThresholds::medium())
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             T sc = scale[c];

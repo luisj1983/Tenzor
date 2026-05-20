@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/swin_transformer.hpp"
+#include "tenzor/models/hub.hpp"
 #include "tenzor/nn/layers/drop_path.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/checkpoint.hpp"
@@ -625,14 +626,8 @@ auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained, bool use_
     );
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained Swin Transformer weights not available. "
-            "To use pretrained weights:\n"
-            "  1. Download weights from a pretrained source\n"
-            "  2. Convert to Tenzor checkpoint format if needed\n"
-            "  3. Load using: model->load_pretrained(\"path/to/weights.pt\")\n"
-            "For training from scratch, set pretrained=false"
-        );
+        auto _path = ModelHub::download_pretrained_safetensors("swin_t");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -661,7 +656,8 @@ auto swin_small(int64_t num_classes, int64_t img_size, bool pretrained, bool use
     );
 
     if (pretrained) {
-        throw std::runtime_error("Pretrained weights not yet available");
+        auto _path = ModelHub::download_pretrained_safetensors("swin_s");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -690,7 +686,8 @@ auto swin_base(int64_t num_classes, int64_t img_size, bool pretrained, bool use_
     );
 
     if (pretrained) {
-        throw std::runtime_error("Pretrained weights not yet available");
+        auto _path = ModelHub::download_pretrained_safetensors("swin_b");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -719,7 +716,8 @@ auto swin_large(int64_t num_classes, int64_t img_size, bool pretrained, bool use
     );
 
     if (pretrained) {
-        throw std::runtime_error("Pretrained weights not yet available");
+        auto _path = ModelHub::download_pretrained_safetensors("swin_large");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;

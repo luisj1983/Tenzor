@@ -9,6 +9,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include "multi_backend_dtype_fixture.hpp"
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -22,7 +23,7 @@ TEST_P(KLDivManualMultiDTypeTest, SimpleSubtract) {
     auto loss = tenzor::mean(c);
     loss.backward();
 
-    EXPECT_TRUE(a.grad().has_value());
+    EXPECT_GRAD_FLOWS(a);
 }
 
 TEST_P(KLDivManualMultiDTypeTest, KLDivForwardShape) {
@@ -50,7 +51,7 @@ TEST_P(KLDivManualMultiDTypeTest, KLDivGradientFlow) {
     auto loss = kl_loss.forward(log_probs, targets);
     loss.backward();
 
-    EXPECT_TRUE(log_probs.grad().has_value());
+    EXPECT_GRAD_FLOWS(log_probs);
     expectShape(log_probs.grad().value(), {2, 5});
 }
 

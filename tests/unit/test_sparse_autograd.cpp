@@ -9,6 +9,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include <mutex>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -60,7 +61,7 @@ TEST(SparseAutograd, SpMMBackwardGradExists) {
     loss.backward();
 
     // Dense input should have gradient
-    EXPECT_TRUE(dense.grad().has_value());
+    EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
         auto& grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
@@ -84,7 +85,7 @@ TEST(SparseAutograd, SpMVBackwardGradExists) {
     auto loss = loss_fn(result, target);
     loss.backward();
 
-    EXPECT_TRUE(vec.grad().has_value());
+    EXPECT_GRAD_FLOWS(vec);
     if (vec.grad().has_value()) {
         auto& grad_tensor = vec.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
@@ -108,7 +109,7 @@ TEST(SparseAutograd, SparseAddBackwardGradExists) {
     auto loss = loss_fn(result, target);
     loss.backward();
 
-    EXPECT_TRUE(dense.grad().has_value());
+    EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
         auto& grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 3);

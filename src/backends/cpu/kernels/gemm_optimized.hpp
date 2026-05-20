@@ -420,7 +420,7 @@ inline void microkernel_scalar(
 // ============================================================================
 
 // Adaptive OpenMP thresholds based on operation type.
-// Driven by tenzor::OmpThresholds::matmul() (see tenzor/backend/omp_thresholds.hpp).
+// Driven by ::tenzor::OmpThresholds::matmul() (see tenzor/backend/omp_thresholds.hpp).
 #define OMP_THRESHOLD_GEMM (::tenzor::OmpThresholds::matmul())
 
 /**

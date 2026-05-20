@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/faster_rcnn.hpp"
+#include "tenzor/models/hub.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
@@ -274,10 +275,10 @@ auto faster_rcnn_resnet50(
     const std::string& pretrained_backbone)
     -> std::shared_ptr<FasterRCNN> {
 
-    // Create ResNet-50 backbone
-    // For detection, we typically use features before the final
-    // classification layer (layer4 output)
-    auto resnet = resnet50(1000, pretrained);
+    // When loading full-model COCO weights below, the backbone is overwritten.
+    // Start with random backbone in that case; only set pretrained=true here
+    // if no full-model weights will be loaded.
+    auto resnet = resnet50(1000, /*pretrained=*/false);
 
     if (!pretrained_backbone.empty()) {
         resnet->load_pretrained(pretrained_backbone);
@@ -308,6 +309,11 @@ auto faster_rcnn_resnet50(
         100    // roi_detections_per_img
     );
 
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("faster_rcnn_resnet50_fpn");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
+
     return model;
 }
 
@@ -317,7 +323,8 @@ auto faster_rcnn_resnet101(
     const std::string& pretrained_backbone)
     -> std::shared_ptr<FasterRCNN> {
 
-    // Create ResNet-101 backbone
+    // No full-model COCO weights for ResNet-101 variant in the registry —
+    // backbone-only ImageNet pretraining is the canonical path here.
     auto resnet = resnet101(1000, pretrained);
 
     if (!pretrained_backbone.empty()) {

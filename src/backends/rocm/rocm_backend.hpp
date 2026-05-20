@@ -173,10 +173,7 @@ public:
     // Memory fill
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override;
 
-    // Kernel dispatch
-    auto dispatch(const std::string& op_name,
-                 std::span<const Tensor> inputs,
-                 const OpAttributes& attrs) -> std::vector<Tensor> override;
+    // Legacy string-keyed dispatch removed (audit Phase C).
 
     // ROCm-specific utilities
 

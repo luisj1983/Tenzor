@@ -19,6 +19,7 @@
 #include <tenzor/nn/detection/anchors.hpp>
 #include <tenzor/ops/detection.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -98,7 +99,7 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignGradientFlow) {
     loss.backward();
 
     // Verify gradient exists and has correct dtype
-    EXPECT_TRUE(features.grad().has_value());
+    EXPECT_GRAD_FLOWS(features);
     EXPECT_EQ(features.grad()->dtype(), dtype());
 }
 

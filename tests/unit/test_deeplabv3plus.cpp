@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/deeplabv3plus.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -35,7 +36,7 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet50GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value());
+    EXPECT_GRAD_FLOWS(images);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -59,7 +60,7 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet101GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value());
+    EXPECT_GRAD_FLOWS(images);
 }
 
 TEST_F(DeepLabV3PlusTest, DeepLabV3PlusMobileNetForwardShape) {

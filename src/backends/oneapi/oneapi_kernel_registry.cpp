@@ -2397,13 +2397,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto ks = attrs.get_int_list(AttrKey::KernelSize);
-            auto st = attrs.get_int_list(AttrKey::Stride);
-            auto pd = attrs.get_int_list(AttrKey::Padding);
-            // Expand single value to 3-element vector for isotropic pooling
-            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
-            if (st.size() == 1) st = {st[0], st[0], st[0]};
-            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
+            // Per-axis with scalar fallback (matches the canonical pattern in
+            // include/tenzor/backend/attr_macros.hpp). The nn-layer packs
+            // KernelSizeD/H/W when ctor was called with asymmetric tuples;
+            // single-value MaxPool3d packs only KernelSize as scalar.
+            const auto k = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+            const auto s = ::tenzor::backend::attrs::read_3d(attrs,
+                AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_3d(attrs);
+            std::vector<int64_t> ks{k[0], k[1], k[2]};
+            std::vector<int64_t> st{s[0], s[1], s[2]};
+            std::vector<int64_t> pd{p[0], p[1], p[2]};
             return oneapi::maxpool3d_forward(inputs[0], ks, st, pd, get_q(inputs));
         });
 
@@ -2415,23 +2419,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AvgPool3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto ks = attrs.get_int_list(AttrKey::KernelSize);
-            auto st = attrs.get_int_list(AttrKey::Stride);
-            auto pd = attrs.get_int_list(AttrKey::Padding);
-            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
-            if (st.size() == 1) st = {st[0], st[0], st[0]};
-            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
+            const auto k = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+            const auto s = ::tenzor::backend::attrs::read_3d(attrs,
+                AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_3d(attrs);
+            std::vector<int64_t> ks{k[0], k[1], k[2]};
+            std::vector<int64_t> st{s[0], s[1], s[2]};
+            std::vector<int64_t> pd{p[0], p[1], p[2]};
             return {oneapi::avgpool3d_forward(inputs[0], ks, st, pd, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AvgPool3dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto ks = attrs.get_int_list(AttrKey::KernelSize);
-            auto st = attrs.get_int_list(AttrKey::Stride);
-            auto pd = attrs.get_int_list(AttrKey::Padding);
-            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
-            if (st.size() == 1) st = {st[0], st[0], st[0]};
-            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
+            const auto k = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+            const auto s = ::tenzor::backend::attrs::read_3d(attrs,
+                AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_3d(attrs);
+            std::vector<int64_t> ks{k[0], k[1], k[2]};
+            std::vector<int64_t> st{s[0], s[1], s[2]};
+            std::vector<int64_t> pd{p[0], p[1], p[2]};
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
             return {oneapi::avgpool3d_backward(inputs[0], ks, st, pd, input_shape, get_q(inputs))};
         });

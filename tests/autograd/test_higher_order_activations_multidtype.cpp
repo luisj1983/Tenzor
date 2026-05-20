@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <functional>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -83,14 +84,14 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, SigmoidDoubleBackwardNonZero) {
 
     // First backward with create_graph=true so grad_x carries a grad_fn.
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_x_t = x.grad().value();
 
     auto grad_x_var = Variable(grad_x_t, true);
     auto grad_norm = tenzor::sum(grad_x_var * grad_x_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_x_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_x_var);
     auto second_grad = grad_x_var.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
     const float* gdata = second_grad.data<float>();
 
@@ -117,13 +118,13 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, TanhDoubleBackwardNonZero) {
     auto loss = tenzor::sum(y);
     loss.backward(std::nullopt, false, true);
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_x_t = x.grad().value();
     auto grad_x_var = Variable(grad_x_t, true);
     auto grad_norm = tenzor::sum(grad_x_var * grad_x_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_x_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_x_var);
     auto second_grad = grad_x_var.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
     const float* gdata = second_grad.data<float>();
     double total = 0.0;
@@ -146,12 +147,12 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, SigmoidChainDoubleBackward) {
     auto loss = tenzor::sum(y);
     loss.backward(std::nullopt, false, true);
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_var);
     auto second = grad_var.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
     double total = 0.0;
     const float* p = second.data<float>();

@@ -899,6 +899,149 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                           get_timm_safetensors_url(timm_id)});
     }
 
+    // ResNeXt / Wide ResNet — torchvision URLs + timm safetensors mirrors.
+    models.push_back({std::string("resnext50_32x4d"),
+                      get_pytorch_model_url("resnext50_32x4d-7cdf4587"),
+                      std::string(""), 0, std::string("ResNeXt-50 32x4d"),
+                      get_timm_safetensors_url("resnext50_32x4d.a1h_in1k")});
+    models.push_back({std::string("resnext101_32x8d"),
+                      get_pytorch_model_url("resnext101_32x8d-8ba56ff5"),
+                      std::string(""), 0, std::string("ResNeXt-101 32x8d"),
+                      get_timm_safetensors_url("resnext101_32x8d.tv_in1k")});
+    models.push_back({std::string("wide_resnet50_2"),
+                      get_pytorch_model_url("wide_resnet50_2-95faca4d"),
+                      std::string(""), 0, std::string("Wide ResNet 50-2"),
+                      get_timm_safetensors_url("wide_resnet50_2.racm_in1k")});
+    models.push_back({std::string("wide_resnet101_2"),
+                      get_pytorch_model_url("wide_resnet101_2-32ee1156"),
+                      std::string(""), 0, std::string("Wide ResNet 101-2"),
+                      get_timm_safetensors_url("wide_resnet101_2.tv2_in1k")});
+
+    // MobileNet V3 — torchvision URLs + timm safetensors mirrors.
+    models.push_back({std::string("mobilenet_v3_large"),
+                      get_pytorch_model_url("mobilenet_v3_large-8738ca79"),
+                      std::string(""), 0, std::string("MobileNet V3 Large"),
+                      get_timm_safetensors_url("mobilenetv3_large_100.ra_in1k")});
+    models.push_back({std::string("mobilenet_v3_small"),
+                      get_pytorch_model_url("mobilenet_v3_small-047dcff4"),
+                      std::string(""), 0, std::string("MobileNet V3 Small"),
+                      get_timm_safetensors_url("mobilenetv3_small_100.lamb_in1k")});
+
+    // ConvNeXt — torchvision URLs + timm safetensors mirrors.
+    models.push_back({std::string("convnext_tiny"),
+                      get_pytorch_model_url("convnext_tiny-983f1562"),
+                      std::string(""), 0, std::string("ConvNeXt-Tiny"),
+                      get_timm_safetensors_url("convnext_tiny.fb_in1k")});
+    models.push_back({std::string("convnext_small"),
+                      get_pytorch_model_url("convnext_small-0c510722"),
+                      std::string(""), 0, std::string("ConvNeXt-Small"),
+                      get_timm_safetensors_url("convnext_small.fb_in1k")});
+    models.push_back({std::string("convnext_base"),
+                      get_pytorch_model_url("convnext_base-6075fbad"),
+                      std::string(""), 0, std::string("ConvNeXt-Base"),
+                      get_timm_safetensors_url("convnext_base.fb_in1k")});
+    models.push_back({std::string("convnext_large"),
+                      get_pytorch_model_url("convnext_large-ea097f82"),
+                      std::string(""), 0, std::string("ConvNeXt-Large"),
+                      get_timm_safetensors_url("convnext_large.fb_in1k")});
+
+    // VGG batch-norm variants — torchvision URLs.
+    models.push_back({std::string("vgg11_bn"),
+                      get_pytorch_model_url("vgg11_bn-6002323d"),
+                      std::string(""), 0, std::string("VGG-11 (BN)"), std::string("")});
+    models.push_back({std::string("vgg13_bn"),
+                      get_pytorch_model_url("vgg13_bn-abd245e5"),
+                      std::string(""), 0, std::string("VGG-13 (BN)"), std::string("")});
+    models.push_back({std::string("vgg16_bn"),
+                      get_pytorch_model_url("vgg16_bn-6c64b313"),
+                      std::string(""), 0, std::string("VGG-16 (BN)"), std::string("")});
+    models.push_back({std::string("vgg19_bn"),
+                      get_pytorch_model_url("vgg19_bn-c79401a0"),
+                      std::string(""), 0, std::string("VGG-19 (BN)"), std::string("")});
+
+    // AlexNet / GoogLeNet / Inception V3 — torchvision URLs.
+    models.push_back({std::string("alexnet"),
+                      get_pytorch_model_url("alexnet-owt-7be5be79"),
+                      std::string(""), 0, std::string("AlexNet"), std::string("")});
+    models.push_back({std::string("googlenet"),
+                      get_pytorch_model_url("googlenet-1378be20"),
+                      std::string(""), 0, std::string("GoogLeNet"), std::string("")});
+    models.push_back({std::string("inception_v3"),
+                      get_pytorch_model_url("inception_v3_google-0cc3c7bd"),
+                      std::string(""), 0, std::string("Inception V3"), std::string("")});
+
+    // Swin Transformer V1 — torchvision URLs.
+    models.push_back({std::string("swin_t"),
+                      get_pytorch_model_url("swin_t-704ceda3"),
+                      std::string(""), 0, std::string("Swin Transformer Tiny"),
+                      get_timm_safetensors_url("swin_tiny_patch4_window7_224.ms_in1k")});
+    models.push_back({std::string("swin_s"),
+                      get_pytorch_model_url("swin_s-5e29d889"),
+                      std::string(""), 0, std::string("Swin Transformer Small"),
+                      get_timm_safetensors_url("swin_small_patch4_window7_224.ms_in1k")});
+    models.push_back({std::string("swin_b"),
+                      get_pytorch_model_url("swin_b-68c6b09e"),
+                      std::string(""), 0, std::string("Swin Transformer Base"),
+                      get_timm_safetensors_url("swin_base_patch4_window7_224.ms_in1k")});
+    models.push_back({std::string("swin_large"),
+                      std::string(""), std::string(""), 0,
+                      std::string("Swin Transformer Large"),
+                      get_timm_safetensors_url("swin_large_patch4_window7_224.ms_in22k_ft_in1k")});
+
+    // Detection & segmentation — full-model COCO weights (RPN + ROI head + backbone).
+    models.push_back({std::string("mask_rcnn_resnet50_fpn"),
+                      get_pytorch_model_url("maskrcnn_resnet50_fpn_coco-bf2d0c1e"),
+                      std::string(""), 0, std::string("Mask R-CNN (ResNet-50 FPN, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("faster_rcnn_resnet50_fpn"),
+                      get_pytorch_model_url("fasterrcnn_resnet50_fpn_coco-258fb6c6"),
+                      std::string(""), 0, std::string("Faster R-CNN (ResNet-50 FPN, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("retinanet_resnet50_fpn"),
+                      get_pytorch_model_url("retinanet_resnet50_fpn_coco-eeacb38b"),
+                      std::string(""), 0, std::string("RetinaNet (ResNet-50 FPN, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("deeplabv3_resnet50"),
+                      get_pytorch_model_url("deeplabv3_resnet50_coco-cd0a2569"),
+                      std::string(""), 0, std::string("DeepLabV3 (ResNet-50, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("deeplabv3_resnet101"),
+                      get_pytorch_model_url("deeplabv3_resnet101_coco-586e9e4e"),
+                      std::string(""), 0, std::string("DeepLabV3 (ResNet-101, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("fcn_resnet50"),
+                      get_pytorch_model_url("fcn_resnet50_coco-1167a1af"),
+                      std::string(""), 0, std::string("FCN (ResNet-50, COCO)"),
+                      std::string("")});
+    models.push_back({std::string("fcn_resnet101"),
+                      get_pytorch_model_url("fcn_resnet101_coco-7ecb50ca"),
+                      std::string(""), 0, std::string("FCN (ResNet-101, COCO)"),
+                      std::string("")});
+
+    // YOLO — Ultralytics release URLs (.pt PyTorch pickle archives).
+    auto ultralytics_url = [](const char* repo, const char* version, const char* fname) {
+        return std::string("https://github.com/ultralytics/") + repo +
+               "/releases/download/" + version + "/" + fname;
+    };
+    models.push_back({std::string("yolov3"),
+                      ultralytics_url("yolov3", "v9.6.0", "yolov3.pt"),
+                      std::string(""), 0, std::string("YOLOv3 (Ultralytics)"), std::string("")});
+    models.push_back({std::string("yolov5n"),
+                      ultralytics_url("yolov5", "v7.0", "yolov5n.pt"),
+                      std::string(""), 0, std::string("YOLOv5n (Ultralytics)"), std::string("")});
+    models.push_back({std::string("yolov5s"),
+                      ultralytics_url("yolov5", "v7.0", "yolov5s.pt"),
+                      std::string(""), 0, std::string("YOLOv5s (Ultralytics)"), std::string("")});
+    models.push_back({std::string("yolov5m"),
+                      ultralytics_url("yolov5", "v7.0", "yolov5m.pt"),
+                      std::string(""), 0, std::string("YOLOv5m (Ultralytics)"), std::string("")});
+    models.push_back({std::string("yolov5l"),
+                      ultralytics_url("yolov5", "v7.0", "yolov5l.pt"),
+                      std::string(""), 0, std::string("YOLOv5l (Ultralytics)"), std::string("")});
+    models.push_back({std::string("yolov5x"),
+                      ultralytics_url("yolov5", "v7.0", "yolov5x.pt"),
+                      std::string(""), 0, std::string("YOLOv5x (Ultralytics)"), std::string("")});
+
     // Directly add to registry without locking (already locked by caller)
     for (const auto& model : models) {
         registry[model.name] = model;

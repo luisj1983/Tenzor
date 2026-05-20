@@ -19,6 +19,7 @@
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -98,7 +99,7 @@ TEST_F(C1Test, HigherOrderGraphBuiltWhenPGProvided) {
     Variable grad_var = input.grad_variable().value();
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 
     // Sanity: the all-reduce was actually called (forward + backward).
     EXPECT_GE(pg->all_reduce_calls, 1);

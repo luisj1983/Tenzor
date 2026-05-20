@@ -17,6 +17,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -52,7 +53,7 @@ TEST_P(HigherOrderNNTest, Conv2d_DoubleBackward) {
     // The first-backward graph should be followable: back-propagating
     // through grad_norm touches input via the chain that backward_with_variables
     // built, so input ends up with a second-order gradient accumulated on it.
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -94,7 +95,7 @@ TEST_P(HigherOrderNNTest, LSTM_InnerLoop_Gradient) {
     Variable grad_var = input.grad_variable().value();
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -128,7 +129,7 @@ TEST_P(HigherOrderNNTest, GRU_InnerLoop_Gradient) {
     Variable grad_var = input.grad_variable().value();
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -155,7 +156,7 @@ TEST_P(HigherOrderNNTest, SyncBatchNorm_DoubleBackward) {
         Variable grad_var = input.grad_variable().value();
         auto grad_norm = tenzor::sum(grad_var * grad_var);
         grad_norm.backward();
-        EXPECT_TRUE(input.grad().has_value());
+        EXPECT_GRAD_FLOWS(input);
     } catch (const std::runtime_error& e) {
         // Backend not implementing BN at all on this device should skip.
         GTEST_SKIP() << "SyncBatchNorm unavailable: " << e.what();

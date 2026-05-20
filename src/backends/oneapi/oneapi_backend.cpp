@@ -855,12 +855,7 @@ public:
         }
     }
 
-    auto dispatch(const std::string& op_name,
-                 std::span<const Tensor> inputs,
-                 const OpAttributes& attrs) -> std::vector<Tensor> override {
-        throw std::runtime_error("OneAPIBackend::dispatch(string): operation '" + op_name +
-            "' not available via legacy string dispatch. Use OpId-based dispatch instead.");
-    }
+    // Legacy string-keyed dispatch removed (audit Phase C).
 
 private:
     struct OneAPIDeviceData {

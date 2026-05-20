@@ -7,6 +7,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
 #include "multi_backend_dtype_fixture.hpp"
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -60,8 +61,8 @@ TEST_P(RNNCellsMultiDTypeTest, RNNCell_GradientFlow) {
     auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
-    EXPECT_TRUE(hx.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(hx);
 }
 
 TEST_P(RNNCellsMultiDTypeTest, RNNCell_NoBias) {
@@ -119,8 +120,8 @@ TEST_P(RNNCellsMultiDTypeTest, GRUCell_GradientFlow) {
     auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
-    EXPECT_TRUE(hx.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(hx);
 }
 
 TEST_P(RNNCellsMultiDTypeTest, GRUCell_NoBias) {

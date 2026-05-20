@@ -15,6 +15,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include <gtest/gtest.h>
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -202,7 +203,7 @@ TEST_P(DeformableConv2dTest, BackwardGradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad_cpu = input.grad().value().to(Device::cpu());
     auto* grad_data = grad_cpu.data<float>();
     float grad_sum = 0.0f;
@@ -268,17 +269,17 @@ TEST_P(DeformableConv2dTest, BackwardParityVsCPU) {
     EXPECT_LT(diff(out_cpu.tensor(), out_dev.tensor()), 1e-4f)
         << "DeformableConv2d forward diverges";
 
-    ASSERT_TRUE(in_cpu.grad().has_value());
-    ASSERT_TRUE(in_dev.grad().has_value());
+    EXPECT_GRAD_FLOWS(in_cpu);
+    EXPECT_GRAD_FLOWS(in_dev);
     EXPECT_LT(diff(in_cpu.grad().value(), in_dev.grad().value()), 1e-3f)
         << "input gradient diverges";
 
-    ASSERT_TRUE(off_cpu.grad().has_value());
-    ASSERT_TRUE(off_dev.grad().has_value());
+    EXPECT_GRAD_FLOWS(off_cpu);
+    EXPECT_GRAD_FLOWS(off_dev);
     EXPECT_LT(diff(off_cpu.grad().value(), off_dev.grad().value()), 1e-3f)
         << "offset gradient diverges";
 
-    ASSERT_TRUE(msk_cpu.grad().has_value());
+    EXPECT_GRAD_FLOWS(msk_cpu);
     ASSERT_TRUE(msk_dev.grad().has_value());
     EXPECT_LT(diff(msk_cpu.grad().value(), msk_dev.grad().value()), 1e-3f)
         << "mask gradient diverges";

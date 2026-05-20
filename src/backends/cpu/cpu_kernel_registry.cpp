@@ -10,6 +10,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/nn/layers/flex_attention.hpp"  // Audit J12: find_registered_score_mod
@@ -23,6 +24,7 @@
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
+#include <array>
 #include <cstdlib>
 #include <climits>
 #include <cstdint>
@@ -347,10 +349,21 @@ namespace cpu {
     auto conv_transpose3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t opD, int64_t opH, int64_t opW, int64_t dD, int64_t dH, int64_t dW, int64_t groups) -> Tensor;
 
     // Pooling
-    auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation = 1) -> std::pair<Tensor, Tensor>;
+    auto maxpool2d_forward_kernel(const Tensor& input,
+                                   std::array<int64_t, 2> kernel_size,
+                                   std::array<int64_t, 2> stride,
+                                   std::array<int64_t, 2> padding,
+                                   std::array<int64_t, 2> dilation) -> std::pair<Tensor, Tensor>;
     auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
-    auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
-    auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
+    auto avgpool2d_forward_kernel(const Tensor& input,
+                                   std::array<int64_t, 2> kernel_size,
+                                   std::array<int64_t, 2> stride,
+                                   std::array<int64_t, 2> padding) -> Tensor;
+    auto avgpool2d_backward_kernel(const Tensor& grad_output,
+                                    const std::vector<int64_t>& input_shape,
+                                    std::array<int64_t, 2> kernel_size,
+                                    std::array<int64_t, 2> stride,
+                                    std::array<int64_t, 2> padding) -> Tensor;
     auto adaptive_avgpool2d_kernel(const Tensor& input, int64_t output_h, int64_t output_w) -> Tensor;
     auto adaptive_avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape) -> Tensor;
     auto adaptive_maxpool2d_kernel(const Tensor& input, int64_t output_h, int64_t output_w) -> std::pair<Tensor, Tensor>;
@@ -367,10 +380,21 @@ namespace cpu {
     auto adaptive_maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
 
     // 3D Pooling
-    auto maxpool3d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> std::pair<Tensor, Tensor>;
+    auto maxpool3d_forward_kernel(const Tensor& input,
+                                   std::array<int64_t, 3> kernel_size,
+                                   std::array<int64_t, 3> stride,
+                                   std::array<int64_t, 3> padding,
+                                   std::array<int64_t, 3> dilation) -> std::pair<Tensor, Tensor>;
     auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
-    auto avgpool3d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
-    auto avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
+    auto avgpool3d_forward_kernel(const Tensor& input,
+                                   std::array<int64_t, 3> kernel_size,
+                                   std::array<int64_t, 3> stride,
+                                   std::array<int64_t, 3> padding) -> Tensor;
+    auto avgpool3d_backward_kernel(const Tensor& grad_output,
+                                    const std::vector<int64_t>& input_shape,
+                                    std::array<int64_t, 3> kernel_size,
+                                    std::array<int64_t, 3> stride,
+                                    std::array<int64_t, 3> padding) -> Tensor;
     auto adaptive_maxpool3d_kernel(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w) -> std::pair<Tensor, Tensor>;
     auto adaptive_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
     auto adaptive_avgpool3d_kernel(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w) -> Tensor;
@@ -1887,10 +1911,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // Pooling Operations
     // =========================================================================
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_2d(attrs);
         auto [output, indices] = cpu::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation);
         return std::vector<Tensor>{output, indices};
     });
@@ -1901,17 +1926,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         return cpu::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding);
     });
 
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         return cpu::avgpool2d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding);
     });
 
@@ -1995,10 +2022,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // 3D Pooling Operations
     // =========================================================================
     table.register_kernel(OpId::MaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        auto [output, indices] = cpu::maxpool3d_forward_kernel(inputs[0], kernel_size, stride, padding);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
+            AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_3d(attrs);
+        auto [output, indices] = cpu::maxpool3d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -2008,17 +2037,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
+            AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
         return cpu::avgpool3d_forward_kernel(inputs[0], kernel_size, stride, padding);
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
+            AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
         return cpu::avgpool3d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding);
     });
 
@@ -3048,9 +3079,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     };
     table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
 
-    // FlexAttentionBackward shares the FlashAttention backward kernel for the
-    // identity/causal score_mods (they're algebraically the same op). Native
-    // score_mod backward arrives in M8.
+    // FlexAttentionBackward dispatch split:
+    //   - ScoreModId 0/1 (identity/causal): fused FlashAttention backward
+    //     (algebraically identical — same kernel).
+    //   - ScoreModId 2..N (sliding_window, relpos_bias, ALiBi, prefix_lm,
+    //     user-registered): composed backward — forward is replayed with the
+    //     per-ID score-mod mask reapplied, then the softmax chain rule
+    //     produces {dQ, dK, dV}.
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);

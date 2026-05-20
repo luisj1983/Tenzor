@@ -20,6 +20,7 @@
 #include "../multi_backend_dtype_fixture.hpp"
 #include <tuple>
 #include <vector>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -152,7 +153,7 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingGradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = patch_embed->parameters();
@@ -225,7 +226,7 @@ TEST_P(ViTMultiDtypeTest, ViTEmbeddingsGradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -281,7 +282,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16GradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = model->parameters();
@@ -356,7 +357,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch32GradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -405,7 +406,7 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch16GradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -501,7 +502,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 

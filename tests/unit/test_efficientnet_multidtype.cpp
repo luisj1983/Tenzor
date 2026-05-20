@@ -9,6 +9,7 @@
 #include "../../include/tenzor/models/efficientnet.hpp"
 #include <tenzor/nn/offload.hpp>
 #include <memory>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -107,7 +108,7 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationGradientFlow) {
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = se->parameters();
     EXPECT_GT(params.size(), 0);
     for (const auto& param : params) {
@@ -213,7 +214,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 
     auto params = block->parameters();
@@ -261,7 +262,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 
     auto params = model->parameters();
@@ -331,7 +332,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 }
 
@@ -374,7 +375,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB2GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 }
 
@@ -415,7 +416,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 }
 
@@ -471,7 +472,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB5GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 }
 
@@ -528,7 +529,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectDType(input.grad().value());
 }
 

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <string>
 #include <stdexcept>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -106,7 +107,7 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
 
     int64_t spatial_size = H_in * W_in;
 
-    #pragma omp parallel for collapse(2) if(N * H_out * W_out > 4096)
+    #pragma omp parallel for collapse(2) if(N * H_out * W_out > ::tenzor::OmpThresholds::complex())
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t hw = 0; hw < H_out * W_out; ++hw) {
             int64_t h = hw / W_out;

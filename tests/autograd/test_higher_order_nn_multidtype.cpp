@@ -17,6 +17,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -54,7 +55,7 @@ TEST_P(HigherOrderNNMultiDTypeTest, Conv2d_DoubleBackward) {
     Variable grad_var = input.grad_variable().value();
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -87,7 +88,7 @@ TEST_P(HigherOrderNNMultiDTypeTest, LSTM_InnerLoop_Gradient) {
         Variable grad_var = input.grad_variable().value();
         auto grad_norm = tenzor::sum(grad_var * grad_var);
         grad_norm.backward();
-        EXPECT_TRUE(input.grad().has_value());
+        EXPECT_GRAD_FLOWS(input);
     } catch (const std::runtime_error& e) {
         GTEST_SKIP() << "LSTM double backward not supported: " << e.what();
     }
@@ -120,7 +121,7 @@ TEST_P(HigherOrderNNMultiDTypeTest, GRU_InnerLoop_Gradient) {
         Variable grad_var = input.grad_variable().value();
         auto grad_norm = tenzor::sum(grad_var * grad_var);
         grad_norm.backward();
-        EXPECT_TRUE(input.grad().has_value());
+        EXPECT_GRAD_FLOWS(input);
     } catch (const std::runtime_error& e) {
         GTEST_SKIP() << "GRU double backward not supported: " << e.what();
     }

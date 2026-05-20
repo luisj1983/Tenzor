@@ -29,6 +29,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -422,7 +423,7 @@ void sum_along_dim_optimized(
     // Check if reduction dimension is contiguous (stride == 1)
     const bool is_contiguous = (reduce_stride == 1);
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 
@@ -474,7 +475,7 @@ void max_along_dim_optimized(
     const int64_t reduce_stride = info.input_strides[info.reduce_dim];
     const bool is_contiguous = (reduce_stride == 1);
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 
@@ -512,7 +513,7 @@ void min_along_dim_optimized(
     const int64_t reduce_stride = info.input_strides[info.reduce_dim];
     const bool is_contiguous = (reduce_stride == 1);
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 
@@ -549,7 +550,7 @@ void argmax_along_dim_optimized(
     const int64_t reduce_size = info.reduce_size;
     const int64_t reduce_stride = info.input_strides[info.reduce_dim];
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 
@@ -580,7 +581,7 @@ void argmin_along_dim_optimized(
     const int64_t reduce_size = info.reduce_size;
     const int64_t reduce_stride = info.input_strides[info.reduce_dim];
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 
@@ -612,7 +613,7 @@ void mean_along_dim_optimized(
     const T scale = T(1) / static_cast<T>(info.reduce_size);
     const int64_t output_size = info.output_size;
 
-    #pragma omp parallel for if(output_size > 10000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::medium())
     for (int64_t i = 0; i < output_size; ++i) {
         output[i] *= scale;
     }
@@ -633,7 +634,7 @@ void var_along_dim_optimized(
     const int64_t reduce_stride = info.input_strides[info.reduce_dim];
     const T divisor = static_cast<T>(std::max(int64_t(1), reduce_size - correction));
 
-    #pragma omp parallel for if(output_size > 1000)
+    #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
         int64_t base_idx = output_to_input_base(out_idx, info);
 

@@ -19,6 +19,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -69,7 +70,7 @@ TEST_F(Float16RegressionTest, LinearBackward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().dtype(), DType::Float16);
 }
 
@@ -91,7 +92,7 @@ TEST_F(Float16RegressionTest, SoftmaxBackward) {
     auto loss = sum(output);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // Mean backward in Float16
@@ -100,7 +101,7 @@ TEST_F(Float16RegressionTest, MeanBackward) {
     auto output = mean(input);
     output.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // Reshape backward in Float16
@@ -110,7 +111,7 @@ TEST_F(Float16RegressionTest, ReshapeBackward) {
     auto loss = sum(reshaped);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // Permute backward in Float16
@@ -120,7 +121,7 @@ TEST_F(Float16RegressionTest, PermuteBackward) {
     auto loss = sum(permuted);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // Embedding forward/backward in Float16
@@ -159,6 +160,6 @@ TEST_F(Float16RegressionTest, BmmBackward) {
     auto loss = sum(c);
     loss.backward();
 
-    ASSERT_TRUE(a.grad().has_value());
-    ASSERT_TRUE(b.grad().has_value());
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
 }

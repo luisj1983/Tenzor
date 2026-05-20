@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/loss/losses.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -67,7 +68,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMMBackwardGradExists) {
     auto loss = loss_fn(result, target);
     loss.backward();
 
-    EXPECT_TRUE(dense.grad().has_value());
+    EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
         auto& grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
@@ -88,7 +89,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMVBackwardGradExists) {
     auto loss = loss_fn(result, target);
     loss.backward();
 
-    EXPECT_TRUE(vec.grad().has_value());
+    EXPECT_GRAD_FLOWS(vec);
     if (vec.grad().has_value()) {
         EXPECT_EQ(vec.grad().value().shape()[0], 4);
     }
@@ -108,7 +109,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SparseAddBackwardGradExists) {
     auto loss = loss_fn(result, target);
     loss.backward();
 
-    EXPECT_TRUE(dense.grad().has_value());
+    EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
         EXPECT_EQ(dense.grad().value().shape()[0], 3);
         EXPECT_EQ(dense.grad().value().shape()[1], 4);

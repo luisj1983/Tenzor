@@ -20,6 +20,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -123,7 +124,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, CheckpointGradientCorrectness) {
     auto loss = sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_cpu = x.grad()->to(Device::cpu());
 
     if (dtype() == DType::Float32) {
@@ -175,8 +176,8 @@ TEST_P(GradientCheckpointMultiDTypeTest, MultiVariableCheckpoint) {
     auto loss = sum(z);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
-    EXPECT_TRUE(y.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
+    EXPECT_GRAD_FLOWS(y);
 }
 
 TEST_P(GradientCheckpointMultiDTypeTest, NestedCheckpoints) {
@@ -216,7 +217,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, NestedCheckpoints) {
     auto loss = sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_cpu = x.grad()->to(Device::cpu());
     if (dtype() == DType::Float32) {
         const float* grad_data = grad_cpu.data<float>();
@@ -248,7 +249,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, CheckpointWithReLU) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(GradientCheckpointMultiDTypeTest, CheckpointWithSigmoid) {
@@ -279,7 +280,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, CheckpointWithSigmoid) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ==============================================================================

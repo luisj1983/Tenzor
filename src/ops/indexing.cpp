@@ -1,4 +1,5 @@
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/utils/error.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -105,7 +106,7 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
         int64_t want = std::max({ec, ex, ey});
         auto ok = [&](int64_t e) { return e == want || e == 1; };
         if (!ok(ec) || !ok(ex) || !ok(ey)) {
-            throw std::invalid_argument(
+            throw tenzor::ValueError(
                 "where: shapes are not broadcastable");
         }
         out_shape[a] = want;
@@ -213,14 +214,14 @@ auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
-        throw std::out_of_range("Dimension out of range for select");
+        throw tenzor::IndexError("Dimension out of range for select");
     }
 
     // Normalize and validate index
     int64_t dim_size = input.shape()[dim];
     if (index < 0) index += dim_size;
     if (index < 0 || index >= dim_size) {
-        throw std::out_of_range("Index out of range for select: index=" + std::to_string(index) +
+        throw tenzor::IndexError("Index out of range for select: index=" + std::to_string(index) +
                                ", dimension size=" + std::to_string(dim_size));
     }
 
@@ -233,10 +234,10 @@ auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> 
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
-        throw std::out_of_range("Dimension out of range for narrow");
+        throw tenzor::IndexError("Dimension out of range for narrow");
     }
     if (start < 0 || length < 0 || start + length > input.shape()[dim]) {
-        throw std::out_of_range("narrow: start (" + std::to_string(start) + ") + length (" +
+        throw tenzor::IndexError("narrow: start (" + std::to_string(start) + ") + length (" +
                                std::to_string(length) + ") exceeds dimension size (" +
                                std::to_string(input.shape()[dim]) + ")");
     }

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/mobilenet.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -41,7 +42,7 @@ TEST_F(MobileNetTest, MobileNetV2GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -98,7 +99,7 @@ TEST_F(MobileNetTest, MobileNetV3SmallGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(MobileNetTest, MobileNetV3SmallParameterCount) {
@@ -142,7 +143,7 @@ TEST_F(MobileNetTest, MobileNetV3LargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(MobileNetTest, MobileNetV3LargeParameterCount) {

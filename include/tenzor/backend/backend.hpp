@@ -354,27 +354,10 @@ public:
         throw std::runtime_error(std::string(name()) + " backend does not support memset");
     }
 
-    /**
-     * @brief Dispatch operation kernel.
-     *
-     * Main entry point for executing operations on this backend.
-     * Looks up and executes the kernel for the specified operation.
-     *
-     * @param op_name Operation identifier (e.g., "add", "matmul", "conv2d")
-     * @param inputs Input tensors for the operation
-     * @param attrs Operation-specific attributes
-     * @return Output tensor(s) produced by the operation
-     * @throws std::runtime_error if operation is not supported
-     *
-     * @code
-     * std::vector<Tensor> result = backend->dispatch(
-     *     "matmul", {tensor_a, tensor_b}, {{"transpose_a", "false"}}
-     * );
-     * @endcode
-     */
-    virtual auto dispatch(const std::string& op_name,
-                         std::span<const Tensor> inputs,
-                         const OpAttributes& attrs) -> std::vector<Tensor> = 0;
+    // The legacy string-keyed `dispatch(op_name, inputs, attrs)` virtual was
+    // removed. Production dispatch is OpId-based via DispatchTable; use
+    // `dispatch_to_device(OpId::..., device.type, inputs, attrs)` instead.
+    // (Removed in the pre-release audit cleanup — see audit Phase C.)
 };
 
 /**

@@ -27,6 +27,7 @@
 #include <tenzor/ops/custom_op.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -159,7 +160,7 @@ TEST_F(D2Test, TensorBackwardOnly_FirstOrderStillWorks) {
 
     auto loss = tenzor::sum(y);
     loss.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto& g = x.grad().value();
     ASSERT_EQ(g.numel(), 4);
     auto* gp = g.data<float>();

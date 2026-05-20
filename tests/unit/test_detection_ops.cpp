@@ -8,6 +8,7 @@
 #include <tenzor/nn/detection/roi_ops.hpp>
 #include <tenzor/nn/detection/anchors.hpp>
 #include <tenzor/ops/detection.hpp>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -51,7 +52,7 @@ TEST_F(DetectionOpsTest, ROIAlignBasicGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(features.grad().has_value());
+    EXPECT_GRAD_FLOWS(features);
 }
 
 TEST_F(DetectionOpsTest, ROIAlignDifferentPoolSizes) {
@@ -99,7 +100,7 @@ TEST_F(DetectionOpsTest, ROIAlignGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(features.grad().has_value());
+    EXPECT_GRAD_FLOWS(features);
 }
 
 TEST_F(DetectionOpsTest, ROIAlignDifferentSamplingRatios) {

@@ -119,7 +119,7 @@ public:
      *   - Shard -> Replicate: all-gather
      *   - Replicate -> Shard: local slice (no communication)
      *   - Partial -> Replicate: all-reduce
-     *   - Shard(dim_a) -> Shard(dim_b): all-to-all (not yet implemented)
+     *   - Shard(dim_a) -> Shard(dim_b): all-to-all via permute + alltoall_single
      *
      * @param new_placements Target placements (one per mesh dimension)
      * @return DTensor with the new placements

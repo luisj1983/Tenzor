@@ -9,6 +9,7 @@
 #include "../../include/tenzor/models/efficientnet.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -47,7 +48,7 @@ TEST_F(EfficientNetTest, SqueezeExcitationGradientFlow) {
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = se->parameters();
     EXPECT_GT(params.size(), 0);
     for (const auto& param : params) {
@@ -92,7 +93,7 @@ TEST_F(EfficientNetTest, MBConvBlockGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = block->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -223,7 +224,7 @@ TEST_F(EfficientNetTest, EfficientNetB0GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -272,7 +273,7 @@ TEST_F(EfficientNetTest, EfficientNetB1GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -299,7 +300,7 @@ TEST_F(EfficientNetTest, EfficientNetB2GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -398,7 +399,7 @@ TEST_F(EfficientNetTest, EfficientNetB7GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================

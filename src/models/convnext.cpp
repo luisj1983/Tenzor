@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/convnext.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -316,7 +317,8 @@ auto convnext_tiny(int64_t num_classes, bool pretrained)
         1e-6);
 
     if (pretrained) {
-        model->load_pretrained("convnext_tiny_imagenet.pth");
+        auto _path = ModelHub::download_pretrained_safetensors("convnext_tiny");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -332,7 +334,8 @@ auto convnext_small(int64_t num_classes, bool pretrained)
         1e-6);
 
     if (pretrained) {
-        model->load_pretrained("convnext_small_imagenet.pth");
+        auto _path = ModelHub::download_pretrained_safetensors("convnext_small");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -348,7 +351,8 @@ auto convnext_base(int64_t num_classes, bool pretrained)
         1e-6);
 
     if (pretrained) {
-        model->load_pretrained("convnext_base_imagenet.pth");
+        auto _path = ModelHub::download_pretrained_safetensors("convnext_base");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -364,7 +368,8 @@ auto convnext_large(int64_t num_classes, bool pretrained)
         1e-6);
 
     if (pretrained) {
-        model->load_pretrained("convnext_large_imagenet.pth");
+        auto _path = ModelHub::download_pretrained_safetensors("convnext_large");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;
@@ -380,7 +385,8 @@ auto convnext_xlarge(int64_t num_classes, bool pretrained)
         1e-6);
 
     if (pretrained) {
-        model->load_pretrained("convnext_xlarge_imagenet22k.pth");
+        auto _path = ModelHub::download_pretrained_safetensors("convnext_xlarge");
+        ModelHub::load_pretrained_weights(*model, _path, /*strict=*/false);
     }
 
     return model;

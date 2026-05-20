@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/alexnet.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -114,15 +115,8 @@ auto alexnet(int64_t num_classes, bool pretrained) -> std::shared_ptr<AlexNet> {
     auto model = std::make_shared<AlexNet>(num_classes);
 
     if (pretrained) {
-        throw std::runtime_error(
-            "Pretrained AlexNet weights not available. "
-            "To use pretrained weights:\n"
-            "  1. Download ImageNet pretrained weights\n"
-            "  2. Convert to Tenzor checkpoint format using model serialization\n"
-            "  3. Load using: nn::ModelCheckpoint().load_model(\"path/to/weights.pt\")\n"
-            "     and model->load_state_dict(state_dict)\n"
-            "For training from scratch, set pretrained=false"
-        );
+        auto path = ModelHub::download_pretrained_safetensors("alexnet");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;

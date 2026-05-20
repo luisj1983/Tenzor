@@ -36,6 +36,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -74,7 +75,7 @@ inline void bias_relu_avx2(
 ) {
     __m256 zero = _mm256_setzero_ps();
 
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -107,7 +108,7 @@ inline void bias_gelu_avx2(
     __m256 sqrt_2_over_pi = _mm256_set1_ps(0.7978845608f);
     __m256 coeff = _mm256_set1_ps(0.044715f);
 
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -157,7 +158,7 @@ inline void bias_sigmoid_avx2(
     int64_t batch_size,
     int64_t out_features
 ) {
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -189,7 +190,7 @@ inline void bias_tanh_avx2(
     int64_t batch_size,
     int64_t out_features
 ) {
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -221,7 +222,7 @@ inline void bias_swish_avx2(
     int64_t batch_size,
     int64_t out_features
 ) {
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -258,7 +259,7 @@ inline void bias_leaky_relu_avx2(
     __m256 zero = _mm256_setzero_ps();
     __m256 slope = _mm256_set1_ps(negative_slope);
 
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -292,7 +293,7 @@ inline void bias_only_avx2(
     int64_t batch_size,
     int64_t out_features
 ) {
-    #pragma omp parallel for if(batch_size * out_features > 10000)
+    #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out_row = output + b * out_features;
 
@@ -318,7 +319,7 @@ inline void bias_only_avx2(
 namespace scalar {
 
 inline void bias_relu(float* output, const float* bias, int64_t batch_size, int64_t out_features) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float val = output[b * out_features + j] + bias[j];
@@ -331,7 +332,7 @@ inline void bias_gelu(float* output, const float* bias, int64_t batch_size, int6
     constexpr float sqrt_2_over_pi = 0.7978845608f;
     constexpr float coeff = 0.044715f;
 
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float x = output[b * out_features + j] + bias[j];
@@ -343,7 +344,7 @@ inline void bias_gelu(float* output, const float* bias, int64_t batch_size, int6
 }
 
 inline void bias_sigmoid(float* output, const float* bias, int64_t batch_size, int64_t out_features) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float x = output[b * out_features + j] + bias[j];
@@ -353,7 +354,7 @@ inline void bias_sigmoid(float* output, const float* bias, int64_t batch_size, i
 }
 
 inline void bias_tanh(float* output, const float* bias, int64_t batch_size, int64_t out_features) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float x = output[b * out_features + j] + bias[j];
@@ -363,7 +364,7 @@ inline void bias_tanh(float* output, const float* bias, int64_t batch_size, int6
 }
 
 inline void bias_swish(float* output, const float* bias, int64_t batch_size, int64_t out_features) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float x = output[b * out_features + j] + bias[j];
@@ -374,7 +375,7 @@ inline void bias_swish(float* output, const float* bias, int64_t batch_size, int
 }
 
 inline void bias_leaky_relu(float* output, const float* bias, int64_t batch_size, int64_t out_features, float negative_slope = 0.01f) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             float x = output[b * out_features + j] + bias[j];
@@ -384,7 +385,7 @@ inline void bias_leaky_relu(float* output, const float* bias, int64_t batch_size
 }
 
 inline void bias_only(float* output, const float* bias, int64_t batch_size, int64_t out_features) {
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > 10000)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t j = 0; j < out_features; ++j) {
             output[b * out_features + j] += bias[j];
@@ -442,7 +443,7 @@ inline void linear_bias_activation(
                 break;
             case Activation::ReLU: {
                 int64_t n = batch_size * out_features;
-                #pragma omp parallel for if(n > 10000)
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; ++i) {
                     output[i] = std::max(0.0f, output[i]);
                 }

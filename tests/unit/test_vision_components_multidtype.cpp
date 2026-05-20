@@ -14,6 +14,7 @@
 #include <tenzor/models/swin_transformer.hpp>
 #include <tenzor/models/convnext.hpp>
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -91,7 +92,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbeddingGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }
@@ -158,7 +159,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }
@@ -246,7 +247,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }
@@ -287,7 +288,7 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }
@@ -354,7 +355,7 @@ TEST_P(VisionComponentsMultiDTypeTest, LayerScaleGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }
@@ -393,7 +394,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPGradientFlow) {
         loss.backward();
     });
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     if (input.grad().has_value()) {
         EXPECT_EQ(input.grad()->dtype(), dtype());
     }

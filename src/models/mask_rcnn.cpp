@@ -4,6 +4,8 @@
  */
 
 #include "tenzor/models/mask_rcnn.hpp"
+#include "tenzor/models/hub.hpp"
+#include "tenzor/nn/checkpoint.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/activations/activations.hpp"
@@ -1229,10 +1231,15 @@ auto MaskRCNN::select_training_samples(const Tensor& proposals,
     return tenzor::ops::index_select(proposals, 0, idx);
 }
 
-void MaskRCNN::load_pretrained([[maybe_unused]] const std::string& path, [[maybe_unused]] bool strict) {
-    // Load pretrained weights
-    // This would integrate with Tenzor's serialization system
-    throw std::runtime_error("Pretrained weight loading not yet implemented");
+void MaskRCNN::load_pretrained(const std::string& path, bool strict) {
+    // Legitimate file-path loader for user-saved checkpoints.
+    nn::ModelCheckpoint checkpoint_manager;
+    auto checkpoint = checkpoint_manager.load(path);
+    if (checkpoint.model_state.empty()) {
+        throw std::runtime_error("MaskRCNN::load_pretrained: checkpoint '" + path +
+                                 "' contains no model state");
+    }
+    load_state_dict(checkpoint.model_state, strict);
 }
 
 // ============================================================================
@@ -1242,28 +1249,23 @@ void MaskRCNN::load_pretrained([[maybe_unused]] const std::string& path, [[maybe
 auto mask_rcnn_resnet50_fpn(int64_t num_classes, bool pretrained)
     -> std::shared_ptr<MaskRCNN> {
 
-    // Create ResNet-50 backbone
-    auto backbone = resnet50(1000, pretrained);
+    // Backbone is initialized with randomly-initialized weights here because
+    // the full Mask R-CNN COCO checkpoint below already contains the
+    // ImageNet-trained backbone + RPN + ROI head + mask head weights as one
+    // unified state_dict. Passing `pretrained=true` to resnet50() here would
+    // download ImageNet weights only to be immediately overwritten by the
+    // COCO checkpoint, so we keep the backbone unpretrained.
+    auto backbone = resnet50(1000, /*pretrained=*/false);
 
-    // Create Mask R-CNN model
     auto model = std::make_shared<MaskRCNN>(
-        backbone,
-        num_classes,
-        800,   // min_size
-        1333,  // max_size
-        2000,  // rpn_pre_nms_top_n_train
-        1000,  // rpn_pre_nms_top_n_test
-        2000,  // rpn_post_nms_top_n_train
-        1000,  // rpn_post_nms_top_n_test
-        0.7,   // rpn_nms_thresh
-        0.05,  // box_score_thresh
-        0.5,   // box_nms_thresh
-        100    // box_detections_per_img
-    );
+        backbone, num_classes,
+        800, 1333, 2000, 1000, 2000, 1000,
+        0.7, 0.05, 0.5, 100);
 
     if (pretrained) {
-        // Load pretrained COCO weights
-        // model->load_pretrained("mask_rcnn_resnet50_fpn_coco.pth");
+        // Full-model COCO weights (backbone + FPN + RPN + ROI box head + mask head).
+        auto path = ModelHub::download_pretrained_safetensors("mask_rcnn_resnet50_fpn");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;

@@ -43,7 +43,7 @@
 namespace tenzor::cpu {
 
 /// Threshold for OpenMP parallelization of elementwise ops.
-/// Driven by tenzor::OmpThresholds::simple() (see tenzor/backend/omp_thresholds.hpp).
+/// Driven by ::tenzor::OmpThresholds::simple() (see tenzor/backend/omp_thresholds.hpp).
 #define ELEMENTWISE_OMP_THRESHOLD (::tenzor::OmpThresholds::simple())
 
 /**

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "../module.hpp"
+#include <array>
 
 namespace tenzor {
 namespace nn {
@@ -53,9 +54,19 @@ public:
      * MaxPool2d pool3(2, 1, 1);   // 2x2, stride=1, padding=1
      * @endcode
      */
+    /// Scalar (symmetric) ctor — delegates to the per-axis form with
+    /// kernel/stride/padding replicated on both axes.
     MaxPool2d(int64_t kernel_size,
              int64_t stride = -1,  // Default: same as kernel_size
              int64_t padding = 0,
+             bool ceil_mode = false,
+             bool return_indices = false);
+
+    /// Per-axis ctor accepting (kernel_h, kernel_w) tuples for asymmetric
+    /// pooling — matches PyTorch's `MaxPool2d(kernel_size=(2, 3), stride=(2, 3))`.
+    MaxPool2d(std::array<int64_t, 2> kernel_size,
+             std::array<int64_t, 2> stride = {-1, -1},
+             std::array<int64_t, 2> padding = {0, 0},
              bool ceil_mode = false,
              bool return_indices = false);
 
@@ -74,15 +85,34 @@ public:
     auto get_return_indices() const -> bool { return return_indices_; }
 
     auto extra_repr() const -> std::string override {
-        return "kernel_size=" + std::to_string(kernel_size_) +
-               ", stride=" + std::to_string(stride_) +
-               ", padding=" + std::to_string(padding_);
+        auto pair = [](int64_t a, int64_t b) -> std::string {
+            if (a == b) return std::to_string(a);
+            return "(" + std::to_string(a) + ", " + std::to_string(b) + ")";
+        };
+        return "kernel_size=" + pair(kernel_size_h_, kernel_size_w_) +
+               ", stride="    + pair(stride_h_,      stride_w_) +
+               ", padding="   + pair(padding_h_,     padding_w_);
     }
 
+    auto get_kernel_size() const -> std::array<int64_t, 2> { return {kernel_size_h_, kernel_size_w_}; }
+    auto get_stride()      const -> std::array<int64_t, 2> { return {stride_h_,      stride_w_}; }
+    auto get_padding()     const -> std::array<int64_t, 2> { return {padding_h_,     padding_w_}; }
+
 private:
-    int64_t kernel_size_;  ///< Pooling window size
-    int64_t stride_;       ///< Stride
-    int64_t padding_;      ///< Padding
+    // Per-axis storage (H, W). Scalar ctor replicates the value across both axes.
+    int64_t kernel_size_h_;
+    int64_t kernel_size_w_;
+    int64_t stride_h_;
+    int64_t stride_w_;
+    int64_t padding_h_;
+    int64_t padding_w_;
+    // Symmetric-only legacy fields, kept for backward-source-compatibility with
+    // any external code accessing kernel_size_ etc. as int64_t. Initialised to
+    // the H-axis value; check the get_kernel_size() / per-axis getters when
+    // asymmetric values matter.
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
     bool ceil_mode_;       ///< Use ceil instead of floor for output size
     bool return_indices_;  ///< Store indices of max values
 };
@@ -108,16 +138,15 @@ private:
  */
 class AvgPool2d : public Module {
 public:
-    /**
-     * @brief Construct 2D average pooling layer.
-     *
-     * @param kernel_size Size of pooling window (square)
-     * @param stride Stride of pooling window (default: same as kernel_size)
-     * @param padding Zero-padding added to input (default: 0)
-     */
+    /// Scalar (symmetric) ctor.
     AvgPool2d(int64_t kernel_size,
              int64_t stride = -1,  // Default: same as kernel_size
              int64_t padding = 0);
+
+    /// Per-axis ctor accepting (kernel_h, kernel_w) tuples.
+    AvgPool2d(std::array<int64_t, 2> kernel_size,
+             std::array<int64_t, 2> stride = {-1, -1},
+             std::array<int64_t, 2> padding = {0, 0});
 
     /**
      * @brief Forward pass through average pooling.
@@ -128,15 +157,24 @@ public:
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto extra_repr() const -> std::string override {
-        return "kernel_size=" + std::to_string(kernel_size_) +
-               ", stride=" + std::to_string(stride_) +
-               ", padding=" + std::to_string(padding_);
+        auto pair = [](int64_t a, int64_t b) -> std::string {
+            if (a == b) return std::to_string(a);
+            return "(" + std::to_string(a) + ", " + std::to_string(b) + ")";
+        };
+        return "kernel_size=" + pair(kernel_size_h_, kernel_size_w_) +
+               ", stride="    + pair(stride_h_,      stride_w_) +
+               ", padding="   + pair(padding_h_,     padding_w_);
     }
 
+    auto get_kernel_size() const -> std::array<int64_t, 2> { return {kernel_size_h_, kernel_size_w_}; }
+    auto get_stride()      const -> std::array<int64_t, 2> { return {stride_h_,      stride_w_}; }
+    auto get_padding()     const -> std::array<int64_t, 2> { return {padding_h_,     padding_w_}; }
+
 private:
-    int64_t kernel_size_;  ///< Pooling window size
-    int64_t stride_;       ///< Stride
-    int64_t padding_;      ///< Padding
+    int64_t kernel_size_h_, kernel_size_w_;
+    int64_t stride_h_,      stride_w_;
+    int64_t padding_h_,     padding_w_;
+    int64_t kernel_size_, stride_, padding_;
 };
 
 /**
@@ -215,9 +253,17 @@ private:
  */
 class MaxPool3d : public Module {
 public:
+    /// Scalar (symmetric) ctor.
     MaxPool3d(int64_t kernel_size,
              int64_t stride = -1,
              int64_t padding = 0,
+             bool ceil_mode = false,
+             bool return_indices = false);
+
+    /// Per-axis ctor accepting (kernel_d, kernel_h, kernel_w) tuples.
+    MaxPool3d(std::array<int64_t, 3> kernel_size,
+             std::array<int64_t, 3> stride = {-1, -1, -1},
+             std::array<int64_t, 3> padding = {0, 0, 0},
              bool ceil_mode = false,
              bool return_indices = false);
 
@@ -226,10 +272,15 @@ public:
     auto get_ceil_mode() const -> bool { return ceil_mode_; }
     auto get_return_indices() const -> bool { return return_indices_; }
 
+    auto get_kernel_size() const -> std::array<int64_t, 3> { return {kernel_size_d_, kernel_size_h_, kernel_size_w_}; }
+    auto get_stride()      const -> std::array<int64_t, 3> { return {stride_d_,      stride_h_,      stride_w_}; }
+    auto get_padding()     const -> std::array<int64_t, 3> { return {padding_d_,     padding_h_,     padding_w_}; }
+
 private:
-    int64_t kernel_size_;
-    int64_t stride_;
-    int64_t padding_;
+    int64_t kernel_size_d_, kernel_size_h_, kernel_size_w_;
+    int64_t stride_d_,      stride_h_,      stride_w_;
+    int64_t padding_d_,     padding_h_,     padding_w_;
+    int64_t kernel_size_, stride_, padding_;
     bool ceil_mode_;
     bool return_indices_;
 };
@@ -241,16 +292,27 @@ private:
  */
 class AvgPool3d : public Module {
 public:
+    /// Scalar (symmetric) ctor.
     AvgPool3d(int64_t kernel_size,
              int64_t stride = -1,
              int64_t padding = 0);
 
+    /// Per-axis ctor accepting (kernel_d, kernel_h, kernel_w) tuples.
+    AvgPool3d(std::array<int64_t, 3> kernel_size,
+             std::array<int64_t, 3> stride = {-1, -1, -1},
+             std::array<int64_t, 3> padding = {0, 0, 0});
+
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto get_kernel_size() const -> std::array<int64_t, 3> { return {kernel_size_d_, kernel_size_h_, kernel_size_w_}; }
+    auto get_stride()      const -> std::array<int64_t, 3> { return {stride_d_,      stride_h_,      stride_w_}; }
+    auto get_padding()     const -> std::array<int64_t, 3> { return {padding_d_,     padding_h_,     padding_w_}; }
+
 private:
-    int64_t kernel_size_;
-    int64_t stride_;
-    int64_t padding_;
+    int64_t kernel_size_d_, kernel_size_h_, kernel_size_w_;
+    int64_t stride_d_,      stride_h_,      stride_w_;
+    int64_t padding_d_,     padding_h_,     padding_w_;
+    int64_t kernel_size_, stride_, padding_;
 };
 
 /**

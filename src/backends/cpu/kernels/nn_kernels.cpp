@@ -6,6 +6,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 #include <bit>
 #include <random>
 #include <cmath>
@@ -566,12 +567,12 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 0.0f, grad_w_data, static_cast<MKL_INT>(in_features)
             );
 
-            // grad_bias = sum(grad_output, dim=0)
-            // Only use OpenMP for large out_features to avoid thread overhead
-            #pragma omp parallel for if(out_features > 1000)
+            // grad_bias[o] = sum over batch of grad_output[b, o].
+            // Threshold tied to the matmul-class OmpThresholds — same policy
+            // as conv2d's bias reduction at conv2d.cpp:1598-1612.
+            #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
             for (int64_t o = 0; o < out_features; ++o) {
                 float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t b = 0; b < batch_size; ++b) {
                     sum += grad_out_data[b * out_features + o];
                 }
@@ -615,11 +616,10 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 0.0, grad_w_data, static_cast<MKL_INT>(in_features)
             );
 
-            // Only use OpenMP for large out_features to avoid thread overhead
-            #pragma omp parallel for if(out_features > 1000)
+            // grad_bias[o] = sum over batch of grad_output[b, o].
+            #pragma omp parallel for if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
             for (int64_t o = 0; o < out_features; ++o) {
                 double sum = 0.0;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t b = 0; b < batch_size; ++b) {
                     sum += grad_out_data[b * out_features + o];
                 }
@@ -756,28 +756,28 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     if (grad_output.dtype() == DType::Float32) {
         const float* grad_data = grad_output.data<float>();
         float* grad_in_data = grad_input.data<float>();
-        #pragma omp parallel for if(n > 10000)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_data[i] * mask_data[i];
         }
     } else if (grad_output.dtype() == DType::Float64) {
         const double* grad_data = grad_output.data<double>();
         double* grad_in_data = grad_input.data<double>();
-        #pragma omp parallel for if(n > 10000)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_data[i] * static_cast<double>(mask_data[i]);
         }
     } else if (grad_output.dtype() == DType::Float16) {
         const Float16* grad_data = grad_output.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
-        #pragma omp parallel for if(n > 10000)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = Float16(static_cast<float>(grad_data[i]) * mask_data[i]);
         }
     } else if (grad_output.dtype() == DType::BFloat16) {
         const BFloat16* grad_data = grad_output.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
-        #pragma omp parallel for if(n > 10000)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = BFloat16(static_cast<float>(grad_data[i]) * mask_data[i]);
         }
@@ -821,7 +821,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
 
     auto do_embedding = [&](auto* w_data, auto* out_data) {
         using elem_t = std::remove_pointer_t<decltype(out_data)>;
-        #pragma omp parallel for if(num_indices * embedding_dim > 10000)
+        #pragma omp parallel for if(num_indices * embedding_dim > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += num_embeddings;
@@ -1226,7 +1226,7 @@ static void layer_norm_simd_with_stats(
     constexpr int64_t PREFETCH_DISTANCE = 64;
 
     // Only parallelize for large total work to avoid thread overhead
-    #pragma omp parallel for if(batch_size * norm_size > 10000)
+    #pragma omp parallel for if(batch_size * norm_size > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;
@@ -1396,7 +1396,7 @@ static void layer_norm_simd(
     constexpr int64_t PREFETCH_DISTANCE = 64;
 
     // Only parallelize for large total work to avoid thread overhead
-    #pragma omp parallel for if(batch_size * norm_size > 10000)
+    #pragma omp parallel for if(batch_size * norm_size > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;

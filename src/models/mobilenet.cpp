@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/mobilenet.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -437,7 +438,8 @@ auto mobilenet_v2(int64_t num_classes, bool pretrained)
     auto model = std::make_shared<MobileNetV2>(num_classes, 1.0, 0.2);
 
     if (pretrained) {
-        model->load_pretrained("mobilenet_v2_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("mobilenet_v2");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -448,8 +450,19 @@ auto mobilenet_v2_width(int64_t num_classes, double width_mult, bool pretrained)
     auto model = std::make_shared<MobileNetV2>(num_classes, width_mult, 0.2);
 
     if (pretrained) {
-        std::string path = "mobilenet_v2_" + std::to_string(width_mult) + "_imagenet.pth";
-        model->load_pretrained(path);
+        // Width-scaled MobileNet V2 (e.g., 0.75x, 1.4x) has its own timm checkpoint.
+        // Look up the closest match in the registry; throw if not found rather
+        // than silently loading a wrong-shaped checkpoint.
+        std::string key = "mobilenet_v2_" + std::to_string(width_mult);
+        if (!ModelHub::is_registered(key)) {
+            throw std::runtime_error(
+                "mobilenet_v2_width(width_mult=" + std::to_string(width_mult) +
+                "): pretrained weights for this width multiplier are not registered. "
+                "Register the model via ModelHub::register_model() or use width_mult=1.0 "
+                "(mobilenet_v2 in the registry).");
+        }
+        auto path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -460,7 +473,8 @@ auto mobilenet_v3_large(int64_t num_classes, bool pretrained)
     auto model = std::make_shared<MobileNetV3>(num_classes, "large", 1.0, 0.2);
 
     if (pretrained) {
-        model->load_pretrained("mobilenet_v3_large_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("mobilenet_v3_large");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -471,7 +485,8 @@ auto mobilenet_v3_small(int64_t num_classes, bool pretrained)
     auto model = std::make_shared<MobileNetV3>(num_classes, "small", 1.0, 0.2);
 
     if (pretrained) {
-        model->load_pretrained("mobilenet_v3_small_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("mobilenet_v3_small");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;

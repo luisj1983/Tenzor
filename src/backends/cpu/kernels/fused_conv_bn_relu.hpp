@@ -42,6 +42,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -132,7 +133,7 @@ inline void im2col_optimized(
 ) {
     const int64_t col_width = channels * kernel_h * kernel_w;
 
-    #pragma omp parallel for collapse(2) if(batch * out_h * out_w > 10000)
+    #pragma omp parallel for collapse(2) if(batch * out_h * out_w > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t oh = 0; oh < out_h; ++oh) {
             for (int64_t ow = 0; ow < out_w; ++ow) {

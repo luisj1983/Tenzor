@@ -9,6 +9,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -46,7 +47,7 @@ static void im3col_cpu(
     int64_t col_cols = channels * kD * kH * kW;
     int64_t total = batch * out_d * out_h * out_w * col_cols;
 
-    #pragma omp parallel for if(total > 10000)
+    #pragma omp parallel for if(total > ::tenzor::OmpThresholds::medium())
     for (int64_t idx = 0; idx < total; ++idx) {
         int64_t tmp = idx;
         int64_t kw = tmp % kW; tmp /= kW;
@@ -97,7 +98,7 @@ static void col3im_cpu(
 
     int64_t col_cols = channels * kD * kH * kW;
 
-    #pragma omp parallel for collapse(5) if(output_size > 10000)
+    #pragma omp parallel for collapse(5) if(output_size > ::tenzor::OmpThresholds::medium())
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
             for (int64_t id = 0; id < depth; ++id) {
@@ -140,7 +141,7 @@ static void col3im_cpu(
 template<typename T>
 static void gemm_local(const T* A, const T* B, T* C,
                         int64_t M, int64_t N, int64_t K, bool transB) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > ::tenzor::OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             T sum = T(0);
@@ -207,7 +208,7 @@ static void conv3d_forward_impl(
         for (int64_t g = 0; g < groups; ++g) {
             int64_t in_start = g * ic_per_g;
             int64_t out_start = g * oc_per_g;
-            #pragma omp parallel for if(batch * spatial > 10000)
+            #pragma omp parallel for if(batch * spatial > ::tenzor::OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {
                 for (int64_t s = 0; s < spatial; ++s) {
                     for (int64_t oc = 0; oc < oc_per_g; ++oc) {
@@ -248,7 +249,7 @@ static void conv3d_forward_impl(
 
             // Scatter from (batch * oD * oH * oW, oc_per_g) to NCDHW
             T* out_data = output.data<T>();
-            #pragma omp parallel for collapse(5) if(batch * oc_per_g * out_d * out_h * out_w > 10000)
+            #pragma omp parallel for collapse(5) if(batch * oc_per_g * out_d * out_h * out_w > ::tenzor::OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {
                 for (int64_t c = 0; c < oc_per_g; ++c) {
                     for (int64_t od = 0; od < out_d; ++od) {
@@ -273,7 +274,7 @@ static void conv3d_forward_impl(
         const T* bias_data = bias->data<T>();
         T* out_data = output.data<T>();
         int64_t spatial = out_d * out_h * out_w;
-        #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
+        #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > ::tenzor::OmpThresholds::medium())
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t c = 0; c < out_channels; ++c) {
                 for (int64_t s = 0; s < spatial; ++s) {
@@ -320,7 +321,7 @@ static void conv3d_backward_input_impl(
 
         std::vector<T> grad_col(M * K);
         const T* go_data = grad_output.data<T>();
-        #pragma omp parallel for if(M * K > 10000)
+        #pragma omp parallel for if(M * K > ::tenzor::OmpThresholds::medium())
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t od = 0; od < out_d; ++od) {
                 for (int64_t oh = 0; oh < out_h; ++oh) {
@@ -427,7 +428,7 @@ static void conv3d_backward_weight_impl(
         // Use transA: A=(M, oc_per_g), B=(M, col_cols), C = A^T @ B
         std::vector<T> gw_chunk(oc_per_g * col_cols, T(0));
         // Manual transA GEMM
-        #pragma omp parallel for collapse(2) if(oc_per_g * col_cols > 1000)
+        #pragma omp parallel for collapse(2) if(oc_per_g * col_cols > ::tenzor::OmpThresholds::matmul())
         for (int64_t i = 0; i < oc_per_g; ++i) {
             for (int64_t j = 0; j < col_cols; ++j) {
                 T sum = T(0);

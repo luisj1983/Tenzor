@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/convnext.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -41,7 +42,7 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 }
@@ -87,7 +88,7 @@ TEST_F(ConvNeXtTest, ConvNeXtSmallGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -113,7 +114,7 @@ TEST_F(ConvNeXtTest, ConvNeXtBaseGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(ConvNeXtTest, ConvNeXtBaseParameterCount) {
@@ -157,7 +158,7 @@ TEST_F(ConvNeXtTest, ConvNeXtLargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(ConvNeXtTest, ConvNeXtLargeParameterCount) {
@@ -201,7 +202,7 @@ TEST_F(ConvNeXtTest, ConvNeXtXLargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================

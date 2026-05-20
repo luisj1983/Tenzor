@@ -6,6 +6,7 @@
 #include <iostream>
 #include <omp.h>
 #include <immintrin.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 namespace tenzor {
 namespace cpu {
@@ -666,7 +667,7 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> 
     }
     auto in_strides_full = compute_strides(effective_in_shape);
 
-    #pragma omp parallel for if(total > 65536)
+    #pragma omp parallel for if(total > ::tenzor::OmpThresholds::simple())
     for (int64_t idx = 0; idx < total; ++idx) {
         int64_t src_linear = 0;
         int64_t remaining = idx;
@@ -808,7 +809,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
         auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
         // Reorder data from NCHW to NHWC
-        #pragma omp parallel for collapse(2) if(N * C * H * W > 65536)
+        #pragma omp parallel for collapse(2) if(N * C * H * W > ::tenzor::OmpThresholds::simple())
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C; ++c) {
                 for (int64_t h = 0; h < H; ++h) {
@@ -858,7 +859,7 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
     const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
     auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
-    #pragma omp parallel for if(total > 65536)
+    #pragma omp parallel for if(total > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < total; ++i) {
         int64_t inner_idx = i % inner_size;
         int64_t dim_idx = (i / inner_size) % dim_size;
@@ -905,7 +906,7 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
 
     // For each output element: map back to input
     // output[outer, d_out, inner] = input[outer, d_out / repeats, inner]
-    #pragma omp parallel for if(total_out > 65536)
+    #pragma omp parallel for if(total_out > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < total_out; ++i) {
         int64_t inner_idx = i % inner_size;
         int64_t out_dim_idx = (i / inner_size) % out_shape[dim];
@@ -994,7 +995,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
     // Binary search to find which input element owns a given output dim index
-    #pragma omp parallel for if(total_out > 65536)
+    #pragma omp parallel for if(total_out > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < total_out; ++i) {
         int64_t inner_idx = i % inner_size;
         int64_t out_dim_idx = (i / inner_size) % total_repeats;

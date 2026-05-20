@@ -13,6 +13,7 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../grad_flow_helpers.hpp"
 
 namespace tenzor {
 namespace {
@@ -53,7 +54,7 @@ TEST_F(HardshrinkThresholdTest, HardshrinkBackwardPassesGradient) {
     auto loss = tenzor::sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     const float* g = x.grad().value().data<float>();
     // Gradient is 1 where |x| > 0.5, 0 otherwise.
     EXPECT_FLOAT_EQ(g[0], 1.0f);  // |-1| > 0.5
@@ -97,7 +98,7 @@ TEST_F(HardshrinkThresholdTest, ThresholdBackward) {
     auto loss = tenzor::sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     const float* g = x.grad().value().data<float>();
     EXPECT_FLOAT_EQ(g[0], 0.0f);
     EXPECT_FLOAT_EQ(g[1], 0.0f);

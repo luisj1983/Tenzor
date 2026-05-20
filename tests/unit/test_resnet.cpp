@@ -8,6 +8,7 @@
 #include "../../include/tenzor/models/resnet.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -70,7 +71,7 @@ TEST_F(ResNetTest, BasicBlockGradientFlow) {
     loss.backward();
 
     // Check that input has gradients
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad_shape = input.grad()->shape();
     auto input_shape = input.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(grad_shape.begin(), grad_shape.end()),
@@ -147,7 +148,7 @@ TEST_F(ResNetTest, BottleneckGradientFlow) {
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 
     auto params = block->parameters();
     EXPECT_GT(params.size(), 0);

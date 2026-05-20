@@ -159,19 +159,28 @@ static auto to_dnnl_dtype(DType dt) -> dnnl::memory::data_type {
 }
 
 // Forward declaration: pure SYCL maxpool implementation for non-Float32 dtypes
-static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t kernel_size, int64_t stride,
-                                                 int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
+                                                 int64_t kernel_h, int64_t kernel_w,
+                                                 int64_t stride_h, int64_t stride_w,
+                                                 int64_t padding_h, int64_t padding_w,
+                                                 int64_t dilation_h, int64_t dilation_w,
+                                                 sycl::queue& queue) -> std::pair<Tensor, Tensor>;
 
 // MaxPool2d forward with indices using oneDNN - returns both output and indices for backward pass
-auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,
-                                    int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+auto maxpool2d_forward_with_indices(const Tensor& input,
+                                    int64_t kernel_h, int64_t kernel_w,
+                                    int64_t stride_h, int64_t stride_w,
+                                    int64_t padding_h, int64_t padding_w,
+                                    int64_t dilation_h, int64_t dilation_w,
+                                    sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     using namespace dnnl;
 
     // oneDNN pooling only reliably supports f32 on all devices;
     // for other dtypes use the pure SYCL implementation to avoid
     // buffer-size mismatches between the tensor and the descriptor.
     if (input.dtype() != DType::Float32) {
-        return maxpool2d_forward_with_indices_sycl(input, kernel_size, stride, padding, dilation, queue);
+        return maxpool2d_forward_with_indices_sycl(input,
+            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
     }
 
     auto shape = input.shape();
@@ -184,8 +193,8 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
     const int64_t H_in = shape[2];
     const int64_t W_in = shape[3];
 
-    const int64_t H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     // Indices must be Int64 to correctly represent element positions for all tensor sizes.
@@ -198,10 +207,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
     // Memory descriptors
     memory::dims src_dims = {N, C, H_in, W_in};
     memory::dims dst_dims = {N, C, H_out, W_out};
-    memory::dims kernel_dims = {kernel_size, kernel_size};
-    memory::dims strides_dims = {stride, stride};
-    memory::dims padding_dims = {padding, padding};
-    memory::dims dilation_dims = {dilation - 1, dilation - 1};
+    memory::dims kernel_dims = {kernel_h, kernel_w};
+    memory::dims strides_dims = {stride_h, stride_w};
+    memory::dims padding_dims = {padding_h, padding_w};
+    memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
 
     auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
     auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
@@ -258,10 +267,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
         float max_val = -3.4028235e+38f;
         int64_t max_idx = 0;
 
-        for (int64_t kh = 0; kh < kernel_size; ++kh) {
-            for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                int64_t h_in = h_out * stride - padding + kh * dilation;
-                int64_t w_in = w_out * stride - padding + kw * dilation;
+        for (int64_t kh = 0; kh < kernel_h; ++kh) {
+            for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                 if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                     int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -281,15 +290,23 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 }
 
 // MaxPool2d forward using oneDNN - returns only output
-auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
-    auto [output, indices] = maxpool2d_forward_with_indices(input, kernel_size, stride, padding, dilation, queue);
+auto maxpool2d_forward(const Tensor& input,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       sycl::queue& queue) -> Tensor {
+    auto [output, indices] = maxpool2d_forward_with_indices(input,
+        kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
     return output;
 }
 
 // AvgPool2d forward using oneDNN
-auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, bool count_include_pad, sycl::queue& queue) -> Tensor {
+auto avgpool2d_forward(const Tensor& input,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       bool count_include_pad, sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
     auto shape = input.shape();
@@ -302,8 +319,8 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     const int64_t H_in = shape[2];
     const int64_t W_in = shape[3];
 
-    const int64_t H_out = (H_in + 2 * padding - kernel_size) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - kernel_size) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - kernel_h) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - kernel_w) / stride_w + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
 
@@ -314,9 +331,9 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     // Memory descriptors
     memory::dims src_dims = {N, C, H_in, W_in};
     memory::dims dst_dims = {N, C, H_out, W_out};
-    memory::dims kernel_dims = {kernel_size, kernel_size};
-    memory::dims strides_dims = {stride, stride};
-    memory::dims padding_dims = {padding, padding};
+    memory::dims kernel_dims = {kernel_h, kernel_w};
+    memory::dims strides_dims = {stride_h, stride_w};
+    memory::dims padding_dims = {padding_h, padding_w};
 
     auto dt = to_dnnl_dtype(input.dtype());
     auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
@@ -360,8 +377,12 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 }
 
 // Pure SYCL maxpool implementation used for non-Float32 dtypes when oneDNN is available
-static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t kernel_size, int64_t stride,
-                                                 int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
+                                                 int64_t kernel_h, int64_t kernel_w,
+                                                 int64_t stride_h, int64_t stride_w,
+                                                 int64_t padding_h, int64_t padding_w,
+                                                 int64_t dilation_h, int64_t dilation_w,
+                                                 sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
@@ -372,8 +393,8 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t ker
     const int64_t H_in = shape[2];
     const int64_t W_in = shape[3];
 
-    const int64_t H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     // Indices must be Int64 to correctly represent element positions for all tensor sizes.
@@ -399,10 +420,10 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t ker
             double max_val = -1.7976931348623157e+308;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -438,10 +459,10 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t ker
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -477,10 +498,10 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t ker
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -508,8 +529,12 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t ker
 #else // !TENZOR_HAS_ONEDNN - Pure SYCL implementation (slower fallback)
 
 // MaxPool2d forward with indices (pure SYCL) - returns both output and indices for backward pass
-auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,
-                                    int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+auto maxpool2d_forward_with_indices(const Tensor& input,
+                                    int64_t kernel_h, int64_t kernel_w,
+                                    int64_t stride_h, int64_t stride_w,
+                                    int64_t padding_h, int64_t padding_w,
+                                    int64_t dilation_h, int64_t dilation_w,
+                                    sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
@@ -520,8 +545,8 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
     const int64_t H_in = shape[2];
     const int64_t W_in = shape[3];
 
-    const int64_t H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     // Indices must be Int64 to correctly represent element positions for all tensor sizes.
@@ -545,10 +570,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -584,10 +609,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             double max_val = -1.7976931348623157e+308;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -624,10 +649,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -664,10 +689,10 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -693,15 +718,23 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 }
 
 // MaxPool2d forward (pure SYCL) - returns only output (for operations that don't need indices)
-auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
-    auto [output, indices] = maxpool2d_forward_with_indices(input, kernel_size, stride, padding, dilation, queue);
+auto maxpool2d_forward(const Tensor& input,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       sycl::queue& queue) -> Tensor {
+    auto [output, indices] = maxpool2d_forward_with_indices(input,
+        kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
     return output;
 }
 
 // AvgPool2d forward (pure SYCL)
-auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, bool count_include_pad, sycl::queue& queue) -> Tensor {
+auto avgpool2d_forward(const Tensor& input,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       bool count_include_pad, sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("AvgPool2d requires 4D input (N, C, H, W)");
@@ -712,8 +745,8 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     const int64_t H_in = shape[2];
     const int64_t W_in = shape[3];
 
-    const int64_t H_out = (H_in + 2 * padding - kernel_size) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - kernel_size) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - kernel_h) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - kernel_w) / stride_w + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
 
@@ -734,10 +767,10 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             float sum = 0.0f;
             int64_t count = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh;
-                    int64_t w_in = w_out * stride - padding + kw;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh;
+                    int64_t w_in = w_out * stride_w - padding_w + kw;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         sum += in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
@@ -769,10 +802,10 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             double sum = 0.0;
             int64_t count = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh;
-                    int64_t w_in = w_out * stride - padding + kw;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh;
+                    int64_t w_in = w_out * stride_w - padding_w + kw;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         sum += in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
@@ -805,10 +838,10 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             float sum = 0.0f;
             int64_t count = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh;
-                    int64_t w_in = w_out * stride - padding + kw;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh;
+                    int64_t w_in = w_out * stride_w - padding_w + kw;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         sum += static_cast<float>(in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in]);
@@ -841,10 +874,10 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             float sum = 0.0f;
             int64_t count = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh;
-                    int64_t w_in = w_out * stride - padding + kw;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh;
+                    int64_t w_in = w_out * stride_w - padding_w + kw;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         sum += bf16_to_f32(in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in]);
@@ -1491,16 +1524,25 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
  * @return Tensor Pooled output tensor
  */
 auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.has(AttrKey::KernelSize)) {
+    if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("avg_pool2d: 'kernel_size' attribute is required");
     }
 
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+    // Per-axis with scalar fallback. Matches the canonical pattern in
+    // include/tenzor/backend/attr_macros.hpp.
+    const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 1);
+    const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+    const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+    const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+    const int64_t stride_h = attrs.get_int(AttrKey::StrideH, s_scalar);
+    const int64_t stride_w = attrs.get_int(AttrKey::StrideW, s_scalar);
+    const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+    const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
+    const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
+    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
 
-    return avgpool2d_forward(input, kernel_size, stride, padding, count_include_pad, queue);
+    return avgpool2d_forward(input, kernel_h, kernel_w, stride_h, stride_w,
+                              padding_h, padding_w, count_include_pad, queue);
 }
 
 /**
@@ -1516,16 +1558,26 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return std::pair<Tensor, Tensor> Pooled output tensor and indices tensor
  */
 auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
-    if (!attrs.has(AttrKey::KernelSize)) {
+    if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("max_pool2d: 'kernel_size' attribute is required");
     }
 
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    // Per-axis with scalar fallback.
+    const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 1);
+    const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+    const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+    const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+    const int64_t stride_h = attrs.get_int(AttrKey::StrideH, s_scalar);
+    const int64_t stride_w = attrs.get_int(AttrKey::StrideW, s_scalar);
+    const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+    const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
+    const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
+    const int64_t d_scalar = attrs.get_int(AttrKey::Dilation, 1);
+    const int64_t dilation_h = attrs.get_int(AttrKey::DilationH, d_scalar);
+    const int64_t dilation_w = attrs.get_int(AttrKey::DilationW, d_scalar);
 
-    return maxpool2d_forward_with_indices(input, kernel_size, stride, padding, dilation, queue);
+    return maxpool2d_forward_with_indices(input,
+        kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
 }
 
 /**
@@ -1616,7 +1668,7 @@ auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
  */
 auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.has(AttrKey::KernelSize)) {
+    if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("avg_pool2d_backward: 'kernel_size' attribute is required");
     }
 
@@ -1627,10 +1679,17 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::invalid_argument("avg_pool2d_backward requires 4D inputs (N, C, H, W)");
     }
 
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+    // Per-axis with scalar fallback.
+    const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 1);
+    const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+    const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+    const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+    const int64_t stride_h = attrs.get_int(AttrKey::StrideH, s_scalar);
+    const int64_t stride_w = attrs.get_int(AttrKey::StrideW, s_scalar);
+    const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+    const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
+    const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
+    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
 
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
@@ -1667,10 +1726,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
                 // Count valid positions in pooling window
                 int64_t count = 0;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             count++;
@@ -1683,10 +1742,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 // Distribute gradient evenly
                 const float grad_per_input = count > 0 ? grad_val / static_cast<float>(count) : 0.0f;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -1719,10 +1778,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const double grad_val = grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out];
 
                 int64_t count = 0;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             count++;
@@ -1734,10 +1793,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
                 const double grad_per_input = count > 0 ? grad_val / static_cast<double>(count) : 0.0;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -1772,10 +1831,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const float grad_val = static_cast<float>(grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out]);
 
                 int64_t count = 0;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             count++;
@@ -1787,10 +1846,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
                 const float grad_per_input = count > 0 ? grad_val / static_cast<float>(count) : 0.0f;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -1832,10 +1891,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const float grad_val = bf16_to_f32(grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out]);
 
                 int64_t count = 0;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             count++;
@@ -1847,10 +1906,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
                 const float grad_per_input = count > 0 ? grad_val / static_cast<float>(count) : 0.0f;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh;
-                        int64_t w_in = w_out * stride - padding + kw;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh;
+                        int64_t w_in = w_out * stride_w - padding_w + kw;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
@@ -1891,7 +1950,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
  */
 auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.has(AttrKey::KernelSize)) {
+    if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("max_pool2d_backward: 'kernel_size' attribute is required");
     }
 
@@ -1902,10 +1961,19 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::invalid_argument("max_pool2d_backward requires 4D inputs (N, C, H, W)");
     }
 
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    // Per-axis with scalar fallback.
+    const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 1);
+    const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+    const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+    const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+    const int64_t stride_h = attrs.get_int(AttrKey::StrideH, s_scalar);
+    const int64_t stride_w = attrs.get_int(AttrKey::StrideW, s_scalar);
+    const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+    const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
+    const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
+    const int64_t d_scalar = attrs.get_int(AttrKey::Dilation, 1);
+    const int64_t dilation_h = attrs.get_int(AttrKey::DilationH, d_scalar);
+    const int64_t dilation_w = attrs.get_int(AttrKey::DilationW, d_scalar);
 
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
@@ -1946,10 +2014,10 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 int64_t max_h = -1;
                 int64_t max_w = -1;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh * dilation;
-                        int64_t w_in = w_out * stride - padding + kw * dilation;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             float val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
@@ -1996,10 +2064,10 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 int64_t max_h = -1;
                 int64_t max_w = -1;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh * dilation;
-                        int64_t w_in = w_out * stride - padding + kw * dilation;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             double val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
@@ -2048,10 +2116,10 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 int64_t max_h = -1;
                 int64_t max_w = -1;
 
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t h_in = h_out * stride - padding + kh * dilation;
-                        int64_t w_in = w_out * stride - padding + kw * dilation;
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                         if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                             float val = bf16_to_f32(in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in]);

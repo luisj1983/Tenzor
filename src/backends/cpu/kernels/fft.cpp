@@ -28,6 +28,7 @@
 
 #ifdef TENZOR_USE_MKL
 #include <mkl_dfti.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -621,13 +622,13 @@ inline auto build_complex64_from_half(const Tensor& input) -> Tensor {
 
     if (input.dtype() == DType::Float16) {
         const auto* src = input.data<tenzor::Float16>();
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             dst[i] = std::complex<float>(static_cast<float>(src[i]), 0.0f);
         }
     } else if (input.dtype() == DType::BFloat16) {
         const auto* src = input.data<tenzor::BFloat16>();
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             dst[i] = std::complex<float>(static_cast<float>(src[i]), 0.0f);
         }

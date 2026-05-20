@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 #include "test_backend_utils.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using tenzor::test::BackendConfig;
@@ -505,7 +506,7 @@ TEST_P(EdgeCaseTest, BackwardOnNonLeafTensor) {
     // Backward on non-leaf without retain_grad should fail
     // Note: We test on z instead since y doesn't have backward() without graph retention
     z.backward();
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(EdgeCaseTest, MultipleBackwardCalls_WithoutRetain) {
@@ -516,7 +517,7 @@ TEST_P(EdgeCaseTest, MultipleBackwardCalls_WithoutRetain) {
     y.backward();
 
     // After backward, the graph is freed. x should have gradients
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 
     // Second backward would require retain_graph which we're not testing here
     // Just verify the first backward worked correctly
@@ -555,7 +556,7 @@ TEST_P(EdgeCaseTest, GradientOnScalarOnly) {
     z.backward();
 
     // Verify gradients were computed
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ============================================================================
@@ -643,7 +644,7 @@ TEST_P(EdgeCaseTest, InvalidParameterCombination_Conv2D) {
 TEST_P(EdgeCaseTest, InvalidParameterCombination_Pooling) {
     // Negative pooling size
     EXPECT_THROW({
-        nn::MaxPool2d pool({-1, -1});
+        nn::MaxPool2d pool(std::array<int64_t, 2>{-1, -1});
     }, std::runtime_error);
 }
 

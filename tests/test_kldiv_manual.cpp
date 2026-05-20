@@ -6,6 +6,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include <iostream>
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -34,7 +35,7 @@ TEST_F(KLDivManualTest, SimpleSubtract) {
     loss.backward();
 
     std::cout << "Checking gradient..." << std::endl;
-    EXPECT_TRUE(a.grad().has_value());
+    EXPECT_GRAD_FLOWS(a);
     if (a.grad().has_value()) {
         std::cout << "SUCCESS: gradient computed!" << std::endl;
     }
@@ -57,7 +58,7 @@ TEST_F(KLDivManualTest, SimpleMultiply) {
     loss.backward();
 
     std::cout << "Checking gradient..." << std::endl;
-    EXPECT_TRUE(a.grad().has_value());
+    EXPECT_GRAD_FLOWS(a);
     if (a.grad().has_value()) {
         std::cout << "SUCCESS: gradient computed!" << std::endl;
     }
@@ -131,7 +132,7 @@ TEST_F(KLDivManualTest, ExactReplicaOfFailingTest) {
 
     // Check that we can compute gradients
     loss.backward();
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 
     std::cout << "SUCCESS: Test passed!" << std::endl;
 }

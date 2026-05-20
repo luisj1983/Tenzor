@@ -12,6 +12,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::autograd;
@@ -177,7 +178,7 @@ TEST_F(GradientCheckpointTest, CheckpointGradientCorrectness) {
     loss.backward();
 
     // Gradient should be dy/dx = 2*x = 2*1 = 2
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     const float* grad_data = x.grad()->data<float>();
 
     for (int i = 0; i < x.tensor().numel(); ++i) {
@@ -218,8 +219,8 @@ TEST_F(GradientCheckpointTest, MultiVariableCheckpoint) {
     loss.backward();
 
     // Verify gradients exist
-    EXPECT_TRUE(x.grad().has_value());
-    EXPECT_TRUE(y.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
+    EXPECT_GRAD_FLOWS(y);
 }
 
 TEST_F(GradientCheckpointTest, NestedCheckpoints) {
@@ -257,7 +258,7 @@ TEST_F(GradientCheckpointTest, NestedCheckpoints) {
     loss.backward();
 
     // Gradient: dy/dx = 3
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     const float* grad_data = x.grad()->data<float>();
     for (int i = 0; i < x.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 3.0f);
@@ -284,7 +285,7 @@ TEST_F(GradientCheckpointTest, CheckpointWithReLU) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_F(GradientCheckpointTest, CheckpointWithSigmoid) {
@@ -309,7 +310,7 @@ TEST_F(GradientCheckpointTest, CheckpointWithSigmoid) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ==============================================================================

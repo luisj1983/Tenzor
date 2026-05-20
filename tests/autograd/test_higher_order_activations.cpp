@@ -24,6 +24,7 @@
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../grad_flow_helpers.hpp"
 
 namespace tenzor {
 namespace {
@@ -62,7 +63,7 @@ TEST_F(HigherOrderActivationsTest, SigmoidDoubleBackwardNonZero) {
     auto grad_norm = tenzor::sum(grad_x_var * grad_x_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_x_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_x_var);
     auto second_grad = grad_x_var.grad().value().to(Device::cpu()).contiguous();
     const double* gdata = second_grad.data<double>();
 
@@ -88,13 +89,13 @@ TEST_F(HigherOrderActivationsTest, TanhDoubleBackwardNonZero) {
     auto loss = tenzor::sum(y);
     loss.backward(std::nullopt, false, true);
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_x_t = x.grad().value();
     auto grad_x_var = Variable(grad_x_t, true);
     auto grad_norm = tenzor::sum(grad_x_var * grad_x_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_x_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_x_var);
     auto second_grad = grad_x_var.grad().value().to(Device::cpu()).contiguous();
     const double* gdata = second_grad.data<double>();
     double total = 0.0;
@@ -116,12 +117,12 @@ TEST_F(HigherOrderActivationsTest, SigmoidChainDoubleBackward) {
     auto loss = tenzor::sum(y);
     loss.backward(std::nullopt, false, true);
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);
     grad_norm.backward();
 
-    ASSERT_TRUE(grad_var.grad().has_value());
+    EXPECT_GRAD_FLOWS(grad_var);
     auto second = grad_var.grad().value().to(Device::cpu()).contiguous();
     double total = 0.0;
     const double* p = second.data<double>();

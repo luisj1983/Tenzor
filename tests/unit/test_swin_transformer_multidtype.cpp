@@ -16,6 +16,7 @@
 #include "../../include/tenzor/models/swin_transformer.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -122,7 +123,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyGradientFlow) {
                   << " max_abs_finite=" << max_abs << std::endl;
     }
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
 
@@ -214,7 +215,7 @@ TEST_P(SwinMultiDTypeTest, SwinSmallGradientFlow) {
                   << " max_abs_finite=" << max_abs << std::endl;
     }
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -258,7 +259,7 @@ TEST_P(SwinMultiDTypeTest, SwinBaseGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -304,7 +305,7 @@ TEST_P(SwinMultiDTypeTest, SwinLargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -433,7 +434,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
     loss.backward();
 
     // Verify gradients flow through shifted window attention
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 
     auto grad = input.grad().value().to(Device::cpu()).to(DType::Float32);
     auto grad_data = grad.data<float>();
@@ -502,7 +503,7 @@ TEST_P(SwinMultiDTypeTest, SwinSmallHierarchicalGradients) {
     loss.backward();
 
     // Verify hierarchical gradients
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = model->parameters();

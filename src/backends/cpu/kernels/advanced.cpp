@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "tenzor/backend/omp_thresholds.hpp"
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -196,7 +197,7 @@ auto cumsum_impl(const T* data, T* output, int64_t dim_size,
     }
 
     // Scalar fallback for all types and small inner sizes
-    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
             T running = T(0);
@@ -273,7 +274,7 @@ auto cumprod_impl(const T* data, T* output, int64_t dim_size,
     }
 
     // Scalar fallback
-    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
             T running = T(1);
@@ -656,7 +657,7 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right)
                   DType::Int64, input.device());
     int64_t* out_data = result.data<int64_t>();
 
-    #pragma omp parallel for schedule(static) if(n > 65536)
+    #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < n; ++i) {
         float val = in_data[i];
         // Binary search
@@ -683,7 +684,7 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right)
 template<typename T>
 auto cummax_impl(const T* data, T* out_values, int64_t* out_indices,
                  int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
-    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
             int64_t first_idx = (outer * dim_size + 0) * inner_size + inner;
@@ -708,7 +709,7 @@ auto cummax_impl(const T* data, T* out_values, int64_t* out_indices,
 template<typename T>
 auto cummin_impl(const T* data, T* out_values, int64_t* out_indices,
                  int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
-    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
             int64_t first_idx = (outer * dim_size + 0) * inner_size + inner;
@@ -826,7 +827,7 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements) -> Tensor 
     Tensor output(out_shape, DType::Bool, elements.device());
     bool* out_data = output.data<bool>();
 
-    #pragma omp parallel for schedule(static) if(n_elem > 65536)
+    #pragma omp parallel for schedule(static) if(n_elem > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < n_elem; ++i) {
         uint32_t bits;
         std::memcpy(&bits, &elem_data[i], sizeof(uint32_t));
@@ -924,7 +925,7 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim,
 
 template<typename T>
 auto fmax_impl(const T* a, const T* b, T* out, int64_t n) -> void {
-    #pragma omp parallel for schedule(static) if(n > 65536)
+    #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < n; ++i) {
         if constexpr (std::is_floating_point_v<T>) {
             if (std::isnan(a[i])) { out[i] = b[i]; }
@@ -938,7 +939,7 @@ auto fmax_impl(const T* a, const T* b, T* out, int64_t n) -> void {
 
 template<typename T>
 auto fmin_impl(const T* a, const T* b, T* out, int64_t n) -> void {
-    #pragma omp parallel for schedule(static) if(n > 65536)
+    #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < n; ++i) {
         if constexpr (std::is_floating_point_v<T>) {
             if (std::isnan(a[i])) { out[i] = b[i]; }

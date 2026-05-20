@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <memory>
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -55,7 +56,7 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithReshapeInput) {
     loss.backward();
 
     // Check that input gradient is accumulated correctly
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 4);
@@ -95,7 +96,7 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithPermuteInput) {
     loss.backward();
 
     // Check gradients flow back to original input
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -121,7 +122,7 @@ TEST_F(LinearReshapeIntegrationTest, MultipleReshapeOps) {
     loss.backward();
 
     // Check gradient propagates back through all reshapes
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value();
     EXPECT_EQ(grad.shape()[0], 6);
 

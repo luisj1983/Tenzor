@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/resnet.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -387,7 +388,8 @@ auto resnet18(int64_t num_classes, bool pretrained) -> std::shared_ptr<ResNet> {
         std::vector<int64_t>{2, 2, 2, 2}, num_classes, true, 1, 64);
 
     if (pretrained) {
-        model->load_pretrained("resnet18_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnet18");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -398,7 +400,8 @@ auto resnet34(int64_t num_classes, bool pretrained) -> std::shared_ptr<ResNet> {
         std::vector<int64_t>{3, 4, 6, 3}, num_classes, true, 1, 64);
 
     if (pretrained) {
-        model->load_pretrained("resnet34_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnet34");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -409,7 +412,8 @@ auto resnet50(int64_t num_classes, bool pretrained) -> std::shared_ptr<ResNet> {
         std::vector<int64_t>{3, 4, 6, 3}, num_classes, false, 1, 64);
 
     if (pretrained) {
-        model->load_pretrained("resnet50_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnet50");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -420,7 +424,8 @@ auto resnet101(int64_t num_classes, bool pretrained) -> std::shared_ptr<ResNet> 
         std::vector<int64_t>{3, 4, 23, 3}, num_classes, false, 1, 64);
 
     if (pretrained) {
-        model->load_pretrained("resnet101_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnet101");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -431,7 +436,8 @@ auto resnet152(int64_t num_classes, bool pretrained) -> std::shared_ptr<ResNet> 
         std::vector<int64_t>{3, 8, 36, 3}, num_classes, false, 1, 64);
 
     if (pretrained) {
-        model->load_pretrained("resnet152_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnet152");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -446,7 +452,10 @@ auto resnet50_atrous(int64_t num_classes, int64_t output_stride, bool pretrained
     -> std::shared_ptr<ResNet> {
     auto model = std::make_shared<ResNet>(
         std::vector<int64_t>{3, 4, 6, 3}, num_classes, false, 1, 64, output_stride);
-    if (pretrained) model->load_pretrained("resnet50_imagenet.pth");
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("resnet50");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
     return model;
 }
 
@@ -454,7 +463,10 @@ auto resnet101_atrous(int64_t num_classes, int64_t output_stride, bool pretraine
     -> std::shared_ptr<ResNet> {
     auto model = std::make_shared<ResNet>(
         std::vector<int64_t>{3, 4, 23, 3}, num_classes, false, 1, 64, output_stride);
-    if (pretrained) model->load_pretrained("resnet101_imagenet.pth");
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("resnet101");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
     return model;
 }
 
@@ -462,7 +474,10 @@ auto resnet152_atrous(int64_t num_classes, int64_t output_stride, bool pretraine
     -> std::shared_ptr<ResNet> {
     auto model = std::make_shared<ResNet>(
         std::vector<int64_t>{3, 8, 36, 3}, num_classes, false, 1, 64, output_stride);
-    if (pretrained) model->load_pretrained("resnet152_imagenet.pth");
+    if (pretrained) {
+        auto path = ModelHub::download_pretrained_safetensors("resnet152");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
     return model;
 }
 
@@ -471,7 +486,8 @@ auto resnext50_32x4d(int64_t num_classes, bool pretrained) -> std::shared_ptr<Re
         std::vector<int64_t>{3, 4, 6, 3}, num_classes, false, 32, 4);
 
     if (pretrained) {
-        model->load_pretrained("resnext50_32x4d_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnext50_32x4d");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -482,7 +498,8 @@ auto resnext101_32x8d(int64_t num_classes, bool pretrained) -> std::shared_ptr<R
         std::vector<int64_t>{3, 4, 23, 3}, num_classes, false, 32, 8);
 
     if (pretrained) {
-        model->load_pretrained("resnext101_32x8d_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("resnext101_32x8d");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -493,7 +510,8 @@ auto wide_resnet50_2(int64_t num_classes, bool pretrained) -> std::shared_ptr<Re
         std::vector<int64_t>{3, 4, 6, 3}, num_classes, false, 1, 128);
 
     if (pretrained) {
-        model->load_pretrained("wide_resnet50_2_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("wide_resnet50_2");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;
@@ -504,7 +522,8 @@ auto wide_resnet101_2(int64_t num_classes, bool pretrained) -> std::shared_ptr<R
         std::vector<int64_t>{3, 4, 23, 3}, num_classes, false, 1, 128);
 
     if (pretrained) {
-        model->load_pretrained("wide_resnet101_2_imagenet.pth");
+        auto path = ModelHub::download_pretrained_safetensors("wide_resnet101_2");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;

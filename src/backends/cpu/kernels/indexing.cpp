@@ -19,6 +19,7 @@
 #include <span>
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 // SIMD support detection
@@ -57,7 +58,7 @@ void index_select_impl(const T* in_data, T* out_data,
         }
     }
 
-    #pragma omp parallel for collapse(2) if(outer_size * num_indices > 65536)
+    #pragma omp parallel for collapse(2) if(outer_size * num_indices > ::tenzor::OmpThresholds::simple())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t idx = 0; idx < num_indices; ++idx) {
             int64_t src_idx = index_data[idx];
@@ -96,7 +97,7 @@ void gather_impl(const T* input_ptr, T* output_ptr,
     }
 
     // Gather in parallel (indices already validated)
-    #pragma omp parallel for if(numel > 65536)
+    #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
         int64_t temp = flat_idx;
         int64_t input_idx = 0;
@@ -949,14 +950,14 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
 #elif defined(INDEXING_HAS_AVX2)
             fast_math::where_batch_avx2(float_cond_ptr, x_ptr, y_ptr, output_ptr, static_cast<size_t>(numel));
 #else
-            #pragma omp parallel for if(numel > 100000)
+            #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
             for (int64_t i = 0; i < numel; ++i) {
                 output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
             }
 #endif
         } else {
             // Bool condition - scalar loop with OpenMP
-            #pragma omp parallel for if(numel > 100000)
+            #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
             for (int64_t i = 0; i < numel; ++i) {
                 output_ptr[i] = bool_cond_ptr[i] ? x_ptr[i] : y_ptr[i];
             }
@@ -1123,7 +1124,7 @@ auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor {
         }
     }
 
-    #pragma omp parallel for if(num_indices > 65536)
+    #pragma omp parallel for if(num_indices > ::tenzor::OmpThresholds::simple())
     for (int64_t i = 0; i < num_indices; ++i) {
         int64_t idx = idx_data[i];
         if (idx < 0) idx += input_numel;
@@ -1209,7 +1210,7 @@ auto searchsorted_kernel(std::span<const Tensor> inputs, const OpAttributes& att
 
     auto search_typed = [&](const auto* seq_ptr, const auto* val_ptr, int64_t* out_ptr) {
         #ifdef _OPENMP
-        #pragma omp parallel for if(num_values > 4096)
+        #pragma omp parallel for if(num_values > ::tenzor::OmpThresholds::complex())
         #endif
         for (int64_t i = 0; i < num_values; ++i) {
             auto v = val_ptr[i];
@@ -1388,7 +1389,7 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     const int64_t* idx_ptr = indices.data<int64_t>();
 
     auto copy_elements = [&](auto* in_ptr, auto* out_ptr) {
-        #pragma omp parallel for if(numel > 65536)
+        #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < numel; ++i) {
             int64_t outer = i / (idx_dim_size * inner_size);
             int64_t rem = i % (idx_dim_size * inner_size);
@@ -1455,13 +1456,18 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor
     };
 
     switch (input.dtype()) {
-        case DType::Float32: scatter_values(output.data<float>(), source.data<float>(), source.numel()); break;
-        case DType::Float64: scatter_values(output.data<double>(), source.data<double>(), source.numel()); break;
-        case DType::Int32:   scatter_values(output.data<int32_t>(), source.data<int32_t>(), source.numel()); break;
-        case DType::Int64:   scatter_values(output.data<int64_t>(), source.data<int64_t>(), source.numel()); break;
-        case DType::Int16:   scatter_values(output.data<int16_t>(), source.data<int16_t>(), source.numel()); break;
-        case DType::Int8:    scatter_values(output.data<int8_t>(), source.data<int8_t>(), source.numel()); break;
-        case DType::UInt8:   scatter_values(output.data<uint8_t>(), source.data<uint8_t>(), source.numel()); break;
+        case DType::Float32:    scatter_values(output.data<float>(),                 source.data<float>(),                 source.numel()); break;
+        case DType::Float64:    scatter_values(output.data<double>(),                source.data<double>(),                source.numel()); break;
+        case DType::Float16:    scatter_values(output.data<Float16>(),               source.data<Float16>(),               source.numel()); break;
+        case DType::BFloat16:   scatter_values(output.data<BFloat16>(),              source.data<BFloat16>(),              source.numel()); break;
+        case DType::Complex64:  scatter_values(output.data<std::complex<float>>(),   source.data<std::complex<float>>(),   source.numel()); break;
+        case DType::Complex128: scatter_values(output.data<std::complex<double>>(),  source.data<std::complex<double>>(),  source.numel()); break;
+        case DType::Bool:       scatter_values(output.data<bool>(),                  source.data<bool>(),                  source.numel()); break;
+        case DType::Int64:      scatter_values(output.data<int64_t>(),               source.data<int64_t>(),               source.numel()); break;
+        case DType::Int32:      scatter_values(output.data<int32_t>(),               source.data<int32_t>(),               source.numel()); break;
+        case DType::Int16:      scatter_values(output.data<int16_t>(),               source.data<int16_t>(),               source.numel()); break;
+        case DType::Int8:       scatter_values(output.data<int8_t>(),                source.data<int8_t>(),                source.numel()); break;
+        case DType::UInt8:      scatter_values(output.data<uint8_t>(),               source.data<uint8_t>(),               source.numel()); break;
         default:
             throw std::runtime_error("masked_scatter: unsupported dtype");
     }

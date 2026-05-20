@@ -24,6 +24,7 @@
 #include <tenzor/ops/math.hpp>
 #include <cmath>
 #include <limits>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -44,7 +45,7 @@ TEST_F(D4Test, P2_Norm_Backward_MatchesClosedForm) {
     auto x = make_var({3.0f, 4.0f}, {2});
     auto y = vector_norm(x, /*ord=*/2.0);
     y.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto* gp = x.grad().value().data<float>();
     EXPECT_NEAR(gp[0], 0.6f, 1e-5f);
     EXPECT_NEAR(gp[1], 0.8f, 1e-5f);
@@ -54,7 +55,7 @@ TEST_F(D4Test, P1_Norm_Backward_IsSign) {
     auto x = make_var({2.0f, -3.0f, 0.5f, -0.1f}, {4});
     auto y = vector_norm(x, /*ord=*/1.0);
     y.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto* gp = x.grad().value().data<float>();
     EXPECT_FLOAT_EQ(gp[0], 1.0f);
     EXPECT_FLOAT_EQ(gp[1], -1.0f);
@@ -67,7 +68,7 @@ TEST_F(D4Test, PInf_Norm_Backward_OnArgmax) {
     auto x = make_var({1.0f, -4.0f, 3.0f}, {3});
     auto y = vector_norm(x, /*ord=*/std::numeric_limits<double>::infinity());
     y.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto* gp = x.grad().value().data<float>();
     EXPECT_FLOAT_EQ(gp[0], 0.0f);
     EXPECT_FLOAT_EQ(gp[1], -1.0f);
@@ -79,7 +80,7 @@ TEST_F(D4Test, PNegInf_Norm_Backward_OnArgmin) {
     auto x = make_var({3.0f, 0.5f, 4.0f}, {3});
     auto y = vector_norm(x, /*ord=*/-std::numeric_limits<double>::infinity());
     y.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto* gp = x.grad().value().data<float>();
     EXPECT_FLOAT_EQ(gp[0], 0.0f);
     EXPECT_FLOAT_EQ(gp[1], 1.0f);

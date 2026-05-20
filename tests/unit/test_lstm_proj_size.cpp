@@ -14,6 +14,7 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -126,7 +127,7 @@ TEST_F(G1Test, GradientFlowsToInput) {
     auto [out, _] = lstm.forward(x, {Variable{}, Variable{}});
     auto loss = tenzor::sum(out);
     loss.backward();
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     // Gradient should be non-zero somewhere.
     bool any_nonzero = false;
     auto* gp = x.grad().value().data<float>();

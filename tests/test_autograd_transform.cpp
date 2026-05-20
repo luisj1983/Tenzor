@@ -10,6 +10,7 @@
 #include "tenzor/ops/math.hpp"
 #include "backend_test_fixture.hpp"
 #include <vector>
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -51,7 +52,7 @@ TEST_P(AutogradTransformBackendTest, ReshapeBackwardPass) {
     loss.backward();
 
     // Check gradient has correct shape
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     EXPECT_EQ(grad.shape().size(), 2);
     EXPECT_EQ(grad.shape()[0], 2);
@@ -79,7 +80,7 @@ TEST_P(AutogradTransformBackendTest, ReshapeChainedOperations) {
     loss.backward();
 
     // Check gradient (d(sum(3*x))/dx = 3)
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     auto grad_data = grad.data<float>();
     for (int64_t i = 0; i < grad.numel(); ++i) {
@@ -116,7 +117,7 @@ TEST_P(AutogradTransformBackendTest, PermuteBackwardPass) {
     loss.backward();
 
     // Check gradient has correct shape (same as input)
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     EXPECT_EQ(grad.shape().size(), 3);
     EXPECT_EQ(grad.shape()[0], 2);
@@ -143,7 +144,7 @@ TEST_P(AutogradTransformBackendTest, PermuteTranspose) {
     loss.backward();
 
     // Check gradient shape matches input
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     EXPECT_EQ(grad.shape()[0], 3);
     EXPECT_EQ(grad.shape()[1], 4);
@@ -162,7 +163,7 @@ TEST_P(AutogradTransformBackendTest, PermuteWithSum) {
     loss.backward();
 
     // Check gradient (d(sum(x))/dx = 1)
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -188,7 +189,7 @@ TEST_P(AutogradTransformBackendTest, ReshapeAndPermuteCombined) {
     loss.backward();
 
     // Check gradient shape matches original input
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -238,7 +239,7 @@ TEST_P(AutogradTransformBackendTest, GradientCorrectness) {
     loss.backward();
 
     // Check gradient: d(sum(3*x))/dx = 3
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
 
     // Verify gradient shape matches input
@@ -265,7 +266,7 @@ TEST_P(AutogradTransformBackendTest, MultipleReshapes) {
 
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
 
     // Original shape should be preserved
@@ -289,7 +290,7 @@ TEST_P(AutogradTransformBackendTest, MultiplePermutes) {
 
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad = x.grad().value().to(Device::cpu());
 
     // Original shape should be preserved

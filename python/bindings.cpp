@@ -190,6 +190,20 @@ PYBIND11_MODULE(tenzor_core, m) {
     // `except tz.TensorBoardError`). The catch-all is kept as a safety net.
     py::register_exception<tenzor::TensorBoardException>(
         m, "TensorBoardError", py_tenzor_error.ptr());
+    // Python-parity exception types — map to the corresponding Python builtins
+    // so `except IndexError`, `except TypeError`, `except ValueError`,
+    // `except NotImplementedError`, `except RuntimeError` all work as
+    // Python users expect when calling Tenzor ops.
+    py::register_exception<tenzor::IndexError>(
+        m, "IndexError", PyExc_IndexError);
+    py::register_exception<tenzor::ValueError>(
+        m, "ValueError", PyExc_ValueError);
+    py::register_exception<tenzor::TypeError>(
+        m, "TypeError", PyExc_TypeError);
+    py::register_exception<tenzor::NotImplementedError>(
+        m, "NotImplementedError", PyExc_NotImplementedError);
+    py::register_exception<tenzor::RuntimeError>(
+        m, "RuntimeError", PyExc_RuntimeError);
 
     // Catch-all translator: any future TenzorException-derived types not
     // explicitly registered above will still map to TenzorError in Python.
@@ -1980,31 +1994,50 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("use_basic_block") = true,
              py::arg("groups") = 1, py::arg("base_width") = 64);
 
-    // Convenience functions for standard ResNet variants
-    models.def("resnet18", [](int64_t num_classes) {
-        return std::make_shared<tenzor::models::ResNet>(
-            std::vector<int64_t>{2, 2, 2, 2}, num_classes, true);
-    }, py::arg("num_classes") = 1000, "Create ResNet-18");
-
-    models.def("resnet34", [](int64_t num_classes) {
-        return std::make_shared<tenzor::models::ResNet>(
-            std::vector<int64_t>{3, 4, 6, 3}, num_classes, true);
-    }, py::arg("num_classes") = 1000, "Create ResNet-34");
-
-    models.def("resnet50", [](int64_t num_classes) {
-        return std::make_shared<tenzor::models::ResNet>(
-            std::vector<int64_t>{3, 4, 6, 3}, num_classes, false);
-    }, py::arg("num_classes") = 1000, "Create ResNet-50");
-
-    models.def("resnet101", [](int64_t num_classes) {
-        return std::make_shared<tenzor::models::ResNet>(
-            std::vector<int64_t>{3, 4, 23, 3}, num_classes, false);
-    }, py::arg("num_classes") = 1000, "Create ResNet-101");
-
-    models.def("resnet152", [](int64_t num_classes) {
-        return std::make_shared<tenzor::models::ResNet>(
-            std::vector<int64_t>{3, 8, 36, 3}, num_classes, false);
-    }, py::arg("num_classes") = 1000, "Create ResNet-152");
+    // Convenience functions for standard ResNet variants. pretrained=True
+    // downloads ImageNet weights via ModelHub.
+    models.def("resnet18",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnet18(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNet-18. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("resnet34",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnet34(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNet-34.");
+    models.def("resnet50",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnet50(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNet-50.");
+    models.def("resnet101",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnet101(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNet-101.");
+    models.def("resnet152",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnet152(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNet-152.");
+    models.def("resnext50_32x4d",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnext50_32x4d(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNeXt-50 32x4d.");
+    models.def("resnext101_32x8d",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::resnext101_32x8d(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ResNeXt-101 32x8d.");
 
     // VGG
     py::class_<tenzor::models::VGG, tenzor::nn::Module,
@@ -2019,18 +2052,30 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<>())
         .def_readwrite("layers", &tenzor::models::VGGConfig::layers);
 
-    models.def("vgg11", [](int64_t num_classes, bool bn) {
-        return tenzor::models::vgg11(num_classes, bn);
-    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-11");
-    models.def("vgg13", [](int64_t num_classes, bool bn) {
-        return tenzor::models::vgg13(num_classes, bn);
-    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-13");
-    models.def("vgg16", [](int64_t num_classes, bool bn) {
-        return tenzor::models::vgg16(num_classes, bn);
-    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-16");
-    models.def("vgg19", [](int64_t num_classes, bool bn) {
-        return tenzor::models::vgg19(num_classes, bn);
-    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-19");
+    models.def("vgg11",
+        [](int64_t num_classes, bool bn, bool pretrained) {
+            return tenzor::models::vgg11(num_classes, bn, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("batch_norm") = true, py::arg("pretrained") = false,
+        "VGG-11. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("vgg13",
+        [](int64_t num_classes, bool bn, bool pretrained) {
+            return tenzor::models::vgg13(num_classes, bn, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("batch_norm") = true, py::arg("pretrained") = false,
+        "VGG-13.");
+    models.def("vgg16",
+        [](int64_t num_classes, bool bn, bool pretrained) {
+            return tenzor::models::vgg16(num_classes, bn, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("batch_norm") = true, py::arg("pretrained") = false,
+        "VGG-16.");
+    models.def("vgg19",
+        [](int64_t num_classes, bool bn, bool pretrained) {
+            return tenzor::models::vgg19(num_classes, bn, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("batch_norm") = true, py::arg("pretrained") = false,
+        "VGG-19.");
 
     // AlexNet
     py::class_<tenzor::models::AlexNet, tenzor::nn::Module,
@@ -2038,9 +2083,12 @@ PYBIND11_MODULE(tenzor_core, m) {
         "AlexNet architecture")
         .def(py::init<int64_t, double>(),
              py::arg("num_classes") = 1000, py::arg("dropout") = 0.5);
-    models.def("alexnet", [](int64_t num_classes) {
-        return tenzor::models::alexnet(num_classes);
-    }, py::arg("num_classes") = 1000, "Create AlexNet");
+    models.def("alexnet",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::alexnet(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "AlexNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
 
     // MobileNet
     py::class_<tenzor::models::MobileNetV2, tenzor::nn::Module,
@@ -2049,9 +2097,12 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, double, double>(),
              py::arg("num_classes") = 1000, py::arg("width_mult") = 1.0,
              py::arg("dropout") = 0.2);
-    models.def("mobilenet_v2", [](int64_t num_classes) {
-        return tenzor::models::mobilenet_v2(num_classes);
-    }, py::arg("num_classes") = 1000, "Create MobileNetV2");
+    models.def("mobilenet_v2",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::mobilenet_v2(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "MobileNetV2. pretrained=True downloads ImageNet weights via tz.models.hub.");
 
     py::class_<tenzor::models::MobileNetV3, tenzor::nn::Module,
                std::shared_ptr<tenzor::models::MobileNetV3>>(models, "MobileNetV3",
@@ -2059,12 +2110,18 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, std::string, double, double>(),
              py::arg("num_classes") = 1000, py::arg("mode") = "large",
              py::arg("width_mult") = 1.0, py::arg("dropout") = 0.2);
-    models.def("mobilenet_v3_large", [](int64_t num_classes) {
-        return tenzor::models::mobilenet_v3_large(num_classes);
-    }, py::arg("num_classes") = 1000, "Create MobileNetV3-Large");
-    models.def("mobilenet_v3_small", [](int64_t num_classes) {
-        return tenzor::models::mobilenet_v3_small(num_classes);
-    }, py::arg("num_classes") = 1000, "Create MobileNetV3-Small");
+    models.def("mobilenet_v3_large",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::mobilenet_v3_large(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "MobileNetV3-Large.");
+    models.def("mobilenet_v3_small",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::mobilenet_v3_small(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "MobileNetV3-Small.");
 
     // EfficientNet
     py::class_<tenzor::models::EfficientNet, tenzor::nn::Module,
@@ -2081,30 +2138,54 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_readwrite("num_classes", &tenzor::models::EfficientNetConfig::num_classes)
         .def_readwrite("dropout_rate", &tenzor::models::EfficientNetConfig::dropout_rate);
 
-    models.def("efficientnet_b0", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b0(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B0");
-    models.def("efficientnet_b1", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b1(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B1");
-    models.def("efficientnet_b2", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b2(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B2");
-    models.def("efficientnet_b3", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b3(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B3");
-    models.def("efficientnet_b4", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b4(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B4");
-    models.def("efficientnet_b5", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b5(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B5");
-    models.def("efficientnet_b6", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b6(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B6");
-    models.def("efficientnet_b7", [](int64_t num_classes) {
-        return tenzor::models::efficientnet_b7(num_classes);
-    }, py::arg("num_classes") = 1000, "Create EfficientNet-B7");
+    models.def("efficientnet_b0",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b0(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b1",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b1(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b2",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b2(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b3",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b3(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b4",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b4(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b5",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b5(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b6",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b6(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("efficientnet_b7",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::efficientnet_b7(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "EfficientNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
 
     // GoogLeNet
     py::class_<tenzor::models::GoogLeNet, tenzor::nn::Module,
@@ -2113,9 +2194,12 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, bool, double, bool>(),
              py::arg("num_classes") = 1000, py::arg("aux_logits") = true,
              py::arg("dropout") = 0.4, py::arg("init_weights") = true);
-    models.def("googlenet", [](int64_t num_classes) {
-        return tenzor::models::googlenet(num_classes);
-    }, py::arg("num_classes") = 1000, "Create GoogLeNet");
+    models.def("googlenet",
+        [](int64_t num_classes, bool pretrained, bool aux_logits) {
+            return tenzor::models::googlenet(num_classes, pretrained, aux_logits);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false, py::arg("aux_logits") = true,
+        "GoogLeNet. pretrained=True downloads ImageNet weights via tz.models.hub.");
 
     // ConvNeXt
     py::class_<tenzor::models::ConvNeXt, tenzor::nn::Module,
@@ -2126,18 +2210,30 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("depths") = std::vector<int64_t>{3,3,9,3},
              py::arg("dims") = std::vector<int64_t>{96,192,384,768},
              py::arg("drop_path_rate") = 0.0, py::arg("layer_scale_init_value") = 1e-6);
-    models.def("convnext_tiny", [](int64_t num_classes) {
-        return tenzor::models::convnext_tiny(num_classes);
-    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Tiny");
-    models.def("convnext_small", [](int64_t num_classes) {
-        return tenzor::models::convnext_small(num_classes);
-    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Small");
-    models.def("convnext_base", [](int64_t num_classes) {
-        return tenzor::models::convnext_base(num_classes);
-    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Base");
-    models.def("convnext_large", [](int64_t num_classes) {
-        return tenzor::models::convnext_large(num_classes);
-    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Large");
+    models.def("convnext_tiny",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::convnext_tiny(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ConvNeXt. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("convnext_small",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::convnext_small(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ConvNeXt. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("convnext_base",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::convnext_base(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ConvNeXt. pretrained=True downloads ImageNet weights via tz.models.hub.");
+    models.def("convnext_large",
+        [](int64_t num_classes, bool pretrained) {
+            return tenzor::models::convnext_large(num_classes, pretrained);
+        },
+        py::arg("num_classes") = 1000, py::arg("pretrained") = false,
+        "ConvNeXt. pretrained=True downloads ImageNet weights via tz.models.hub.");
 
     // Vision Transformer (ViT)
     py::class_<tenzor::models::ViTConfig>(models, "ViTConfig", "ViT configuration")
@@ -2194,15 +2290,27 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("drop_rate") = 0.0, py::arg("attn_drop_rate") = 0.0,
              py::arg("drop_path_rate") = 0.1, py::arg("norm_layer") = true,
              py::arg("use_checkpoint") = false);
-    models.def("swin_tiny", [](int64_t num_classes) {
-        return tenzor::models::swin_tiny(num_classes);
-    }, py::arg("num_classes") = 1000, "Create Swin-Tiny");
-    models.def("swin_small", [](int64_t num_classes) {
-        return tenzor::models::swin_small(num_classes);
-    }, py::arg("num_classes") = 1000, "Create Swin-Small");
-    models.def("swin_base", [](int64_t num_classes) {
-        return tenzor::models::swin_base(num_classes);
-    }, py::arg("num_classes") = 1000, "Create Swin-Base");
+    models.def("swin_tiny",
+        [](int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint) {
+            return tenzor::models::swin_tiny(num_classes, img_size, pretrained, use_checkpoint);
+        },
+        py::arg("num_classes") = 1000, py::arg("img_size") = 224,
+        py::arg("pretrained") = false, py::arg("use_checkpoint") = false,
+        "Swin Transformer Tiny.");
+    models.def("swin_small",
+        [](int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint) {
+            return tenzor::models::swin_small(num_classes, img_size, pretrained, use_checkpoint);
+        },
+        py::arg("num_classes") = 1000, py::arg("img_size") = 224,
+        py::arg("pretrained") = false, py::arg("use_checkpoint") = false,
+        "Swin Transformer Small.");
+    models.def("swin_base",
+        [](int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint) {
+            return tenzor::models::swin_base(num_classes, img_size, pretrained, use_checkpoint);
+        },
+        py::arg("num_classes") = 1000, py::arg("img_size") = 224,
+        py::arg("pretrained") = false, py::arg("use_checkpoint") = false,
+        "Swin Transformer Base.");
 
     // BERT
     py::class_<tenzor::models::BertConfig>(models, "BertConfig", "BERT configuration")

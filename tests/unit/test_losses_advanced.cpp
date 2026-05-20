@@ -8,6 +8,7 @@
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/activations/activations.hpp>
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -577,7 +578,7 @@ TEST(AdvancedLossTest, SoftMarginLoss_Gradient) {
     auto loss = soft_margin_loss(input, target, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
@@ -612,7 +613,7 @@ TEST(AdvancedLossTest, HingeEmbeddingLoss_Gradient) {
     auto loss = hinge_embedding_loss(input, target, 1.0, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
@@ -647,7 +648,7 @@ TEST(AdvancedLossTest, PoissonNLLLoss_Gradient) {
     auto loss = poisson_nll_loss(input, target, true, false, 1e-8, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
@@ -685,8 +686,8 @@ TEST(AdvancedLossTest, CosineEmbeddingLoss_Gradient) {
     auto loss = cosine_embedding_loss(input1, input2, target, 0.0, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input1.grad().has_value());
-    EXPECT_TRUE(input2.grad().has_value());
+    EXPECT_GRAD_FLOWS(input1);
+    EXPECT_GRAD_FLOWS(input2);
 }
 
 //==============================================================================
@@ -713,7 +714,7 @@ TEST(AdvancedLossTest, TripletMarginLoss_Gradient) {
     auto loss = triplet_margin_loss(anchor, positive, negative, 1.0, 2.0, false, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(anchor.grad().has_value());
+    EXPECT_GRAD_FLOWS(anchor);
 }
 
 //==============================================================================
@@ -738,7 +739,7 @@ TEST(AdvancedLossTest, MultiLabelSoftMarginLoss_Gradient) {
     auto loss = multi_label_soft_margin_loss(input, target, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
@@ -807,6 +808,6 @@ TEST(AdvancedLossTest, GaussianNLLLoss_Gradient) {
     auto loss = gaussian_nll_loss(input, target, var, false, 1e-6, Reduction::Mean);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
-    EXPECT_TRUE(var.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(var);
 }

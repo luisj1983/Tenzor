@@ -27,6 +27,7 @@
 #include "../multi_backend_dtype_fixture.hpp"
 
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -57,7 +58,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AvgPool1dForwardBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 4);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, MaxPool1dForwardBackward) {
@@ -67,7 +68,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, MaxPool1dForwardBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 4);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AvgPool3dForwardBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, MaxPool3dForwardBackward) {
@@ -91,7 +92,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, MaxPool3dForwardBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveAvgPool1dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool1dBackward) {
@@ -115,7 +116,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool1dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveAvgPool3dBackward) {
@@ -125,7 +126,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveAvgPool3dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[4], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool3dBackward) {
@@ -135,7 +136,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool3dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[4], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveAvgPool2dBackward) {
@@ -145,7 +146,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveAvgPool2dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool2dBackward) {
@@ -155,7 +156,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, AdaptiveMaxPool2dBackward) {
     auto output = pool.forward(input);
     EXPECT_EQ(output.shape()[2], 2);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, Conv3dForwardBackward) {
     auto output = conv.forward(input);
     EXPECT_EQ(output.shape()[1], 4);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, MaxUnpool2dForwardBackward) {
         /*padding=*/{0, 0});
     expectShape(output.tensor(), {1, 2, 4, 4});
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     // Backward through MaxUnpool2dBackward: grad_input shape must match input shape.
     EXPECT_EQ(input.grad()->shape()[2], 2);
     EXPECT_EQ(input.grad()->shape()[3], 2);
@@ -255,7 +256,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, MaxUnpool3dForwardBackward) {
         /*padding=*/{0, 0, 0});
     expectShape(output.tensor(), {1, 2, 4, 4, 4});
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->shape()[2], 2);
 }
 
@@ -278,7 +279,7 @@ TEST_P(PoolConvMissingMultiDTypeTest, DeformableConv2dFullCycle) {
     auto output = dcn.forward(input, offset);
     EXPECT_EQ(output.shape()[1], 4);
     sum(output).backward();
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(PoolConvMissingMultiDTypeTest);

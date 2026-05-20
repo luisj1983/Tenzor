@@ -20,6 +20,7 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::autograd;
@@ -160,8 +161,8 @@ TEST_P(CheckpointMultiDTypeTest, MultiVariableCheckpoint) {
     loss.backward();
 
     // Verify gradients exist
-    EXPECT_TRUE(x.grad().has_value());
-    EXPECT_TRUE(y.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
+    EXPECT_GRAD_FLOWS(y);
 
     // Gradient verification: dz/dx = y + 1 = 2 + 1 = 3
     verifyGradient(x, 3.0f, "x gradient in multi-variable");
@@ -188,7 +189,7 @@ TEST_P(CheckpointMultiDTypeTest, CheckpointWithReLU) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 
     // Verify ReLU behavior: output should be non-negative
     auto y_cpu = y.tensor().to(Device::cpu()).to(DType::Float32);
@@ -221,7 +222,7 @@ TEST_P(CheckpointMultiDTypeTest, CheckpointWithSigmoid) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ============================================================================

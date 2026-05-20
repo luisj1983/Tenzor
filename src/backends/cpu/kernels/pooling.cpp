@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <omp.h>
@@ -200,23 +201,26 @@ template<typename T>
 void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                              int64_t N, int64_t C, int64_t H, int64_t W,
                              int64_t H_out, int64_t W_out,
-                             int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) {
+                             int64_t kernel_h, int64_t kernel_w,
+                             int64_t stride_h, int64_t stride_w,
+                             int64_t padding_h, int64_t padding_w,
+                             int64_t dilation_h, int64_t dilation_w) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    int64_t h_start = oh * stride - padding;
-                    int64_t w_start = ow * stride - padding;
+                    int64_t h_start = oh * stride_h - padding_h;
+                    int64_t w_start = ow * stride_w - padding_w;
 
                     Compute max_val = -std::numeric_limits<Compute>::infinity();
                     int64_t max_idx = 0;
 
-                    for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                            int64_t h = h_start + kh * dilation;
-                            int64_t w = w_start + kw * dilation;
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                            int64_t h = h_start + kh * dilation_h;
+                            int64_t w = w_start + kw * dilation_w;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 int64_t in_idx = ((n * C + c) * H + h) * W + w;
@@ -238,8 +242,11 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding, int64_t dilation)
+auto maxpool2d_forward_kernel(const Tensor& input,
+                               std::array<int64_t, 2> kernel_size,
+                               std::array<int64_t, 2> stride,
+                               std::array<int64_t, 2> padding,
+                               std::array<int64_t, 2> dilation)
     -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     int64_t N = shape[0];
@@ -247,8 +254,8 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     int64_t H = shape[2];
     int64_t W = shape[3];
 
-    int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t H_out = (H + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) / stride[0] + 1;
+    int64_t W_out = (W + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, H_out, W_out}, DType::Int64, input.device());
@@ -259,20 +266,23 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     // Computing output via oneDNN + indices via template impl would be no faster
     // than computing both together in the template impl.
 
-    if (input.dtype() == DType::Float32) {
-        maxpool2d_forward_impl<float>(input.data<float>(), output.data<float>(), idx_data,
-                                      N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
-    } else if (input.dtype() == DType::Float64) {
-        maxpool2d_forward_impl<double>(input.data<double>(), output.data<double>(), idx_data,
-                                       N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
-    } else if (input.dtype() == DType::Float16) {
-        maxpool2d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
-                                        N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
-    } else if (input.dtype() == DType::BFloat16) {
-        maxpool2d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
-                                         N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
-    } else {
-        throw std::runtime_error("Unsupported dtype for maxpool2d_forward");
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        maxpool2d_forward_impl<T>(input.data<T>(), output.data<T>(), idx_data,
+                                  N, C, H, W, H_out, W_out,
+                                  kernel_size[0], kernel_size[1],
+                                  stride[0],      stride[1],
+                                  padding[0],     padding[1],
+                                  dilation[0],    dilation[1]);
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for maxpool2d_forward");
     }
 
     return {output, indices};
@@ -338,21 +348,23 @@ template<typename T>
 void avgpool2d_forward_impl(const T* in_data, T* out_data,
                              int64_t N, int64_t C, int64_t H, int64_t W,
                              int64_t H_out, int64_t W_out,
-                             int64_t kernel_size, int64_t stride, int64_t padding) {
+                             int64_t kernel_h, int64_t kernel_w,
+                             int64_t stride_h, int64_t stride_w,
+                             int64_t padding_h, int64_t padding_w) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    int64_t h_start = oh * stride - padding;
-                    int64_t w_start = ow * stride - padding;
+                    int64_t h_start = oh * stride_h - padding_h;
+                    int64_t w_start = ow * stride_w - padding_w;
 
                     Compute sum = Compute(0);
                     int64_t count = 0;
 
-                    for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
                             int64_t h = h_start + kh;
                             int64_t w = w_start + kw;
 
@@ -370,47 +382,59 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
     }
 }
 
-auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding) -> Tensor {
+auto avgpool2d_forward_kernel(const Tensor& input,
+                               std::array<int64_t, 2> kernel_size,
+                               std::array<int64_t, 2> stride,
+                               std::array<int64_t, 2> padding) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
     int64_t H = shape[2];
     int64_t W = shape[3];
 
-    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
-    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+    int64_t H_out = (H + 2 * padding[0] - kernel_size[0]) / stride[0] + 1;
+    int64_t W_out = (W + 2 * padding[1] - kernel_size[1]) / stride[1] + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
+    const bool symmetric =
+        kernel_size[0] == kernel_size[1] &&
+        stride[0]      == stride[1]      &&
+        padding[0]     == padding[1];
+
 #ifdef TENZOR_USE_ONEDNN
-    if (input.dtype() == DType::Float32) {
+    if (symmetric && input.dtype() == DType::Float32) {
         if (onednn_avgpool2d_forward(input.data<float>(), output.data<float>(),
-                                     N, C, H, W, H_out, W_out, kernel_size, stride, padding)) {
+                                     N, C, H, W, H_out, W_out,
+                                     kernel_size[0], stride[0], padding[0])) {
             return output;
         }
     }
 #endif
 
-    if (input.dtype() == DType::Float32) {
-        if (CPUInfo::get().has_avx512()) {
-            avx512::avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
-                                          N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-        } else {
-            avgpool2d_forward_impl<float>(input.data<float>(), output.data<float>(),
-                                          N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-        }
-    } else if (input.dtype() == DType::Float64) {
-        avgpool2d_forward_impl<double>(input.data<double>(), output.data<double>(),
-                                       N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::Float16) {
-        avgpool2d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
-                                        N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::BFloat16) {
-        avgpool2d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                         N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else {
-        throw std::runtime_error("Unsupported dtype for avgpool2d_forward");
+    if (symmetric && input.dtype() == DType::Float32 && CPUInfo::get().has_avx512()) {
+        avx512::avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
+                                      N, C, H, W, H_out, W_out,
+                                      kernel_size[0], stride[0], padding[0]);
+        return output;
+    }
+
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        avgpool2d_forward_impl<T>(input.data<T>(), output.data<T>(),
+                                  N, C, H, W, H_out, W_out,
+                                  kernel_size[0], kernel_size[1],
+                                  stride[0],      stride[1],
+                                  padding[0],     padding[1]);
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for avgpool2d_forward");
     }
 
     return output;
@@ -420,33 +444,38 @@ template<typename T>
 void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t N, int64_t C, int64_t H, int64_t W,
                               int64_t H_out, int64_t W_out,
-                              int64_t kernel_size, int64_t stride, int64_t padding) {
+                              int64_t kernel_h, int64_t kernel_w,
+                              int64_t stride_h, int64_t stride_w,
+                              int64_t padding_h, int64_t padding_w) {
+    using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    int64_t h_start = oh * stride - padding;
-                    int64_t w_start = ow * stride - padding;
+                    int64_t h_start = oh * stride_h - padding_h;
+                    int64_t w_start = ow * stride_w - padding_w;
 
                     int64_t count = 0;
-                    for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
                             int64_t h = h_start + kh;
                             int64_t w = w_start + kw;
                             if (h >= 0 && h < H && w >= 0 && w < W) count++;
                         }
                     }
 
-                    float grad_val = static_cast<float>(grad_out_data[((n * C + c) * H_out + oh) * W_out + ow]) / count;
+                    Compute grad_val =
+                        static_cast<Compute>(grad_out_data[((n * C + c) * H_out + oh) * W_out + ow]) /
+                        static_cast<Compute>(count);
 
-                    for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
                             int64_t h = h_start + kh;
                             int64_t w = w_start + kw;
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 int64_t idx = ((n * C + c) * H + h) * W + w;
-                                float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                                Compute val = static_cast<Compute>(grad_in_data[idx]) + grad_val;
                                 grad_in_data[idx] = static_cast<T>(val);
                             }
                         }
@@ -459,8 +488,9 @@ void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
 
 auto avgpool2d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
-                                int64_t kernel_size, int64_t stride,
-                                int64_t padding) -> Tensor {
+                                std::array<int64_t, 2> kernel_size,
+                                std::array<int64_t, 2> stride,
+                                std::array<int64_t, 2> padding) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -472,20 +502,22 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
 
     auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
 
-    if (grad_output.dtype() == DType::Float32) {
-        avgpool2d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
-                                       N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::Float64) {
-        avgpool2d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
-                                        N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::Float16) {
-        avgpool2d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
-                                         N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        avgpool2d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
-                                          N, C, H, W, H_out, W_out, kernel_size, stride, padding);
-    } else {
-        throw std::runtime_error("Unsupported dtype for avgpool2d_backward");
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        avgpool2d_backward_impl<T>(grad_output.data<T>(), grad_input.data<T>(),
+                                   N, C, H, W, H_out, W_out,
+                                   kernel_size[0], kernel_size[1],
+                                   stride[0],      stride[1],
+                                   padding[0],     padding[1]);
+    };
+
+    switch (grad_output.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for avgpool2d_backward");
     }
 
     return grad_input;
@@ -1210,7 +1242,10 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                              int64_t N, int64_t C,
                              int64_t D, int64_t H, int64_t W,
                              int64_t D_out, int64_t H_out, int64_t W_out,
-                             int64_t kernel_size, int64_t stride, int64_t padding) {
+                             int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
+                             int64_t stride_d, int64_t stride_h, int64_t stride_w,
+                             int64_t padding_d, int64_t padding_h, int64_t padding_w,
+                             int64_t dilation_d, int64_t dilation_h, int64_t dilation_w) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
@@ -1218,19 +1253,19 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
             for (int64_t od = 0; od < D_out; ++od) {
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     for (int64_t ow = 0; ow < W_out; ++ow) {
-                        int64_t d_start = od * stride - padding;
-                        int64_t h_start = oh * stride - padding;
-                        int64_t w_start = ow * stride - padding;
+                        int64_t d_start = od * stride_d - padding_d;
+                        int64_t h_start = oh * stride_h - padding_h;
+                        int64_t w_start = ow * stride_w - padding_w;
 
                         Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = 0;
 
-                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
-                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                                    int64_t d = d_start + kd;
-                                    int64_t h = h_start + kh;
-                                    int64_t w = w_start + kw;
+                        for (int64_t kd = 0; kd < kernel_d; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                                    int64_t d = d_start + kd * dilation_d;
+                                    int64_t h = h_start + kh * dilation_h;
+                                    int64_t w = w_start + kw * dilation_w;
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
                                         Compute val = static_cast<Compute>(in_data[in_idx]);
@@ -1253,8 +1288,11 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto maxpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding)
+auto maxpool3d_forward_kernel(const Tensor& input,
+                               std::array<int64_t, 3> kernel_size,
+                               std::array<int64_t, 3> stride,
+                               std::array<int64_t, 3> padding,
+                               std::array<int64_t, 3> dilation)
     -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     int64_t N = shape[0];
@@ -1263,28 +1301,31 @@ auto maxpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
     int64_t H = shape[3];
     int64_t W = shape[4];
 
-    int64_t D_out = (D + 2 * padding - kernel_size) / stride + 1;
-    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
-    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+    int64_t D_out = (D + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) / stride[0] + 1;
+    int64_t H_out = (H + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
+    int64_t W_out = (W + 2 * padding[2] - dilation[2] * (kernel_size[2] - 1) - 1) / stride[2] + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
 
-    if (input.dtype() == DType::Float32) {
-        maxpool3d_forward_impl<float>(input.data<float>(), output.data<float>(), idx_data,
-                                      N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::Float64) {
-        maxpool3d_forward_impl<double>(input.data<double>(), output.data<double>(), idx_data,
-                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::Float16) {
-        maxpool3d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
-                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::BFloat16) {
-        maxpool3d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
-                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else {
-        throw std::runtime_error("Unsupported dtype for maxpool3d_forward");
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        maxpool3d_forward_impl<T>(input.data<T>(), output.data<T>(), idx_data,
+                                  N, C, D, H, W, D_out, H_out, W_out,
+                                  kernel_size[0], kernel_size[1], kernel_size[2],
+                                  stride[0],      stride[1],      stride[2],
+                                  padding[0],     padding[1],     padding[2],
+                                  dilation[0],    dilation[1],    dilation[2]);
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for maxpool3d_forward");
     }
 
     return {output, indices};
@@ -1354,11 +1395,11 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                              int64_t N, int64_t C,
                              int64_t D, int64_t H, int64_t W,
                              int64_t D_out, int64_t H_out, int64_t W_out,
-                             int64_t kernel_size, int64_t stride, int64_t padding) {
+                             int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
+                             int64_t stride_d, int64_t stride_h, int64_t stride_w,
+                             int64_t padding_d, int64_t padding_h, int64_t padding_w) {
     // audit-2026-05-03 — accumulate at native precision when T is Float64,
-    // otherwise widen Float16/BFloat16 to Float32. Always-float accumulator
-    // dropped Float64 forward precision (which then poisoned the autograd
-    // numerical-vs-analytical comparison).
+    // otherwise widen Float16/BFloat16 to Float32.
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
@@ -1366,16 +1407,16 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
             for (int64_t od = 0; od < D_out; ++od) {
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     for (int64_t ow = 0; ow < W_out; ++ow) {
-                        int64_t d_start = od * stride - padding;
-                        int64_t h_start = oh * stride - padding;
-                        int64_t w_start = ow * stride - padding;
+                        int64_t d_start = od * stride_d - padding_d;
+                        int64_t h_start = oh * stride_h - padding_h;
+                        int64_t w_start = ow * stride_w - padding_w;
 
                         Compute sum = Compute(0);
                         int64_t count = 0;
 
-                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
-                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                        for (int64_t kd = 0; kd < kernel_d; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
                                     int64_t d = d_start + kd;
                                     int64_t h = h_start + kh;
                                     int64_t w = w_start + kw;
@@ -1396,8 +1437,10 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
     }
 }
 
-auto avgpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding) -> Tensor {
+auto avgpool3d_forward_kernel(const Tensor& input,
+                               std::array<int64_t, 3> kernel_size,
+                               std::array<int64_t, 3> stride,
+                               std::array<int64_t, 3> padding) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1405,26 +1448,28 @@ auto avgpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
     int64_t H = shape[3];
     int64_t W = shape[4];
 
-    int64_t D_out = (D + 2 * padding - kernel_size) / stride + 1;
-    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
-    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+    int64_t D_out = (D + 2 * padding[0] - kernel_size[0]) / stride[0] + 1;
+    int64_t H_out = (H + 2 * padding[1] - kernel_size[1]) / stride[1] + 1;
+    int64_t W_out = (W + 2 * padding[2] - kernel_size[2]) / stride[2] + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
 
-    if (input.dtype() == DType::Float32) {
-        avgpool3d_forward_impl<float>(input.data<float>(), output.data<float>(),
-                                      N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::Float64) {
-        avgpool3d_forward_impl<double>(input.data<double>(), output.data<double>(),
-                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::Float16) {
-        avgpool3d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
-                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (input.dtype() == DType::BFloat16) {
-        avgpool3d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else {
-        throw std::runtime_error("Unsupported dtype for avgpool3d_forward");
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        avgpool3d_forward_impl<T>(input.data<T>(), output.data<T>(),
+                                  N, C, D, H, W, D_out, H_out, W_out,
+                                  kernel_size[0], kernel_size[1], kernel_size[2],
+                                  stride[0],      stride[1],      stride[2],
+                                  padding[0],     padding[1],     padding[2]);
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for avgpool3d_forward");
     }
 
     return output;
@@ -1435,10 +1480,9 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t N, int64_t C,
                               int64_t D, int64_t H, int64_t W,
                               int64_t D_out, int64_t H_out, int64_t W_out,
-                              int64_t kernel_size, int64_t stride, int64_t padding) {
-    // audit-2026-05-03 — accumulate at native precision when T is Float64,
-    // otherwise widen Float16/BFloat16 to Float32. Previous always-float
-    // accumulator dropped Float64 gradient precision and broke gradcheck.
+                              int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
+                              int64_t stride_d, int64_t stride_h, int64_t stride_w,
+                              int64_t padding_d, int64_t padding_h, int64_t padding_w) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
@@ -1446,14 +1490,14 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
             for (int64_t od = 0; od < D_out; ++od) {
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     for (int64_t ow = 0; ow < W_out; ++ow) {
-                        int64_t d_start = od * stride - padding;
-                        int64_t h_start = oh * stride - padding;
-                        int64_t w_start = ow * stride - padding;
+                        int64_t d_start = od * stride_d - padding_d;
+                        int64_t h_start = oh * stride_h - padding_h;
+                        int64_t w_start = ow * stride_w - padding_w;
 
                         int64_t count = 0;
-                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
-                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                        for (int64_t kd = 0; kd < kernel_d; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
                                     int64_t d = d_start + kd;
                                     int64_t h = h_start + kh;
                                     int64_t w = w_start + kw;
@@ -1465,9 +1509,9 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
                         Compute grad_val = static_cast<Compute>(grad_out_data[out_idx]) / static_cast<Compute>(count);
 
-                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
-                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                        for (int64_t kd = 0; kd < kernel_d; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
                                     int64_t d = d_start + kd;
                                     int64_t h = h_start + kh;
                                     int64_t w = w_start + kw;
@@ -1488,8 +1532,9 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
 
 auto avgpool3d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
-                                int64_t kernel_size, int64_t stride,
-                                int64_t padding) -> Tensor {
+                                std::array<int64_t, 3> kernel_size,
+                                std::array<int64_t, 3> stride,
+                                std::array<int64_t, 3> padding) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -1503,20 +1548,22 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
 
     auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
 
-    if (grad_output.dtype() == DType::Float32) {
-        avgpool3d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
-                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::Float64) {
-        avgpool3d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
-                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::Float16) {
-        avgpool3d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
-                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        avgpool3d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
-                                          N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
-    } else {
-        throw std::runtime_error("Unsupported dtype for avgpool3d_backward");
+    auto dispatch = [&](auto* dummy) {
+        using T = std::remove_pointer_t<decltype(dummy)>;
+        avgpool3d_backward_impl<T>(grad_output.data<T>(), grad_input.data<T>(),
+                                   N, C, D, H, W, D_out, H_out, W_out,
+                                   kernel_size[0], kernel_size[1], kernel_size[2],
+                                   stride[0],      stride[1],      stride[2],
+                                   padding[0],     padding[1],     padding[2]);
+    };
+
+    switch (grad_output.dtype()) {
+        case DType::Float32:  dispatch(static_cast<float*>(nullptr));    break;
+        case DType::Float64:  dispatch(static_cast<double*>(nullptr));   break;
+        case DType::Float16:  dispatch(static_cast<Float16*>(nullptr));  break;
+        case DType::BFloat16: dispatch(static_cast<BFloat16*>(nullptr)); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for avgpool3d_backward");
     }
 
     return grad_input;

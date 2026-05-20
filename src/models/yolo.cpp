@@ -4,6 +4,8 @@
  */
 
 #include "../../include/tenzor/models/yolo.hpp"
+#include "../../include/tenzor/models/hub.hpp"
+#include "../../include/tenzor/nn/checkpoint.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/utils/variable_cast.hpp"
 #include "../../include/tenzor/ops/detection.hpp"
@@ -246,8 +248,7 @@ YOLOv3::YOLOv3(int64_t num_classes, bool pretrained,
     anchors_small_ = {{10.0f, 13.0f}, {16.0f, 30.0f}, {33.0f, 23.0f}};
 
     if (pretrained) {
-        // Pretrained weights would be loaded here
-        // load_pretrained("yolov3_coco.pth");
+        load_pretrained("yolov3");
     }
 }
 
@@ -536,10 +537,23 @@ auto YOLOv3::postprocess(const Tensor& boxes, const Tensor& scores)
     return results;
 }
 
-auto YOLOv3::load_pretrained([[maybe_unused]] const std::string& path) -> void {
-    // Load pretrained weights
-    // Implementation would use model serialization
-    throw std::runtime_error("Pretrained weights loading not yet implemented");
+auto YOLOv3::load_pretrained(const std::string& path) -> void {
+    // Either a path-based local checkpoint, or a hub key (e.g. "yolov3") in
+    // which case we route through ModelHub. Hub-keys are the path basename
+    // without extension or directory.
+    if (ModelHub::is_registered(path)) {
+        auto cached = ModelHub::download_pretrained_safetensors(path);
+        ModelHub::load_pretrained_weights(*this, cached, /*strict=*/false);
+        return;
+    }
+    // Otherwise treat `path` as a literal filesystem path.
+    nn::ModelCheckpoint mgr;
+    auto ckpt = mgr.load(path);
+    if (ckpt.model_state.empty()) {
+        throw std::runtime_error("YOLOv3::load_pretrained: '" + path +
+                                 "' contains no model state");
+    }
+    load_state_dict(ckpt.model_state);
 }
 
 // ============================================================================
@@ -912,7 +926,16 @@ YOLOv5::YOLOv5(Size size, int64_t num_classes, bool pretrained,
     anchors_p5_ = {{116.0f, 90.0f}, {156.0f, 198.0f}, {373.0f, 326.0f}};
 
     if (pretrained) {
-        // load_pretrained("yolov5" + size_to_string(size) + "_coco.pth");
+        // Map the Size enum to the hub registry key.
+        const char* key = "yolov5s";
+        switch (size) {
+            case Size::Nano:    key = "yolov5n"; break;
+            case Size::Small:   key = "yolov5s"; break;
+            case Size::Medium:  key = "yolov5m"; break;
+            case Size::Large:   key = "yolov5l"; break;
+            case Size::XLarge:  key = "yolov5x"; break;
+        }
+        load_pretrained(key);
     }
 }
 
@@ -1205,8 +1228,19 @@ auto YOLOv5::postprocess(const Tensor& boxes, const Tensor& scores)
     return results;
 }
 
-auto YOLOv5::load_pretrained([[maybe_unused]] const std::string& path) -> void {
-    throw std::runtime_error("Pretrained weights loading not yet implemented");
+auto YOLOv5::load_pretrained(const std::string& path) -> void {
+    if (ModelHub::is_registered(path)) {
+        auto cached = ModelHub::download_pretrained_safetensors(path);
+        ModelHub::load_pretrained_weights(*this, cached, /*strict=*/false);
+        return;
+    }
+    nn::ModelCheckpoint mgr;
+    auto ckpt = mgr.load(path);
+    if (ckpt.model_state.empty()) {
+        throw std::runtime_error("YOLOv5::load_pretrained: '" + path +
+                                 "' contains no model state");
+    }
+    load_state_dict(ckpt.model_state);
 }
 
 // ============================================================================

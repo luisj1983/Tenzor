@@ -10,6 +10,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -53,10 +54,10 @@ TEST_P(ScatterAddAutogradMultiDTypeTest, FirstOrderGradient) {
     auto loss = tenzor::sum(result);
     loss.backward();
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {2, 4});
 
-    ASSERT_TRUE(src.grad().has_value());
+    EXPECT_GRAD_FLOWS(src);
     expectShape(src.grad().value(), {2, 2});
 }
 

@@ -1,4 +1,6 @@
 """Chi-squared distribution."""
+import math
+
 import numpy as np
 from scipy.special import gammaln, digamma
 from .distribution import Distribution, _to_numpy
@@ -47,12 +49,8 @@ class Chi2(Distribution):
     def entropy(self):
         k = self.df
         # H = k/2 + log(2) + lgamma(k/2) + (1 - k/2)*digamma(k/2)
-        import math
         return (k / 2.0 + math.log(2.0) + gammaln(k / 2.0)
                 + (1.0 - k / 2.0) * digamma(k / 2.0))
 
     def support(self):
         return "(0, inf)"
-
-
-import math  # noqa: E402 — already at top, just ensuring availability

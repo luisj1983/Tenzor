@@ -11,6 +11,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -89,14 +90,14 @@ TEST_F(ScatterAddAutogradTest, FirstOrderGradient) {
     loss.backward();
 
     // grad_input should be all ones (identity gradient)
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad_input = input.grad().value();
     for (int64_t i = 0; i < grad_input.numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_input.data<float>()[i], 1.0f);
     }
 
     // grad_src should be all ones (gather from all-ones grad_output)
-    ASSERT_TRUE(src.grad().has_value());
+    EXPECT_GRAD_FLOWS(src);
     auto grad_src = src.grad().value();
     for (int64_t i = 0; i < grad_src.numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_src.data<float>()[i], 1.0f);
@@ -130,7 +131,7 @@ TEST_F(ScatterAddAutogradTest, ScaledSourceGradient) {
 
     // grad through scatter_add: grad_src_scaled = gather(ones, dim=1, index) = [1, 1]
     // grad through mul: grad_src = grad_src_scaled * 2.0 = [2, 2]
-    ASSERT_TRUE(src.grad().has_value());
+    EXPECT_GRAD_FLOWS(src);
     auto grad_src = src.grad().value();
     EXPECT_FLOAT_EQ(grad_src.data<float>()[0], 2.0f);
     EXPECT_FLOAT_EQ(grad_src.data<float>()[1], 2.0f);

@@ -270,7 +270,6 @@ void register_jit(py::module_& m) {
     jit.def("compile_function",
         [](py::function fn, std::string backend, std::string target,
            bool fallback_to_eager) {
-            (void)fallback_to_eager;  // Future: route into config_.
             auto cpp_fn = [fn](const tenzor::Variable& input)
                 -> tenzor::Variable {
                 py::gil_scoped_acquire acquire;
@@ -281,6 +280,11 @@ void register_jit(py::module_& m) {
             tenzor::jit::CompileConfig config;
             config.backend = std::move(backend);
             config.target  = std::move(target);
+            // `fallback_to_eager` is the inverse of CompileConfig::strict.
+            // - fallback_to_eager=false  → strict=true  → throw on coverage gap
+            // - fallback_to_eager=true   → strict=false → degrade to eager
+            // This matches the @tz.jit Python decorator docstring.
+            config.strict = !fallback_to_eager;
 
             return std::make_shared<tenzor::jit::CompiledFunction>(
                 std::move(cpp_fn), std::move(config));

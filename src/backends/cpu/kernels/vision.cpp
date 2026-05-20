@@ -14,8 +14,10 @@
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
+#include <type_traits>
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -27,15 +29,25 @@ namespace cpu {
 
 namespace {
 
-// Cubic interpolation coefficient function (Catmull-Rom spline)
-inline float cubic_interp_coeff(float x) {
-    float abs_x = std::abs(x);
-    if (abs_x <= 1.0f) {
-        return 1.5f * abs_x * abs_x * abs_x - 2.5f * abs_x * abs_x + 1.0f;
-    } else if (abs_x < 2.0f) {
-        return -0.5f * abs_x * abs_x * abs_x + 2.5f * abs_x * abs_x - 4.0f * abs_x + 2.0f;
+// Accumulator-precision selector for interpolation kernels: Float64 inputs keep
+// `double` throughout (coordinates, weights, accumulators); every other input
+// dtype (Float32, Float16, BFloat16) widens to `float` for the arithmetic and
+// narrows back at store. Mirrors the pattern from
+// adaptive_avgpool1d_impl in pooling.cpp.
+template<typename T>
+using interp_acc_t = std::conditional_t<std::is_same_v<T, double>, double, float>;
+
+// Cubic interpolation coefficient function (Catmull-Rom spline).
+// Templated on the compute type so Float64 paths keep double precision.
+template<typename C>
+inline C cubic_interp_coeff(C x) {
+    C abs_x = std::abs(x);
+    if (abs_x <= C(1)) {
+        return C(1.5) * abs_x * abs_x * abs_x - C(2.5) * abs_x * abs_x + C(1);
+    } else if (abs_x < C(2)) {
+        return C(-0.5) * abs_x * abs_x * abs_x + C(2.5) * abs_x * abs_x - C(4) * abs_x + C(2);
     }
-    return 0.0f;
+    return C(0);
 }
 
 // Template for nearest neighbor interpolation
@@ -50,19 +62,20 @@ void interpolate_nearest_impl(
     int64_t out_h,
     int64_t out_w
 ) {
-    const float scale_h = static_cast<float>(in_h) / out_h;
-    const float scale_w = static_cast<float>(in_w) / out_w;
+    using Compute = interp_acc_t<T>;
+    const Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    const Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > 65536)
+    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > ::tenzor::OmpThresholds::simple())
     #endif
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
             for (int64_t oh = 0; oh < out_h; ++oh) {
                 for (int64_t ow = 0; ow < out_w; ++ow) {
                     // Calculate source position
-                    int64_t ih = static_cast<int64_t>(oh * scale_h);
-                    int64_t iw = static_cast<int64_t>(ow * scale_w);
+                    int64_t ih = static_cast<int64_t>(static_cast<Compute>(oh) * scale_h);
+                    int64_t iw = static_cast<int64_t>(static_cast<Compute>(ow) * scale_w);
 
                     // Clamp to valid range
                     ih = std::clamp(ih, int64_t(0), in_h - 1);
@@ -96,30 +109,37 @@ void interpolate_bilinear_impl(
     int64_t out_w,
     bool align_corners
 ) {
+    using Compute = interp_acc_t<T>;
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > 65536)
+    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > ::tenzor::OmpThresholds::simple())
     #endif
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
             for (int64_t oh = 0; oh < out_h; ++oh) {
                 for (int64_t ow = 0; ow < out_w; ++ow) {
-                    // Calculate source position (floating point)
-                    float y, x;
+                    // Calculate source position (Compute-precision)
+                    Compute y, x;
                     if (align_corners) {
                         // Align corners: map [0, out-1] to [0, in-1]
-                        y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-                        x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+                        y = (out_h > 1)
+                            ? static_cast<Compute>(oh) * static_cast<Compute>(in_h - 1) /
+                              static_cast<Compute>(out_h - 1)
+                            : Compute(0);
+                        x = (out_w > 1)
+                            ? static_cast<Compute>(ow) * static_cast<Compute>(in_w - 1) /
+                              static_cast<Compute>(out_w - 1)
+                            : Compute(0);
                     } else {
                         // Half-pixel centers: pixels are unit squares
-                        float scale_h = static_cast<float>(in_h) / out_h;
-                        float scale_w = static_cast<float>(in_w) / out_w;
-                        y = (oh + 0.5f) * scale_h - 0.5f;
-                        x = (ow + 0.5f) * scale_w - 0.5f;
+                        Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+                        Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+                        y = (static_cast<Compute>(oh) + Compute(0.5)) * scale_h - Compute(0.5);
+                        x = (static_cast<Compute>(ow) + Compute(0.5)) * scale_w - Compute(0.5);
                     }
 
                     // Clamp to valid range
-                    y = std::clamp(y, 0.0f, static_cast<float>(in_h - 1));
-                    x = std::clamp(x, 0.0f, static_cast<float>(in_w - 1));
+                    y = std::clamp(y, Compute(0), static_cast<Compute>(in_h - 1));
+                    x = std::clamp(x, Compute(0), static_cast<Compute>(in_w - 1));
 
                     // Get integer and fractional parts
                     int64_t y0 = static_cast<int64_t>(y);
@@ -127,24 +147,24 @@ void interpolate_bilinear_impl(
                     int64_t y1 = std::min(y0 + 1, in_h - 1);
                     int64_t x1 = std::min(x0 + 1, in_w - 1);
 
-                    float fy = y - y0;
-                    float fx = x - x0;
+                    Compute fy = y - static_cast<Compute>(y0);
+                    Compute fx = x - static_cast<Compute>(x0);
 
                     // Bilinear interpolation weights
-                    float w00 = (1.0f - fy) * (1.0f - fx);
-                    float w01 = (1.0f - fy) * fx;
-                    float w10 = fy * (1.0f - fx);
-                    float w11 = fy * fx;
+                    Compute w00 = (Compute(1) - fy) * (Compute(1) - fx);
+                    Compute w01 = (Compute(1) - fy) * fx;
+                    Compute w10 = fy * (Compute(1) - fx);
+                    Compute w11 = fy * fx;
 
                     // Get pixel values
                     int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
-                    float v00 = static_cast<float>(input[base_idx + y0 * in_w + x0]);
-                    float v01 = static_cast<float>(input[base_idx + y0 * in_w + x1]);
-                    float v10 = static_cast<float>(input[base_idx + y1 * in_w + x0]);
-                    float v11 = static_cast<float>(input[base_idx + y1 * in_w + x1]);
+                    Compute v00 = static_cast<Compute>(input[base_idx + y0 * in_w + x0]);
+                    Compute v01 = static_cast<Compute>(input[base_idx + y0 * in_w + x1]);
+                    Compute v10 = static_cast<Compute>(input[base_idx + y1 * in_w + x0]);
+                    Compute v11 = static_cast<Compute>(input[base_idx + y1 * in_w + x1]);
 
                     // Interpolate
-                    float result = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
+                    Compute result = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
 
                     int64_t out_idx = b * (channels * out_h * out_w) +
                                      c * (out_h * out_w) +
@@ -170,34 +190,41 @@ void interpolate_bicubic_impl(
     int64_t out_w,
     bool align_corners
 ) {
+    using Compute = interp_acc_t<T>;
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > 65536)
+    #pragma omp parallel for collapse(2) if(batch * channels * out_h * out_w > ::tenzor::OmpThresholds::simple())
     #endif
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
             for (int64_t oh = 0; oh < out_h; ++oh) {
                 for (int64_t ow = 0; ow < out_w; ++ow) {
-                    // Calculate source position (floating point)
-                    float y, x;
+                    // Calculate source position (Compute-precision)
+                    Compute y, x;
                     if (align_corners) {
-                        y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-                        x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+                        y = (out_h > 1)
+                            ? static_cast<Compute>(oh) * static_cast<Compute>(in_h - 1) /
+                              static_cast<Compute>(out_h - 1)
+                            : Compute(0);
+                        x = (out_w > 1)
+                            ? static_cast<Compute>(ow) * static_cast<Compute>(in_w - 1) /
+                              static_cast<Compute>(out_w - 1)
+                            : Compute(0);
                     } else {
-                        float scale_h = static_cast<float>(in_h) / out_h;
-                        float scale_w = static_cast<float>(in_w) / out_w;
-                        y = (oh + 0.5f) * scale_h - 0.5f;
-                        x = (ow + 0.5f) * scale_w - 0.5f;
+                        Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+                        Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+                        y = (static_cast<Compute>(oh) + Compute(0.5)) * scale_h - Compute(0.5);
+                        x = (static_cast<Compute>(ow) + Compute(0.5)) * scale_w - Compute(0.5);
                     }
 
                     // Clamp to valid range
-                    y = std::clamp(y, 0.0f, static_cast<float>(in_h - 1));
-                    x = std::clamp(x, 0.0f, static_cast<float>(in_w - 1));
+                    y = std::clamp(y, Compute(0), static_cast<Compute>(in_h - 1));
+                    x = std::clamp(x, Compute(0), static_cast<Compute>(in_w - 1));
 
                     int64_t y_int = static_cast<int64_t>(y);
                     int64_t x_int = static_cast<int64_t>(x);
 
                     // Bicubic interpolation using 4x4 neighborhood
-                    float sum = 0.0f;
+                    Compute sum = Compute(0);
                     int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
 
                     for (int64_t dy = -1; dy <= 2; ++dy) {
@@ -209,11 +236,13 @@ void interpolate_bicubic_impl(
                             iy = std::clamp(iy, int64_t(0), in_h - 1);
                             ix = std::clamp(ix, int64_t(0), in_w - 1);
 
-                            float weight_y = cubic_interp_coeff(y - (y_int + dy));
-                            float weight_x = cubic_interp_coeff(x - (x_int + dx));
-                            float weight = weight_y * weight_x;
+                            Compute weight_y = cubic_interp_coeff<Compute>(
+                                y - static_cast<Compute>(y_int + dy));
+                            Compute weight_x = cubic_interp_coeff<Compute>(
+                                x - static_cast<Compute>(x_int + dx));
+                            Compute weight = weight_y * weight_x;
 
-                            sum += weight * static_cast<float>(input[base_idx + iy * in_w + ix]);
+                            sum += weight * static_cast<Compute>(input[base_idx + iy * in_w + ix]);
                         }
                     }
 
@@ -243,10 +272,11 @@ void interpolate_trilinear_impl(
     int64_t out_w,
     bool align_corners
 ) {
+    using Compute = interp_acc_t<T>;
     int64_t total = batch * channels * out_d * out_h * out_w;
 
 #ifdef _OPENMP
-    #pragma omp parallel for if(total > 65536)
+    #pragma omp parallel for if(total > ::tenzor::OmpThresholds::simple())
 #endif
     for (int64_t idx = 0; idx < total; ++idx) {
         int64_t temp = idx;
@@ -256,23 +286,32 @@ void interpolate_trilinear_impl(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float z, y, x;
+        Compute z, y, x;
         if (align_corners) {
-            z = (out_d > 1) ? static_cast<float>(od) * (in_d - 1) / (out_d - 1) : 0.0f;
-            y = (out_h > 1) ? static_cast<float>(oh) * (in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? static_cast<float>(ow) * (in_w - 1) / (out_w - 1) : 0.0f;
+            z = (out_d > 1)
+                ? static_cast<Compute>(od) * static_cast<Compute>(in_d - 1) /
+                  static_cast<Compute>(out_d - 1)
+                : Compute(0);
+            y = (out_h > 1)
+                ? static_cast<Compute>(oh) * static_cast<Compute>(in_h - 1) /
+                  static_cast<Compute>(out_h - 1)
+                : Compute(0);
+            x = (out_w > 1)
+                ? static_cast<Compute>(ow) * static_cast<Compute>(in_w - 1) /
+                  static_cast<Compute>(out_w - 1)
+                : Compute(0);
         } else {
-            float scale_d = static_cast<float>(in_d) / out_d;
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            z = (od + 0.5f) * scale_d - 0.5f;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            z = (static_cast<Compute>(od) + Compute(0.5)) * scale_d - Compute(0.5);
+            y = (static_cast<Compute>(oh) + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (static_cast<Compute>(ow) + Compute(0.5)) * scale_w - Compute(0.5);
         }
 
-        z = std::max(0.0f, std::min(z, static_cast<float>(in_d - 1)));
-        y = std::max(0.0f, std::min(y, static_cast<float>(in_h - 1)));
-        x = std::max(0.0f, std::min(x, static_cast<float>(in_w - 1)));
+        z = std::max(Compute(0), std::min(z, static_cast<Compute>(in_d - 1)));
+        y = std::max(Compute(0), std::min(y, static_cast<Compute>(in_h - 1)));
+        x = std::max(Compute(0), std::min(x, static_cast<Compute>(in_w - 1)));
 
         int64_t z0 = static_cast<int64_t>(z);
         int64_t y0 = static_cast<int64_t>(y);
@@ -281,31 +320,31 @@ void interpolate_trilinear_impl(
         int64_t y1 = std::min(y0 + 1, in_h - 1);
         int64_t x1 = std::min(x0 + 1, in_w - 1);
 
-        float fz = z - z0;
-        float fy = y - y0;
-        float fx = x - x0;
+        Compute fz = z - static_cast<Compute>(z0);
+        Compute fy = y - static_cast<Compute>(y0);
+        Compute fx = x - static_cast<Compute>(x0);
 
         // Base offset for this (b, c) slice
         int64_t base = (b * channels + c) * in_d * in_h * in_w;
 
         // 8-point trilinear interpolation
-        float v000 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
-        float v001 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
-        float v010 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
-        float v011 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
-        float v100 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
-        float v101 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
-        float v110 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
-        float v111 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
+        Compute v000 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
+        Compute v001 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
+        Compute v010 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
+        Compute v011 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
+        Compute v100 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
+        Compute v101 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
+        Compute v110 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
+        Compute v111 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
 
-        float result =
-            v000 * (1 - fz) * (1 - fy) * (1 - fx) +
-            v001 * (1 - fz) * (1 - fy) * fx +
-            v010 * (1 - fz) * fy * (1 - fx) +
-            v011 * (1 - fz) * fy * fx +
-            v100 * fz * (1 - fy) * (1 - fx) +
-            v101 * fz * (1 - fy) * fx +
-            v110 * fz * fy * (1 - fx) +
+        Compute result =
+            v000 * (Compute(1) - fz) * (Compute(1) - fy) * (Compute(1) - fx) +
+            v001 * (Compute(1) - fz) * (Compute(1) - fy) * fx +
+            v010 * (Compute(1) - fz) * fy * (Compute(1) - fx) +
+            v011 * (Compute(1) - fz) * fy * fx +
+            v100 * fz * (Compute(1) - fy) * (Compute(1) - fx) +
+            v101 * fz * (Compute(1) - fy) * fx +
+            v110 * fz * fy * (Compute(1) - fx) +
             v111 * fz * fy * fx;
 
         output[idx] = static_cast<T>(result);
@@ -326,13 +365,14 @@ void interpolate_nearest_5d_impl(
     int64_t out_h,
     int64_t out_w
 ) {
-    float scale_d = static_cast<float>(in_d) / out_d;
-    float scale_h = static_cast<float>(in_h) / out_h;
-    float scale_w = static_cast<float>(in_w) / out_w;
+    using Compute = interp_acc_t<T>;
+    Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+    Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
     int64_t total = batch * channels * out_d * out_h * out_w;
 
 #ifdef _OPENMP
-    #pragma omp parallel for if(total > 65536)
+    #pragma omp parallel for if(total > ::tenzor::OmpThresholds::simple())
 #endif
     for (int64_t idx = 0; idx < total; ++idx) {
         int64_t temp = idx;
@@ -342,9 +382,9 @@ void interpolate_nearest_5d_impl(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        int64_t id = std::min(static_cast<int64_t>(od * scale_d), in_d - 1);
-        int64_t ih = std::min(static_cast<int64_t>(oh * scale_h), in_h - 1);
-        int64_t iw = std::min(static_cast<int64_t>(ow * scale_w), in_w - 1);
+        int64_t id = std::min(static_cast<int64_t>(static_cast<Compute>(od) * scale_d), in_d - 1);
+        int64_t ih = std::min(static_cast<int64_t>(static_cast<Compute>(oh) * scale_h), in_h - 1);
+        int64_t iw = std::min(static_cast<int64_t>(static_cast<Compute>(ow) * scale_w), in_w - 1);
 
         int64_t in_idx = ((b * channels + c) * in_d + id) * in_h * in_w + ih * in_w + iw;
         output[idx] = input[in_idx];
@@ -537,14 +577,15 @@ static void interpolate_bilinear_backward_impl(
     int64_t out_h, int64_t out_w,
     bool align_corners)
 {
+    using Compute = interp_acc_t<T>;
     // align_corners=false: scale = in_h / out_h; src = (h + 0.5) * scale - 0.5.
     // align_corners=true:  scale = (in_h - 1) / (out_h - 1); src = h * scale.
-    const float scale_h = align_corners && out_h > 1
-        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
-        : static_cast<float>(in_h) / static_cast<float>(out_h);
-    const float scale_w = align_corners && out_w > 1
-        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
-        : static_cast<float>(in_w) / static_cast<float>(out_w);
+    const Compute scale_h = align_corners && out_h > 1
+        ? static_cast<Compute>(in_h - 1) / static_cast<Compute>(out_h - 1)
+        : static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    const Compute scale_w = align_corners && out_w > 1
+        ? static_cast<Compute>(in_w - 1) / static_cast<Compute>(out_w - 1)
+        : static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
     // grad_in is zero-initialized by the caller.
     for (int64_t n = 0; n < N; ++n) {
@@ -552,29 +593,29 @@ static void interpolate_bilinear_backward_impl(
             const T* go = grad_out + ((n * C + c) * out_h * out_w);
             T* gi = grad_in + ((n * C + c) * in_h * in_w);
             for (int64_t h = 0; h < out_h; ++h) {
-                const float src_h = align_corners
-                    ? h * scale_h
-                    : (h + 0.5f) * scale_h - 0.5f;
+                const Compute src_h = align_corners
+                    ? static_cast<Compute>(h) * scale_h
+                    : (static_cast<Compute>(h) + Compute(0.5)) * scale_h - Compute(0.5);
                 const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
                 const int64_t h1 = h0 + 1;
-                const float fh = src_h - h0;
+                const Compute fh = src_h - static_cast<Compute>(h0);
                 for (int64_t w = 0; w < out_w; ++w) {
-                    const float src_w = align_corners
-                        ? w * scale_w
-                        : (w + 0.5f) * scale_w - 0.5f;
+                    const Compute src_w = align_corners
+                        ? static_cast<Compute>(w) * scale_w
+                        : (static_cast<Compute>(w) + Compute(0.5)) * scale_w - Compute(0.5);
                     const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
                     const int64_t w1 = w0 + 1;
-                    const float fw = src_w - w0;
-                    const float g_val = static_cast<float>(go[h * out_w + w]);
+                    const Compute fw = src_w - static_cast<Compute>(w0);
+                    const Compute g_val = static_cast<Compute>(go[h * out_w + w]);
 
-                    auto add = [&](int64_t hi, int64_t wi, float weight) {
+                    auto add = [&](int64_t hi, int64_t wi, Compute weight) {
                         if (hi < 0 || hi >= in_h || wi < 0 || wi >= in_w) return;
                         gi[hi * in_w + wi] = static_cast<T>(
-                            static_cast<float>(gi[hi * in_w + wi]) + g_val * weight);
+                            static_cast<Compute>(gi[hi * in_w + wi]) + g_val * weight);
                     };
-                    add(h0, w0, (1.0f - fh) * (1.0f - fw));
-                    add(h0, w1, (1.0f - fh) * fw);
-                    add(h1, w0, fh * (1.0f - fw));
+                    add(h0, w0, (Compute(1) - fh) * (Compute(1) - fw));
+                    add(h0, w1, (Compute(1) - fh) * fw);
+                    add(h1, w0, fh * (Compute(1) - fw));
                     add(h1, w1, fh * fw);
                 }
             }
@@ -644,26 +685,28 @@ void interpolate_linear_backward_impl(
     const T* grad_out, T* grad_in,
     int64_t N, int64_t C, int64_t in_w, int64_t out_w, bool align_corners)
 {
-    const float scale_w = align_corners && out_w > 1
-        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
-        : static_cast<float>(in_w) / static_cast<float>(out_w);
+    using Compute = interp_acc_t<T>;
+    const Compute scale_w = align_corners && out_w > 1
+        ? static_cast<Compute>(in_w - 1) / static_cast<Compute>(out_w - 1)
+        : static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             const T* go = grad_out + ((n * C + c) * out_w);
             T* gi = grad_in + ((n * C + c) * in_w);
             for (int64_t w = 0; w < out_w; ++w) {
-                const float src_w = align_corners ? w * scale_w
-                                                  : (w + 0.5f) * scale_w - 0.5f;
+                const Compute src_w = align_corners
+                    ? static_cast<Compute>(w) * scale_w
+                    : (static_cast<Compute>(w) + Compute(0.5)) * scale_w - Compute(0.5);
                 const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
                 const int64_t w1 = w0 + 1;
-                const float fw = src_w - w0;
-                const float g_val = static_cast<float>(go[w]);
-                auto add = [&](int64_t wi, float weight) {
+                const Compute fw = src_w - static_cast<Compute>(w0);
+                const Compute g_val = static_cast<Compute>(go[w]);
+                auto add = [&](int64_t wi, Compute weight) {
                     if (wi < 0 || wi >= in_w) return;
-                    gi[wi] = static_cast<T>(static_cast<float>(gi[wi]) + g_val * weight);
+                    gi[wi] = static_cast<T>(static_cast<Compute>(gi[wi]) + g_val * weight);
                 };
-                add(w0, 1.0f - fw);
+                add(w0, Compute(1) - fw);
                 add(w1, fw);
             }
         }
@@ -677,35 +720,40 @@ void interpolate_bicubic_backward_impl(
     int64_t N, int64_t C, int64_t in_h, int64_t in_w,
     int64_t out_h, int64_t out_w, bool align_corners)
 {
-    const float scale_h = align_corners && out_h > 1
-        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
-        : static_cast<float>(in_h) / static_cast<float>(out_h);
-    const float scale_w = align_corners && out_w > 1
-        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
-        : static_cast<float>(in_w) / static_cast<float>(out_w);
+    using Compute = interp_acc_t<T>;
+    const Compute scale_h = align_corners && out_h > 1
+        ? static_cast<Compute>(in_h - 1) / static_cast<Compute>(out_h - 1)
+        : static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    const Compute scale_w = align_corners && out_w > 1
+        ? static_cast<Compute>(in_w - 1) / static_cast<Compute>(out_w - 1)
+        : static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             const T* go = grad_out + ((n * C + c) * out_h * out_w);
             T* gi = grad_in + ((n * C + c) * in_h * in_w);
             for (int64_t h = 0; h < out_h; ++h) {
-                const float src_h = align_corners ? h * scale_h
-                                                  : (h + 0.5f) * scale_h - 0.5f;
+                const Compute src_h = align_corners
+                    ? static_cast<Compute>(h) * scale_h
+                    : (static_cast<Compute>(h) + Compute(0.5)) * scale_h - Compute(0.5);
                 const int64_t hi = static_cast<int64_t>(std::floor(src_h));
                 for (int64_t w = 0; w < out_w; ++w) {
-                    const float src_w = align_corners ? w * scale_w
-                                                      : (w + 0.5f) * scale_w - 0.5f;
+                    const Compute src_w = align_corners
+                        ? static_cast<Compute>(w) * scale_w
+                        : (static_cast<Compute>(w) + Compute(0.5)) * scale_w - Compute(0.5);
                     const int64_t wi = static_cast<int64_t>(std::floor(src_w));
-                    const float g_val = static_cast<float>(go[h * out_w + w]);
+                    const Compute g_val = static_cast<Compute>(go[h * out_w + w]);
                     for (int64_t dy = -1; dy <= 2; ++dy) {
                         const int64_t iy = std::clamp<int64_t>(hi + dy, 0, in_h - 1);
-                        const float wy = cubic_interp_coeff(src_h - static_cast<float>(hi + dy));
+                        const Compute wy = cubic_interp_coeff<Compute>(
+                            src_h - static_cast<Compute>(hi + dy));
                         for (int64_t dx = -1; dx <= 2; ++dx) {
                             const int64_t ix = std::clamp<int64_t>(wi + dx, 0, in_w - 1);
-                            const float wx = cubic_interp_coeff(src_w - static_cast<float>(wi + dx));
-                            const float weight = wy * wx;
+                            const Compute wx = cubic_interp_coeff<Compute>(
+                                src_w - static_cast<Compute>(wi + dx));
+                            const Compute weight = wy * wx;
                             gi[iy * in_w + ix] = static_cast<T>(
-                                static_cast<float>(gi[iy * in_w + ix]) + g_val * weight);
+                                static_cast<Compute>(gi[iy * in_w + ix]) + g_val * weight);
                         }
                     }
                 }
@@ -722,54 +770,59 @@ void interpolate_trilinear_backward_impl(
     int64_t in_d, int64_t in_h, int64_t in_w,
     int64_t out_d, int64_t out_h, int64_t out_w, bool align_corners)
 {
-    const float scale_d = align_corners && out_d > 1
-        ? static_cast<float>(in_d - 1) / static_cast<float>(out_d - 1)
-        : static_cast<float>(in_d) / static_cast<float>(out_d);
-    const float scale_h = align_corners && out_h > 1
-        ? static_cast<float>(in_h - 1) / static_cast<float>(out_h - 1)
-        : static_cast<float>(in_h) / static_cast<float>(out_h);
-    const float scale_w = align_corners && out_w > 1
-        ? static_cast<float>(in_w - 1) / static_cast<float>(out_w - 1)
-        : static_cast<float>(in_w) / static_cast<float>(out_w);
+    using Compute = interp_acc_t<T>;
+    const Compute scale_d = align_corners && out_d > 1
+        ? static_cast<Compute>(in_d - 1) / static_cast<Compute>(out_d - 1)
+        : static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+    const Compute scale_h = align_corners && out_h > 1
+        ? static_cast<Compute>(in_h - 1) / static_cast<Compute>(out_h - 1)
+        : static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    const Compute scale_w = align_corners && out_w > 1
+        ? static_cast<Compute>(in_w - 1) / static_cast<Compute>(out_w - 1)
+        : static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             const T* go = grad_out + (((n * C + c) * out_d) * out_h * out_w);
             T* gi = grad_in + (((n * C + c) * in_d) * in_h * in_w);
             for (int64_t od = 0; od < out_d; ++od) {
-                const float src_d = align_corners ? od * scale_d
-                                                  : (od + 0.5f) * scale_d - 0.5f;
+                const Compute src_d = align_corners
+                    ? static_cast<Compute>(od) * scale_d
+                    : (static_cast<Compute>(od) + Compute(0.5)) * scale_d - Compute(0.5);
                 const int64_t d0 = static_cast<int64_t>(std::floor(src_d));
                 const int64_t d1 = d0 + 1;
-                const float fd = src_d - d0;
+                const Compute fd = src_d - static_cast<Compute>(d0);
                 for (int64_t oh = 0; oh < out_h; ++oh) {
-                    const float src_h = align_corners ? oh * scale_h
-                                                      : (oh + 0.5f) * scale_h - 0.5f;
+                    const Compute src_h = align_corners
+                        ? static_cast<Compute>(oh) * scale_h
+                        : (static_cast<Compute>(oh) + Compute(0.5)) * scale_h - Compute(0.5);
                     const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
                     const int64_t h1 = h0 + 1;
-                    const float fh = src_h - h0;
+                    const Compute fh = src_h - static_cast<Compute>(h0);
                     for (int64_t ow = 0; ow < out_w; ++ow) {
-                        const float src_w = align_corners ? ow * scale_w
-                                                          : (ow + 0.5f) * scale_w - 0.5f;
+                        const Compute src_w = align_corners
+                            ? static_cast<Compute>(ow) * scale_w
+                            : (static_cast<Compute>(ow) + Compute(0.5)) * scale_w - Compute(0.5);
                         const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
                         const int64_t w1 = w0 + 1;
-                        const float fw = src_w - w0;
-                        const float g_val = static_cast<float>(
+                        const Compute fw = src_w - static_cast<Compute>(w0);
+                        const Compute g_val = static_cast<Compute>(
                             go[(od * out_h + oh) * out_w + ow]);
-                        auto add = [&](int64_t di, int64_t hi, int64_t wi, float weight) {
+                        auto add = [&](int64_t di, int64_t hi, int64_t wi, Compute weight) {
                             if (di < 0 || di >= in_d ||
                                 hi < 0 || hi >= in_h ||
                                 wi < 0 || wi >= in_w) return;
                             const int64_t idx = (di * in_h + hi) * in_w + wi;
-                            gi[idx] = static_cast<T>(static_cast<float>(gi[idx]) + g_val * weight);
+                            gi[idx] = static_cast<T>(static_cast<Compute>(gi[idx]) + g_val * weight);
                         };
-                        add(d0, h0, w0, (1-fd)*(1-fh)*(1-fw));
-                        add(d0, h0, w1, (1-fd)*(1-fh)*fw);
-                        add(d0, h1, w0, (1-fd)*fh*(1-fw));
-                        add(d0, h1, w1, (1-fd)*fh*fw);
-                        add(d1, h0, w0, fd*(1-fh)*(1-fw));
-                        add(d1, h0, w1, fd*(1-fh)*fw);
-                        add(d1, h1, w0, fd*fh*(1-fw));
+                        const Compute one = Compute(1);
+                        add(d0, h0, w0, (one-fd)*(one-fh)*(one-fw));
+                        add(d0, h0, w1, (one-fd)*(one-fh)*fw);
+                        add(d0, h1, w0, (one-fd)*fh*(one-fw));
+                        add(d0, h1, w1, (one-fd)*fh*fw);
+                        add(d1, h0, w0, fd*(one-fh)*(one-fw));
+                        add(d1, h0, w1, fd*(one-fh)*fw);
+                        add(d1, h1, w0, fd*fh*(one-fw));
                         add(d1, h1, w1, fd*fh*fw);
                     }
                 }
@@ -788,6 +841,7 @@ void nearest_backward_axis_scatter(
     const std::vector<int64_t>& out_spatial,
     bool nearest_exact)
 {
+    using Compute = interp_acc_t<T>;
     const int64_t spatial_dims = static_cast<int64_t>(in_spatial.size());
     int64_t out_total = 1, in_total = 1;
     for (int64_t s : out_spatial) out_total *= s;
@@ -803,23 +857,20 @@ void nearest_backward_axis_scatter(
                 int64_t in_stride = 1;
                 int64_t tmp = out_idx;
                 std::vector<int64_t> src_indices(spatial_dims);
-                int64_t out_stride = 1;
-                // Compute strides for the spatial axes (last-axis-fastest).
-                // We need src for each dim, so unwind right-to-left.
+                // Compute src for each dim, unwind right-to-left.
                 for (int64_t d = spatial_dims - 1; d >= 0; --d) {
                     const int64_t dim_idx = tmp % out_spatial[d];
                     tmp /= out_spatial[d];
                     src_indices[d] = nearest_exact
                         ? nearest_exact_src(dim_idx, in_spatial[d], out_spatial[d])
                         : nearest_src(dim_idx, in_spatial[d], out_spatial[d]);
-                    (void)out_stride;
                 }
                 for (int64_t d = spatial_dims - 1; d >= 0; --d) {
                     in_idx += src_indices[d] * in_stride;
                     in_stride *= in_spatial[d];
                 }
                 gi[in_idx] = static_cast<T>(
-                    static_cast<float>(gi[in_idx]) + static_cast<float>(go[out_idx]));
+                    static_cast<Compute>(gi[in_idx]) + static_cast<Compute>(go[out_idx]));
             }
         }
     }
@@ -836,6 +887,7 @@ void area_backward_impl(
     const std::vector<int64_t>& in_spatial,
     const std::vector<int64_t>& out_spatial)
 {
+    using Compute = interp_acc_t<T>;
     const int64_t spatial_dims = static_cast<int64_t>(in_spatial.size());
     int64_t out_total = 1, in_total = 1;
     for (int64_t s : out_spatial) out_total *= s;
@@ -859,18 +911,18 @@ void area_backward_impl(
                 std::vector<int64_t> starts(spatial_dims), ends(spatial_dims);
                 int64_t area = 1;
                 for (int64_t d = 0; d < spatial_dims; ++d) {
-                    const float ratio_lo = static_cast<float>(dst[d]) *
-                        static_cast<float>(in_spatial[d]) / static_cast<float>(out_spatial[d]);
-                    const float ratio_hi = static_cast<float>(dst[d] + 1) *
-                        static_cast<float>(in_spatial[d]) / static_cast<float>(out_spatial[d]);
+                    const Compute ratio_lo = static_cast<Compute>(dst[d]) *
+                        static_cast<Compute>(in_spatial[d]) / static_cast<Compute>(out_spatial[d]);
+                    const Compute ratio_hi = static_cast<Compute>(dst[d] + 1) *
+                        static_cast<Compute>(in_spatial[d]) / static_cast<Compute>(out_spatial[d]);
                     starts[d] = std::max<int64_t>(0,
                         static_cast<int64_t>(std::floor(ratio_lo)));
                     ends[d] = std::min<int64_t>(in_spatial[d],
                         static_cast<int64_t>(std::ceil(ratio_hi)));
                     area *= std::max<int64_t>(1, ends[d] - starts[d]);
                 }
-                const float g_val = static_cast<float>(go[out_idx]) /
-                                    static_cast<float>(area);
+                const Compute g_val = static_cast<Compute>(go[out_idx]) /
+                                      static_cast<Compute>(area);
                 // Iterate over the input region and accumulate.
                 std::vector<int64_t> it = starts;
                 while (true) {
@@ -879,7 +931,7 @@ void area_backward_impl(
                         in_idx += it[d] * in_stride;
                         in_stride *= in_spatial[d];
                     }
-                    gi[in_idx] = static_cast<T>(static_cast<float>(gi[in_idx]) + g_val);
+                    gi[in_idx] = static_cast<T>(static_cast<Compute>(gi[in_idx]) + g_val);
                     // Advance: rightmost iterator first.
                     int64_t d = spatial_dims - 1;
                     while (d >= 0) {
@@ -1007,36 +1059,196 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
 
 namespace {
 
-template<typename T>
+template<typename T, typename Compute = interp_acc_t<T>>
 auto bilinear_interpolate(const T* data, int64_t height, int64_t width,
-                          float y, float x) -> float {
-    if (y < -1.0f || y > static_cast<float>(height) ||
-        x < -1.0f || x > static_cast<float>(width)) {
-        return 0.0f;
+                          Compute y, Compute x) -> Compute {
+    if (y < Compute(-1) || y > static_cast<Compute>(height) ||
+        x < Compute(-1) || x > static_cast<Compute>(width)) {
+        return Compute(0);
     }
 
-    y = std::max(y, 0.0f);
-    x = std::max(x, 0.0f);
+    y = std::max(y, Compute(0));
+    x = std::max(x, Compute(0));
 
     int64_t y_low = static_cast<int64_t>(y);
     int64_t x_low = static_cast<int64_t>(x);
     int64_t y_high = y_low + 1;
     int64_t x_high = x_low + 1;
 
-    if (y_low >= height - 1) { y_low = y_high = height - 1; y = static_cast<float>(y_low); }
-    if (x_low >= width - 1) { x_low = x_high = width - 1; x = static_cast<float>(x_low); }
+    if (y_low >= height - 1) { y_low = y_high = height - 1; y = static_cast<Compute>(y_low); }
+    if (x_low >= width - 1)  { x_low = x_high = width - 1;  x = static_cast<Compute>(x_low); }
 
-    float ly = y - static_cast<float>(y_low);
-    float lx = x - static_cast<float>(x_low);
-    float hy = 1.0f - ly;
-    float hx = 1.0f - lx;
+    Compute ly = y - static_cast<Compute>(y_low);
+    Compute lx = x - static_cast<Compute>(x_low);
+    Compute hy = Compute(1) - ly;
+    Compute hx = Compute(1) - lx;
 
-    float v1 = static_cast<float>(data[y_low * width + x_low]);
-    float v2 = static_cast<float>(data[y_low * width + x_high]);
-    float v3 = static_cast<float>(data[y_high * width + x_low]);
-    float v4 = static_cast<float>(data[y_high * width + x_high]);
+    Compute v1 = static_cast<Compute>(data[y_low * width + x_low]);
+    Compute v2 = static_cast<Compute>(data[y_low * width + x_high]);
+    Compute v3 = static_cast<Compute>(data[y_high * width + x_low]);
+    Compute v4 = static_cast<Compute>(data[y_high * width + x_high]);
 
     return hy * hx * v1 + hy * lx * v2 + ly * hx * v3 + ly * lx * v4;
+}
+
+
+template<typename T>
+void roi_align_forward_impl(
+    const T* feat_data, const T* roi_data, T* out_data,
+    int64_t num_rois, int64_t channels, int64_t height, int64_t width,
+    int64_t output_h, int64_t output_w,
+    float spatial_scale_f, int64_t sampling_ratio, bool aligned)
+{
+    using Compute = interp_acc_t<T>;
+    const Compute spatial_scale = static_cast<Compute>(spatial_scale_f);
+    const Compute offset = aligned ? Compute(0.5) : Compute(0);
+
+    #pragma omp parallel for if(num_rois > 16)
+    for (int64_t n = 0; n < num_rois; ++n) {
+        int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+        Compute roi_x1 = static_cast<Compute>(roi_data[n * 5 + 1]) * spatial_scale - offset;
+        Compute roi_y1 = static_cast<Compute>(roi_data[n * 5 + 2]) * spatial_scale - offset;
+        Compute roi_x2 = static_cast<Compute>(roi_data[n * 5 + 3]) * spatial_scale - offset;
+        Compute roi_y2 = static_cast<Compute>(roi_data[n * 5 + 4]) * spatial_scale - offset;
+
+        Compute roi_w = roi_x2 - roi_x1;
+        Compute roi_h = roi_y2 - roi_y1;
+        if (!aligned) {
+            roi_w = std::max(roi_w, Compute(1));
+            roi_h = std::max(roi_h, Compute(1));
+        }
+
+        Compute bin_h = roi_h / static_cast<Compute>(output_h);
+        Compute bin_w = roi_w / static_cast<Compute>(output_w);
+
+        int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
+            : static_cast<int64_t>(std::ceil(bin_h));
+        int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
+            : static_cast<int64_t>(std::ceil(bin_w));
+        roi_bin_h = std::max(roi_bin_h, int64_t(1));
+        roi_bin_w = std::max(roi_bin_w, int64_t(1));
+
+        Compute count = static_cast<Compute>(roi_bin_h * roi_bin_w);
+
+        for (int64_t c = 0; c < channels; ++c) {
+            const T* channel_data = feat_data + (batch_idx * channels + c) * height * width;
+
+            for (int64_t ph = 0; ph < output_h; ++ph) {
+                for (int64_t pw = 0; pw < output_w; ++pw) {
+                    Compute val = Compute(0);
+
+                    for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
+                        Compute y = roi_y1 + bin_h * (static_cast<Compute>(ph) +
+                            (static_cast<Compute>(iy) + Compute(0.5)) / static_cast<Compute>(roi_bin_h));
+                        for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
+                            Compute x = roi_x1 + bin_w * (static_cast<Compute>(pw) +
+                                (static_cast<Compute>(ix) + Compute(0.5)) / static_cast<Compute>(roi_bin_w));
+                            val += bilinear_interpolate<T, Compute>(channel_data, height, width, y, x);
+                        }
+                    }
+
+                    out_data[((n * channels + c) * output_h + ph) * output_w + pw] =
+                        static_cast<T>(val / count);
+                }
+            }
+        }
+    }
+}
+
+template<typename T>
+void roi_align_backward_impl(
+    const T* go_data, const T* roi_data, T* gi_data,
+    int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
+    int64_t output_h, int64_t output_w,
+    float spatial_scale_f, int64_t sampling_ratio, bool aligned)
+{
+    using Compute = interp_acc_t<T>;
+    const Compute spatial_scale = static_cast<Compute>(spatial_scale_f);
+    const Compute offset = aligned ? Compute(0.5) : Compute(0);
+
+    #pragma omp parallel for if(num_rois > 16)
+    for (int64_t n = 0; n < num_rois; ++n) {
+        int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+        Compute roi_x1 = static_cast<Compute>(roi_data[n * 5 + 1]) * spatial_scale - offset;
+        Compute roi_y1 = static_cast<Compute>(roi_data[n * 5 + 2]) * spatial_scale - offset;
+        Compute roi_x2 = static_cast<Compute>(roi_data[n * 5 + 3]) * spatial_scale - offset;
+        Compute roi_y2 = static_cast<Compute>(roi_data[n * 5 + 4]) * spatial_scale - offset;
+
+        Compute roi_w = roi_x2 - roi_x1;
+        Compute roi_h = roi_y2 - roi_y1;
+        if (!aligned) {
+            roi_w = std::max(roi_w, Compute(1));
+            roi_h = std::max(roi_h, Compute(1));
+        }
+
+        Compute bin_h = roi_h / static_cast<Compute>(output_h);
+        Compute bin_w = roi_w / static_cast<Compute>(output_w);
+
+        int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
+            : static_cast<int64_t>(std::ceil(bin_h));
+        int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
+            : static_cast<int64_t>(std::ceil(bin_w));
+        roi_bin_h = std::max(roi_bin_h, int64_t(1));
+        roi_bin_w = std::max(roi_bin_w, int64_t(1));
+
+        Compute count = static_cast<Compute>(roi_bin_h * roi_bin_w);
+
+        for (int64_t c = 0; c < channels; ++c) {
+            T* gi_channel = gi_data + (batch_idx * channels + c) * feat_height * feat_width;
+
+            for (int64_t ph = 0; ph < output_h; ++ph) {
+                for (int64_t pw = 0; pw < output_w; ++pw) {
+                    Compute grad_val =
+                        static_cast<Compute>(go_data[((n * channels + c) * output_h + ph) * output_w + pw])
+                        / count;
+
+                    for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
+                        Compute y = roi_y1 + bin_h * (static_cast<Compute>(ph) +
+                            (static_cast<Compute>(iy) + Compute(0.5)) / static_cast<Compute>(roi_bin_h));
+                        for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
+                            Compute x = roi_x1 + bin_w * (static_cast<Compute>(pw) +
+                                (static_cast<Compute>(ix) + Compute(0.5)) / static_cast<Compute>(roi_bin_w));
+
+                            if (y < Compute(-1) || y > static_cast<Compute>(feat_height) ||
+                                x < Compute(-1) || x > static_cast<Compute>(feat_width)) continue;
+
+                            y = std::max(y, Compute(0));
+                            x = std::max(x, Compute(0));
+
+                            int64_t y_low = static_cast<int64_t>(y);
+                            int64_t x_low = static_cast<int64_t>(x);
+                            int64_t y_high = y_low + 1;
+                            int64_t x_high = x_low + 1;
+
+                            if (y_low >= feat_height - 1) { y_low = y_high = feat_height - 1; y = static_cast<Compute>(y_low); }
+                            if (x_low >= feat_width  - 1) { x_low = x_high = feat_width  - 1; x = static_cast<Compute>(x_low); }
+
+                            Compute ly = y - static_cast<Compute>(y_low);
+                            Compute lx = x - static_cast<Compute>(x_low);
+                            Compute hy = Compute(1) - ly;
+                            Compute hx = Compute(1) - lx;
+
+                            // Each atomic uses a small read-modify-write because the
+                            // accumulation type is Compute and storage is T — for
+                            // Float64 storage Compute is double (atomic add OK), for
+                            // float storage Compute is float (atomic add OK). For
+                            // Float16/BFloat16 inputs we widen at the kernel level
+                            // (see the dispatch wrapper) so this branch is never hit
+                            // with narrower storage.
+                            #pragma omp atomic
+                            gi_channel[y_low  * feat_width + x_low ] += static_cast<T>(grad_val * hy * hx);
+                            #pragma omp atomic
+                            gi_channel[y_low  * feat_width + x_high] += static_cast<T>(grad_val * hy * lx);
+                            #pragma omp atomic
+                            gi_channel[y_high * feat_width + x_low ] += static_cast<T>(grad_val * ly * hx);
+                            #pragma omp atomic
+                            gi_channel[y_high * feat_width + x_high] += static_cast<T>(grad_val * ly * lx);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 } // anonymous namespace
@@ -1049,134 +1261,38 @@ auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
     // rois: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
     const auto& feat_shape = features.shape();
     int64_t channels = feat_shape[1];
-    int64_t height = feat_shape[2];
-    int64_t width = feat_shape[3];
+    int64_t height   = feat_shape[2];
+    int64_t width    = feat_shape[3];
     int64_t num_rois = rois.shape()[0];
 
     Tensor output({num_rois, channels, output_h, output_w},
                   features.dtype(), features.device());
 
-    if (features.dtype() == DType::Float32) {
-        const float* feat_data = features.data<float>();
-        const float* roi_data = rois.data<float>();
-        float* out_data = output.data<float>();
-
-        float offset = aligned ? 0.5f : 0.0f;
-
-        #pragma omp parallel for if(num_rois > 16)
-        for (int64_t n = 0; n < num_rois; ++n) {
-            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
-            float roi_x1 = roi_data[n * 5 + 1] * spatial_scale - offset;
-            float roi_y1 = roi_data[n * 5 + 2] * spatial_scale - offset;
-            float roi_x2 = roi_data[n * 5 + 3] * spatial_scale - offset;
-            float roi_y2 = roi_data[n * 5 + 4] * spatial_scale - offset;
-
-            float roi_w = roi_x2 - roi_x1;
-            float roi_h = roi_y2 - roi_y1;
-            if (!aligned) {
-                roi_w = std::max(roi_w, 1.0f);
-                roi_h = std::max(roi_h, 1.0f);
-            }
-
-            float bin_h = roi_h / static_cast<float>(output_h);
-            float bin_w = roi_w / static_cast<float>(output_w);
-
-            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_h));
-            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_w));
-            roi_bin_h = std::max(roi_bin_h, int64_t(1));
-            roi_bin_w = std::max(roi_bin_w, int64_t(1));
-
-            float count = static_cast<float>(roi_bin_h * roi_bin_w);
-
-            for (int64_t c = 0; c < channels; ++c) {
-                const float* channel_data = feat_data + (batch_idx * channels + c) * height * width;
-
-                for (int64_t ph = 0; ph < output_h; ++ph) {
-                    for (int64_t pw = 0; pw < output_w; ++pw) {
-                        float val = 0.0f;
-
-                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
-                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
-                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
-                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
-                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
-                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
-                                val += bilinear_interpolate(channel_data, height, width, y, x);
-                            }
-                        }
-
-                        out_data[((n * channels + c) * output_h + ph) * output_w + pw] = val / count;
-                    }
-                }
-            }
+    switch (features.dtype()) {
+        case DType::Float32:
+            roi_align_forward_impl<float>(
+                features.data<float>(), rois.data<float>(), output.data<float>(),
+                num_rois, channels, height, width, output_h, output_w,
+                spatial_scale, sampling_ratio, aligned);
+            break;
+        case DType::Float64:
+            roi_align_forward_impl<double>(
+                features.data<double>(), rois.data<double>(), output.data<double>(),
+                num_rois, channels, height, width, output_h, output_w,
+                spatial_scale, sampling_ratio, aligned);
+            break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Widen to Float32 for the inner kernel; narrow at store.
+            auto features_f32 = features.to(DType::Float32);
+            auto rois_f32     = rois.to(DType::Float32);
+            auto output_f32   = roi_align_forward_kernel(
+                features_f32, rois_f32, output_h, output_w,
+                spatial_scale, sampling_ratio, aligned);
+            return output_f32.to(features.dtype());
         }
-    } else if (features.dtype() == DType::Float64) {
-        const double* feat_data = features.data<double>();
-        const double* roi_data = rois.data<double>();
-        double* out_data = output.data<double>();
-
-        double offset = aligned ? 0.5 : 0.0;
-
-        #pragma omp parallel for if(num_rois > 16)
-        for (int64_t n = 0; n < num_rois; ++n) {
-            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
-            float roi_x1 = static_cast<float>(roi_data[n * 5 + 1] * spatial_scale - offset);
-            float roi_y1 = static_cast<float>(roi_data[n * 5 + 2] * spatial_scale - offset);
-            float roi_x2 = static_cast<float>(roi_data[n * 5 + 3] * spatial_scale - offset);
-            float roi_y2 = static_cast<float>(roi_data[n * 5 + 4] * spatial_scale - offset);
-
-            float roi_w = roi_x2 - roi_x1;
-            float roi_h = roi_y2 - roi_y1;
-            if (!aligned) {
-                roi_w = std::max(roi_w, 1.0f);
-                roi_h = std::max(roi_h, 1.0f);
-            }
-
-            float bin_h = roi_h / static_cast<float>(output_h);
-            float bin_w = roi_w / static_cast<float>(output_w);
-
-            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_h));
-            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_w));
-            roi_bin_h = std::max(roi_bin_h, int64_t(1));
-            roi_bin_w = std::max(roi_bin_w, int64_t(1));
-
-            float count = static_cast<float>(roi_bin_h * roi_bin_w);
-
-            for (int64_t c = 0; c < channels; ++c) {
-                const double* channel_data = feat_data + (batch_idx * channels + c) * height * width;
-
-                for (int64_t ph = 0; ph < output_h; ++ph) {
-                    for (int64_t pw = 0; pw < output_w; ++pw) {
-                        float val = 0.0f;
-
-                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
-                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
-                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
-                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
-                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
-                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
-                                val += bilinear_interpolate(channel_data, height, width, y, x);
-                            }
-                        }
-
-                        out_data[((n * channels + c) * output_h + ph) * output_w + pw] = static_cast<double>(val / count);
-                    }
-                }
-            }
-        }
-    } else if (features.dtype() == DType::Float16 || features.dtype() == DType::BFloat16) {
-        // Convert to Float32, compute, convert back
-        auto features_f32 = features.to(DType::Float32);
-        auto rois_f32 = rois.to(DType::Float32);
-        auto output_f32 = roi_align_forward_kernel(features_f32, rois_f32, output_h, output_w,
-                                                     spatial_scale, sampling_ratio, aligned);
-        return output_f32.to(features.dtype());
-    } else {
-        throw std::runtime_error("roi_align_forward: unsupported dtype");
+        default:
+            throw std::runtime_error("roi_align_forward: unsupported dtype");
     }
 
     return output;
@@ -1197,172 +1313,31 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
     std::memset(grad_input.data<uint8_t>(), 0,
                 grad_input.numel() * dtype_size(grad_input.dtype()));
 
-    if (grad_output.dtype() == DType::Float32) {
-        float* gi_data = grad_input.data<float>();
-        const float* go_data = grad_output.data<float>();
-        const float* roi_data = rois.data<float>();
-
-        float offset = aligned ? 0.5f : 0.0f;
-
-        // Parallelize over ROIs; use atomic adds for overlapping spatial regions
-        #pragma omp parallel for if(num_rois > 16)
-        for (int64_t n = 0; n < num_rois; ++n) {
-            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
-            float roi_x1 = roi_data[n * 5 + 1] * spatial_scale - offset;
-            float roi_y1 = roi_data[n * 5 + 2] * spatial_scale - offset;
-            float roi_x2 = roi_data[n * 5 + 3] * spatial_scale - offset;
-            float roi_y2 = roi_data[n * 5 + 4] * spatial_scale - offset;
-
-            float roi_w = roi_x2 - roi_x1;
-            float roi_h = roi_y2 - roi_y1;
-            if (!aligned) {
-                roi_w = std::max(roi_w, 1.0f);
-                roi_h = std::max(roi_h, 1.0f);
-            }
-
-            float bin_h = roi_h / static_cast<float>(output_h);
-            float bin_w = roi_w / static_cast<float>(output_w);
-
-            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_h));
-            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_w));
-            roi_bin_h = std::max(roi_bin_h, int64_t(1));
-            roi_bin_w = std::max(roi_bin_w, int64_t(1));
-
-            float count = static_cast<float>(roi_bin_h * roi_bin_w);
-
-            for (int64_t c = 0; c < channels; ++c) {
-                float* gi_channel = gi_data + (batch_idx * channels + c) * feat_height * feat_width;
-
-                for (int64_t ph = 0; ph < output_h; ++ph) {
-                    for (int64_t pw = 0; pw < output_w; ++pw) {
-                        float grad_val = go_data[((n * channels + c) * output_h + ph) * output_w + pw] / count;
-
-                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
-                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
-                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
-                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
-                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
-                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
-
-                                if (y < -1.0f || y > static_cast<float>(feat_height) ||
-                                    x < -1.0f || x > static_cast<float>(feat_width)) continue;
-
-                                y = std::max(y, 0.0f);
-                                x = std::max(x, 0.0f);
-
-                                int64_t y_low = static_cast<int64_t>(y);
-                                int64_t x_low = static_cast<int64_t>(x);
-                                int64_t y_high = y_low + 1;
-                                int64_t x_high = x_low + 1;
-
-                                if (y_low >= feat_height - 1) { y_low = y_high = feat_height - 1; }
-                                if (x_low >= feat_width - 1) { x_low = x_high = feat_width - 1; }
-
-                                float ly = y - static_cast<float>(y_low);
-                                float lx = x - static_cast<float>(x_low);
-
-                                #pragma omp atomic
-                                gi_channel[y_low * feat_width + x_low] += grad_val * (1.0f - ly) * (1.0f - lx);
-                                #pragma omp atomic
-                                gi_channel[y_low * feat_width + x_high] += grad_val * (1.0f - ly) * lx;
-                                #pragma omp atomic
-                                gi_channel[y_high * feat_width + x_low] += grad_val * ly * (1.0f - lx);
-                                #pragma omp atomic
-                                gi_channel[y_high * feat_width + x_high] += grad_val * ly * lx;
-                            }
-                        }
-                    }
-                }
-            }
+    switch (grad_output.dtype()) {
+        case DType::Float32:
+            roi_align_backward_impl<float>(
+                grad_output.data<float>(), rois.data<float>(), grad_input.data<float>(),
+                num_rois, channels, feat_height, feat_width, output_h, output_w,
+                spatial_scale, sampling_ratio, aligned);
+            break;
+        case DType::Float64:
+            roi_align_backward_impl<double>(
+                grad_output.data<double>(), rois.data<double>(), grad_input.data<double>(),
+                num_rois, channels, feat_height, feat_width, output_h, output_w,
+                spatial_scale, sampling_ratio, aligned);
+            break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Widen to Float32 for the inner kernel; narrow on return.
+            auto go_f32   = grad_output.to(DType::Float32);
+            auto rois_f32 = rois.to(DType::Float32);
+            auto result   = roi_align_backward_kernel(
+                go_f32, rois_f32, batch_size, feat_height, feat_width,
+                spatial_scale, sampling_ratio, aligned);
+            return result.to(grad_output.dtype());
         }
-    } else if (grad_output.dtype() == DType::Float64) {
-        double* gi_data = grad_input.data<double>();
-        const double* go_data = grad_output.data<double>();
-        const double* roi_data = rois.data<double>();
-
-        double offset = aligned ? 0.5 : 0.0;
-
-        #pragma omp parallel for if(num_rois > 16)
-        for (int64_t n = 0; n < num_rois; ++n) {
-            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
-            float roi_x1 = static_cast<float>(roi_data[n * 5 + 1] * spatial_scale - offset);
-            float roi_y1 = static_cast<float>(roi_data[n * 5 + 2] * spatial_scale - offset);
-            float roi_x2 = static_cast<float>(roi_data[n * 5 + 3] * spatial_scale - offset);
-            float roi_y2 = static_cast<float>(roi_data[n * 5 + 4] * spatial_scale - offset);
-
-            float roi_w = roi_x2 - roi_x1;
-            float roi_h = roi_y2 - roi_y1;
-            if (!aligned) {
-                roi_w = std::max(roi_w, 1.0f);
-                roi_h = std::max(roi_h, 1.0f);
-            }
-
-            float bin_h = roi_h / static_cast<float>(output_h);
-            float bin_w = roi_w / static_cast<float>(output_w);
-
-            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_h));
-            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
-                : static_cast<int64_t>(std::ceil(bin_w));
-            roi_bin_h = std::max(roi_bin_h, int64_t(1));
-            roi_bin_w = std::max(roi_bin_w, int64_t(1));
-
-            float count = static_cast<float>(roi_bin_h * roi_bin_w);
-
-            for (int64_t c = 0; c < channels; ++c) {
-                double* gi_channel = gi_data + (batch_idx * channels + c) * feat_height * feat_width;
-
-                for (int64_t ph = 0; ph < output_h; ++ph) {
-                    for (int64_t pw = 0; pw < output_w; ++pw) {
-                        double grad_val = go_data[((n * channels + c) * output_h + ph) * output_w + pw] / count;
-
-                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
-                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
-                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
-                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
-                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
-                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
-
-                                if (y < -1.0f || y > static_cast<float>(feat_height) ||
-                                    x < -1.0f || x > static_cast<float>(feat_width)) continue;
-
-                                y = std::max(y, 0.0f);
-                                x = std::max(x, 0.0f);
-
-                                int64_t y_low = static_cast<int64_t>(y);
-                                int64_t x_low = static_cast<int64_t>(x);
-                                int64_t y_high = y_low + 1;
-                                int64_t x_high = x_low + 1;
-
-                                if (y_low >= feat_height - 1) { y_low = y_high = feat_height - 1; }
-                                if (x_low >= feat_width - 1) { x_low = x_high = feat_width - 1; }
-
-                                float ly = y - static_cast<float>(y_low);
-                                float lx = x - static_cast<float>(x_low);
-
-                                #pragma omp atomic
-                                gi_channel[y_low * feat_width + x_low] += grad_val * static_cast<double>((1.0f - ly) * (1.0f - lx));
-                                #pragma omp atomic
-                                gi_channel[y_low * feat_width + x_high] += grad_val * static_cast<double>((1.0f - ly) * lx);
-                                #pragma omp atomic
-                                gi_channel[y_high * feat_width + x_low] += grad_val * static_cast<double>(ly * (1.0f - lx));
-                                #pragma omp atomic
-                                gi_channel[y_high * feat_width + x_high] += grad_val * static_cast<double>(ly * lx);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        // Convert to Float32, compute, convert back
-        auto go_f32 = grad_output.to(DType::Float32);
-        auto rois_f32 = rois.to(DType::Float32);
-        auto result = roi_align_backward_kernel(go_f32, rois_f32, batch_size, feat_height, feat_width,
-                                                  spatial_scale, sampling_ratio, aligned);
-        return result.to(grad_output.dtype());
+        default:
+            throw std::runtime_error("roi_align_backward: unsupported dtype");
     }
 
     return grad_input;
@@ -1417,7 +1392,7 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
     const float* b2 = b2_f32.data<float>();
     float* out = output.data<float>();
 
-    #pragma omp parallel for collapse(2) if(N * M > 4096)
+    #pragma omp parallel for collapse(2) if(N * M > ::tenzor::OmpThresholds::complex())
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < M; ++j) {
             float x1 = std::max(b1[i * 4 + 0], b2[j * 4 + 0]);

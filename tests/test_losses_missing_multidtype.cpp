@@ -13,6 +13,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include "multi_backend_dtype_fixture.hpp"
+#include "grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -73,7 +74,7 @@ TEST_P(MissingLossesMultiDTypeTest, MarginRankingLoss_GradientFlow) {
     auto result = loss.forward(input1, input2, target);
     result.backward();
 
-    EXPECT_TRUE(input1.grad().has_value());
+    EXPECT_GRAD_FLOWS(input1);
     expectShape(input1.grad().value(), {4});
 }
 
@@ -123,7 +124,7 @@ TEST_P(MissingLossesMultiDTypeTest, PoissonNLLLoss_GradientFlow) {
     auto result = loss.forward(input, target);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 5});
 }
 
@@ -180,7 +181,7 @@ TEST_P(MissingLossesMultiDTypeTest, CosineEmbeddingLoss_GradientFlow) {
     auto result = loss.forward(input1, input2, target);
     result.backward();
 
-    EXPECT_TRUE(input1.grad().has_value());
+    EXPECT_GRAD_FLOWS(input1);
     expectShape(input1.grad().value(), {4, 8});
 }
 
@@ -236,7 +237,7 @@ TEST_P(MissingLossesMultiDTypeTest, TripletMarginLoss_GradientFlow) {
     auto result = loss.forward(anchor, positive, negative);
     result.backward();
 
-    EXPECT_TRUE(anchor.grad().has_value());
+    EXPECT_GRAD_FLOWS(anchor);
     expectShape(anchor.grad().value(), {4, 16});
 }
 
@@ -295,7 +296,7 @@ TEST_P(MissingLossesMultiDTypeTest, GaussianNLLLoss_GradientFlow) {
     auto result = loss.forward(input, target, var);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 3});
 }
 
@@ -345,7 +346,7 @@ TEST_P(MissingLossesMultiDTypeTest, SoftMarginLoss_GradientFlow) {
     auto result = loss.forward(input, target);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 5});
 }
 
@@ -395,7 +396,7 @@ TEST_P(MissingLossesMultiDTypeTest, HingeEmbeddingLoss_GradientFlow) {
     auto result = loss.forward(input, target);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 5});
 }
 
@@ -446,7 +447,7 @@ TEST_P(MissingLossesMultiDTypeTest, MultiLabelSoftMarginLoss_GradientFlow) {
     auto result = loss.forward(input, target);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 6});
 }
 
@@ -496,7 +497,7 @@ TEST_P(MissingLossesMultiDTypeTest, MultiMarginLoss_GradientFlow) {
     auto result = loss.forward(input, target);
     result.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     expectShape(input.grad().value(), {4, 5});
 }
 

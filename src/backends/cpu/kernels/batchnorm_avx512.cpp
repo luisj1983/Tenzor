@@ -22,6 +22,7 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
 namespace tenzor {
@@ -138,7 +139,7 @@ void batchnorm_forward_affine_f32(
     int final_threads = 1;
 #endif
 
-    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > 10000)
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > ::tenzor::OmpThresholds::medium())
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             __m512 vscale = _mm512_set1_ps(scale[c]);

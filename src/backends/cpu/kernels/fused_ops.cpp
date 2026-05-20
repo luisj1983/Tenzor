@@ -30,6 +30,7 @@
 
 // SIMD fast math (vectorized tanh, GELU, etc.)
 #include "simd_fast_math.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 
 namespace tenzor {
 namespace cpu {
@@ -78,7 +79,7 @@ auto fused_linear_relu_kernel(
         float* out_data = output.data<float>();
         const float* bias_data = bias ? bias->data<float>() : nullptr;
 
-        #pragma omp parallel for if(total_elems > 65536)
+        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -93,7 +94,7 @@ auto fused_linear_relu_kernel(
         double* out_data = output.data<double>();
         const double* bias_data = bias ? bias->data<double>() : nullptr;
 
-        #pragma omp parallel for if(total_elems > 65536)
+        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -111,7 +112,7 @@ auto fused_linear_relu_kernel(
         float* out_data = output_f32.data<float>();
         const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
 
-        #pragma omp parallel for if(total_elems > 65536)
+        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -131,7 +132,7 @@ auto fused_linear_relu_kernel(
         float* out_data = output_f32.data<float>();
         const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
 
-        #pragma omp parallel for if(total_elems > 65536)
+        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -171,13 +172,13 @@ auto fused_conv2d_relu_kernel(
     int64_t n = result.numel();
     if (result.dtype() == DType::Float32) {
         float* data = result.data<float>();
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
     } else if (result.dtype() == DType::Float64) {
         double* data = result.data<double>();
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0, data[i]);
         }
@@ -499,7 +500,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #if defined(TENZOR_ATTN_AVX2)
         size_t vec_end = n - (n % 8);
         __m256 zero_vec = _mm256_setzero_ps();
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < vec_end; i += 8) {
             __m256 v = _mm256_loadu_ps(data + i);
             _mm256_storeu_ps(data + i, _mm256_max_ps(zero_vec, v));
@@ -508,7 +509,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             data[i] = std::max(0.0f, data[i]);
         }
 #else
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
@@ -516,7 +517,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     } else if (result.dtype() == DType::Float64) {
         double* data = result.data<double>();
         size_t n = static_cast<size_t>(result.numel());
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0, data[i]);
         }
@@ -524,7 +525,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         Tensor result_f32 = result.to(DType::Float32);
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
@@ -533,7 +534,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         Tensor result_f32 = result.to(DType::Float32);
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
@@ -564,7 +565,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
 
 #if defined(TENZOR_ATTN_AVX512)
         size_t vec_end = n - (n % 16);
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < vec_end; i += 16) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             _mm512_storeu_ps(out_data + i, fast_math::gelu_avx512(x));
@@ -577,7 +578,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         }
 #elif defined(TENZOR_ATTN_AVX2)
         size_t vec_end = n - (n % 8);
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < vec_end; i += 8) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             _mm256_storeu_ps(out_data + i, fast_math::gelu_avx2(x));
@@ -589,7 +590,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
             out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
         }
 #else
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float x_cubed = x * x * x;
@@ -603,7 +604,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         double* out_data = result.data<double>();
         size_t n = static_cast<size_t>(input.numel());
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double x_cubed = x * x * x;
@@ -616,7 +617,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = result.data<Float16>();
         size_t n = static_cast<size_t>(input.numel());
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x_cubed = x * x * x;
@@ -629,7 +630,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         BFloat16* out_data = result.data<BFloat16>();
         size_t n = static_cast<size_t>(input.numel());
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x_cubed = x * x * x;
@@ -1670,7 +1671,7 @@ auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_b
         float* p = param.data<float>();
         const float* g = grad.data<float>();
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1693,7 +1694,7 @@ auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_b
         double* p = param.data<double>();
         const double* g = grad.data<double>();
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (weight_decay != 0.0) {
@@ -1733,7 +1734,7 @@ auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
         float* v = exp_avg_sq.data<float>();
         float* v_max = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
 
-        #pragma omp parallel for if(n > 32768)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
 
@@ -1764,7 +1765,7 @@ auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
         double* v = exp_avg_sq.data<double>();
         double* v_max = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
 
-        #pragma omp parallel for if(n > 32768)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (decoupled_weight_decay && weight_decay != 0.0) {
@@ -1806,7 +1807,7 @@ auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
         float* v = exp_avg_sq.data<float>();
         float* v_max = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
 
-        #pragma omp parallel for if(n > 32768)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1837,7 +1838,7 @@ auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
         double d_bias_correction2 = 1.0 - std::pow(static_cast<double>(beta2), static_cast<double>(step));
         double d_step_size = static_cast<double>(lr) / (1.0 - std::pow(static_cast<double>(beta1), static_cast<double>(step)));
 
-        #pragma omp parallel for if(n > 32768)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1875,7 +1876,7 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
         float* ga = (centered && grad_avg) ? grad_avg->data<float>() : nullptr;
         float* buf = (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr;
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1906,7 +1907,7 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
         double* ga = (centered && grad_avg) ? grad_avg->data<double>() : nullptr;
         double* buf = (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr;
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1945,7 +1946,7 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
         float* sq = square_avg.data<float>();
         float* ad = acc_delta.data<float>();
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1963,7 +1964,7 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
         double* sq = square_avg.data<double>();
         double* ad = acc_delta.data<double>();
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -1990,7 +1991,7 @@ auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
         const float* g = grad.data<float>();
         float* ss = sum_sq.data<float>();
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             float grad_val = g[i];
             if (weight_decay != 0.0f) {
@@ -2005,7 +2006,7 @@ auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
         double* ss = sum_sq.data<double>();
         double clr_d = static_cast<double>(lr) / (1.0 + static_cast<double>(step - 1) * static_cast<double>(lr_decay));
 
-        #pragma omp parallel for if(n > 65536)
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n; ++i) {
             double grad_val = g[i];
             if (weight_decay != 0.0f) {

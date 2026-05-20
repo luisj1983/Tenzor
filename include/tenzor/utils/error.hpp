@@ -83,6 +83,61 @@ class AutogradException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+// =====================================================================
+// Python-parity exception types.
+//
+// These mirror Python's stdlib exception hierarchy so that pybind11 can
+// translate them to the corresponding Python exception classes via
+// py::register_exception in the bindings layer. User-facing throw sites
+// in indexing/dtype-validation/range-check paths should use these to
+// give Python users the idiomatic exception type rather than a generic
+// RuntimeError.
+// =====================================================================
+
+/**
+ * @brief Index out of range. Translated to Python's ``IndexError``.
+ */
+class IndexError : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
+/**
+ * @brief Value out of valid range / invalid argument value. Translated to
+ *        Python's ``ValueError``. Use for "argument was in the wrong domain
+ *        but was the right type" — e.g. negative ``num_classes``, empty
+ *        tensor where non-empty was required.
+ */
+class ValueError : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
+/**
+ * @brief Type mismatch from a user-API perspective. Translated to Python's
+ *        ``TypeError``. Distinct from the internal ``DTypeException``, which
+ *        is for backend precondition violations; ``TypeError`` is what a
+ *        Python user sees when passing the wrong tensor kind to an op.
+ */
+class TypeError : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
+/**
+ * @brief Operation not implemented for the given input. Translated to
+ *        Python's ``NotImplementedError``.
+ */
+class NotImplementedError : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
+/**
+ * @brief Generic runtime error from a Tenzor op. Translated to Python's
+ *        ``RuntimeError`` (which is also pybind11's default mapping for any
+ *        unrecognised ``std::runtime_error``-derived exception).
+ */
+class RuntimeError : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
 // Error checking macros
 #define TENZOR_CHECK(condition, message) \
     do { \

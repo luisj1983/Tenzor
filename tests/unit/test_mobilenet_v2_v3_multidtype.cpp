@@ -18,6 +18,7 @@
 #include "../../include/tenzor/models/mobilenet.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -433,7 +434,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InvertedResiduals) {
     loss.backward();
 
     // Verify gradient can flow through residual connections
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3InvertedResidualsWithSE) {
@@ -447,7 +448,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3InvertedResidualsWithSE) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================

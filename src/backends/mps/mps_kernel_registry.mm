@@ -1047,15 +1047,22 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     table.register_kernel(OpId::MaxPool3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t kd = attrs.get_int(AttrKey::KernelSizeD, 2);
-            int64_t kh = attrs.get_int(AttrKey::KernelSizeH, 2);
-            int64_t kw = attrs.get_int(AttrKey::KernelSizeW, 2);
-            int64_t sd = attrs.get_int(AttrKey::StrideD, kd);
-            int64_t sh = attrs.get_int(AttrKey::StrideH, kh);
-            int64_t sw = attrs.get_int(AttrKey::StrideW, kw);
-            int64_t pd = attrs.get_int(AttrKey::PaddingD, 0);
-            int64_t ph = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pw = attrs.get_int(AttrKey::PaddingW, 0);
+            // Per-axis with scalar fallback: matches the canonical pattern in
+            // include/tenzor/backend/attr_macros.hpp. The previous hard-coded
+            // default of 2 silently picked kernel=2 when the dispatcher only
+            // set scalar AttrKey::KernelSize.
+            const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 2);
+            const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+            const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+            const int64_t kd = attrs.get_int(AttrKey::KernelSizeD, k_scalar);
+            const int64_t kh = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+            const int64_t kw = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+            const int64_t sd = attrs.get_int(AttrKey::StrideD, s_scalar);
+            const int64_t sh = attrs.get_int(AttrKey::StrideH, s_scalar);
+            const int64_t sw = attrs.get_int(AttrKey::StrideW, s_scalar);
+            const int64_t pd = attrs.get_int(AttrKey::PaddingD, p_scalar);
+            const int64_t ph = attrs.get_int(AttrKey::PaddingH, p_scalar);
+            const int64_t pw = attrs.get_int(AttrKey::PaddingW, p_scalar);
             Tensor indices;
             auto output = mps_maxpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, indices);
             return {output, indices};
@@ -1063,15 +1070,18 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     table.register_single_output_kernel(OpId::AvgPool3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t kd = attrs.get_int(AttrKey::KernelSizeD, 2);
-            int64_t kh = attrs.get_int(AttrKey::KernelSizeH, 2);
-            int64_t kw = attrs.get_int(AttrKey::KernelSizeW, 2);
-            int64_t sd = attrs.get_int(AttrKey::StrideD, kd);
-            int64_t sh = attrs.get_int(AttrKey::StrideH, kh);
-            int64_t sw = attrs.get_int(AttrKey::StrideW, kw);
-            int64_t pd = attrs.get_int(AttrKey::PaddingD, 0);
-            int64_t ph = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pw = attrs.get_int(AttrKey::PaddingW, 0);
+            const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 2);
+            const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
+            const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
+            const int64_t kd = attrs.get_int(AttrKey::KernelSizeD, k_scalar);
+            const int64_t kh = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
+            const int64_t kw = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
+            const int64_t sd = attrs.get_int(AttrKey::StrideD, s_scalar);
+            const int64_t sh = attrs.get_int(AttrKey::StrideH, s_scalar);
+            const int64_t sw = attrs.get_int(AttrKey::StrideW, s_scalar);
+            const int64_t pd = attrs.get_int(AttrKey::PaddingD, p_scalar);
+            const int64_t ph = attrs.get_int(AttrKey::PaddingH, p_scalar);
+            const int64_t pw = attrs.get_int(AttrKey::PaddingW, p_scalar);
             bool count_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
             return mps_avgpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, count_pad);
         });

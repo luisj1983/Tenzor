@@ -19,6 +19,7 @@
 #include <tenzor/ops/reduction.hpp>
 
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -60,7 +61,7 @@ TEST_P(HardshrinkThresholdMultiDTypeTest, HardshrinkBackwardPassesGradient) {
     auto loss = tenzor::sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto g = x.grad().value().to(Device::cpu()).to(DType::Float32);
     const float* gp = g.data<float>();
     // Gradient is 1 where |x| > 0.5, 0 otherwise.
@@ -109,7 +110,7 @@ TEST_P(HardshrinkThresholdMultiDTypeTest, ThresholdBackward) {
     auto loss = tenzor::sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto g = x.grad().value().to(Device::cpu()).to(DType::Float32);
     const float* gp = g.data<float>();
     EXPECT_NEAR(gp[0], 0.0f, atol());

@@ -23,6 +23,7 @@
 #include <tenzor/ops/math.hpp>
 #include <cmath>
 #include <limits>
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -45,7 +46,7 @@ TEST_F(D5Test, Spectral_Pos2_Backward_NoRegression) {
     auto A = make_matrix({3.0f, 0.0f, 0.0f, 1.0f}, 2, 2);
     auto y = matrix_norm(A, /*ord=*/2.0);
     y.backward();
-    ASSERT_TRUE(A.grad().has_value());
+    EXPECT_GRAD_FLOWS(A);
     auto* gp = A.grad().value().data<float>();
     EXPECT_NEAR(gp[0], 1.0f, 1e-4f);  // (0,0)
     EXPECT_NEAR(gp[1], 0.0f, 1e-4f);  // (0,1)
@@ -59,7 +60,7 @@ TEST_F(D5Test, Spectral_Neg2_Backward_HitsSmallestSV) {
     auto A = make_matrix({3.0f, 0.0f, 0.0f, 1.0f}, 2, 2);
     auto y = matrix_norm(A, /*ord=*/-2.0);
     y.backward();
-    ASSERT_TRUE(A.grad().has_value());
+    EXPECT_GRAD_FLOWS(A);
     auto* gp = A.grad().value().data<float>();
     EXPECT_NEAR(gp[0], 0.0f, 1e-4f);  // (0,0)
     EXPECT_NEAR(gp[1], 0.0f, 1e-4f);  // (0,1)
@@ -72,7 +73,7 @@ TEST_F(D5Test, Ord1_Backward_NoRegression) {
     auto A = make_matrix({3.0f, 0.0f, 0.0f, 1.0f}, 2, 2);
     auto y = matrix_norm(A, /*ord=*/1.0);
     y.backward();
-    ASSERT_TRUE(A.grad().has_value());
+    EXPECT_GRAD_FLOWS(A);
     auto* gp = A.grad().value().data<float>();
     EXPECT_NEAR(gp[0], 1.0f, 1e-4f);  // (0,0) sign(3) = 1
     EXPECT_NEAR(gp[1], 0.0f, 1e-4f);
@@ -85,7 +86,7 @@ TEST_F(D5Test, OrdPosInf_Backward_NoRegression) {
     auto A = make_matrix({3.0f, 0.0f, 0.0f, 1.0f}, 2, 2);
     auto y = matrix_norm(A, /*ord=*/std::numeric_limits<double>::infinity());
     y.backward();
-    ASSERT_TRUE(A.grad().has_value());
+    EXPECT_GRAD_FLOWS(A);
     auto* gp = A.grad().value().data<float>();
     EXPECT_NEAR(gp[0], 1.0f, 1e-4f);
     EXPECT_NEAR(gp[1], 0.0f, 1e-4f);

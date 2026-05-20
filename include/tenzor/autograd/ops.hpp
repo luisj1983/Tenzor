@@ -1059,13 +1059,14 @@ auto renorm(const Variable& input, double p, int64_t dim, double maxnorm) -> Var
 /// Inverse via Cholesky factors. Grad: through triangular structure
 auto cholesky_inverse(const Variable& input, bool upper = false) -> Variable;
 
-/// LDL^T factorization. Grad: structured (stub)
+/// LDL^T factorization. Grad: structured (via LDLBackward in function_new_ops).
 auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable>;
 
-/// Solve using LDL^T factors. Grad: re-solve with grad
+/// Solve using LDL^T factors. Grad: re-solve with grad.
 auto ldl_solve(const Variable& LD, const Tensor& pivots, const Variable& B) -> Variable;
 
-/// Householder product. Grad: complex (stub)
+/// Householder product. Grad: implicit-Q + structured chain rule
+/// (see HouseholderProductBackward in function_new_ops).
 auto householder_product(const Variable& input, const Variable& tau) -> Variable;
 
 /// Generalized tensor inverse. Grad: -Y @ grad @ Y (reshaped)

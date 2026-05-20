@@ -2177,7 +2177,7 @@ static void deformable_conv2d_forward_impl(
     int64_t out_channels_per_group = C_out / groups;
     int64_t channels_per_offset_group = C_in / offset_groups;
 
-    #pragma omp parallel for collapse(3) schedule(static) if(N * C_out * H_out * W_out > 65536)
+    #pragma omp parallel for collapse(3) schedule(static) if(N * C_out * H_out * W_out > ::tenzor::OmpThresholds::simple())
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t oc = 0; oc < C_out; ++oc) {
             for (int64_t oh = 0; oh < H_out; ++oh) {

@@ -6,6 +6,7 @@
 #include "../../include/tenzor/models/googlenet.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/models/hub.hpp"
 #include <stdexcept>
 #include <vector>
 
@@ -376,7 +377,8 @@ auto googlenet(int64_t num_classes, bool pretrained, bool aux_logits) -> std::sh
     auto model = std::make_shared<GoogLeNet>(num_classes, aux_logits);
 
     if (pretrained) {
-        throw std::runtime_error("Pretrained weights not yet implemented");
+        auto path = ModelHub::download_pretrained_safetensors("googlenet");
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 
     return model;

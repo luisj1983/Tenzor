@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/convnext.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -133,7 +134,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -192,7 +193,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyLayerScaling) {
     loss.backward();
 
     // Verify gradients flow through layer scaling - just check gradient exists
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -241,7 +242,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -293,7 +294,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -330,7 +331,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseLayerScaling) {
     loss.backward();
 
     // Verify gradients flow through layer scaling - just check gradient exists
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -362,7 +363,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -428,7 +429,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
@@ -536,7 +537,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientNumericalStability) {
     loss.backward();
 
     // Check gradient numerical stability
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad_cpu = input.grad().value().to(Device::cpu()).to(DType::Float32);
     auto grad_data = grad_cpu.data<float>();
     for (size_t i = 0; i < grad_cpu.numel(); ++i) {

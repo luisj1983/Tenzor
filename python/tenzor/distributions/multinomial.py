@@ -54,10 +54,56 @@ class Multinomial(Distribution):
         return log_factorial_n - log_fac_x + log_p_term
 
     def entropy(self):
-        raise NotImplementedError(
-            "Multinomial entropy has no simple closed form; "
-            "use Monte Carlo estimation."
-        )
+        """Entropy of the multinomial distribution.
+
+        Uses the exact closed-form expression:
+            H(Multinomial(n, p)) = -log(n!)
+                                   + n * sum_k -p_k log(p_k)
+                                   + sum_k E[log(x_k!)]
+                                 = log(n!)  (constant)
+                                   - n * sum_k p_k * log(p_k)  (entropy term)
+                                   - sum_k E_x[log(x_k!)]      (log-factorial term)
+
+        Equivalently the entropy of `n` independent categorical draws is
+        `n * H(Categorical(p))` plus the multinomial's log-binomial-coefficient
+        correction; numerically we evaluate via E[log(x_k!)] using the per-cell
+        marginal Binomial(n, p_k) under which
+        x_k ~ Binomial(n, p_k) so E[log(x_k!)] = sum_{i=0}^{n} P(x_k = i) * log(i!).
+
+        Returns ``ndarray`` with shape equal to the batch shape.
+        """
+        n = float(self.total_count)
+        p = np.clip(self.probs, 1e-300, 1.0)
+
+        # log(n!) — constant per batch element
+        log_n_factorial = math.lgamma(n + 1.0)
+
+        # n * sum_k p_k * log(p_k)
+        cat_entropy_term = n * (-(p * np.log(p)).sum(axis=-1))
+
+        # E[log(x_k!)] for x_k ~ Binomial(n, p_k), enumerated.
+        # Shape: (..., K) where ... is batch.
+        n_int = int(self.total_count)
+        i_arr = np.arange(n_int + 1, dtype=np.float64)
+        log_fact = gammaln(i_arr + 1.0)  # log(i!) for i in 0..n
+        log_choose = (math.lgamma(n + 1.0)
+                      - gammaln(i_arr + 1.0)
+                      - gammaln(n - i_arr + 1.0))   # log C(n, i)
+
+        # broadcast over batch
+        p_exp = p[..., np.newaxis]                 # (..., K, 1)
+        log_p = np.log(p_exp)
+        log_1mp = np.log(np.clip(1.0 - p_exp, 1e-300, 1.0))
+        # log P(x_k = i) = log C(n, i) + i log p_k + (n - i) log(1 - p_k)
+        log_pmf = (log_choose                       # (n+1,)
+                   + i_arr * log_p                   # broadcasts to (..., K, n+1)
+                   + (n - i_arr) * log_1mp)
+        pmf = np.exp(log_pmf)                       # (..., K, n+1)
+        # Per-cell expected log-factorial: sum_i pmf[i] * log(i!)
+        e_log_fact_per_k = (pmf * log_fact).sum(axis=-1)   # (..., K)
+        log_fact_term = e_log_fact_per_k.sum(axis=-1)      # (...,)
+
+        return -log_n_factorial + cat_entropy_term + log_fact_term
 
     def support(self):
         return f"{{x in Z^K : sum(x) = {self.total_count}, x_i >= 0}}"

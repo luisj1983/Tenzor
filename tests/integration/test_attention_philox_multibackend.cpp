@@ -24,6 +24,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
+#include "../grad_flow_helpers.hpp"
 
 using ::tenzor::Variable;
 using ::tenzor::Tensor;
@@ -80,8 +81,8 @@ TEST_P(BackendTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
 
     // Same seed → same gradient (the dropout-mask backward replay must
     // match the forward draw bit-for-bit).
-    ASSERT_TRUE(Q1.grad().has_value());
-    ASSERT_TRUE(Q2.grad().has_value());
+    EXPECT_GRAD_FLOWS(Q1);
+    EXPECT_GRAD_FLOWS(Q2);
     auto g1 = Q1.grad()->to(tenzor::Device::cpu()).contiguous();
     auto g2 = Q2.grad()->to(tenzor::Device::cpu()).contiguous();
     auto* gp1 = g1.data<float>();
