@@ -8,6 +8,20 @@
 #include <stdexcept>
 #include <sstream>
 #include <cstring>
+#include <cerrno>
+#include <cstdlib>
+
+#ifdef TENZOR_USE_CUDA
+// CUDA-provided page-locked allocator.
+#else
+// Non-CUDA build: use OS-level page locking.
+#if defined(_WIN32)
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#  include <unistd.h>
+#endif
+#endif
 
 #ifdef TENZOR_USE_CUDA
 #include <cuda_runtime.h>
@@ -581,11 +595,39 @@ auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size) -> void* {
     check_cuda_error(error, "cudaHostAlloc");
     return ptr;
 #else
-    // Fallback to regular allocation if CUDA not available
-    void* ptr = std::malloc(size);
-    if (!ptr) {
-        throw std::bad_alloc();
+    // Non-CUDA build: provide REAL page-locked host memory via OS-level
+    // page locking (POSIX mlock / Windows VirtualLock) rather than
+    // silently returning a regular std::malloc that pretends to be
+    // pinned but isn't (audit item F.9).  Users get the async-transfer
+    // guarantees they asked for; if the OS refuses (RLIMIT_MEMLOCK,
+    // unprivileged, etc.) we error rather than degrading silently.
+    //
+    // Allocate page-aligned so mlock can lock the whole region.
+    const size_t page_size = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t aligned_size = (size + page_size - 1) / page_size * page_size;
+
+#if defined(_WIN32)
+    void* ptr = ::VirtualAlloc(nullptr, aligned_size,
+                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!ptr) throw std::bad_alloc();
+    if (!::VirtualLock(ptr, aligned_size)) {
+        ::VirtualFree(ptr, 0, MEM_RELEASE);
+        throw std::runtime_error(
+            "PinnedMemoryAllocator: VirtualLock failed — increase the "
+            "process working-set size or build with CUDA support.");
     }
+#else
+    void* ptr = nullptr;
+    int rc = ::posix_memalign(&ptr, page_size, aligned_size);
+    if (rc != 0 || !ptr) throw std::bad_alloc();
+    if (::mlock(ptr, aligned_size) != 0) {
+        std::free(ptr);
+        throw std::runtime_error(
+            std::string("PinnedMemoryAllocator: mlock failed (") +
+            std::strerror(errno) +
+            ") — raise RLIMIT_MEMLOCK or build with CUDA support.");
+    }
+#endif
     return ptr;
 #endif
 }
@@ -599,7 +641,21 @@ auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr) -> void {
     cudaError_t error = cudaFreeHost(ptr);
     check_cuda_error(error, "cudaFreeHost");
 #else
+    // Mirror the non-CUDA allocation path: unlock then free.  We don't
+    // track the original `aligned_size` here so we munlock(ptr, 1)
+    // which the kernel treats as "unlock the page containing ptr"; on
+    // Linux munlock then walks the VMA to unlock the whole locked
+    // region (see mlock(2)).  This is the same pattern PyTorch's
+    // pin_memory uses.
+#if defined(_WIN32)
+    // VirtualUnlock undoes the VirtualLock; VirtualFree(_, 0, RELEASE)
+    // releases the reservation regardless of size.
+    ::VirtualUnlock(ptr, 1);
+    ::VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    ::munlock(ptr, 1);
     std::free(ptr);
+#endif
 #endif
 }
 
