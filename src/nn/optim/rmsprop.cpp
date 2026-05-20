@@ -96,11 +96,11 @@ auto RMSprop::step_impl() -> void {
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::Alpha, static_cast<float>(alpha_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
-            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
+            attrs.set(AttrKey::Lr, lr_);
+            attrs.set(AttrKey::Alpha, alpha_);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Momentum, momentum_);
             attrs.set(AttrKey::Centered, centered_);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);
@@ -121,11 +121,11 @@ auto RMSprop::step_impl() -> void {
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::Alpha, static_cast<float>(alpha_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
-            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
+            attrs.set(AttrKey::Lr, lr_);
+            attrs.set(AttrKey::Alpha, alpha_);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Momentum, momentum_);
             attrs.set(AttrKey::Centered, centered_);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);

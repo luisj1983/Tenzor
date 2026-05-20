@@ -110,10 +110,13 @@ auto Adagrad::step_impl() -> void {
 
             std::vector<Tensor> inputs = {grad_orig, param->tensor(), sum_[i]};
 
+            // Audit item I.14: pass Float64 hyperparams through to dispatch
+            // (was static_cast<float>, losing precision vs Adam/AdamW which
+            // already preserve double via AttrKey::Lr).
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(current_lr));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Lr, current_lr);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
             continue;
@@ -127,10 +130,10 @@ auto Adagrad::step_impl() -> void {
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(current_lr));
-            attrs.set(AttrKey::LrDecay, static_cast<float>(lr_decay_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Lr, current_lr);
+            attrs.set(AttrKey::LrDecay, lr_decay_);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
             attrs.set(AttrKey::Step, step_count_);
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
