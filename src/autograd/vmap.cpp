@@ -319,19 +319,10 @@ void init_builtin_batching_rules() {
     register_batching_rule("UpsampleNearestBackward", shape_passthrough);
 }
 
-// Try to detect the operation name from a probe run's grad_fn
-static auto detect_op_name(const std::function<Variable(const Variable&)>& func,
-                           const Variable& probe) -> std::string {
-    try {
-        auto result = func(probe);
-        if (result.grad_fn()) {
-            return result.grad_fn()->name();
-        }
-    } catch (...) {
-        // Probe failed — fall back to loop-and-stack
-    }
-    return "";
-}
+// Audit A.3: legacy helpers detect_op_name / detect_op_id collapsed
+// into the inline probe-and-dispatch logic inside `vmap()` below
+// (which now reads both the OpId *and* the name from a single probe
+// run, avoiding the double-probe of the previous design).
 
 // Loop-and-stack fallback implementation
 static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& func,
@@ -370,17 +361,41 @@ auto vmap(std::function<Variable(const Variable&)> func,
     // Initialize built-in rules on first call
     std::call_once(init_flag, init_builtin_batching_rules);
 
-    // Try to detect the operation and apply a batching rule
-    if (!batching_rules().empty()) {
+    // Audit A.3: OpId-first lookup, name-string fallback. The Function
+    // base class now exposes a canonical forward OpId via op_id() (audit
+    // A.2), so we can find the batching rule without going through the
+    // class-name string. For un-opted-in Functions, op_id() returns
+    // OpId::Unknown and we fall back to the name-string registry — the
+    // existing path that's been working until the migration completes.
+    if (!batching_rules().empty() || !batching_rules_by_opid().empty()) {
         // Create a probe slice to detect the op
         auto probe_tensor = tenzor::select(input_tensor, batch_dim, 0);
         Variable probe(probe_tensor, batched_input.requires_grad());
 
-        auto op_name = detect_op_name(func, probe);
-        if (!op_name.empty()) {
-            auto it = batching_rules().find(op_name);
-            if (it != batching_rules().end()) {
-                return it->second(func, batched_input, batch_dim);
+        // Run the probe once and inspect both the OpId and the name. We
+        // duplicate the func() call instead of caching the Variable
+        // because detect_op_id and detect_op_name each run their own
+        // try/catch path; merging the probe into a single call here also
+        // avoids running the probe twice when the OpId path hits.
+        auto probe_result = func(probe);
+        auto grad_fn = probe_result.grad_fn();
+
+        if (grad_fn) {
+            OpId probed_op_id = grad_fn->op_id();
+            if (probed_op_id != OpId::Unknown) {
+                auto it = batching_rules_by_opid().find(probed_op_id);
+                if (it != batching_rules_by_opid().end()) {
+                    return it->second(func, batched_input, batch_dim);
+                }
+            }
+            // Fall back to the name-string registry for un-opted-in
+            // Function subclasses or OpIds without an OpId-keyed rule yet.
+            auto name = grad_fn->name();
+            if (!name.empty()) {
+                auto it = batching_rules().find(name);
+                if (it != batching_rules().end()) {
+                    return it->second(func, batched_input, batch_dim);
+                }
             }
         }
     }
