@@ -122,6 +122,19 @@ public:
              double weight_decay = 0.0);
 
     /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     *
+     * Each group may override `lr` / `weight_decay` via ParamGroup's
+     * non-optional fields and `rho` / `eps` via the optional fields.
+     * Defaults supplied here apply when a group does not override.
+     */
+    explicit Adadelta(std::vector<optim::ParamGroup> groups,
+                      double default_lr = 1.0,
+                      double default_rho = 0.9,
+                      double default_eps = 1e-6,
+                      double default_weight_decay = 0.0);
+
+    /**
      * @brief Perform single Adadelta optimization step
      *
      * Updates parameters using exponential moving averages of

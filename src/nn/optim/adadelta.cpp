@@ -41,6 +41,17 @@ Adadelta::Adadelta(std::vector<std::shared_ptr<Variable>> params,
     initialize_buffers();
 }
 
+Adadelta::Adadelta(std::vector<optim::ParamGroup> groups,
+                   double default_lr, double default_rho,
+                   double default_eps, double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      rho_(default_rho),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
+
 auto Adadelta::initialize_buffers() -> void {
     square_avg_.clear();
     acc_delta_.clear();
@@ -58,12 +69,35 @@ auto Adadelta::initialize_buffers() -> void {
 }
 
 auto Adadelta::step_impl() -> void {
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this Adadelta instance.
+    struct AdadeltaHP {
+        double lr;
+        double rho;
+        double eps;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> AdadeltaHP {
+        AdadeltaHP hp{lr_, rho_, eps_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.rho          = ParamGroup::or_else(g->rho, rho_);
+            hp.eps          = ParamGroup::or_else(g->eps, eps_);
+        }
+        return hp;
+    };
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
 
         if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
+
+        const AdadeltaHP hp = resolve(i);
 
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
@@ -82,10 +116,10 @@ auto Adadelta::step_impl() -> void {
             };
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::Rho, static_cast<float>(rho_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
+            attrs.set(AttrKey::Rho, static_cast<float>(hp.rho));
+            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;
@@ -101,10 +135,10 @@ auto Adadelta::step_impl() -> void {
             };
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Rho, static_cast<float>(rho_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Rho, static_cast<float>(hp.rho));
+            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
+            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;
@@ -113,13 +147,13 @@ auto Adadelta::step_impl() -> void {
         // Generic fallback using tensor-level ops (device-agnostic)
         Tensor grad = grad_orig;
         Tensor param_data = param_data_orig;
-        float rho = static_cast<float>(rho_);
-        float eps = static_cast<float>(eps_);
-        float lr = static_cast<float>(lr_);
+        float rho = static_cast<float>(hp.rho);
+        float eps = static_cast<float>(hp.eps);
+        float lr = static_cast<float>(hp.lr);
 
         // Apply weight decay: g = g + weight_decay * param
-        if (weight_decay_ > 0.0) {
-            grad = grad + param_data * static_cast<float>(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad = grad + param_data * static_cast<float>(hp.weight_decay);
         }
 
         // Accumulate squared gradient: v = rho * v + (1 - rho) * g^2

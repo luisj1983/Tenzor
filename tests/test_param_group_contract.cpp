@@ -6,11 +6,13 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
 
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
+#include "tenzor/nn/optim/adadelta.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -239,6 +241,68 @@ TEST_F(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
     //  → v2 ≈ 0.99
     EXPECT_LT(v2, 1.0f) << "weight_decay=0.5 must shrink p2";
     EXPECT_NEAR(v2, 0.99f, 1e-4f);
+}
+
+// ----- Adadelta D.4 coverage ----------------------------------------------
+
+TEST_F(ParamGroupContractTest, AdadeltaPerGroupLearningRate) {
+    // Two params with distinct group lr.  Adadelta's update is
+    //   delta = -(sqrt(E[Δθ²] + eps) / sqrt(E[g²] + eps)) * g
+    //   p   += lr * delta
+    // On the very first step E[Δθ²] = 0 so std_delta = sqrt(eps), and
+    // E[g²] picks up (1-rho)*g² so std_grad = sqrt((1-rho)*g² + eps).
+    // The ratio depends only on rho and eps, not lr — so the ratio of
+    // |p1|/|p2| after one step equals the lr ratio.
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
+
+    optim::ParamGroup g1{{p1}, /*lr=*/0.5, /*wd=*/0.0};
+    optim::ParamGroup g2{{p2}, /*lr=*/2.0, /*wd=*/0.0};
+    optim::Adadelta ad({g1, g2});
+
+    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    p1->set_grad(grad);
+    p2->set_grad(grad);
+    ad.step();
+
+    auto v1 = p1->tensor().data<float>()[0];
+    auto v2 = p2->tensor().data<float>()[0];
+    EXPECT_LT(v1, 0.0f);
+    EXPECT_LT(v2, 0.0f);
+    EXPECT_NEAR(v2 / v1, 4.0f, 1e-3f)
+        << "Adadelta per-group lr must scale the delta linearly";
+}
+
+TEST_F(ParamGroupContractTest, AdadeltaPerGroupRho) {
+    // Distinct rho changes E[g^2] weighting on the first step:
+    //   E[g²]_1 = (1 - rho) * g²
+    // Smaller rho → larger E[g²]_1 → larger denominator → smaller
+    // |delta|.  Verify p1 (rho=0.5) ends with strictly smaller |delta|
+    // than p2 (rho=0.95).
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
+
+    optim::ParamGroup g1{{p1}, /*lr=*/1.0, /*wd=*/0.0};
+    g1.rho = 0.5;
+    optim::ParamGroup g2{{p2}, /*lr=*/1.0, /*wd=*/0.0};
+    g2.rho = 0.95;
+    optim::Adadelta ad({g1, g2});
+
+    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    p1->set_grad(grad);
+    p2->set_grad(grad);
+    ad.step();
+
+    auto v1 = p1->tensor().data<float>()[0];
+    auto v2 = p2->tensor().data<float>()[0];
+    EXPECT_LT(v1, 0.0f);
+    EXPECT_LT(v2, 0.0f);
+    EXPECT_GT(std::abs(v2), std::abs(v1))
+        << "rho=0.95 (smaller (1-rho)*g²) must produce larger |delta|";
 }
 
 }  // namespace
