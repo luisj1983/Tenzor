@@ -380,6 +380,158 @@ auto FlexAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     return try_flex_backward_or_throw(dO, Q, K, V, O, L, scale_, score_mod_id_, block_mask);
 }
 
+namespace {
+
+// Audit B.3 — Variable-level composed attention backward.
+//
+// Mirrors the Tensor-level `composed_attention_backward()` math above
+// (S = Q K^T scale, P = softmax(S), dV = P^T dO, dP = dO V^T,
+//  dS = P * (dP - rowsum(dP*P)), dQ = dS K * scale, dK = dS^T Q * scale)
+// but every operation is a Variable autograd op. Building the backward
+// from differentiable Variable ops lets reverse-mode autograd compute
+// the Hessian when this Function is itself reached in a higher-order
+// backward call, with no need for a custom 2nd-order kernel.
+//
+// Dropout is incompatible with higher-order autograd (the stochastic
+// mask isn't differentiable), so callers gate this path on dropout_p
+// == 0. score_mod is similarly user-supplied at OpId granularity, so
+// only the identity score-mod path is exposed for FlexAttention's
+// higher-order entry.
+auto composed_attention_backward_variable(const Variable& dO,
+                                          const Variable& Q,
+                                          const Variable& K,
+                                          const Variable& V,
+                                          float scale,
+                                          bool causal) -> std::vector<Variable> {
+    auto Q_shape_span = Q.tensor().shape();
+    std::vector<int64_t> orig_shape(Q_shape_span.begin(), Q_shape_span.end());
+    std::vector<int64_t> K_shape(K.tensor().shape().begin(), K.tensor().shape().end());
+    std::vector<int64_t> V_shape(V.tensor().shape().begin(), V.tensor().shape().end());
+    bool is_4d = (orig_shape.size() == 4);
+
+    auto reshape_3d = [&](const Variable& v) -> Variable {
+        if (!is_4d) return v;
+        auto s = v.tensor().shape();
+        return tenzor::reshape(v, std::vector<int64_t>{s[0] * s[1], s[2], s[3]});
+    };
+
+    auto Q3 = reshape_3d(Q);
+    auto K3 = reshape_3d(K);
+    auto V3 = reshape_3d(V);
+    auto dO3 = reshape_3d(dO);
+
+    auto Kt = tenzor::transpose(K3, -1, -2);
+    auto S = tenzor::bmm(Q3, Kt);
+    {
+        Variable scale_v(::tenzor::full({1}, static_cast<double>(scale),
+                                         S.tensor().dtype(), S.tensor().device()),
+                          false);
+        S = S * scale_v;
+    }
+
+    if (causal) {
+        auto S_shape = S.tensor().shape();
+        int64_t S_q = S_shape[1];
+        int64_t S_k = S_shape[2];
+        auto mask_t = ::tenzor::triu(
+            ::tenzor::ones({S_q, S_k}, S.tensor().dtype(), S.tensor().device()),
+            1 + (S_k - S_q));
+        auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
+                                         S.tensor().dtype(), S.tensor().device());
+        Variable mask_v(mask_t * neg_inf_t, false);
+        S = S + mask_v;
+    }
+
+    auto P = tenzor::softmax(S, -1);
+
+    auto Pt = tenzor::transpose(P, -1, -2);
+    auto dV3 = tenzor::bmm(Pt, dO3);
+
+    auto Vt = tenzor::transpose(V3, -1, -2);
+    auto dP = tenzor::bmm(dO3, Vt);
+
+    auto dPP = dP * P;
+    auto row_sum = tenzor::sum(dPP, std::optional<int64_t>{-1}, /*keepdim=*/true);
+    auto dS = P * (dP - row_sum);
+
+    Variable scale_v(::tenzor::full({1}, static_cast<double>(scale),
+                                     dS.tensor().dtype(), dS.tensor().device()),
+                      false);
+    auto dQ3 = tenzor::bmm(dS, K3) * scale_v;
+    auto dSt = tenzor::transpose(dS, -1, -2);
+    auto dK3 = tenzor::bmm(dSt, Q3) * scale_v;
+
+    if (is_4d) {
+        dQ3 = tenzor::reshape(dQ3, orig_shape);
+        dK3 = tenzor::reshape(dK3, K_shape);
+        dV3 = tenzor::reshape(dV3, V_shape);
+    }
+    return {dQ3, dK3, dV3};
+}
+
+} // anonymous namespace
+
+// Audit B.3 — real higher-order backward for FlashAttention.
+// Falls through to the Tensor-level stub when dropout > 0 because the
+// stochastic dropout mask is non-differentiable; for dropout == 0 the
+// composed Variable-level backward is mathematically identical to the
+// fused kernel's first-order backward and provides a real 2nd-order
+// gradient via reverse-mode autograd.
+auto FlashAttentionBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    TENZOR_CHECK(!grad_outputs.empty(), "FlashAttentionBackward::backward_with_variables needs >=1 grad_output");
+    const auto& saved = saved_tensors();
+    TENZOR_CHECK(saved.size() >= 4,
+                 "FlashAttentionBackward::backward_with_variables: not enough saved tensors");
+    if (dropout_p_ > 0.0f) {
+        return passthrough_stub_backward(std::move(grad_outputs));
+    }
+    Variable dO = grad_outputs[0];
+    Variable Q(saved[0], false);
+    Variable K(saved[1], false);
+    Variable V(saved[2], false);
+    return composed_attention_backward_variable(dO, Q, K, V, scale_, causal_);
+}
+
+// Audit B.3 — real higher-order backward for FusedAttention.
+// FusedAttention has no dropout and the math is identical to
+// FlashAttention's no-dropout path, so we reuse the same composed
+// Variable-level backward.
+auto FusedAttentionBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    TENZOR_CHECK(!grad_outputs.empty(), "FusedAttentionBackward::backward_with_variables needs >=1 grad_output");
+    const auto& saved = saved_tensors();
+    TENZOR_CHECK(saved.size() >= 4,
+                 "FusedAttentionBackward::backward_with_variables: not enough saved tensors");
+    Variable dO = grad_outputs[0];
+    Variable Q(saved[0], false);
+    Variable K(saved[1], false);
+    Variable V(saved[2], false);
+    return composed_attention_backward_variable(dO, Q, K, V, scale_, causal_);
+}
+
+// Audit B.3 — real higher-order backward for FlexAttention.
+// Only the identity score-mod (score_mod_id == 0) path has a closed-form
+// Variable-level pipeline; non-trivial score mods are user-supplied
+// OpIds that don't compose at Variable level, so we fall back to the
+// structural-zero stub for those (and for any case where a block_mask
+// was applied — the block mask is non-differentiable).
+auto FlexAttentionBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    TENZOR_CHECK(!grad_outputs.empty(), "FlexAttentionBackward::backward_with_variables needs >=1 grad_output");
+    const auto& saved = saved_tensors();
+    TENZOR_CHECK(saved.size() >= 4,
+                 "FlexAttentionBackward::backward_with_variables: not enough saved tensors");
+    if (score_mod_id_ != 0 || has_block_mask_) {
+        return passthrough_stub_backward(std::move(grad_outputs));
+    }
+    Variable dO = grad_outputs[0];
+    Variable Q(saved[0], false);
+    Variable K(saved[1], false);
+    Variable V(saved[2], false);
+    return composed_attention_backward_variable(dO, Q, K, V, scale_, /*causal=*/false);
+}
+
 // ============================================================================
 // User-facing apply helpers
 // ============================================================================

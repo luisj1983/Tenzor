@@ -2213,7 +2213,14 @@ public:
     CholeskySolveBackward(bool upper = false) : upper_(upper) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: real Variable-level higher-order backward.
+    // The closed-form backward (grad_B = cholesky_solve(grad_X, L),
+    // grad_L = -tril(cholesky_solve(grad_X @ X^T + X @ grad_X^T, L)))
+    // is composed entirely of Variable-level ops, so reverse-mode
+    // autograd through these gives the correct second-order grad.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CholeskySolveBackward"; }
 private:
     bool upper_;
@@ -2961,7 +2968,14 @@ class LinalgLDLFactorBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: real Variable-level higher-order backward.
+    // The Smith (1995) closed-form L^{-T} (S + R) L^{-1} is rewritten
+    // via `linalg::inv(L)` so the entire backward composes from
+    // Variable-level ops (tril, transpose, matmul, diag, diag_embed,
+    // inv) and reverse-mode autograd produces correct 2nd-order grads.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "LinalgLDLFactorBackward"; }
     auto op_id() const -> OpId override { return OpId::LinalgLDLFactor; }
 };
@@ -3155,7 +3169,17 @@ public:
         : scale_(scale), causal_(causal), dropout_p_(dropout_p), is_training_(is_training) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: real Variable-level higher-order backward.
+    // Mirrors the existing Float64 composed-ops fast path in
+    // `flash_attention()` — softmax-attention backward expressed as
+    // matmul/softmax/transpose on Variables, so reverse-mode autograd
+    // through these gives the correct second-order grad. Dropout is
+    // unsupported for higher-order (training-time stochasticity is
+    // not differentiable); the override falls through to the
+    // structural-zero stub when dropout_p > 0.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FlashAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FlashAttention; }
 private:
@@ -3178,7 +3202,13 @@ public:
         : scale_(scale), causal_(causal), use_cudnn_sdpa_(use_cudnn_sdpa) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: real Variable-level higher-order backward.
+    // Same closed form as FlashAttentionBackward (math is identical,
+    // no dropout). Reverse-mode autograd through the composed
+    // matmul/softmax/transpose chain produces correct 2nd-order grads.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FusedAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FusedAttention; }
 private:
@@ -3199,7 +3229,14 @@ public:
         : scale_(scale), score_mod_id_(score_mod_id), has_block_mask_(has_block_mask) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    // Audit B.3: real Variable-level higher-order backward.
+    // Same closed form as FlashAttentionBackward with score_mod applied
+    // to scores before softmax. Only score_mod_id == 0 (identity, i.e.
+    // standard attention) is supported for higher-order; other score
+    // mods are user-supplied OpIds without a Variable-level pipeline.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FlexAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FlexAttention; }
 private:

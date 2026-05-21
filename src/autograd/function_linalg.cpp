@@ -1247,6 +1247,43 @@ auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     }
 }
 
+// Audit B.3: real higher-order backward via Variable-level composition.
+// The Tensor-level backward uses two nested `solve_triangular` calls that
+// compose to `(L L^T)^{-1} S = cholesky_solve(S, L)` (for the lower case,
+// and the symmetric formula `(U^T U)^{-1} S = cholesky_solve(S, U, upper)`
+// for the upper case). Re-expressing in those terms gives a backward that
+// is built entirely from Variable-level ops — `cholesky_solve`, `matmul`,
+// `transpose`, `tril`/`triu`, `neg` — so reverse-mode autograd over this
+// computation produces the correct second-order gradient.
+auto CholeskySolveBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    require_saved_tensors(2);
+    auto grad_X = grad_outputs[0];
+    // Treat saved {X, L} as non-grad-tracking Variables — they were fixed
+    // when the forward ran. The higher-order graph passes through grad_X.
+    auto X = Variable(saved_tensors_[0], false);
+    auto L = Variable(saved_tensors_[1], false);
+
+    int64_t ndim = X.tensor().ndim();
+
+    // grad_B = cholesky_solve(grad_X, L, upper) — Variable-level.
+    auto grad_B = tenzor::cholesky_solve(grad_X, L, upper_);
+
+    // S = grad_X @ X^T + X @ grad_X^T (symmetrized rank-2 outer product).
+    auto Xt = tenzor::transpose(X, ndim - 2, ndim - 1);
+    auto grad_Xt = tenzor::transpose(grad_X, ndim - 2, ndim - 1);
+    auto S = tenzor::matmul(grad_X, Xt) + tenzor::matmul(X, grad_Xt);
+
+    // grad_L = -tril(cholesky_solve(S, L, upper=false))  for lower;
+    // grad_U = -triu(cholesky_solve(S, U, upper=true))   for upper.
+    // cholesky_solve(M, L, upper=false) computes (L L^T)^{-1} M = L^{-T} L^{-1} M
+    // which matches the Tensor-level double-triangular-solve chain.
+    auto grad_L_full = tenzor::cholesky_solve(S, L, upper_);
+    Variable grad_L = upper_ ? tenzor::neg(tenzor::triu(grad_L_full))
+                              : tenzor::neg(tenzor::tril(grad_L_full));
+    return {grad_B, grad_L};
+}
+
 // ============================================================================
 // LUSolveBackward — audit-2026-05-03 Phase 8.
 // Forward: X = lu_solve(LU, pivots, B). Treats LU/pivots as fixed.

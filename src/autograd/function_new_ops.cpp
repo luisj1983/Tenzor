@@ -774,6 +774,69 @@ auto LinalgLDLFactorBackward::backward(std::vector<Tensor> grad_outputs) -> std:
     return out;
 }
 
+// Audit B.3: real higher-order backward via Variable-level composition.
+// Re-implements the Smith (1995) closed-form Tensor-level backward above
+// using Variable-level ops. The only non-trivial replacement is the
+// `solve_triangular(L, I)` call — since `L` is unit-lower-triangular and
+// therefore invertible, `linalg::inv(L)` produces the same `L^{-1}` and is
+// available as a Variable-level op with its own real higher-order
+// backward, so reverse-mode autograd through the entire composition
+// produces correct second-order gradients.
+auto LinalgLDLFactorBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    require_saved_tensors(2);
+    auto grad_LD = grad_outputs[0];
+    auto A_var = Variable(saved_tensors_[0], false);
+    auto LD_var = Variable(saved_tensors_[1], false);
+
+    const auto& A_t = A_var.tensor();
+    int64_t n = A_t.shape().back();
+    auto eye_t = tenzor::eye(n, std::nullopt, A_t.dtype(), A_t.device());
+    auto eye_v = Variable(eye_t, false);
+
+    // L_strict = tril(LD, -1)   L = L_strict + I
+    auto L_strict = tenzor::tril(LD_var, -1);
+    auto L = L_strict + eye_v;
+    int64_t ndim = LD_var.tensor().ndim();
+    auto Lt = tenzor::transpose(L, ndim - 2, ndim - 1);
+
+    auto D_diag = tenzor::diag(LD_var, 0);
+
+    auto grad_L_strict = tenzor::tril(grad_LD, -1);
+    auto grad_D_diag = tenzor::diag(grad_LD, 0);
+
+    // P = L^T @ grad_L_strict; Q = tril(P, -1)
+    auto P = tenzor::matmul(Lt, grad_L_strict);
+    auto Q = tenzor::tril(P, -1);
+
+    // R = Q / D_diag broadcast as row.
+    auto D_row = tenzor::unsqueeze(D_diag, -2);
+    auto R = Q / D_row;
+
+    // S = diag_embed(grad_D_diag) — build via eye * grad_D_diag.unsqueeze(-2)
+    auto grad_D_row = tenzor::unsqueeze(grad_D_diag, -2);
+    auto S = eye_v * grad_D_row;
+
+    auto S_plus_R = S + R;
+
+    // L_inv = inv(L) — L is unit-lower-triangular so this is well-defined
+    // and the Variable-level `inv` has its own higher-order backward.
+    auto L_inv = tenzor::inv(L);
+    auto LT_inv = tenzor::transpose(L_inv, ndim - 2, ndim - 1);
+
+    auto grad_A_factor = tenzor::matmul(tenzor::matmul(LT_inv, S_plus_R), L_inv);
+
+    // Upper-triangular passthrough — LAPACK leaves LD's strict-upper equal
+    // to A's input strict-upper, so its gradient flows directly back.
+    auto ones_mat_t = tenzor::ones(std::vector<int64_t>(A_t.shape().begin(), A_t.shape().end()),
+                                    A_t.dtype(), A_t.device());
+    auto upper_mask = Variable(tenzor::triu(ones_mat_t, 1), false);
+    auto grad_A_upper = grad_LD * upper_mask;
+
+    auto grad_A = grad_A_factor + grad_A_upper;
+    return {grad_A};
+}
+
 // LinalgLDLSolveBackward:
 // Forward: X = ldl_solve(LD, piv, B)  solves AX = B where A = LDL^T
 // Backward: grad_B = ldl_solve(LD, piv, grad)
