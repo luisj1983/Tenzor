@@ -81,9 +81,19 @@ int main() {
             }
         }
 
-        // Log computation graph
+        // Log computation graph.
+        //
+        // Build a tiny autograd graph so that `add_graph` has a real
+        // grad_fn chain to walk.  In practice you would pass the output of
+        // your model's forward pass.
         std::cout << "\nLogging computation graph...\n";
-        writer.add_graph("SimpleModel", {1, 3, 224, 224});
+        {
+            Variable x(tenzor::randn({1, 3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+            Variable w(tenzor::randn({3, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+            Variable b(tenzor::randn({1, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+            auto y = x.matmul(w) + b;
+            writer.add_graph("SimpleModel", y);
+        }
 
         // Flush and close
         std::cout << "\nFlushing and closing writer...\n";

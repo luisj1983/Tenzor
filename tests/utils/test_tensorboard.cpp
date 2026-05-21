@@ -159,8 +159,13 @@ TEST_F(TensorBoardTest, AddGraph) {
     {
         SummaryWriter writer(test_log_dir_);
 
-        std::vector<int64_t> input_shape = {1, 3, 224, 224};
-        writer.add_graph("ResNet50", input_shape);
+        // Build a small autograd graph: y = x @ w + b
+        Variable x(tenzor::randn({1, 3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+        Variable w(tenzor::randn({3, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+        Variable b(tenzor::randn({1, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+        auto y = x.matmul(w) + b;
+
+        writer.add_graph("ToyModel", y);
         writer.flush();
     }
 

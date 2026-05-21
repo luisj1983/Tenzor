@@ -9,7 +9,12 @@
 #include "tenzor/utils/tensorboard.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/logging.hpp"
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/autograd/function.hpp"
 #include <filesystem>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
 #include <ctime>
 #include <cstring>
 #include <cmath>
@@ -69,7 +74,39 @@ void write_string(std::vector<uint8_t>& buffer, std::string_view str) {
 // Protobuf field encoding
 void write_field_header(std::vector<uint8_t>& buffer, uint32_t field_number, uint32_t wire_type) {
     uint32_t tag = (field_number << 3) | wire_type;
+    // Tags above 15 need multi-byte varint encoding (field_number > 15 -> tag >= 128).
+    while (tag >= 0x80) {
+        buffer.push_back(static_cast<uint8_t>((tag & 0x7F) | 0x80));
+        tag >>= 7;
+    }
     buffer.push_back(static_cast<uint8_t>(tag));
+}
+
+// Write a base-128 varint.
+void write_varint(std::vector<uint8_t>& buffer, uint64_t value) {
+    while (value >= 0x80) {
+        buffer.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+    buffer.push_back(static_cast<uint8_t>(value));
+}
+
+// Write a length-delimited field: tag + varint(length) + payload.
+void write_length_delimited(std::vector<uint8_t>& buffer,
+                            uint32_t field_number,
+                            const std::vector<uint8_t>& payload) {
+    write_field_header(buffer, field_number, 2);
+    write_varint(buffer, payload.size());
+    buffer.insert(buffer.end(), payload.begin(), payload.end());
+}
+
+// Write a length-delimited string field: tag + varint(len) + bytes.
+void write_string_field(std::vector<uint8_t>& buffer,
+                        uint32_t field_number,
+                        std::string_view str) {
+    write_field_header(buffer, field_number, 2);
+    write_varint(buffer, str.size());
+    buffer.insert(buffer.end(), str.begin(), str.end());
 }
 
 } // anonymous namespace
@@ -228,33 +265,137 @@ auto SummaryWriter::add_image(std::string_view tag,
     }
 }
 
+namespace {
+
+// Encode a single NodeDef message body (without outer tag/length).
+//   field 1: name   (string)
+//   field 2: op     (string)
+//   field 3: input  (repeated string)
+auto encode_node_def(std::string_view name,
+                     std::string_view op,
+                     const std::vector<std::string>& inputs) -> std::vector<uint8_t> {
+    std::vector<uint8_t> node;
+    write_string_field(node, 1, name);
+    write_string_field(node, 2, op);
+    for (const auto& in : inputs) {
+        write_string_field(node, 3, in);
+    }
+    return node;
+}
+
+// BFS the autograd graph reachable from `root` via Function::next_functions().
+//
+// We assign a sequential id to every Function we visit (in discovery order),
+// then emit one NodeDef per Function with op = Function::name() and inputs =
+// the names assigned to its `next_functions()` (i.e. upstream gradient
+// producers — equivalently, the forward-pass inputs to this op).
+struct GraphDefResult {
+    std::vector<uint8_t> bytes;
+    size_t node_count{0};
+};
+
+auto build_graph_def(const std::shared_ptr<Function>& root) -> GraphDefResult {
+    GraphDefResult out;
+    if (!root) {
+        return out;  // Empty GraphDef — leaf-only Variable.
+    }
+
+    // Discover all reachable Functions and assign stable ids.
+    std::unordered_map<Function*, std::string> name_for;
+    std::vector<std::shared_ptr<Function>> order;
+    std::queue<std::shared_ptr<Function>> q;
+    q.push(root);
+    name_for[root.get()] = "node_0";
+    order.push_back(root);
+
+    while (!q.empty()) {
+        auto fn = q.front();
+        q.pop();
+        for (const auto& nxt : fn->next_functions()) {
+            if (!nxt) continue;
+            if (name_for.find(nxt.get()) != name_for.end()) continue;
+            std::string id = "node_" + std::to_string(name_for.size());
+            name_for[nxt.get()] = id;
+            order.push_back(nxt);
+            q.push(nxt);
+        }
+    }
+
+    // Emit nodes. GraphDef field 1 = repeated NodeDef.
+    for (const auto& fn : order) {
+        std::vector<std::string> input_names;
+        input_names.reserve(fn->next_functions().size());
+        for (const auto& nxt : fn->next_functions()) {
+            if (!nxt) continue;
+            auto it = name_for.find(nxt.get());
+            if (it != name_for.end()) {
+                input_names.push_back(it->second);
+            }
+        }
+        auto node_bytes = encode_node_def(name_for[fn.get()], fn->name(), input_names);
+        write_length_delimited(out.bytes, /*field_number=*/1, node_bytes);
+    }
+    out.node_count = order.size();
+    return out;
+}
+
+} // anonymous namespace
+
 auto SummaryWriter::add_graph(std::string_view model_name,
-                             const std::vector<int64_t>& input_shape) -> void {
+                             const Variable& output) -> void {
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    // Create simple graph metadata
-    std::vector<uint8_t> graph_data;
+    // Walk the autograd graph rooted at `output.grad_fn()` and build a real
+    // GraphDef protobuf message.
+    auto graph_def_result = build_graph_def(output.grad_fn());
+    const auto& graph_def_bytes = graph_def_result.bytes;
 
-    // Graph event structure (simplified)
-    write_field_header(graph_data, 1, 2); // graph_def (string, wire_type=2)
+    // Wrap the GraphDef in an event's `graph_def` field. The Event proto
+    // (tensorflow/core/util/event.proto) has:
+    //   field 1: wall_time (double)
+    //   field 2: step      (int64)
+    //   field 4: summary   (Summary)
+    //   field 5: file_version (string)
+    //   field 6: graph_def (bytes)  <-- serialized GraphDef
+    //
+    // We emit a *standalone* event whose only payload is graph_def, which is
+    // how TensorBoard's reader recognises and routes it to the graph plugin.
+    std::vector<uint8_t> event;
 
-    // Graph definition (minimal)
-    std::string graph_def = std::format("model: {}, input_shape: [", model_name);
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-        if (i > 0) graph_def += ", ";
-        graph_def += std::to_string(input_shape[i]);
-    }
-    graph_def += "]";
+    // wall_time
+    write_field_header(event, 1, 1);
+    double wall_time = impl_->get_current_wall_time();
+    uint64_t wall_time_bits;
+    std::memcpy(&wall_time_bits, &wall_time, sizeof(double));
+    write_uint64_le(event, wall_time_bits);
 
-    write_string(graph_data, graph_def);
+    // step = 0
+    write_field_header(event, 2, 0);
+    event.push_back(0);
 
-    write_event("__graph__", graph_data, 0);
+    // graph_def (bytes, field 6)
+    write_length_delimited(event, /*field_number=*/6, graph_def_bytes);
 
-    TENZOR_LOG_INFO(std::format("TensorBoard: Added graph for {}", model_name));
+    // TFRecord-frame the event and append.
+    uint64_t length = event.size();
+    std::vector<uint8_t> length_bytes;
+    write_uint64_le(length_bytes, length);
+    uint32_t length_crc = masked_crc32c(length_bytes.data(), length_bytes.size());
+    uint32_t data_crc = masked_crc32c(event.data(), event.size());
+
+    impl_->event_file.write(reinterpret_cast<const char*>(length_bytes.data()), 8);
+    impl_->event_file.write(reinterpret_cast<const char*>(&length_crc), 4);
+    impl_->event_file.write(reinterpret_cast<const char*>(event.data()), event.size());
+    impl_->event_file.write(reinterpret_cast<const char*>(&data_crc), 4);
+
+    TENZOR_LOG_INFO(std::format("TensorBoard: Added graph for {} ({} nodes, {} bytes)",
+                                model_name,
+                                graph_def_result.node_count,
+                                graph_def_bytes.size()));
 }
 
 auto SummaryWriter::flush() -> void {

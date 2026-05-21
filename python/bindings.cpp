@@ -1720,8 +1720,9 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("dataformats") = "CHW",
              "Log image tensor")
         .def("add_graph", &tenzor::SummaryWriter::add_graph,
-             py::arg("model_name"), py::arg("input_shape"),
-             "Log computation graph structure")
+             py::arg("model_name"), py::arg("output"),
+             "Log computation graph by walking the autograd grad_fn chain "
+             "of the given output Variable")
         .def("flush", &tenzor::SummaryWriter::flush,
              "Flush all pending events to disk")
         .def("close", &tenzor::SummaryWriter::close,

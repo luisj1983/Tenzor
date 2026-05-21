@@ -1,0 +1,67 @@
+// Minimal subset of TensorFlow protobuf schema needed to emit a TensorBoard
+// graph visualisation (GraphDef containing NodeDef messages walked from the
+// Tenzor autograd computation graph).
+//
+// This file is *documentation only* — the encoder in
+// `src/utils/tensorboard.cpp` hand-writes the wire format using the existing
+// varint / length-delimited helpers, so we do not invoke `protoc` and do not
+// take a build-time dependency on libprotobuf.
+//
+// The wire format follows the standard Google protobuf v2 encoding:
+//   tag = (field_number << 3) | wire_type
+//   wire_type 0 = varint, 1 = 64-bit, 2 = length-delimited, 5 = 32-bit
+//
+// Sources cross-referenced against tensorflow/core/framework in the upstream
+// TF repository (Apache 2.0). Only the fields actually consumed by
+// TensorBoard's graph plugin are retained.
+
+syntax = "proto3";
+
+package tensorboard;
+
+// ---------------------------------------------------------------------------
+// tensorflow/core/framework/tensor_shape.proto
+// ---------------------------------------------------------------------------
+message TensorShapeProto {
+    message Dim {
+        int64  size = 1;
+        string name = 2;
+    }
+    repeated Dim  dim          = 2;
+    bool          unknown_rank = 3;
+}
+
+// ---------------------------------------------------------------------------
+// tensorflow/core/framework/attr_value.proto (cut down to the variants we use)
+// ---------------------------------------------------------------------------
+message AttrValue {
+    message ListValue {
+        repeated bytes              s     = 2;
+        repeated int64              i     = 3 [packed = true];
+        repeated TensorShapeProto   shape = 6;
+    }
+    oneof value {
+        bytes             s     = 2;
+        int64             i     = 3;
+        TensorShapeProto  shape = 7;
+        ListValue         list  = 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tensorflow/core/framework/node_def.proto
+// ---------------------------------------------------------------------------
+message NodeDef {
+    string             name  = 1;   // Unique node id (e.g. "node_42").
+    string             op    = 2;   // Function::name() / op_id() string.
+    repeated string    input = 3;   // Names of input nodes (upstream edges).
+    string             device = 4;  // Optional, unused here.
+    map<string, AttrValue> attr = 5;
+}
+
+// ---------------------------------------------------------------------------
+// tensorflow/core/framework/graph.proto
+// ---------------------------------------------------------------------------
+message GraphDef {
+    repeated NodeDef node = 1;
+}

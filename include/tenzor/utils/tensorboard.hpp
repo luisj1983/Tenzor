@@ -45,6 +45,8 @@
 
 namespace tenzor {
 
+class Variable;  // Forward declaration; defined in tenzor/autograd/variable.hpp
+
 /**
  * @brief Writer for TensorBoard event files
  *
@@ -209,23 +211,32 @@ public:
                   std::string_view dataformats = "CHW") -> void;
 
     /**
-     * @brief Log computation graph
+     * @brief Log computation graph from an autograd `Variable`.
      *
-     * Records the structure of a neural network model for visualization
-     * in TensorBoard's graph view.
+     * Walks the autograd `grad_fn` chain starting at @p output, assigns each
+     * `Function` a unique node id, and emits one TensorBoard `NodeDef` per
+     * Function inside a single `GraphDef` protobuf message. The resulting
+     * event is consumed by TensorBoard's graph plugin.
      *
-     * @param model_name Name of the model
-     * @param input_shape Shape of input tensor (e.g., {1, 3, 224, 224})
+     * The graph is encoded as the on-wire `GraphDef` schema documented in
+     * `proto/tensorboard_graph.proto` — we hand-encode the bytes since only a
+     * tiny subset is needed and this avoids a build dependency on protoc.
      *
-     * @note This is a simplified implementation. Full graph tracing
-     *       requires integration with autograd system.
+     * @param model_name Human-readable model name (kept for the event tag,
+     *                   not stored inside the GraphDef itself).
+     * @param output     Final `Variable` whose autograd graph should be
+     *                   serialised. Must have a valid `grad_fn` (i.e. be
+     *                   produced from at least one differentiable op);
+     *                   a leaf-only call emits an empty GraphDef.
      *
      * @code
-     * writer.add_graph("ResNet50", {1, 3, 224, 224});
+     * auto x = Variable(Tensor::randn({1, 3, 224, 224}), true);
+     * auto y = model.forward(x);
+     * writer.add_graph("ResNet50", y);
      * @endcode
      */
     auto add_graph(std::string_view model_name,
-                  const std::vector<int64_t>& input_shape) -> void;
+                  const Variable& output) -> void;
 
     /**
      * @brief Flush all pending events to disk
