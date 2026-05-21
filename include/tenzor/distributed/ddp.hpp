@@ -325,21 +325,29 @@ private:
     bool use_gpu_comm_{false};
 
     /**
-     * @brief Dedicated CUDA stream for communication (separate from compute).
+     * @brief Per-bucket dedicated CUDA streams for communication.
      *
-     * Stored as void* to avoid including cuda_runtime.h in the header.
-     * This is a cudaStream_t when use_gpu_comm_ is true, nullptr otherwise.
-     * All NCCL all-reduce operations are launched on this stream so they
-     * can overlap with backward computation on the default compute stream.
+     * Stored as void* (cudaStream_t) to avoid including cuda_runtime.h
+     * in the header. One non-blocking stream per gradient bucket so
+     * that all-reduce of distinct buckets can run concurrently and
+     * overlap with backward compute on the default stream.
+     *
+     * Mirrors the per-bucket NCCL stream pattern used by PyTorch's
+     * `torch.nn.parallel.DistributedDataParallel` reducer
+     * (`torch/csrc/distributed/c10d/reducer.cpp`), where each bucket
+     * owns its own communication stream.
+     *
+     * Empty when use_gpu_comm_ is false.
      */
-    void* comm_stream_{nullptr};
+    std::vector<void*> bucket_streams_;
 
     /**
      * @brief CUDA event recorded after each bucket's all-reduce completes.
      *
-     * Stored as void* (cudaEvent_t). One event per bucket. Before the
-     * optimizer step, the compute stream waits on these events to ensure
-     * all gradients are fully reduced.
+     * Stored as void* (cudaEvent_t). One event per bucket recorded on
+     * that bucket's own stream. Before the optimizer step, the default
+     * compute stream waits on every bucket event so the optimiser
+     * observes the reduced gradients.
      */
     std::vector<void*> bucket_events_;
 

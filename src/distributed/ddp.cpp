@@ -111,18 +111,25 @@ auto DistributedDataParallel::init_comm_resources() -> void {
         return;
     }
 
-    // Create a dedicated non-blocking CUDA stream for communication.
-    // cudaStreamNonBlocking ensures this stream does NOT implicitly
-    // synchronize with the default (stream 0) compute stream.
-    cudaStream_t stream = nullptr;
-    DDP_CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-    comm_stream_ = static_cast<void*>(stream);
-
-    // Create one CUDA event per bucket for synchronization.
-    // Events use cudaEventDisableTiming for lower overhead since
-    // we only need ordering guarantees, not timing.
-    bucket_events_.resize(buckets_.size(), nullptr);
+    // Audit D.9: one dedicated non-blocking CUDA stream per gradient
+    // bucket. Mirrors PyTorch DDP's reducer.cpp where each bucket
+    // gets its own NCCL stream so distinct buckets can all-reduce
+    // concurrently and overlap with backward compute on stream 0.
+    //
+    // cudaStreamNonBlocking ensures these streams do NOT implicitly
+    // synchronize with the default (stream 0) compute stream -- the
+    // only ordering enforced is via the per-bucket event recorded
+    // below and waited on in sync_comm().
+    bucket_streams_.assign(buckets_.size(), nullptr);
+    bucket_events_.assign(buckets_.size(), nullptr);
     for (size_t i = 0; i < buckets_.size(); ++i) {
+        cudaStream_t stream = nullptr;
+        DDP_CUDA_CHECK(cudaStreamCreateWithFlags(&stream,
+                                                 cudaStreamNonBlocking));
+        bucket_streams_[i] = static_cast<void*>(stream);
+
+        // Events use cudaEventDisableTiming for lower overhead since
+        // we only need ordering guarantees, not timing.
         cudaEvent_t event = nullptr;
         DDP_CUDA_CHECK(cudaEventCreateWithFlags(&event,
                                                  cudaEventDisableTiming));
@@ -148,11 +155,13 @@ auto DistributedDataParallel::destroy_comm_resources() -> void {
     }
     bucket_events_.clear();
 
-    // Destroy the communication stream
-    if (comm_stream_) {
-        cudaStreamDestroy(static_cast<cudaStream_t>(comm_stream_));
-        comm_stream_ = nullptr;
+    // Destroy per-bucket communication streams
+    for (void* s : bucket_streams_) {
+        if (s) {
+            cudaStreamDestroy(static_cast<cudaStream_t>(s));
+        }
     }
+    bucket_streams_.clear();
 #endif
 }
 
@@ -302,6 +311,22 @@ auto DistributedDataParallel::all_reduce_bucket_async(
     }
 
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    // Audit D.9: each bucket all-reduces on its OWN dedicated stream
+    // (PyTorch DDP reducer.cpp pattern). Distinct buckets' collectives
+    // can therefore run concurrently and overlap with backward
+    // compute on the default stream.
+    if (bucket_idx >= bucket_streams_.size() ||
+        !bucket_streams_[bucket_idx]) {
+        // Defensive: stream not initialised for this bucket. Should
+        // not happen because init_comm_resources() sizes the vector
+        // to buckets_.size(), but fall back to sync all-reduce rather
+        // than crashing.
+        all_reduce_bucket(bucket);
+        return;
+    }
+
+    void* this_bucket_stream = bucket_streams_[bucket_idx];
+
     for (auto& param : bucket.params) {
         if (!param || !param->has_grad()) {
             continue;
@@ -310,29 +335,30 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         // Get the gradient tensor
         Tensor grad = param->grad().value();
 
-        // Launch NCCL all-reduce asynchronously on the communication stream.
-        // The NCCL kernel reads gradient data from GPU memory; since the
-        // gradient was just computed on the default compute stream, NCCL
-        // will see the correct data because ncclAllReduce on a non-blocking
-        // stream does not require explicit inter-stream synchronization --
-        // NCCL internally tracks data dependencies on the same GPU.
+        // Launch NCCL all-reduce asynchronously on this bucket's
+        // dedicated communication stream. The NCCL kernel reads
+        // gradient data from GPU memory; since the gradient was
+        // produced on the default compute stream, the same-GPU
+        // ordering between the producer kernel and ncclAllReduce
+        // is enforced by NCCL's internal dependency tracking on a
+        // single device.
         //
-        // However, we must NOT read the gradient on the compute stream
-        // until the all-reduce completes, which is handled by the event
-        // recorded below.
-        // Use ReduceOp::AVG to fuse the division by world_size into the
-        // all-reduce kernel, eliminating a separate element-wise division.
-        // NCCL natively supports AVG reduction (ncclAvg), so this is a
-        // single fused communication + scaling operation.
-        pg_->all_reduce_async(grad, ReduceOp::AVG, comm_stream_);
+        // The optimizer step (on the default stream) must NOT read
+        // the gradient until the all-reduce completes -- handled by
+        // the per-bucket event recorded below and waited on in
+        // sync_comm().
+        //
+        // Use ReduceOp::AVG so NCCL (ncclAvg) fuses the divide-by
+        // world_size into the all-reduce kernel.
+        pg_->all_reduce_async(grad, ReduceOp::AVG, this_bucket_stream);
     }
 
-    // Record a CUDA event on the communication stream after this bucket's
-    // all-reduce + division completes. The compute stream will later
-    // wait on this event (in sync_comm()) before the optimizer step.
+    // Record a CUDA event on THIS bucket's stream after its
+    // all-reduce(s) complete. The default compute stream will later
+    // cudaStreamWaitEvent on this event before the optimizer step.
     if (bucket_idx < bucket_events_.size() && bucket_events_[bucket_idx]) {
         cudaEvent_t event = static_cast<cudaEvent_t>(bucket_events_[bucket_idx]);
-        cudaStream_t stream = static_cast<cudaStream_t>(comm_stream_);
+        cudaStream_t stream = static_cast<cudaStream_t>(this_bucket_stream);
         DDP_CUDA_CHECK(cudaEventRecord(event, stream));
         pending_async_ops_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -355,19 +381,21 @@ auto DistributedDataParallel::sync_comm() -> void {
         return; // No async operations in flight
     }
 
-    // Make the default compute stream (stream 0) wait on all bucket events.
-    // This ensures the optimizer step (which runs on the compute stream)
-    // does not start until all async all-reduce operations have completed
-    // on the communication stream.
+    // Audit D.9: make the default compute stream (stream 0) wait on
+    // every per-bucket event. Each event was recorded on that
+    // bucket's own dedicated stream after its all-reduce completed,
+    // so once stream 0 has waited on all of them, the optimizer
+    // step (running on stream 0) is guaranteed to observe the
+    // fully-reduced, averaged gradients for every bucket.
     //
-    // Note: We use cudaStreamWaitEvent(0, event, 0) where stream 0 is the
-    // default compute stream. This is a non-blocking GPU-side wait -- the
-    // CPU thread returns immediately, and the GPU will stall the compute
-    // stream only if the event hasn't been reached yet on the comm stream.
+    // cudaStreamWaitEvent(0, event, 0) is a non-blocking GPU-side
+    // wait -- the CPU thread returns immediately, and the GPU
+    // stalls stream 0 only if the corresponding bucket event has
+    // not yet been reached on its bucket stream.
     for (size_t i = 0; i < bucket_events_.size(); ++i) {
         if (bucket_events_[i]) {
             cudaEvent_t event = static_cast<cudaEvent_t>(bucket_events_[i]);
-            // Stream 0 (default compute stream) waits on the comm event
+            // Stream 0 (default compute stream) waits on the bucket event
             DDP_CUDA_CHECK(cudaStreamWaitEvent(nullptr, event, 0));
         }
     }
