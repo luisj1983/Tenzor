@@ -14,6 +14,8 @@
 #include <string>
 #include <functional>
 #include <optional>
+#include <atomic>
+#include <cstdint>
 #include "../../autograd/variable.hpp"
 
 namespace tenzor {
@@ -164,6 +166,37 @@ public:
      * algorithm (SGD, Adam, etc.). Called by step() after gradient clipping.
      */
     virtual auto step_impl() -> void = 0;
+
+    /**
+     * @brief Register a post-step hook (audit G.10).
+     *
+     * Hooks fire in registration order at the end of every successful
+     * `step()` / `step(closure)` invocation, after the parameter update
+     * has been applied.  Used by:
+     *
+     * - Pruning utilities to re-apply masks after each gradient step
+     *   (audit G.10) so the optimizer can't silently undo the mask.
+     * - User code that needs an after-step callback for logging,
+     *   weight clipping, etc.
+     *
+     * Hooks see the optimizer's own parameter list via `parameters()`.
+     * Exceptions thrown by a hook propagate.
+     *
+     * @param hook Callable invoked with no arguments at the end of step().
+     * @return A handle that can be passed to `remove_post_step_hook` to
+     *         deregister.  Handles are stable across hook insertions/
+     *         removals.
+     */
+    using PostStepHook = std::function<void()>;
+    auto register_post_step_hook(PostStepHook hook) -> uint64_t;
+
+    /**
+     * @brief Deregister a previously registered post-step hook.
+     *
+     * @param hook_id Handle returned by `register_post_step_hook`.
+     * @return true if a hook was found and removed; false otherwise.
+     */
+    auto remove_post_step_hook(uint64_t hook_id) -> bool;
 
     /**
      * @brief Zero out all parameter gradients
@@ -331,6 +364,22 @@ protected:
     std::vector<std::shared_ptr<Variable>> parameters_;  ///< All parameters (flattened from groups)
     std::vector<ParamGroup> param_groups_;  ///< Parameter groups with individual hyperparams
     ClipConfig clip_config_;  ///< Gradient clipping configuration
+
+    // Audit G.10: post-step hook storage. Vector of (id, callable) so we
+    // can preserve registration order *and* remove a specific hook by id.
+    // The `next_hook_id_` counter is incremented atomically so handles
+    // are stable across insertions / removals.
+    std::vector<std::pair<uint64_t, PostStepHook>> post_step_hooks_;
+    std::atomic<uint64_t> next_hook_id_{1};
+
+    /**
+     * @brief Fire every registered post-step hook in registration order.
+     *
+     * Called by `step()` and `step(closure)` after the underlying
+     * step_impl() has updated the parameters. Exceptions thrown by a
+     * hook propagate to the caller of step().
+     */
+    auto fire_post_step_hooks_() -> void;
 };
 
 } // namespace optim

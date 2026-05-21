@@ -466,6 +466,11 @@ add_executable(test_vmap_opid_dispatch test_vmap_opid_dispatch.cpp)
 target_link_libraries(test_vmap_opid_dispatch PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_vmap_opid_dispatch DISCOVERY_TIMEOUT 60)
 
+# Optimizer post-step hook infrastructure (audit G.10)
+add_executable(test_optimizer_step_hooks test_optimizer_step_hooks.cpp)
+target_link_libraries(test_optimizer_step_hooks PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_optimizer_step_hooks DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)

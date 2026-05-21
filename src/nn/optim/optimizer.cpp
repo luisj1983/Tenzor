@@ -3,6 +3,7 @@
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/device.hpp"
+#include <algorithm>
 #include "tenzor/backend/loader.hpp"
 #include <cstring>
 #include <stdexcept>
@@ -38,6 +39,37 @@ auto Optimizer::step() -> void {
     }
 
     step_impl();
+
+    // Audit G.10: fire post-step hooks (e.g. pruning mask
+    // reapplication) after the parameter update has been applied.
+    // Hooks fire in registration order; exceptions propagate.
+    fire_post_step_hooks_();
+}
+
+auto Optimizer::register_post_step_hook(PostStepHook hook) -> uint64_t {
+    uint64_t id = next_hook_id_.fetch_add(1, std::memory_order_relaxed);
+    post_step_hooks_.emplace_back(id, std::move(hook));
+    return id;
+}
+
+auto Optimizer::remove_post_step_hook(uint64_t hook_id) -> bool {
+    auto it = std::find_if(post_step_hooks_.begin(), post_step_hooks_.end(),
+                            [hook_id](const auto& entry) {
+                                return entry.first == hook_id;
+                            });
+    if (it == post_step_hooks_.end()) {
+        return false;
+    }
+    post_step_hooks_.erase(it);
+    return true;
+}
+
+auto Optimizer::fire_post_step_hooks_() -> void {
+    for (auto& [_id, hook] : post_step_hooks_) {
+        if (hook) {
+            hook();
+        }
+    }
 }
 
 auto Optimizer::step(std::function<Variable()> closure) -> Variable {

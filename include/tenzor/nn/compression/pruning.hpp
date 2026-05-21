@@ -17,6 +17,8 @@
 #include "../module.hpp"
 #include "../layers/conv.hpp"
 #include "../layers/linear.hpp"
+#include "../optim/optimizer.hpp"
+#include <cstdint>
 
 namespace tenzor {
 namespace nn {
@@ -370,6 +372,34 @@ auto apply_pruning_masks(
     std::shared_ptr<Module> module,
     const PruningConfig& config
 ) -> void;
+
+/**
+ * @brief Register an optimizer post-step hook that re-applies pruning
+ *        masks after every parameter update (audit G.10).
+ *
+ * Without this hook, the optimizer's gradient step silently restores
+ * the zeroed-out positions to non-zero values (each step adds a small
+ * delta to the masked positions).  PyTorch's `prune.global_unstructured`
+ * + `prune.PruningContainer` machinery solves this by registering a
+ * pre-forward hook on the parameter; the equivalent here is a post-
+ * step hook on the optimizer that calls `apply_pruning_masks` after
+ * each step.
+ *
+ * The returned handle can be passed to `optim::Optimizer::
+ * remove_post_step_hook()` to deregister later (e.g. in
+ * `finalize_pruning()` after the masks have been baked into the
+ * weights).
+ *
+ * @param optimizer Optimizer instance to attach the hook to.
+ * @param module Module whose state dict gets masked after each step.
+ * @param config Pruning configuration containing the masks to apply.
+ * @return Hook id (stable across other registrations / removals).
+ */
+auto register_pruning_auto_reapply(
+    optim::Optimizer& optimizer,
+    std::shared_ptr<Module> module,
+    PruningConfig config
+) -> uint64_t;
 
 /**
  * @brief Make pruning permanent by removing zero weights

@@ -650,6 +650,28 @@ auto apply_pruning_masks(
     }
 }
 
+auto register_pruning_auto_reapply(
+    optim::Optimizer& optimizer,
+    std::shared_ptr<Module> module,
+    PruningConfig config
+) -> uint64_t {
+    // Audit G.10: register an optimizer post-step hook that reapplies
+    // the pruning masks after every parameter update.  Without this,
+    // the optimizer silently un-prunes the zeroed-out positions on
+    // each step (each gradient step adds a small delta back into
+    // them).
+    //
+    // The hook captures the module by shared_ptr (so it stays alive),
+    // the config by value (so subsequent mutations of the caller's
+    // config object don't change what the hook applies — semantically
+    // the masks are snapshotted at registration time), and dispatches
+    // through the existing apply_pruning_masks entry point.
+    return optimizer.register_post_step_hook(
+        [module, config = std::move(config)]() mutable {
+            apply_pruning_masks(module, config);
+        });
+}
+
 auto finalize_pruning(
     std::shared_ptr<Module> module,
     const PruningConfig& config
