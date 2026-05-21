@@ -11,6 +11,7 @@
 #pragma once
 
 #include "variable.hpp"
+#include "../ops/op_id.hpp"
 #include <functional>
 #include <cstdint>
 #include <string>
@@ -43,6 +44,19 @@ void register_batching_rule(const std::string& op_name, BatchingRule rule);
  * @brief Check if a batching rule exists for an operation.
  */
 auto has_batching_rule(const std::string& op_name) -> bool;
+
+/**
+ * @brief OpId-keyed registration / lookup.
+ *
+ * Audit A.3: vmap rules can now be keyed by the canonical forward
+ * `OpId` rather than the `Function::name()` string. The OpId-keyed
+ * registry is consulted first; the legacy name-based registry remains
+ * the fallback for un-opted-in Function subclasses (audit A.2 covers
+ * ~128 / 158 subclasses, which is enough to make the OpId path the
+ * common case while the long tail stays on the string path).
+ */
+void register_batching_rule(OpId op_id, BatchingRule rule);
+auto has_batching_rule(OpId op_id) -> bool;
 
 /**
  * @brief Initialize built-in batching rules.

@@ -14,6 +14,15 @@ static std::unordered_map<std::string, BatchingRule>& batching_rules() {
     return rules;
 }
 
+// Audit A.3: OpId-keyed registry. Looked up before the string-keyed
+// registry, so an opted-in Function (op_id() != Unknown) goes through
+// here. The string registry remains for the long-tail Function
+// subclasses that haven't yet opted in to op_id().
+static std::unordered_map<OpId, BatchingRule>& batching_rules_by_opid() {
+    static std::unordered_map<OpId, BatchingRule> rules;
+    return rules;
+}
+
 static std::once_flag init_flag;
 
 void register_batching_rule(const std::string& op_name, BatchingRule rule) {
@@ -22,6 +31,22 @@ void register_batching_rule(const std::string& op_name, BatchingRule rule) {
 
 auto has_batching_rule(const std::string& op_name) -> bool {
     return batching_rules().count(op_name) > 0;
+}
+
+void register_batching_rule(OpId op_id, BatchingRule rule) {
+    // Refuse OpId::Unknown to surface the caller's bug instead of
+    // silently installing a catch-all rule on the sentinel.
+    if (op_id == OpId::Unknown) {
+        throw std::runtime_error(
+            "register_batching_rule: OpId::Unknown is reserved as the "
+            "default sentinel and cannot have a rule registered against "
+            "it. Use the string-name overload for un-opted-in classes.");
+    }
+    batching_rules_by_opid()[op_id] = std::move(rule);
+}
+
+auto has_batching_rule(OpId op_id) -> bool {
+    return batching_rules_by_opid().count(op_id) > 0;
 }
 
 void init_builtin_batching_rules() {
