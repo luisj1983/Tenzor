@@ -115,11 +115,15 @@ auto Adadelta::step_impl() -> void {
                 param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
             };
 
+            // Audit I.14: pass Float64 hyperparams via AttrKey
+            // (was static_cast<float>, losing precision in Float64
+            // training).  The Vulkan kernel reads via attrs.get_float
+            // which returns double, so round-trip is double-clean.
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
-            attrs.set(AttrKey::Rho, static_cast<float>(hp.rho));
-            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Rho, hp.rho);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;
@@ -134,11 +138,12 @@ auto Adadelta::step_impl() -> void {
                 param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
             };
 
+            // Audit I.14: pass Float64 hyperparams via AttrKey.
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Rho, static_cast<float>(hp.rho));
-            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
-            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
+            attrs.set(AttrKey::Rho, hp.rho);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;
