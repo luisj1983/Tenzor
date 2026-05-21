@@ -94,11 +94,19 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
                                    int64_t expand_ratio,
                                    int64_t kernel_size,
                                    bool use_se,
-                                   bool use_hs)
-    : use_residual_(stride == 1 && in_channels == out_channels) {
+                                   bool use_hs,
+                                   int64_t dilation)
+    // Atrous trick: when dilation > 1 the effective stride is *always* 1
+    // (the dilation replaces the stride), so the spatial size is preserved.
+    // The residual path is therefore safe to use as long as channel counts
+    // match — same condition as a regular stride-1 block.
+    : use_residual_(((dilation > 1) ? 1 : stride) == 1 && in_channels == out_channels) {
 
     int64_t hidden_dim = in_channels * expand_ratio;
-    int64_t padding = (kernel_size - 1) / 2;
+    // For atrous convs the receptive field grows: padding must be
+    // dilation * (k-1) / 2 to keep the output spatial size unchanged.
+    int64_t effective_stride = (dilation > 1) ? 1 : stride;
+    int64_t padding = dilation * (kernel_size - 1) / 2;
 
     conv_ = std::make_shared<nn::Sequential>();
 
@@ -120,10 +128,10 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
         }
     }
 
-    // Depthwise convolution
+    // Depthwise convolution (atrous when dilation > 1)
     auto dw_conv = std::make_shared<nn::Conv2d>(
-        hidden_dim, hidden_dim, kernel_size, stride, padding,
-        1, hidden_dim, false);  // groups=hidden_dim for depthwise
+        hidden_dim, hidden_dim, kernel_size, effective_stride, padding,
+        dilation, hidden_dim, false);  // groups=hidden_dim for depthwise
     auto dw_bn = std::make_shared<nn::BatchNorm2d>(hidden_dim);
 
     conv_->add_module(dw_conv);
@@ -177,18 +185,59 @@ auto MobileNetV2::make_divisible(int64_t v, int64_t divisor) -> int64_t {
     return new_v;
 }
 
-MobileNetV2::MobileNetV2(int64_t num_classes, double width_mult, double dropout) {
+MobileNetV2::MobileNetV2(int64_t num_classes,
+                         double width_mult,
+                         double dropout,
+                         int64_t output_stride) {
+    if (output_stride != 8 && output_stride != 16 && output_stride != 32) {
+        throw std::invalid_argument(
+            "MobileNetV2 output_stride must be 8, 16, or 32");
+    }
+    output_stride_ = output_stride;
+
     // MobileNetV2 architecture configuration
     // [expansion, output_channels, num_blocks, stride]
+    //
+    // Stride accumulated by the time each stage's first block runs:
+    //   first conv      -> /2
+    //   stage 1 (16ch)  -> /2  (stride 1)
+    //   stage 2 (24ch)  -> /4  (stride 2)   <- low-level feature for DeepLab
+    //   stage 3 (32ch)  -> /8  (stride 2)
+    //   stage 4 (64ch)  -> /16 (stride 2)
+    //   stage 5 (96ch)  -> /16 (stride 1)
+    //   stage 6 (160ch) -> /32 (stride 2)
+    //   stage 7 (320ch) -> /32 (stride 1)
+    //
+    // Atrous transform:
+    //   output_stride=16: stage 6 stride becomes 1, stages 6/7 dilation = 2
+    //   output_stride=8 : stages 4 AND 6 strides become 1,
+    //                     stages 4/5 dilation = 2, stages 6/7 dilation = 4
     std::vector<std::vector<int64_t>> inverted_residual_settings = {
-        {1, 16, 1, 1},    // First block with expansion=1
-        {6, 24, 2, 2},
-        {6, 32, 3, 2},
-        {6, 64, 4, 2},
-        {6, 96, 3, 1},
-        {6, 160, 3, 2},
-        {6, 320, 1, 1}
+        {1, 16, 1, 1},    // stage 1 - expansion=1
+        {6, 24, 2, 2},    // stage 2 - low-level (stride 4)
+        {6, 32, 3, 2},    // stage 3
+        {6, 64, 4, 2},    // stage 4
+        {6, 96, 3, 1},    // stage 5
+        {6, 160, 3, 2},   // stage 6
+        {6, 320, 1, 1}    // stage 7
     };
+
+    // Per-stage dilation and stride-override schedule. -1 = keep cfg stride.
+    std::vector<int64_t> stage_dilation(inverted_residual_settings.size(), 1);
+    std::vector<int64_t> stage_stride_override(inverted_residual_settings.size(), -1);
+
+    if (output_stride == 16) {
+        stage_stride_override[5] = 1;
+        stage_dilation[5] = 2;
+        stage_dilation[6] = 2;
+    } else if (output_stride == 8) {
+        stage_stride_override[3] = 1;
+        stage_dilation[3] = 2;
+        stage_dilation[4] = 2;
+        stage_stride_override[5] = 1;
+        stage_dilation[5] = 4;
+        stage_dilation[6] = 4;
+    }
 
     features_ = std::make_shared<nn::Sequential>();
 
@@ -203,20 +252,33 @@ MobileNetV2::MobileNetV2(int64_t num_classes, double width_mult, double dropout)
     features_->add_module(first_bn);
 
     // Inverted residual blocks
-    for (const auto& setting : inverted_residual_settings) {
+    for (std::size_t stage_idx = 0; stage_idx < inverted_residual_settings.size(); ++stage_idx) {
+        const auto& setting = inverted_residual_settings[stage_idx];
         int64_t expand_ratio = setting[0];
         int64_t out_channels = make_divisible(
             static_cast<int64_t>(setting[1] * width_mult), 8);
         int64_t num_blocks = setting[2];
-        int64_t stride = setting[3];
+        int64_t cfg_stride = setting[3];
+        int64_t stage_stride = (stage_stride_override[stage_idx] >= 0)
+                                   ? stage_stride_override[stage_idx]
+                                   : cfg_stride;
+        int64_t dilation = stage_dilation[stage_idx];
 
         for (int64_t i = 0; i < num_blocks; ++i) {
-            int64_t block_stride = (i == 0) ? stride : 1;
+            int64_t block_stride = (i == 0) ? stage_stride : 1;
             auto block = std::make_shared<InvertedResidual>(
                 input_channels, out_channels, block_stride,
-                expand_ratio, 3, false, false);  // kernel=3, no SE, no HS (use ReLU6)
+                expand_ratio, 3, false, false, dilation);  // kernel=3, no SE, no HS (ReLU6)
             features_->add_module(block);
             input_channels = out_channels;
+        }
+
+        // After stage 2 (24 ch, stride 4) we have the canonical DeepLabV3+
+        // low-level feature. Record the last module index — that is the cutoff
+        // used by forward_features_multi.
+        if (stage_idx == 1) {
+            low_level_end_idx_ = features_->modules().size() - 1;
+            low_level_channels_ = out_channels;
         }
     }
 
@@ -233,6 +295,7 @@ MobileNetV2::MobileNetV2(int64_t num_classes, double width_mult, double dropout)
 
     features_->add_module(last_conv);
     features_->add_module(last_bn);
+    high_level_channels_ = last_channels;
 
     register_module("features", features_);
 
@@ -267,6 +330,30 @@ auto MobileNetV2::forward_impl(const Variable& input) -> Variable {
 auto MobileNetV2::forward_features(const Variable& input) -> Variable {
     // Extract features before global pooling and classification
     return features_->forward(input);
+}
+
+auto MobileNetV2::forward_features_multi(const Variable& input)
+    -> std::pair<Variable, Variable> {
+    // Walk the registered modules in order, snapshot the activation right
+    // after the low-level cutoff (end of stage 2 — stride 4, 24ch at
+    // width_mult=1.0), then continue through the rest of the feature stack.
+    const auto& modules = features_->modules();
+    if (low_level_end_idx_ == 0 || low_level_end_idx_ >= modules.size()) {
+        throw std::runtime_error(
+            "MobileNetV2::forward_features_multi: low_level_end_idx_ not "
+            "initialised; constructor must record it before this is called.");
+    }
+
+    Variable x = input;
+    Variable low_level;
+
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        x = modules[i]->forward(x);
+        if (i == low_level_end_idx_) {
+            low_level = x;
+        }
+    }
+    return {low_level, x};
 }
 
 auto MobileNetV2::load_pretrained(const std::string& path) -> void {
@@ -462,6 +549,34 @@ auto mobilenet_v2_width(int64_t num_classes, double width_mult, bool pretrained)
                 "(mobilenet_v2 in the registry).");
         }
         auto path = ModelHub::download_pretrained_safetensors(key);
+        ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
+    }
+
+    return model;
+}
+
+auto atrous_mobilenet_v2(int64_t num_classes,
+                         bool pretrained,
+                         int64_t output_stride)
+    -> std::shared_ptr<MobileNetV2> {
+    if (output_stride == 32) {
+        throw std::invalid_argument(
+            "atrous_mobilenet_v2: output_stride=32 is not atrous. "
+            "Use mobilenet_v2() for the standard (non-atrous) model.");
+    }
+    if (output_stride != 8 && output_stride != 16) {
+        throw std::invalid_argument(
+            "atrous_mobilenet_v2: output_stride must be 8 or 16");
+    }
+
+    auto model = std::make_shared<MobileNetV2>(num_classes, 1.0, 0.2, output_stride);
+
+    if (pretrained) {
+        // Atrous and non-atrous MobileNetV2 share parameter shapes (only the
+        // strides and dilations on the depthwise convs change). The non-atrous
+        // ImageNet checkpoint loads cleanly into the atrous variant — strict=
+        // false guards against any name drift between dumps.
+        auto path = ModelHub::download_pretrained_safetensors("mobilenet_v2");
         ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }
 

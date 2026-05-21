@@ -48,8 +48,10 @@ DeepLabV3PlusEncoder::DeepLabV3PlusEncoder(const std::string& backbone_name,
         low_level_channels_ = 64;     // After layer1
         high_level_channels_ = 512;   // After layer4
     } else if (backbone_name == "mobilenetv2") {
-        low_level_channels_ = 24;     // Early layer (after first few inverted residual blocks)
-        high_level_channels_ = 1280;  // Final layer (after last 1x1 conv before classifier)
+        // Audit G.8: real low-level (stride 4, 24ch) + high-level (1280ch)
+        // features now come from MobileNetV2::forward_features_multi.
+        low_level_channels_ = 24;
+        high_level_channels_ = 1280;
     } else {
         throw std::invalid_argument("Unsupported backbone: " + backbone_name);
     }
@@ -65,19 +67,11 @@ DeepLabV3PlusEncoder::DeepLabV3PlusEncoder(const std::string& backbone_name,
     aspp_ = std::make_shared<nn::ASPP>(high_level_channels_, 256, atrous_rates, true, 0.5f);
     register_module("aspp", aspp_);
 
-    // Audit G11: feature_proj_ is only needed for the MobileNetV2 backbone
-    // path (which still uses the project+upsample heuristic until G11-followup
-    // adds atrous MobileNetV2 + real low-level features). For ResNet backbones
-    // the forward path now extracts real C2 features via forward_features_multi
-    // — the C2 channel count already matches `low_level_channels_` (256 for
-    // Bottleneck, 64 for BasicBlock), so no projection is needed.
-    const bool is_resnet = (backbone_name == "resnet50" || backbone_name == "resnet101" ||
-                            backbone_name == "resnet152" || backbone_name == "resnet18" ||
-                            backbone_name == "resnet34");
-    if (!is_resnet) {
-        feature_proj_ = std::make_shared<nn::Conv2d>(high_level_channels_, low_level_channels_, 1, 1, 0);
-        register_module("feature_proj", feature_proj_);
-    }
+    // Audit G.8 / G11: every supported backbone (ResNet, atrous MobileNetV2)
+    // now produces real low-level features via forward_features_multi. The
+    // legacy project+upsample heuristic (feature_proj_) is no longer used; the
+    // pointer remains in the header for ABI/state-dict stability but is left
+    // unconstructed here.
 }
 
 auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
@@ -114,10 +108,12 @@ auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
         }
         backbone = resnet34(1000, pretrained);
     } else if (name == "mobilenetv2") {
-        // MobileNetV2 atrous mode is G11-followup; keep the legacy
-        // construction for now (the encoder forward_multi still uses
-        // feature_proj_ + upsample for this path).
-        backbone = mobilenet_v2(1000, pretrained);
+        // Audit G.8: MobileNetV2 now supports atrous mode. For output_stride<32
+        // we route through the atrous builder so the last stages preserve
+        // spatial resolution; output_stride=32 falls back to the standard model.
+        backbone = (output_stride == 32)
+                       ? mobilenet_v2(1000, pretrained)
+                       : atrous_mobilenet_v2(1000, pretrained, output_stride);
     } else {
         throw std::invalid_argument("Unsupported backbone variant: " + name);
     }
@@ -129,21 +125,25 @@ auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
 auto DeepLabV3PlusEncoder::forward_multi(const Variable& input)
     -> std::pair<Variable, Variable>
 {
-    // Audit G11: real low-level feature extraction.
+    // Audit G.8 / G11: real low-level feature extraction for every backbone.
     //
-    // ResNet path: use forward_features_multi → (C2, C3, C4, C5). C2 is the
+    // ResNet path: forward_features_multi -> (C2, C3, C4, C5). C2 is the
     // canonical low-level feature (layer1 output, stride 4, 256 ch for
-    // Bottleneck variants — matches `low_level_channels_`). C5 is the
-    // high-level feature (with atrous applied per output_stride). ASPP runs
-    // on C5. No project+upsample fake.
+    // Bottleneck / 64 ch for BasicBlock — matches `low_level_channels_`).
+    // ASPP runs on C5; the standard DeepLabV3+ "multi-scale" design uses
+    // multiple parallel atrous rates *within* ASPP applied to that single
+    // feature map (1x1 conv + 3 parallel atrous convs at rates {6,12,18} for
+    // output_stride=16 or {12,24,36} for output_stride=8 + global image
+    // pooling). C3/C4 are intentionally unused — they are not consumed by the
+    // DeepLabV3+ paper architecture.
     //
-    // MobileNetV2 path: keep the legacy project+upsample heuristic until
-    // G11-followup adds atrous MobileNetV2 + real low-level features.
+    // MobileNetV2 path: atrous MobileNetV2 + forward_features_multi gives
+    // (low_level, high_level) directly — no project+upsample fake.
     auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
     if (resnet) {
         auto [c2, c3, c4, c5] = resnet->forward_features_multi(input);
-        (void)c3; (void)c4;  // unused — single-scale ASPP for now.
-
+        (void)c3;
+        (void)c4;
         Variable aspp_features      = aspp_->forward(c5);
         Variable low_level_features = c2;
         return {aspp_features, low_level_features};
@@ -154,14 +154,9 @@ auto DeepLabV3PlusEncoder::forward_multi(const Variable& input)
         throw std::runtime_error("Unsupported backbone type for DeepLabV3+");
     }
 
-    // MobileNetV2 legacy path (G11-followup to refactor).
-    Variable high_level_features = mobilenet->forward_features(input);
-    auto projected = feature_proj_->forward(high_level_features);
-    const auto& input_shape = input.tensor().shape();
-    int64_t target_h = input_shape[2] / 4;
-    int64_t target_w = input_shape[3] / 4;
-    auto low_level_features = nn::upsample_bilinear(projected, target_h, target_w);
-    auto aspp_features = aspp_->forward(high_level_features);
+    auto [low_level_features, high_level_features] =
+        mobilenet->forward_features_multi(input);
+    Variable aspp_features = aspp_->forward(high_level_features);
     return {aspp_features, low_level_features};
 }
 

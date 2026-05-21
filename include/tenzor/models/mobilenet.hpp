@@ -187,6 +187,10 @@ public:
      * @param kernel_size Depthwise conv kernel size (3 or 5)
      * @param use_se Use Squeeze-and-Excitation module
      * @param use_hs Use Hard-Swish activation (otherwise ReLU6)
+     * @param dilation Dilation factor for the depthwise conv. Values >1 enable
+     *                 atrous convolution and force the effective spatial stride
+     *                 to 1 (DeepLab-style trick — receptive field grows while
+     *                 the feature-map resolution is preserved).
      */
     InvertedResidual(int64_t in_channels,
                      int64_t out_channels,
@@ -194,14 +198,15 @@ public:
                      int64_t expand_ratio,
                      int64_t kernel_size = 3,
                      bool use_se = false,
-                     bool use_hs = false);
+                     bool use_hs = false,
+                     int64_t dilation = 1);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     bool use_residual_;  ///< Whether to use skip connection
     std::shared_ptr<nn::Sequential> conv_;  ///< Main convolution sequence
-};
+};;
 
 /**
  * @brief MobileNetV2 model.
@@ -224,10 +229,30 @@ public:
      */
     MobileNetV2(int64_t num_classes = 1000,
                 double width_mult = 1.0,
-                double dropout = 0.2);
+                double dropout = 0.2,
+                int64_t output_stride = 32);
 
     auto forward_impl(const Variable& input) -> Variable override;
     auto forward_features(const Variable& input) -> Variable;
+
+    /**
+     * @brief Multi-scale feature extraction for segmentation decoders.
+     *
+     * Returns (low_level, high_level):
+     *   - low_level : output after the second inverted-residual stage
+     *                 (stride 4, 24 channels at width_mult=1.0)
+     *   - high_level: final feature-map after the last 1x1 conv
+     *                 (stride = output_stride, 1280 channels at width_mult=1.0)
+     *
+     * Required by DeepLabV3+ for encoder/decoder fusion.
+     */
+    auto forward_features_multi(const Variable& input)
+        -> std::pair<Variable, Variable>;
+
+    auto low_level_channels() const -> int64_t { return low_level_channels_; }
+    auto high_level_channels() const -> int64_t { return high_level_channels_; }
+    auto output_stride() const -> int64_t { return output_stride_; }
+
     auto load_pretrained(const std::string& path) -> void;
 
 private:
@@ -235,6 +260,15 @@ private:
 
     std::shared_ptr<nn::Sequential> features_;
     std::shared_ptr<nn::Sequential> classifier_;
+
+    // Index (into features_->modules()) of the *last* module producing the
+    // low-level feature map. Tracked so forward_features_multi can split the
+    // stack without re-encoding the architecture.
+    std::size_t low_level_end_idx_ {0};
+
+    int64_t low_level_channels_ {24};
+    int64_t high_level_channels_ {1280};
+    int64_t output_stride_ {32};
 };
 
 /**
@@ -305,6 +339,32 @@ auto mobilenet_v2(int64_t num_classes = 1000, bool pretrained = false)
  * @return Shared pointer to MobileNetV2 model
  */
 auto mobilenet_v2_width(int64_t num_classes, double width_mult, bool pretrained = false)
+    -> std::shared_ptr<MobileNetV2>;
+
+/**
+ * @brief Create atrous MobileNetV2 model for dense prediction tasks.
+ *
+ * Builds a MobileNetV2 with the last stages converted to atrous convolution
+ * so the effective spatial stride is `output_stride` instead of 32. This is
+ * the standard DeepLab-style modification:
+ *   - output_stride=16: the stride 2 in stage 6 (160-ch group) is replaced
+ *     by stride 1 and that stage's depthwise convs use dilation=2.
+ *   - output_stride=8: in addition to the above, the stride 2 in stage 5
+ *     (64-ch group) is also replaced by stride 1; stages 5/5b use dilation=2
+ *     and stages 6/7 use dilation=4.
+ *
+ * The classifier head is preserved. For segmentation, use
+ * forward_features_multi to retrieve low-level + high-level feature maps.
+ *
+ * @param num_classes Number of classifier-head outputs (default: 1000)
+ * @param pretrained Load pretrained ImageNet weights (default: false)
+ * @param output_stride Effective spatial stride (8 or 16). 32 is not allowed
+ *                      here (use mobilenet_v2 for the standard model).
+ * @return Shared pointer to atrous-MobileNetV2 model
+ */
+auto atrous_mobilenet_v2(int64_t num_classes = 1000,
+                         bool pretrained = false,
+                         int64_t output_stride = 16)
     -> std::shared_ptr<MobileNetV2>;
 
 /**
