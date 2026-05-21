@@ -471,6 +471,11 @@ add_executable(test_optimizer_step_hooks test_optimizer_step_hooks.cpp)
 target_link_libraries(test_optimizer_step_hooks PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_optimizer_step_hooks DISCOVERY_TIMEOUT 60)
 
+# ParamGroup contract on per-optimizer hyperparams (audit D.4)
+add_executable(test_param_group_contract test_param_group_contract.cpp)
+target_link_libraries(test_param_group_contract PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_param_group_contract DISCOVERY_TIMEOUT 60)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)

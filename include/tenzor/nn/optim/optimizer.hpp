@@ -37,6 +37,41 @@ struct ParamGroup {
     std::vector<std::shared_ptr<Variable>> params;  ///< Parameters in this group
     double lr;                      ///< Learning rate for this group
     double weight_decay{0.0};       ///< Weight decay (L2 regularization) for this group
+
+    // Audit D.4: per-group hyperparameter overrides.  Each `std::optional`
+    // field, when set, overrides the corresponding member on the
+    // optimizer for *just this group's parameters*.  Optimizers read
+    // these via the `read_*` accessors below so adding a new field is a
+    // single-line change in the relevant step_impl().
+    //
+    // PyTorch's torch.optim uses a free-form dict for this; we use
+    // named optionals to keep the type-checker honest at the C++ side.
+    // Hyperparams that no optimizer actually consumes can be left as
+    // std::nullopt — the optimizer falls back to its own member default.
+    std::optional<double> momentum;
+    std::optional<double> dampening;
+    std::optional<bool>   nesterov;
+    std::optional<double> beta1;
+    std::optional<double> beta2;
+    std::optional<double> eps;
+    std::optional<bool>   centered;     ///< RMSprop
+    std::optional<double> alpha;        ///< RMSprop / ASGD
+    std::optional<double> rho;          ///< Adadelta
+    std::optional<double> lr_decay;     ///< Adagrad
+    std::optional<double> initial_accumulator_value;  ///< Adagrad
+
+    /**
+     * @brief Read a per-group hyperparam with optimizer-member fallback.
+     *
+     * Used inside step_impl(): the loop over param_groups_ picks each
+     * group's lr / weight_decay / etc. from the group's stored optional
+     * (if set) or from the optimizer's own default member.  See SGD /
+     * Adam / etc. step_impl() bodies for the pattern.
+     */
+    template <typename T>
+    static T or_else(const std::optional<T>& opt, T fallback) {
+        return opt.has_value() ? opt.value() : fallback;
+    }
 };
 
 /**
@@ -380,6 +415,20 @@ protected:
      * hook propagate to the caller of step().
      */
     auto fire_post_step_hooks_() -> void;
+
+    /**
+     * @brief Resolve the ParamGroup that owns `parameters_[i]`, if any.
+     *
+     * Audit D.4 helper: when a derived optimizer's step_impl() needs to
+     * read per-group hyperparameters (lr, weight_decay, momentum, …),
+     * it calls this to find the matching group.  Returns nullptr if
+     * the optimizer was constructed from a flat parameter list (no
+     * groups) — the caller should fall back to its own defaults.
+     *
+     * O(n_groups × n_params_per_group) worst case; with the typical 1–5
+     * groups this is fine.
+     */
+    auto find_group_for_param(size_t param_index) const -> const ParamGroup*;
 };
 
 } // namespace optim

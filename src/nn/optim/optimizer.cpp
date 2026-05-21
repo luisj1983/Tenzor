@@ -72,6 +72,22 @@ auto Optimizer::fire_post_step_hooks_() -> void {
     }
 }
 
+auto Optimizer::find_group_for_param(size_t param_index) const -> const ParamGroup* {
+    // Audit D.4: linear lookup of the ParamGroup owning parameters_[i].
+    // For the typical 1–5 param groups this is fine; if profiling shows
+    // it as a hotspot, swap with a cached index built at flatten time.
+    if (param_index >= parameters_.size()) return nullptr;
+    const auto& target = parameters_[param_index];
+    for (const auto& g : param_groups_) {
+        for (const auto& p : g.params) {
+            if (p.get() == target.get()) {
+                return &g;
+            }
+        }
+    }
+    return nullptr;
+}
+
 auto Optimizer::step(std::function<Variable()> closure) -> Variable {
     auto loss = closure();
     step();

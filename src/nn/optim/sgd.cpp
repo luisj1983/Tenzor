@@ -14,17 +14,53 @@ SGD::SGD(std::vector<std::shared_ptr<Variable>> params, double lr, double moment
     initialize_buffers();
 }
 
+SGD::SGD(std::vector<optim::ParamGroup> groups,
+         double default_lr, double default_momentum, double default_dampening,
+         double default_weight_decay, bool default_nesterov)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      momentum_(default_momentum),
+      dampening_(default_dampening),
+      weight_decay_(default_weight_decay),
+      nesterov_(default_nesterov) {
+    initialize_buffers();
+}
+
 auto SGD::step_impl() -> void {
+    // Audit D.4: resolve each parameter's hyperparameters from the
+    // active ParamGroup (with optimizer-member fallback). When the
+    // optimizer was constructed from a flat parameter list (no groups),
+    // `find_group_for_param` returns nullptr and we use the SGD member
+    // defaults — preserving pre-D.4 behaviour bit-for-bit.
+    struct HP { double lr, momentum, weight_decay, dampening; bool nesterov; };
+    auto resolve = [this](size_t i) -> HP {
+        HP hp{lr_, momentum_, weight_decay_, dampening_, nesterov_};
+        const auto* g = find_group_for_param(i);
+        if (g) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.momentum     = ParamGroup::or_else(g->momentum,  momentum_);
+            hp.dampening    = ParamGroup::or_else(g->dampening, dampening_);
+            hp.nesterov     = ParamGroup::or_else(g->nesterov,  nesterov_);
+        }
+        return hp;
+    };
+
     // Collect CPU parameters eligible for _foreach_* batch path.
     // CUDA params go through the fused kernel; all others are batched.
-    std::vector<Tensor*> batch_params;
-    std::vector<Tensor>  batch_grads;
-    std::vector<size_t>  batch_indices;
+    struct CpuEntry {
+        Tensor* param;
+        Tensor  grad;
+        size_t  idx;
+        HP      hp;
+    };
+    std::vector<CpuEntry> cpu;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+        HP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
@@ -33,72 +69,80 @@ auto SGD::step_impl() -> void {
         if (param_tensor.device().type == Device::Type::CUDA &&
             (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
             std::vector<Tensor> inputs = {param_tensor, grad_tensor};
-            if (momentum_ > 0.0) {
+            if (hp.momentum > 0.0) {
                 inputs.push_back(velocity_buffers_[i]);
             }
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, lr_);
-            attrs.set(AttrKey::Momentum, momentum_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
-            attrs.set(AttrKey::Dampening, dampening_);
-            attrs.set(AttrKey::Nesterov, nesterov_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Momentum, hp.momentum);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
+            attrs.set(AttrKey::Dampening, hp.dampening);
+            attrs.set(AttrKey::Nesterov, hp.nesterov);
             dispatch(OpId::FusedSGDStep, inputs, attrs);
             continue;
         }
 
         // ── CPU: clone grad and apply weight decay ────────────────────────────
         auto g = grad_tensor.clone();
-        if (weight_decay_ > 0.0) {
+        if (hp.weight_decay > 0.0) {
             g = g + param_tensor *
-                full({1}, weight_decay_, param_tensor.dtype(), param_tensor.device());
+                full({1}, hp.weight_decay, param_tensor.dtype(), param_tensor.device());
         }
-        batch_params.push_back(&param_tensor);
-        batch_grads.push_back(std::move(g));
-        batch_indices.push_back(i);
+        cpu.push_back({&param_tensor, std::move(g), i, hp});
     }
 
-    if (batch_params.empty()) return;
+    if (cpu.empty()) return;
 
-    if (momentum_ > 0.0) {
-        // Momentum update: v = momentum*v + (1-dampening)*grad
-        // This is NOT a lerp (lerp would be: v = (1-w)*v + w*grad).
-        // Use per-param scalar tensors to preserve dtype precision.
-        for (size_t k = 0; k < batch_params.size(); ++k) {
-            size_t idx = batch_indices[k];
-            auto& vel    = velocity_buffers_[idx];
-            auto& p      = *batch_params[k];
-            auto dtype   = p.dtype();
-            auto dev     = p.device();
+    // Audit D.4: detect "any momentum" across the batch; the foreach
+    // fast path can only be taken when every CPU param has momentum=0
+    // (otherwise we'd need per-param velocity buffers which the batched
+    // _foreach_mul/_sub_ kernels don't support).  This is a strict
+    // generalisation of the pre-D.4 single-momentum check.
+    bool any_momentum = false;
+    for (const auto& e : cpu) if (e.hp.momentum > 0.0) { any_momentum = true; break; }
 
-            vel = vel * full({1}, momentum_, dtype, dev) +
-                  batch_grads[k] * full({1}, 1.0 - dampening_, dtype, dev);
+    if (any_momentum) {
+        // Per-parameter update; each entry carries its resolved
+        // hyperparams so different groups can use different momentum.
+        for (const auto& e : cpu) {
+            auto& vel  = velocity_buffers_[e.idx];
+            auto& p    = *e.param;
+            auto dtype = p.dtype();
+            auto dev   = p.device();
 
-            Tensor eff_grad = nesterov_
-                ? batch_grads[k] + vel * full({1}, momentum_, dtype, dev)
-                : vel;
+            if (e.hp.momentum > 0.0) {
+                vel = vel * full({1}, e.hp.momentum, dtype, dev) +
+                      e.grad * full({1}, 1.0 - e.hp.dampening, dtype, dev);
 
-            p = p - eff_grad * full({1}, lr_, dtype, dev);
+                Tensor eff_grad = e.hp.nesterov
+                    ? e.grad + vel * full({1}, e.hp.momentum, dtype, dev)
+                    : vel;
+
+                p = p - eff_grad * full({1}, e.hp.lr, dtype, dev);
+            } else {
+                // momentum == 0 inside a mixed-momentum batch: vanilla SGD.
+                p = p - e.grad * full({1}, e.hp.lr, dtype, dev);
+            }
         }
-    } else {
-        // No momentum: param -= lr * grad  — use _foreach_* batch path.
-        std::vector<Tensor> params_view;
-        params_view.reserve(batch_params.size());
-        for (auto* p : batch_params) params_view.push_back(*p);
+        return;
+    }
 
-        std::vector<Tensor> lr_list;
-        lr_list.reserve(batch_params.size());
-        for (size_t k = 0; k < batch_params.size(); ++k) {
-            auto dtype = batch_params[k]->dtype();
-            auto dev   = batch_params[k]->device();
-            lr_list.push_back(full({1}, lr_, dtype, dev));
-        }
-        // scaled[k] = lr * grad[k]
-        auto scaled = foreach_mul(batch_grads, lr_list);
-        // param[k] -= scaled[k]
-        foreach_sub_(params_view, scaled);
-
-        for (size_t k = 0; k < batch_params.size(); ++k)
-            *batch_params[k] = params_view[k];
+    // No momentum anywhere in the batch: vanilla SGD via _foreach_*.
+    std::vector<Tensor> params_view;
+    std::vector<Tensor> grads;
+    std::vector<Tensor> lr_list;
+    params_view.reserve(cpu.size());
+    grads.reserve(cpu.size());
+    lr_list.reserve(cpu.size());
+    for (const auto& e : cpu) {
+        params_view.push_back(*e.param);
+        grads.push_back(e.grad);
+        lr_list.push_back(full({1}, e.hp.lr, e.param->dtype(), e.param->device()));
+    }
+    auto scaled = foreach_mul(grads, lr_list);
+    foreach_sub_(params_view, scaled);
+    for (size_t k = 0; k < cpu.size(); ++k) {
+        *cpu[k].param = params_view[k];
     }
 }
 

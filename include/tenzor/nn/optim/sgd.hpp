@@ -83,6 +83,21 @@ public:
         double weight_decay = 0.0,
         bool nesterov = false);
 
+    /**
+     * @brief Construct from a list of `ParamGroup`s (audit D.4).
+     *
+     * Each group can override any subset of the SGD hyperparameters
+     * (momentum, dampening, nesterov, lr, weight_decay).  Groups that
+     * don't set an override fall back to the SGD member defaults
+     * supplied here.
+     */
+    explicit SGD(std::vector<optim::ParamGroup> groups,
+                 double default_lr = 0.01,
+                 double default_momentum = 0.0,
+                 double default_dampening = 0.0,
+                 double default_weight_decay = 0.0,
+                 bool default_nesterov = false);
+
     /** @brief Perform single SGD step with momentum */
     auto step_impl() -> void override;
 
