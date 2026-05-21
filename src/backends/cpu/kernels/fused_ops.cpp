@@ -39,6 +39,11 @@ namespace cpu {
 // Forward declaration for conv2d_forward_kernel (used by fused conv+activation kernels)
 auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                            int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+// Per-axis overload (audit F.11) — defined in conv2d.cpp.
+auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor;
 
 /**
  * @brief Fused linear + ReLU kernel (CPU implementation)
@@ -160,6 +165,40 @@ auto fused_linear_relu_kernel(
  * Delegates to conv2d_forward_kernel (im2col+GEMM) then applies ReLU in-place.
  * Supports dilation and groups for parity with CUDA backend.
  */
+// Per-axis overload — preferred entry point for anisotropic stride/pad/dilation
+// (audit F.11).  Delegates to the per-axis conv2d_forward_kernel overload.
+auto fused_conv2d_relu_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
+    int64_t groups
+) -> Tensor {
+    Tensor result = conv2d_forward_kernel(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                          groups);
+    int64_t n = result.numel();
+    if (result.dtype() == DType::Float32) {
+        float* data = result.data<float>();
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = std::max(0.0f, data[i]);
+        }
+    } else if (result.dtype() == DType::Float64) {
+        double* data = result.data<double>();
+        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = std::max(0.0, data[i]);
+        }
+    }
+    return result;
+}
+
 auto fused_conv2d_relu_kernel(
     const Tensor& input,
     const Tensor& weight,
@@ -1562,9 +1601,13 @@ auto apply_swish_inplace(T* data, int64_t n) -> void {
 
 } // anonymous namespace
 
+// Per-axis overloads (audit F.11) — delegate to per-axis conv2d_forward_kernel.
 auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                  int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias, stride, padding, dilation, groups);
+                                  int64_t stride_h, int64_t stride_w,
+                                  int64_t pad_h, int64_t pad_w,
+                                  int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
+    Tensor result = conv2d_forward_kernel(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     int64_t n = result.numel();
     if (result.dtype() == DType::Float32) {
         apply_sigmoid_inplace(result.data<float>(), n);
@@ -1574,9 +1617,18 @@ auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, cons
     return result;
 }
 
+auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                  int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
+    return fused_conv2d_sigmoid_kernel(input, weight, bias,
+                                       stride, stride, padding, padding, dilation, dilation, groups);
+}
+
 auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                               int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias, stride, padding, dilation, groups);
+                               int64_t stride_h, int64_t stride_w,
+                               int64_t pad_h, int64_t pad_w,
+                               int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
+    Tensor result = conv2d_forward_kernel(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     int64_t n = result.numel();
     if (result.dtype() == DType::Float32) {
         apply_tanh_inplace(result.data<float>(), n);
@@ -1586,9 +1638,18 @@ auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const T
     return result;
 }
 
+auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                               int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
+    return fused_conv2d_tanh_kernel(input, weight, bias,
+                                    stride, stride, padding, padding, dilation, dilation, groups);
+}
+
 auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias, stride, padding, dilation, groups);
+                                int64_t stride_h, int64_t stride_w,
+                                int64_t pad_h, int64_t pad_w,
+                                int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
+    Tensor result = conv2d_forward_kernel(input, weight, bias,
+                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     int64_t n = result.numel();
     if (result.dtype() == DType::Float32) {
         apply_swish_inplace(result.data<float>(), n);
@@ -1596,6 +1657,12 @@ auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const 
         apply_swish_inplace(result.data<double>(), n);
     }
     return result;
+}
+
+auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor {
+    return fused_conv2d_swish_kernel(input, weight, bias,
+                                     stride, stride, padding, padding, dilation, dilation, groups);
 }
 
 // =========================================================================

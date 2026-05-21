@@ -415,6 +415,8 @@ namespace cpu {
     // Fused operations
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    // Per-axis overload (audit F.11).
+    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor;
     auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, bool compute_grad, const std::string& reduction = "mean") -> std::vector<Tensor>;
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -597,12 +599,25 @@ namespace cpu {
                                    uint64_t philox_offset = 0) -> std::vector<Tensor>;
 
     // Fused Conv2d + Activation variants
+    // Scalar (back-compat) + per-axis (audit F.11) overloads.
     auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                      int64_t stride_h, int64_t stride_w,
+                                      int64_t pad_h, int64_t pad_w,
+                                      int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor;
     auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                    int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                   int64_t stride_h, int64_t stride_w,
+                                   int64_t pad_h, int64_t pad_w,
+                                   int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor;
     auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                     int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                    int64_t stride_h, int64_t stride_w,
+                                    int64_t pad_h, int64_t pad_w,
+                                    int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor;
 
     // BatchNorm2d fused training
     auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean, Tensor& running_var,
@@ -2087,12 +2102,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Audit F.11: read per-axis stride/padding/dilation with scalar fallback.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+        return cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias,
+                                             stride[0], stride[1],
+                                             padding[0], padding[1],
+                                             dilation[0], dilation[1], groups);
     });
 
     table.register_single_output_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3263,30 +3282,42 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // Fused Conv2d + Activation Variants
     // =========================================================================
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Audit F.11: per-axis stride/padding/dilation.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cpu::fused_conv2d_sigmoid_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+        return cpu::fused_conv2d_sigmoid_kernel(inputs[0], inputs[1], bias,
+                                                stride[0], stride[1],
+                                                padding[0], padding[1],
+                                                dilation[0], dilation[1], groups);
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Audit F.11: per-axis stride/padding/dilation.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cpu::fused_conv2d_tanh_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+        return cpu::fused_conv2d_tanh_kernel(inputs[0], inputs[1], bias,
+                                             stride[0], stride[1],
+                                             padding[0], padding[1],
+                                             dilation[0], dilation[1], groups);
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Audit F.11: per-axis stride/padding/dilation.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cpu::fused_conv2d_swish_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+        return cpu::fused_conv2d_swish_kernel(inputs[0], inputs[1], bias,
+                                              stride[0], stride[1],
+                                              padding[0], padding[1],
+                                              dilation[0], dilation[1], groups);
     });
 
     // =========================================================================
