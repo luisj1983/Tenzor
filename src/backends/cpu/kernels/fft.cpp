@@ -965,17 +965,25 @@ auto ifftn_kernel(const Tensor& input,
 #else // !TENZOR_USE_MKL
 
 // ============================================================================
-// Wave Inf-A: non-MKL CPU FFT fallback.
+// Non-MKL CPU FFT fallback (Wave Inf-A, expanded under audits M4 / F.6).
 //
-// Direct O(N²) discrete Fourier transform — correct for any signal length
-// without requiring vendored libraries. The MKL path (above) is the
-// production fast-path at O(N log N); this fallback exists so unit tests pass
-// and small-signal FFTs work in MKL-free builds (e.g. dev machines without
-// the oneAPI installer, ARM hosts, CI sanity-builds).
+// Hierarchy of paths inside `dft_1d_strided`:
+//   1. Power-of-2 N, contiguous (inner == 1): iterative Cooley-Tukey
+//      radix-2 in-place. O(N log N).
+//   2. Arbitrary N (including non-power-of-2), N_in == N_out:
+//      Bluestein's chirp-Z transform built on the radix-2 FFT.
+//      O(N log N).  The chirp factors and FFT(B) are cached in a
+//      BluesteinContext so multi-row dispatches share the work.
+//   3. Resampling (N_in != N_out): direct O(N²) DFT.  This is a
+//      different operation (zero-pad / truncate then transform) and
+//      isn't faster with any FFT algorithm — the O(N²) cost is
+//      inherent to the definition.
 //
-// A future Cooley-Tukey + Bluestein implementation (or a vendored PocketFFT)
-// would replace these with O(N log N); plumbing it in is the documented
-// follow-up. The kernel API is unchanged so the switch is internal.
+// Audit F.6 conclusion: vendoring PocketFFT was considered as an
+// alternative, but the in-tree Cooley-Tukey + Bluestein covers every
+// non-resampling case at O(N log N) using only the existing infra
+// (no new 3000-LoC header dependency).  The kernel API is unchanged
+// so callers see no difference between this and the MKL fast path.
 // ============================================================================
 namespace {
 
