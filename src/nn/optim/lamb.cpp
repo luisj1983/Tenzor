@@ -13,13 +13,50 @@ LAMB::LAMB(std::vector<std::shared_ptr<Variable>> params, double lr, double beta
     initialize_buffers();
 }
 
+LAMB::LAMB(std::vector<optim::ParamGroup> groups,
+           double default_lr, double default_beta1, double default_beta2,
+           double default_eps, double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
+
 auto LAMB::step_impl() -> void {
     step_count_++;
+
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this LAMB instance.
+    struct LAMBHP {
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> LAMBHP {
+        LAMBHP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const LAMBHP hp = resolve(i);
 
         const Tensor& grad = param.grad().value();
 
@@ -28,24 +65,24 @@ auto LAMB::step_impl() -> void {
         };
 
         // Update moment estimates (no weight decay in moment computation)
-        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
-                     grad * scalar(1.0 - beta1_);
-        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
-                        grad * grad * scalar(1.0 - beta2_);
+        exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                     grad * scalar(1.0 - hp.beta1);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                        grad * grad * scalar(1.0 - hp.beta2);
 
         // Bias correction
-        double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-        double bias_correction2 = 1.0 - std::pow(beta2_, step_count_);
+        double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
+        double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
 
         auto m_hat = exp_avg_[i] * scalar(1.0 / bias_correction1);
         auto v_hat = exp_avg_sq_[i] * scalar(1.0 / bias_correction2);
 
         // Adam update direction
-        auto update = div(m_hat, sqrt(v_hat) + scalar(eps_));
+        auto update = div(m_hat, sqrt(v_hat) + scalar(hp.eps));
 
         // Decoupled weight decay
-        if (weight_decay_ > 0.0) {
-            update = update + param.tensor() * scalar(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            update = update + param.tensor() * scalar(hp.weight_decay);
         }
 
         // Compute trust ratio (LAMB scaling)
@@ -71,7 +108,7 @@ auto LAMB::step_impl() -> void {
         }
 
         // Apply update with trust ratio
-        param.tensor() = param.tensor() - update * scalar(lr_ * trust_ratio);
+        param.tensor() = param.tensor() - update * scalar(hp.lr * trust_ratio);
     }
 }
 

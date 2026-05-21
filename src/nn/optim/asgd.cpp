@@ -13,11 +13,49 @@ ASGD::ASGD(std::vector<std::shared_ptr<Variable>> params, double lr, double lamb
     initialize_buffers();
 }
 
+ASGD::ASGD(std::vector<optim::ParamGroup> groups,
+           double default_lr, double default_lambd,
+           double default_alpha, double default_t0,
+           double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      lambd_(default_lambd),
+      alpha_(default_alpha),
+      t0_(default_t0),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
+
 auto ASGD::step_impl() -> void {
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this ASGD instance.
+    // lambd and t0 have no ParamGroup-level override fields, so they
+    // always use the optimiser-wide defaults.
+    struct ASGDHP {
+        double lr;
+        double lambd;
+        double alpha;
+        double t0;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> ASGDHP {
+        ASGDHP hp{lr_, lambd_, alpha_, t0_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.alpha        = ParamGroup::or_else(g->alpha, alpha_);
+        }
+        return hp;
+    };
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const ASGDHP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
@@ -30,12 +68,12 @@ auto ASGD::step_impl() -> void {
         auto grad = grad_tensor.clone();
 
         // Weight decay (L2 regularization applied to gradient)
-        if (weight_decay_ > 0.0) {
-            grad = grad + param_tensor * scalar(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad = grad + param_tensor * scalar(hp.weight_decay);
         }
 
         // Compute step-dependent learning rate: eta_t = lr / (1 + lambd * lr * t)^alpha
-        double eta = lr_ / std::pow(1.0 + lambd_ * lr_ * static_cast<double>(step_count_), alpha_);
+        double eta = hp.lr / std::pow(1.0 + hp.lambd * hp.lr * static_cast<double>(step_count_), hp.alpha);
 
         // SGD update with decayed learning rate
         param_tensor = param_tensor - grad * scalar(eta);
@@ -43,7 +81,7 @@ auto ASGD::step_impl() -> void {
         // Update running average after t0 steps
         // mu_t = max(1, t - t0)
         // ax_t = (1 - 1/mu_t) * ax_{t-1} + (1/mu_t) * x_t
-        double mu = std::max(1.0, static_cast<double>(step_count_) - t0_);
+        double mu = std::max(1.0, static_cast<double>(step_count_) - hp.t0);
         double inv_mu = 1.0 / mu;
         ax_buffers_[i] = ax_buffers_[i] * scalar(1.0 - inv_mu) + param_tensor * scalar(inv_mu);
     }

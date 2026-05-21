@@ -12,11 +12,48 @@ Rprop::Rprop(std::vector<std::shared_ptr<Variable>> params, double lr, double et
     initialize_buffers();
 }
 
+Rprop::Rprop(std::vector<optim::ParamGroup> groups,
+             double default_lr, double default_eta_minus,
+             double default_eta_plus, double default_step_min,
+             double default_step_max)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      eta_minus_(default_eta_minus),
+      eta_plus_(default_eta_plus),
+      step_min_(default_step_min),
+      step_max_(default_step_max) {
+    initialize_buffers();
+}
+
 auto Rprop::step_impl() -> void {
+    // Audit D.4: per-parameter hyperparameters resolve from the active
+    // ParamGroup (when one was set up) or fall through to the optimiser-
+    // wide defaults stored on this Rprop instance. Only `lr` has a
+    // ParamGroup field; Rprop-specific knobs (eta_minus, eta_plus,
+    // step_min, step_max) have no ParamGroup override and always fall
+    // back to the member defaults.
+    struct RpropHP {
+        double lr;
+        double eta_minus;
+        double eta_plus;
+        double step_min;
+        double step_max;
+    };
+
+    auto resolve = [&](size_t i) -> RpropHP {
+        RpropHP hp{lr_, eta_minus_, eta_plus_, step_min_, step_max_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr = g->lr;
+        }
+        return hp;
+    };
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const RpropHP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
@@ -41,11 +78,11 @@ auto Rprop::step_impl() -> void {
 
             // Adapt step sizes
             auto new_steps = step_sizes_[i].clone();
-            new_steps = where(pos_mask, new_steps * scalar(eta_plus_), new_steps);
-            new_steps = where(neg_mask, new_steps * scalar(eta_minus_), new_steps);
+            new_steps = where(pos_mask, new_steps * scalar(hp.eta_plus), new_steps);
+            new_steps = where(neg_mask, new_steps * scalar(hp.eta_minus), new_steps);
 
             // Clamp step sizes
-            new_steps = clamp(new_steps, static_cast<float>(step_min_), static_cast<float>(step_max_));
+            new_steps = clamp(new_steps, static_cast<float>(hp.step_min), static_cast<float>(hp.step_max));
             step_sizes_[i] = new_steps;
 
             // Where sign flipped, zero out the gradient (don't use it this step)
@@ -57,6 +94,11 @@ auto Rprop::step_impl() -> void {
 
         // Store current gradient for next step
         prev_grads_[i] = grad.clone();
+
+        // Note: hp.lr is captured for API symmetry with other optimisers but
+        // Rprop's update does not consume the LR directly during a step --
+        // it only seeds per-parameter `step_sizes_` at construction time.
+        (void)hp.lr;
     }
 
     first_step_ = false;

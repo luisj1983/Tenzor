@@ -58,6 +58,18 @@ public:
          double beta2 = 0.99,
          double weight_decay = 0.0);
 
+    /**
+     * @brief Construct from a list of parameter groups (audit D.4).
+     *
+     * Per-group hyperparameters override the defaults supplied here when
+     * resolved inside @ref step_impl.
+     */
+    explicit Lion(std::vector<optim::ParamGroup> groups,
+                  double default_lr = 1e-4,
+                  double default_beta1 = 0.9,
+                  double default_beta2 = 0.99,
+                  double default_weight_decay = 0.0);
+
     /** @brief Perform a single Lion step */
     auto step_impl() -> void override;
 

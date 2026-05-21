@@ -13,13 +13,47 @@ Lion::Lion(std::vector<std::shared_ptr<Variable>> params,
     initialize_buffers();
 }
 
+Lion::Lion(std::vector<optim::ParamGroup> groups,
+           double default_lr, double default_beta1,
+           double default_beta2, double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
+
 auto Lion::step_impl() -> void {
     step_count_++;
+
+    // Audit D.4: per-parameter hyperparameters resolve from the active
+    // ParamGroup (when one was set up) or fall through to the optimiser-wide
+    // defaults stored on this Lion instance.
+    struct LionHP {
+        double lr;
+        double beta1;
+        double beta2;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> LionHP {
+        LionHP hp{lr_, beta1_, beta2_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+        }
+        return hp;
+    };
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const LionHP hp = resolve(i);
 
         const Tensor& grad = param.grad().value();
 
@@ -30,17 +64,17 @@ auto Lion::step_impl() -> void {
         };
 
         // c_t = beta1 * m_{t-1} + (1 - beta1) * g_t   — update direction
-        auto c = momentum_[i] * scalar(beta1_) + grad * scalar(1.0 - beta1_);
+        auto c = momentum_[i] * scalar(hp.beta1) + grad * scalar(1.0 - hp.beta1);
 
         // theta_t = theta_{t-1} - lr * (sign(c_t) + wd * theta_{t-1})
         Tensor step = sign(c);
-        if (weight_decay_ > 0.0) {
-            step = step + param.tensor() * scalar(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            step = step + param.tensor() * scalar(hp.weight_decay);
         }
-        param.tensor() = param.tensor() - step * scalar(lr_);
+        param.tensor() = param.tensor() - step * scalar(hp.lr);
 
         // m_t = beta2 * m_{t-1} + (1 - beta2) * g_t   — momentum state
-        momentum_[i] = momentum_[i] * scalar(beta2_) + grad * scalar(1.0 - beta2_);
+        momentum_[i] = momentum_[i] * scalar(hp.beta2) + grad * scalar(1.0 - hp.beta2);
     }
 }
 

@@ -86,6 +86,20 @@ public:
           double step_min = 1e-6,
           double step_max = 50.0);
 
+    /**
+     * @brief Construct Rprop from explicit parameter groups (audit D.4).
+     *
+     * Each ParamGroup may override `lr`. Rprop-specific hyperparameters
+     * (eta_minus, eta_plus, step_min, step_max) have no ParamGroup field,
+     * so they fall back to the optimiser-wide defaults supplied here.
+     */
+    explicit Rprop(std::vector<optim::ParamGroup> groups,
+                   double default_lr = 0.01,
+                   double default_eta_minus = 0.5,
+                   double default_eta_plus = 1.2,
+                   double default_step_min = 1e-6,
+                   double default_step_max = 50.0);
+
     /** @brief Perform single Rprop step */
     auto step_impl() -> void override;
 

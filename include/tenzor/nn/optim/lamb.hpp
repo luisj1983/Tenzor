@@ -29,6 +29,13 @@ public:
          double eps = 1e-6,
          double weight_decay = 0.01);
 
+    explicit LAMB(std::vector<optim::ParamGroup> groups,
+                  double default_lr = 1e-3,
+                  double default_beta1 = 0.9,
+                  double default_beta2 = 0.999,
+                  double default_eps = 1e-6,
+                  double default_weight_decay = 0.01);
+
     auto step_impl() -> void override;
     auto set_lr(double lr) -> void override;
     auto get_lr() const -> double override;

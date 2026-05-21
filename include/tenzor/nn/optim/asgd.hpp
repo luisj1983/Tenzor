@@ -85,6 +85,20 @@ public:
          double t0 = 1e6,
          double weight_decay = 0.0);
 
+    /**
+     * @brief Construct ASGD from parameter groups (audit D.4).
+     *
+     * Each group's lr and weight_decay (plus the optional alpha override)
+     * are honoured per-parameter in step_impl(); other hyperparams fall
+     * back to the optimizer-wide defaults supplied here.
+     */
+    explicit ASGD(std::vector<optim::ParamGroup> groups,
+                  double default_lr = 0.01,
+                  double default_lambd = 1e-4,
+                  double default_alpha = 0.75,
+                  double default_t0 = 1e6,
+                  double default_weight_decay = 0.0);
+
     /** @brief Perform single ASGD step with parameter averaging */
     auto step_impl() -> void override;
 
