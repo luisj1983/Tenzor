@@ -26,8 +26,18 @@
 #include <vector>
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
+#include "../backend/op_attributes.hpp"
 
 namespace tenzor {
+
+// OpAttributes is defined as `using OpAttributes = NewOpAttributes` in
+// backend/backend.hpp. We re-declare the alias locally so that this header
+// does not need to pull in the much heavier backend.hpp transitively.
+#ifndef TENZOR_OPATTRIBUTES_ALIAS_DEFINED
+#define TENZOR_OPATTRIBUTES_ALIAS_DEFINED
+using OpAttributes = NewOpAttributes;
+#endif
+
 namespace lazy {
 
 // Forward declarations
@@ -105,8 +115,15 @@ public:
     LazyNode(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
              std::vector<int64_t> output_shape, DType output_dtype, Device output_device);
 
+    /// Computation node with op-specific attributes (preferred — attributes carry
+    /// dim/shape/keepdim values required by the generic backend dispatch path).
+    LazyNode(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
+             std::vector<int64_t> output_shape, DType output_dtype, Device output_device,
+             OpAttributes attrs);
+
     auto op() const -> std::optional<OpId> { return op_; }
     auto inputs() const -> const std::vector<std::shared_ptr<LazyNode>>& { return inputs_; }
+    auto attrs() const -> const OpAttributes& { return attrs_; }
     auto shape() const -> const std::vector<int64_t>& { return shape_; }
     auto dtype() const -> DType { return dtype_; }
     auto device() const -> Device { return device_; }
@@ -127,6 +144,7 @@ public:
 private:
     std::optional<OpId> op_;
     std::vector<std::shared_ptr<LazyNode>> inputs_;
+    OpAttributes attrs_;
     std::vector<int64_t> shape_;
     DType dtype_;
     Device device_;
@@ -151,19 +169,39 @@ public:
     auto add_placeholder(std::vector<int64_t> shape, DType dtype, Device device,
                          const std::string& name = "") -> std::shared_ptr<LazyNode>;
 
-    /// Add a computation node.
+    /// Add a computation node (no attributes).
     auto add_node(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
                   std::vector<int64_t> output_shape, DType output_dtype,
                   Device output_device) -> std::shared_ptr<LazyNode>;
 
+    /// Add a computation node with op-specific attributes.
+    auto add_node(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
+                  std::vector<int64_t> output_shape, DType output_dtype,
+                  Device output_device, OpAttributes attrs) -> std::shared_ptr<LazyNode>;
+
+    /// Attach a node that was created by another LazyGraph (used by merge_graphs).
+    void adopt_node(std::shared_ptr<LazyNode> node);
+
     /// Execute the graph to materialize a specific node.
     auto execute(const std::shared_ptr<LazyNode>& target) -> Tensor;
+
+    /// Run every unrealised node in topological order. Result is bit-identical
+    /// to invoking the same ops eagerly (modulo non-determinism in the kernels
+    /// themselves).
+    void flush();
 
     /// Get all nodes in topological order.
     auto nodes() const -> const std::vector<std::shared_ptr<LazyNode>>& { return nodes_; }
 
     /// Get number of nodes.
     auto size() const -> size_t { return nodes_.size(); }
+
+    /// Build a new LazyGraph whose nodes are the union of `a`'s and `b`'s nodes,
+    /// preserving edges. Used to combine two independent lazy subgraphs into a
+    /// single materialisation context.
+    static auto merge_graphs(const std::shared_ptr<LazyGraph>& a,
+                             const std::shared_ptr<LazyGraph>& b)
+        -> std::shared_ptr<LazyGraph>;
 
 private:
     std::vector<std::shared_ptr<LazyNode>> nodes_;
