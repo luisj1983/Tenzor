@@ -16,7 +16,28 @@ SAM::SAM(std::shared_ptr<Optimizer> base_optimizer, double rho)
     }
 }
 
+SAM::SAM(std::vector<optim::ParamGroup> groups,
+         std::shared_ptr<Optimizer> base_optimizer,
+         double default_rho)
+    : Optimizer(std::move(groups)),
+      base_optimizer_(std::move(base_optimizer)),
+      rho_(default_rho) {
+    if (rho_ < 0.0) {
+        throw std::invalid_argument("SAM: rho must be non-negative");
+    }
+}
+
 auto SAM::first_step() -> void {
+    // Audit D.4: per-parameter `rho` resolves from the active ParamGroup
+    // (when one was set up via the ParamGroup-list constructor) or falls
+    // through to the optimiser-wide default stored on this SAM instance.
+    auto resolve = [&](size_t i) -> double {
+        if (const auto* g = find_group_for_param(i)) {
+            return ParamGroup::or_else(g->rho, rho_);
+        }
+        return rho_;
+    };
+
     // Compute global gradient norm across all parameters
     double grad_norm_sq = 0.0;
 
@@ -32,13 +53,14 @@ auto SAM::first_step() -> void {
     }
 
     double grad_norm = std::sqrt(grad_norm_sq) + 1e-12;  // Avoid division by zero
-    double scale = rho_ / grad_norm;
 
     // Compute and apply perturbation for each parameter
     epsilon_.clear();
     epsilon_.reserve(parameters_.size());
 
-    for (auto& param_ptr : parameters_) {
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        auto& param_ptr = parameters_[i];
+
         if (!param_ptr || !param_ptr->has_grad()) {
             epsilon_.emplace_back();  // Empty tensor placeholder
             continue;
@@ -46,7 +68,11 @@ auto SAM::first_step() -> void {
 
         const Tensor& grad = param_ptr->grad().value();
 
-        // epsilon_i = rho * grad_i / ||grad||_2
+        // Per-parameter rho (from ParamGroup or instance default); global norm.
+        const double rho_i = resolve(i);
+        const double scale = rho_i / grad_norm;
+
+        // epsilon_i = rho_i * grad_i / ||grad||_2
         auto scalar = [&](double value) -> Tensor {
             return full({1}, value, param_ptr->tensor().dtype(), param_ptr->tensor().device());
         };

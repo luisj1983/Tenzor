@@ -85,6 +85,21 @@ public:
               bool amsgrad = false);
 
     /**
+     * @brief Construct Adam-atan2 with per-group hyperparameters (audit D.4)
+     *
+     * Each `ParamGroup` may override `lr`, `weight_decay`, `beta1`, `beta2`,
+     * `eps`; otherwise the corresponding default is used. `amsgrad` remains
+     * a single optimiser-wide setting (no ParamGroup field).
+     */
+    explicit AdamAtan2(std::vector<optim::ParamGroup> groups,
+                       double default_lr = 1e-3,
+                       double default_beta1 = 0.9,
+                       double default_beta2 = 0.999,
+                       double default_eps = 1e-8,
+                       double default_weight_decay = 0.01,
+                       bool amsgrad = false);
+
+    /**
      * @brief Perform single optimization step with atan2 update
      */
     auto step_impl() -> void override;

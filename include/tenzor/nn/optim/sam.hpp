@@ -71,6 +71,22 @@ public:
     SAM(std::shared_ptr<Optimizer> base_optimizer, double rho = 0.05);
 
     /**
+     * @brief Construct SAM with explicit ParamGroups (audit item D.4).
+     *
+     * SAM owns its own ParamGroup list for tracking per-parameter `rho`
+     * overrides; the wrapped base optimiser still owns its own groups for
+     * its hyperparameters (lr / weight_decay / etc.).
+     *
+     * @param groups          Parameter groups (each may override `rho`)
+     * @param base_optimizer  Underlying optimiser that performs the actual step
+     * @param default_rho     Default neighbourhood size when a group does not
+     *                        specify one (default: 0.05)
+     */
+    SAM(std::vector<optim::ParamGroup> groups,
+        std::shared_ptr<Optimizer> base_optimizer,
+        double default_rho = 0.05);
+
+    /**
      * @brief Compute and apply weight perturbation.
      *
      * Computes epsilon = rho * grad / ||grad||_2 for each parameter and

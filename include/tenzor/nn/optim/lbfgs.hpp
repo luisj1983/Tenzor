@@ -68,6 +68,28 @@ public:
           LBFGSLineSearch line_search = LBFGSLineSearch::StrongWolfe);
 
     /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     *
+     * L-BFGS is a quasi-Newton method that flattens *all* parameters into a
+     * single vector and operates on the global gradient. As in PyTorch's
+     * `torch.optim.LBFGS`, exactly one ParamGroup is supported — passing
+     * more than one (or zero) throws `std::invalid_argument`.
+     *
+     * The group's `lr` overrides the optimiser-wide default; everything
+     * else (max_iter / tolerances / history_size / line search variant) is
+     * LBFGS-specific and has no ParamGroup field, so the defaults supplied
+     * here are authoritative.
+     */
+    explicit LBFGS(std::vector<optim::ParamGroup> groups,
+                   double default_lr = 1.0,
+                   int default_max_iter = 20,
+                   int default_max_eval = -1,
+                   double default_tolerance_grad = 1e-7,
+                   double default_tolerance_change = 1e-9,
+                   int default_history_size = 100,
+                   LBFGSLineSearch default_line_search = LBFGSLineSearch::StrongWolfe);
+
+    /**
      * @brief step() without a closure is not supported.
      *
      * L-BFGS requires the closure form because line search needs multiple

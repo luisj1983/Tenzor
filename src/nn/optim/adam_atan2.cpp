@@ -28,8 +28,42 @@ AdamAtan2::AdamAtan2(std::vector<std::shared_ptr<Variable>> params,
     update_stats_ = {0.0, 0.0, 0.0};
 }
 
+AdamAtan2::AdamAtan2(std::vector<optim::ParamGroup> groups,
+                     double default_lr, double default_beta1, double default_beta2,
+                     double default_eps, double default_weight_decay, bool amsgrad)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr), beta1_(default_beta1), beta2_(default_beta2),
+      eps_(default_eps), weight_decay_(default_weight_decay), amsgrad_(amsgrad) {
+    initialize_buffers();
+    update_stats_ = {0.0, 0.0, 0.0};
+}
+
 auto AdamAtan2::step_impl() -> void {
     step_count_++;
+
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this AdamAtan2 instance.
+    // `amsgrad` is not a ParamGroup field and stays optimiser-wide.
+    struct AdamAtan2HP {
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> AdamAtan2HP {
+        AdamAtan2HP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
 
     double total_update_mag = 0.0;
     double max_update_mag = 0.0;
@@ -40,6 +74,8 @@ auto AdamAtan2::step_impl() -> void {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const AdamAtan2HP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = param.grad().value();
@@ -57,11 +93,11 @@ auto AdamAtan2::step_impl() -> void {
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::Beta1, static_cast<float>(beta1_));
-            attrs.set(AttrKey::Beta2, static_cast<float>(beta2_));
-            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
+            attrs.set(AttrKey::Beta1, static_cast<float>(hp.beta1));
+            attrs.set(AttrKey::Beta2, static_cast<float>(hp.beta2));
+            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
             attrs.set(AttrKey::Step, step_count_);
             attrs.set(AttrKey::Amsgrad, amsgrad_);
 
@@ -81,16 +117,16 @@ auto AdamAtan2::step_impl() -> void {
         total_params++;
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * static_cast<float>(beta1_) +
-                     grad * static_cast<float>(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * static_cast<float>(hp.beta1) +
+                     grad * static_cast<float>(1.0 - hp.beta1);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(beta2_) +
-                        grad * grad * static_cast<float>(1.0 - beta2_);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(hp.beta2) +
+                        grad * grad * static_cast<float>(1.0 - hp.beta2);
 
         // Bias correction
-        double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-        double bias_correction2 = 1.0 - std::pow(beta2_, step_count_);
+        double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
+        double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
 
         // Compute bias-corrected estimates
         auto m_hat = exp_avg_[i] * static_cast<float>(1.0 / bias_correction1);
@@ -107,7 +143,7 @@ auto AdamAtan2::step_impl() -> void {
         }
 
         // Compute sqrt(v_hat) + eps
-        auto denom = sqrt(v_hat) + static_cast<float>(eps_);
+        auto denom = sqrt(v_hat) + static_cast<float>(hp.eps);
 
         // Adam-atan2 update: use atan(m_hat / denom) to approximate atan2
         // atan2(y, x) ≈ atan(y/x) when x > 0 (which is always true for denom)
@@ -126,12 +162,12 @@ auto AdamAtan2::step_impl() -> void {
         }
 
         // Decoupled weight decay (like AdamW)
-        if (weight_decay_ > 0) {
-            param.tensor() = param.tensor() * static_cast<float>(1.0 - lr_ * weight_decay_);
+        if (hp.weight_decay > 0) {
+            param.tensor() = param.tensor() * static_cast<float>(1.0 - hp.lr * hp.weight_decay);
         }
 
         // Apply update
-        param.tensor() = param.tensor() - update * static_cast<float>(lr_);
+        param.tensor() = param.tensor() - update * static_cast<float>(hp.lr);
     }
 
     // Update statistics (only meaningful when tracking is enabled)

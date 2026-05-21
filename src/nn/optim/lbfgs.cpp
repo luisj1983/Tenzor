@@ -124,6 +124,41 @@ LBFGS::LBFGS(std::vector<std::shared_ptr<Variable>> params,
     }
 }
 
+LBFGS::LBFGS(std::vector<optim::ParamGroup> groups,
+             double default_lr,
+             int default_max_iter,
+             int default_max_eval,
+             double default_tolerance_grad,
+             double default_tolerance_change,
+             int default_history_size,
+             LBFGSLineSearch default_line_search)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      max_iter_(default_max_iter),
+      max_eval_(default_max_eval >= 0
+                    ? default_max_eval
+                    : static_cast<int>(default_max_iter * 5 / 4)),
+      tolerance_grad_(default_tolerance_grad),
+      tolerance_change_(default_tolerance_change),
+      history_size_(default_history_size),
+      line_search_(default_line_search) {
+    // PyTorch parity: torch.optim.LBFGS rejects multi-group configurations
+    // because the two-loop recursion operates on a single flattened state
+    // vector. Per-group hyperparameter dispatch would require running an
+    // independent line search per group, which defeats the algorithm.
+    if (param_groups_.size() != 1) {
+        throw std::invalid_argument(
+            "LBFGS: exactly one ParamGroup is supported (got " +
+            std::to_string(param_groups_.size()) + ")");
+    }
+    if (parameters_.empty()) {
+        throw std::invalid_argument("LBFGS: parameter list must be non-empty");
+    }
+    if (history_size_ <= 0) {
+        throw std::invalid_argument("LBFGS: history_size must be positive");
+    }
+}
+
 auto LBFGS::step_impl() -> void {
     throw std::runtime_error(
         "LBFGS requires a closure. Call step(closure) instead of step().");
@@ -220,6 +255,12 @@ auto LBFGS::two_loop_recursion(const Tensor& grad) const -> Tensor {
 }
 
 auto LBFGS::step(std::function<Variable()> closure) -> Variable {
+    // Audit D.4: when constructed from a ParamGroup, the group's `lr`
+    // overrides the optimiser-wide default for *this* step. LBFGS is
+    // restricted to a single group (enforced in the ctor), so a single
+    // resolved scalar suffices — no per-parameter loop needed.
+    const double lr = param_groups_.empty() ? lr_ : param_groups_[0].lr;
+
     // Initial evaluation.
     Variable loss_var = closure();
     double loss = loss_to_double(loss_var);
@@ -311,8 +352,8 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
             double phi_prev = loss_0;
             double gtd_prev = gtd_0;
 
-            double alpha_curr = lr_;
-            double alpha_max = std::max(lr_ * 10.0, 10.0);
+            double alpha_curr = lr;
+            double alpha_max = std::max(lr * 10.0, 10.0);
 
             // Each probe spends one func eval; bail out if budget exhausted.
             const int ls_budget = std::max(1, max_eval_ - func_evals);
@@ -506,7 +547,7 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
             }
         } else {
             // --- Armijo backtracking (unchanged semantics) ---
-            double t = lr_;
+            double t = lr;
             auto [p0, g0, fg0, lv0] = eval_at(t);
             new_loss = p0;
             new_flat_grad = fg0;
