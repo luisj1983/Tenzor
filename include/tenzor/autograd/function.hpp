@@ -2500,6 +2500,108 @@ private:
     bool upper_{false};
 };
 
+
+/**
+ * @brief Backward function for SparseTensor -> dense conversion.
+ *
+ * For Y = sparse.to_dense() where the sparse input has a fixed CSR pattern:
+ * - The gradient with respect to the (conceptually differentiable) values of
+ *   the sparse tensor is grad_dense projected onto the original sparsity
+ *   pattern: positions outside the pattern contribute no gradient because
+ *   they were structural zeros in the forward.
+ * - Returns the gradient as a dense Tensor (same shape as the sparse tensor),
+ *   with entries outside the sparsity pattern zeroed.
+ *
+ * The sparsity pattern is captured at forward time as a 0/1 mask (saved via
+ * save_for_backward()) so the backward is a single elementwise multiply.
+ */
+class SparseToDenseBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SparseToDenseBackward"; }
+    auto op_id() const -> OpId override { return OpId::SparseToDense; }
+};
+
+/**
+ * @brief Backward function for dense -> SparseTensor conversion.
+ *
+ * For Y = dense_to_sparse(D, mask) (or by threshold), only entries selected
+ * by the mask (i.e. originally nonzero / above threshold) contribute to the
+ * sparse output. The gradient w.r.t. D therefore zeros out entries that
+ * were discarded:
+ *     grad_D = grad_Y_dense * mask
+ * where grad_Y_dense is the dense projection of the sparse gradient and
+ * `mask` is the 0/1 selection tensor saved at forward time.
+ */
+class DenseToSparseBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "DenseToSparseBackward"; }
+    auto op_id() const -> OpId override { return OpId::DenseToSparse; }
+};
+
+/**
+ * @brief Backward function for sparse softmax (CSR, per-row).
+ *
+ * Forward: Y = sparse_softmax(X) along the column axis of a CSR matrix;
+ * zeros stay zero (structural zeros are treated as -inf inputs and never
+ * participate in normalisation).
+ *
+ * Backward: standard softmax backward, restricted to the sparsity pattern:
+ *     grad_X = (grad_Y - sum(grad_Y * Y, dim=col, keepdim=true)) * Y
+ * Since both grad_Y and Y are zero outside the pattern, this naturally
+ * stays inside the pattern. We save Y (the forward output) and the CSR
+ * structure so the per-row reduction can be performed on the dense view.
+ */
+class SparseSoftmaxBackward : public Function {
+public:
+    /// Save the CSR structure (crow + col + shape) of the output for backward.
+    void set_output_pattern(SparseTensor out) { output_sparse_.emplace(std::move(out)); }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SparseSoftmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::SparseSoftmax; }
+
+private:
+    std::optional<SparseTensor> output_sparse_;  ///< Y = softmax(X) saved for backward.
+};
+
+/**
+ * @brief Backward function for sparse log-softmax (CSR, per-row).
+ *
+ * Forward: Y = sparse_log_softmax(X). Like SparseSoftmax, zeros remain zero
+ * structurally and do not enter the per-row normalisation.
+ *
+ * Backward: standard log-softmax backward, restricted to the sparsity
+ * pattern:
+ *     grad_X = grad_Y - exp(Y) * sum(grad_Y, dim=col, keepdim=true)
+ * We save Y (log-softmax output) and the CSR structure.
+ */
+class SparseLogSoftmaxBackward : public Function {
+public:
+    /// Save the CSR structure (crow + col + shape) of the output for backward.
+    void set_output_pattern(SparseTensor out) { output_sparse_.emplace(std::move(out)); }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SparseLogSoftmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::SparseLogSoftmax; }
+
+private:
+    std::optional<SparseTensor> output_sparse_;  ///< Y = log_softmax(X) saved for backward.
+};
+
 // ============================================================================
 // Custom Op Autograd
 // ============================================================================
