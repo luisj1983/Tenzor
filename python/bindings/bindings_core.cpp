@@ -4490,6 +4490,142 @@ Returns:
              py::arg("loc"), py::arg("scale"),
              "Gumbel (Type-I extreme value) distribution");
 
+    // ---- Audit E.4: 16 additional distributions ------------------------------
+
+    py::class_<tenzor::distributions::HalfNormal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::HalfNormal>>(dist_m, "HalfNormal")
+        .def(py::init<tenzor::Tensor>(), py::arg("scale"),
+             "HalfNormal distribution: |Normal(0, scale)|");
+
+    py::class_<tenzor::distributions::HalfCauchy,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::HalfCauchy>>(dist_m, "HalfCauchy")
+        .def(py::init<tenzor::Tensor>(), py::arg("scale"),
+             "HalfCauchy distribution: |Cauchy(0, scale)|");
+
+    py::class_<tenzor::distributions::FisherSnedecor,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::FisherSnedecor>>(dist_m, "FisherSnedecor")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("df1"), py::arg("df2"),
+             "Fisher-Snedecor (F) distribution with df1 and df2 degrees of freedom");
+
+    py::class_<tenzor::distributions::NegativeBinomial,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::NegativeBinomial>>(dist_m, "NegativeBinomial")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("total_count"), py::arg("probs"),
+             "Negative Binomial distribution parameterized by total_count and probs")
+        .def("cdf", &tenzor::distributions::NegativeBinomial::cdf, py::arg("value"),
+             "Cumulative distribution function")
+        .def("icdf", &tenzor::distributions::NegativeBinomial::icdf, py::arg("q"),
+             "Inverse CDF (quantile function)");
+
+    py::class_<tenzor::distributions::VonMises,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::VonMises>>(dist_m, "VonMises")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("concentration"),
+             "Von Mises distribution on the circle, parameterized by loc and concentration")
+        .def("cdf", &tenzor::distributions::VonMises::cdf, py::arg("value"),
+             "Cumulative distribution function")
+        .def("icdf", &tenzor::distributions::VonMises::icdf, py::arg("q"),
+             "Inverse CDF (quantile function)");
+
+    py::class_<tenzor::distributions::RelaxedBernoulli,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::RelaxedBernoulli>>(dist_m, "RelaxedBernoulli")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("temperature"), py::arg("probs"),
+             "Relaxed Bernoulli (Gumbel-Sigmoid) distribution")
+        .def_static("from_logits", &tenzor::distributions::RelaxedBernoulli::from_logits,
+                     py::arg("temperature"), py::arg("logits"),
+                     "Create RelaxedBernoulli from unnormalized log-probabilities");
+
+    py::class_<tenzor::distributions::RelaxedOneHotCategorical,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::RelaxedOneHotCategorical>>(
+                   dist_m, "RelaxedOneHotCategorical")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("temperature"), py::arg("probs"),
+             "Relaxed one-hot Categorical (Gumbel-Softmax) distribution")
+        .def_static("from_logits",
+                     &tenzor::distributions::RelaxedOneHotCategorical::from_logits,
+                     py::arg("temperature"), py::arg("logits"),
+                     "Create RelaxedOneHotCategorical from unnormalized log-probabilities");
+
+    py::class_<tenzor::distributions::Wishart,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Wishart>>(dist_m, "Wishart")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("df"), py::arg("scale_tril"),
+             "Wishart distribution over positive-definite matrices");
+
+    py::class_<tenzor::distributions::Pareto,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Pareto>>(dist_m, "Pareto")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("scale"), py::arg("alpha"),
+             "Pareto distribution (Type I) with scale and shape parameter alpha")
+        .def("cdf", &tenzor::distributions::Pareto::cdf, py::arg("value"),
+             "Cumulative distribution function");
+
+    py::class_<tenzor::distributions::Weibull,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Weibull>>(dist_m, "Weibull")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("scale"), py::arg("concentration"),
+             "Weibull distribution with scale and concentration (shape) parameters")
+        .def("cdf", &tenzor::distributions::Weibull::cdf, py::arg("value"),
+             "Cumulative distribution function");
+
+    py::class_<tenzor::distributions::Kumaraswamy,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Kumaraswamy>>(dist_m, "Kumaraswamy")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("concentration1"), py::arg("concentration0"),
+             "Kumaraswamy distribution on (0, 1)")
+        .def("cdf", &tenzor::distributions::Kumaraswamy::cdf, py::arg("value"),
+             "Cumulative distribution function");
+
+    py::class_<tenzor::distributions::ContinuousBernoulli,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::ContinuousBernoulli>>(
+                   dist_m, "ContinuousBernoulli")
+        .def(py::init<tenzor::Tensor>(), py::arg("probs"),
+             "Continuous Bernoulli distribution on [0, 1]");
+
+    py::class_<tenzor::distributions::OneHotCategorical,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::OneHotCategorical>>(
+                   dist_m, "OneHotCategorical")
+        .def(py::init<tenzor::Tensor>(), py::arg("probs"),
+             "One-hot Categorical distribution parameterized by probabilities");
+
+    py::class_<tenzor::distributions::LogisticNormal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::LogisticNormal>>(
+                   dist_m, "LogisticNormal")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Logistic-Normal distribution over the simplex");
+
+    py::class_<tenzor::distributions::LowRankMultivariateNormal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::LowRankMultivariateNormal>>(
+                   dist_m, "LowRankMultivariateNormal")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("cov_factor"), py::arg("cov_diag"),
+             "Multivariate Normal with low-rank-plus-diagonal covariance");
+
+    py::class_<tenzor::distributions::LKJCholesky,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::LKJCholesky>>(dist_m, "LKJCholesky")
+        .def(py::init<int64_t, tenzor::Tensor>(),
+             py::arg("dim"), py::arg("concentration"),
+             "LKJ distribution over Cholesky factors of correlation matrices");
+
     dist_m.def("kl_divergence", &tenzor::distributions::kl_divergence,
                py::arg("p"), py::arg("q"),
                "Compute KL(p || q) for supported distribution pairs");
