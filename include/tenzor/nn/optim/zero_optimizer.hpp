@@ -305,6 +305,29 @@ public:
     );
 
     /**
+     * @brief Construct ZeRO Stage 1 optimizer with explicit ParamGroups (audit item D.4).
+     *
+     * ZeRO itself owns no hyperparameters — all per-parameter values
+     * (lr / weight_decay / betas / etc.) resolve through the wrapped
+     * base optimiser's ParamGroup state when its `step()` is invoked.
+     * The groups passed here become this Optimizer's own `param_groups_`
+     * so downstream consumers (schedulers, set_lr, state_dict tooling)
+     * see a consistent view; the base optimiser is independent and the
+     * caller is responsible for constructing it from the matching
+     * parameter list.
+     *
+     * @param groups          Parameter groups (each may carry per-group overrides)
+     * @param base_optimizer  Underlying optimiser that performs the actual step math
+     * @param config          ZeRO configuration
+     * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
+     */
+    explicit ZeROStage1Optimizer(
+        std::vector<optim::ParamGroup> groups,
+        std::shared_ptr<Optimizer> base_optimizer,
+        const ZeROStage1Config& config
+    );
+
+    /**
      * @brief Destructor - cleanup resources
      */
     ~ZeROStage1Optimizer() override;
@@ -920,6 +943,25 @@ public:
     );
 
     /**
+     * @brief Construct ZeRO Stage 2 optimizer with explicit ParamGroups (audit item D.4).
+     *
+     * See ZeROStage1Optimizer's ParamGroup-list constructor for the
+     * full rationale.  ZeRO Stage 2 carries no hyperparameters of its
+     * own; the groups feed straight through to the base Optimizer so
+     * schedulers / set_lr / state_dict tooling see a consistent view.
+     *
+     * @param groups          Parameter groups (each may carry per-group overrides)
+     * @param base_optimizer  Underlying optimiser that performs the actual step math
+     * @param config          ZeRO Stage 2 configuration
+     * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
+     */
+    explicit ZeROStage2Optimizer(
+        std::vector<optim::ParamGroup> groups,
+        std::shared_ptr<Optimizer> base_optimizer,
+        const ZeROStage2Config& config
+    );
+
+    /**
      * @brief Destructor - cleanup hooks and resources
      */
     ~ZeROStage2Optimizer() override;
@@ -1419,6 +1461,25 @@ public:
      * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
      */
     ZeROStage3Optimizer(
+        std::shared_ptr<Optimizer> base_optimizer,
+        const Stage3Config& config
+    );
+
+    /**
+     * @brief Construct ZeRO Stage 3 optimizer with explicit ParamGroups (audit item D.4).
+     *
+     * See ZeROStage1Optimizer's ParamGroup-list constructor for the
+     * full rationale.  ZeRO Stage 3 carries no hyperparameters of its
+     * own; the groups feed straight through to the base Optimizer so
+     * schedulers / set_lr / state_dict tooling see a consistent view.
+     *
+     * @param groups          Parameter groups (each may carry per-group overrides)
+     * @param base_optimizer  Underlying optimiser that performs the actual step math
+     * @param config          ZeRO Stage 3 configuration
+     * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
+     */
+    explicit ZeROStage3Optimizer(
+        std::vector<optim::ParamGroup> groups,
         std::shared_ptr<Optimizer> base_optimizer,
         const Stage3Config& config
     );

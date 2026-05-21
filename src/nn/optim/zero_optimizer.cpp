@@ -229,6 +229,55 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     initialize_optimizer_states();
 }
 
+// Audit D.4: ParamGroup-list constructor. ZeRO carries no hyperparameters of
+// its own — lr / weight_decay / betas / etc. all resolve through the wrapped
+// base optimiser's own ParamGroup state when its step() is invoked. We still
+// store the groups here so that downstream consumers (schedulers, set_lr,
+// state_dict tooling) see a consistent view via this Optimizer's own
+// param_groups_. The caller is responsible for ensuring the base optimiser
+// was constructed against a matching parameter list.
+ZeROStage1Optimizer::ZeROStage1Optimizer(
+    std::vector<optim::ParamGroup> groups,
+    std::shared_ptr<Optimizer> base_optimizer,
+    const ZeROStage1Config& config
+) : Optimizer(std::move(groups)),
+    base_optimizer_(std::move(base_optimizer)),
+    config_(config) {
+
+    if (!base_optimizer_) {
+        throw std::invalid_argument("base_optimizer cannot be null");
+    }
+    if (config_.rank < 0 || config_.rank >= config_.world_size) {
+        throw std::invalid_argument("Invalid rank: must be in [0, world_size)");
+    }
+    if (config_.world_size <= 0) {
+        throw std::invalid_argument("world_size must be > 0");
+    }
+
+    if (!config_.process_group && distributed::is_initialized()) {
+        config_.process_group = distributed::DistributedContext::get_process_group();
+    }
+
+    if (config_.process_group && config_.process_group->supports_async_stream()) {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+        cudaStream_t s = nullptr;
+        cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        if (err == cudaSuccess) {
+            comm_stream_ = static_cast<void*>(s);
+            use_gpu_comm_ = true;
+        }
+#endif
+    }
+
+    partition_parameters();
+
+    if (config_.offload_to_cpu) {
+        initialize_offload_engine();
+    }
+
+    initialize_optimizer_states();
+}
+
 ZeROStage1Optimizer::~ZeROStage1Optimizer() {
     // Best-effort cleanup of NVMe scratch files. We don't want a destructor exception under
     // any circumstance, so we swallow any IO error — leaving stale blobs behind is at worst
@@ -2122,6 +2171,24 @@ ZeROStage2Optimizer::ZeROStage2Optimizer(
     }
 }
 
+// Audit D.4: forwards the groups to the Stage-1 ParamGroup-list ctor; no
+// stage-2-specific hyperparameters need resolving here.
+ZeROStage2Optimizer::ZeROStage2Optimizer(
+    std::vector<optim::ParamGroup> groups,
+    std::shared_ptr<Optimizer> base_optimizer,
+    const ZeROStage2Config& config
+) : ZeROStage1Optimizer(std::move(groups), std::move(base_optimizer), config),
+    stage2_config_(config) {
+
+    if (stage2_config_.gradient_bucketing) {
+        if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+            create_gradient_buckets_element_mode();
+        } else {
+            create_gradient_buckets();
+        }
+    }
+}
+
 ZeROStage2Optimizer::~ZeROStage2Optimizer() {
     // Detach autograd hooks before any of our state (this, buckets) goes away — otherwise
     // a backward() that runs after the optimizer is destroyed would dereference freed memory.
@@ -3081,6 +3148,20 @@ ZeROStage3Optimizer::ZeROStage3Optimizer(
     std::shared_ptr<Optimizer> base_optimizer,
     const Stage3Config& config
 ) : ZeROStage2Optimizer(std::move(base_optimizer), config),
+    stage3_config_(config),
+    registered_model_(nullptr) {
+
+    perf_stats_ = PerformanceStats{};
+    prefetch_scheduler_ = nullptr;
+}
+
+// Audit D.4: forwards the groups to the Stage-2 ParamGroup-list ctor; no
+// stage-3-specific hyperparameters need resolving here.
+ZeROStage3Optimizer::ZeROStage3Optimizer(
+    std::vector<optim::ParamGroup> groups,
+    std::shared_ptr<Optimizer> base_optimizer,
+    const Stage3Config& config
+) : ZeROStage2Optimizer(std::move(groups), std::move(base_optimizer), config),
     stage3_config_(config),
     registered_model_(nullptr) {
 
