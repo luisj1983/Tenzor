@@ -22,6 +22,19 @@ static thread_local std::mt19937 global_rng(std::random_device{}());
 static thread_local bool manual_seed_set = false;
 static thread_local uint64_t manual_seed_value = 0;
 
+namespace detail {
+
+// Audit D.3: expose the thread-local global RNG state to other TUs (in
+// particular core/generator.cpp) so checkpoint save/restore can snapshot
+// it without making global_rng a header-visible symbol.
+auto get_global_rng_engine() -> std::mt19937& { return global_rng; }
+auto get_global_manual_seed_set() -> bool { return manual_seed_set; }
+auto set_global_manual_seed_set(bool v) -> void { manual_seed_set = v; }
+auto get_global_manual_seed_value() -> uint64_t { return manual_seed_value; }
+auto set_global_manual_seed_value(uint64_t v) -> void { manual_seed_value = v; }
+
+} // namespace detail
+
 // Function to access the thread-local RNG
 static std::mt19937& get_rng() {
     return global_rng;

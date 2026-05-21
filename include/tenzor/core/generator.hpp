@@ -14,9 +14,28 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <vector>
 #include "device.hpp"
 
 namespace tenzor {
+
+/**
+ * @brief Opaque RNG state snapshot for Generator save/restore.
+ *
+ * Captures the host-side std::mt19937_64 engine state plus seed bookkeeping.
+ * All Tenzor backends derive their per-op seeds from this host-side stream
+ * (CPU uses it directly; CUDA/ROCm/OneAPI/Vulkan/MPS feed `next_seed()` /
+ * `get_global_seed()` into curand/hiprand/Philox UBOs), so saving/restoring
+ * this is sufficient to make a recomputed forward see the same random
+ * samples as the original forward across every backend.
+ */
+struct GeneratorState {
+    /// Serialized mt19937_64 state (the 312 uint64 internal state vector plus
+    /// position counter, captured via the standard ostream operator).
+    std::vector<uint64_t> engine_state;
+    uint64_t seed{0};
+    uint64_t initial_seed{0};
+};
 
 /**
  * @brief Independent random number generator with reproducible seeding.
@@ -93,6 +112,26 @@ public:
      */
     auto next_seed() -> uint64_t;
 
+    /**
+     * @brief Snapshot the current RNG state for later restoration.
+     *
+     * Used by gradient checkpointing to ensure the recomputed forward sees
+     * the same random draws as the original forward. Cheap to call.
+     *
+     * @return Opaque, copyable state.
+     */
+    [[nodiscard]] auto get_state() const -> GeneratorState;
+
+    /**
+     * @brief Restore the RNG to a previously captured state.
+     *
+     * After this returns, `next_seed()` and `engine()` produce the same
+     * sequence as they did right after `state` was captured.
+     *
+     * @param state State previously returned by `get_state()`.
+     */
+    auto set_state(const GeneratorState& state) -> void;
+
 private:
     Device device_;
     uint64_t seed_{0};
@@ -116,5 +155,30 @@ auto default_generator(Device device = Device::cpu()) -> Generator&;
  * @brief Optional generator reference type used in creation ops.
  */
 using OptionalGenerator = std::optional<std::reference_wrapper<Generator>>;
+
+/**
+ * @brief Snapshot of the thread-local global RNG state used by all
+ *        creation/stochastic ops (rand, randn, dropout, multinomial, ...).
+ *
+ * Backends pull seeds from `tenzor::get_global_seed()` (defined in
+ * ops/creation.cpp); that helper reads three thread-local values:
+ *   - the mt19937 engine
+ *   - whether `manual_seed()` was set
+ *   - the incrementing `manual_seed_value` counter
+ *
+ * Checkpoint save/restore must capture all three to keep recomputed
+ * forwards bit-identical to the original on every backend.
+ */
+struct GlobalRngState {
+    std::vector<uint32_t> engine_state;   ///< Serialized std::mt19937 state
+    bool manual_seed_set{false};
+    uint64_t manual_seed_value{0};
+};
+
+/// Capture the calling thread's global RNG state (for checkpoint save).
+auto save_global_rng_state() -> GlobalRngState;
+
+/// Restore the calling thread's global RNG state (for checkpoint recompute).
+auto restore_global_rng_state(const GlobalRngState& state) -> void;
 
 } // namespace tenzor

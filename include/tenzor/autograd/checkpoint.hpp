@@ -14,7 +14,10 @@
 
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
+#include "../core/device.hpp"
+#include "../core/generator.hpp"
 #include "../core/tensor.hpp"
 #include "variable.hpp"
 #include "function.hpp"
@@ -196,6 +199,20 @@ public:
         return original_input_copies_;
     }
 
+    /**
+     * @brief Capture the RNG state that will be reused on recompute.
+     *
+     * Audit D.3: called by the checkpoint() free function at forward time.
+     * Saves the thread-local global RNG (used by all stochastic ops on
+     * every backend via tenzor::get_global_seed()) plus per-Device
+     * Generator state for each device involved in the inputs (so that any
+     * stochastic op the wrapped function runs sees the same random draws
+     * during recompute as it did the first time).
+     *
+     * @param input_devices Distinct devices of the forward inputs.
+     */
+    auto save_rng_state(const std::vector<Device>& input_devices) -> void;
+
 private:
     std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn_;
     bool allow_caching_;
@@ -226,6 +243,13 @@ private:
     // created during recomputation (e.g., temporaries in multi-input checkpoints)
     // Using Variable copies instead of shared_ptr to avoid no-op deleter issues
     std::vector<Variable> recomputed_intermediates_;
+
+    // Audit D.3 — RNG state snapshot taken at forward time, replayed on
+    // recompute so dropout/multinomial/etc. yield the same samples and the
+    // backward of the recomputed graph matches the original forward.
+    bool rng_state_saved_{false};
+    GlobalRngState saved_global_rng_;
+    std::vector<std::pair<Device, GeneratorState>> saved_generator_states_;
 
     /**
      * @brief Recompute forward pass with gradient tracking

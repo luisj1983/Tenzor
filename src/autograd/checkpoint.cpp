@@ -66,15 +66,14 @@ auto CheckpointFunction::forward([[maybe_unused]] std::vector<Variable> inputs) 
 }
 
 auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    if (!is_checkpoint_enabled()) {
-        // Return zero gradients if checkpointing is disabled
-        std::vector<Tensor> zero_grads;
-        zero_grads.reserve(saved_tensors().size());
-        for (const auto& tensor : saved_tensors()) {
-            zero_grads.push_back(Tensor::zeros_like(tensor));
-        }
-        return zero_grads;
-    }
+    // Audit D.3: a CheckpointFunction is only ever installed as a grad_fn
+    // when checkpointing was enabled at forward time (see
+    // checkpoint_impl_shared early-exit). If the user toggles
+    // is_checkpoint_enabled() to false between forward and backward, we
+    // must still produce correct gradients by recomputing the saved
+    // forward and running a normal autograd backward through it — not
+    // return zeros, which would silently corrupt training. The previous
+    // zero-grad branch is therefore intentionally removed.
 
     // Time the recomputation
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -138,6 +137,34 @@ auto CheckpointFunction::get_memory_savings() const -> size_t {
     return estimated_activation_memory_;
 }
 
+auto CheckpointFunction::save_rng_state(const std::vector<Device>& input_devices) -> void {
+    saved_global_rng_ = save_global_rng_state();
+
+    // Build the set of devices whose default Generator we should snapshot:
+    // every distinct input device plus, conservatively, CPU (host-side ops
+    // and CPU-driven kernels share the CPU default generator).
+    std::vector<Device> devs;
+    devs.reserve(input_devices.size() + 1);
+    auto already_have = [&](const Device& d) {
+        for (const auto& e : devs) {
+            if (e == d) return true;
+        }
+        return false;
+    };
+    for (const auto& d : input_devices) {
+        if (!already_have(d)) devs.push_back(d);
+    }
+    Device cpu_dev = Device::cpu();
+    if (!already_have(cpu_dev)) devs.push_back(cpu_dev);
+
+    saved_generator_states_.clear();
+    saved_generator_states_.reserve(devs.size());
+    for (const auto& d : devs) {
+        saved_generator_states_.emplace_back(d, default_generator(d).get_state());
+    }
+    rng_state_saved_ = true;
+}
+
 auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) -> std::vector<Variable> {
     // Check if we have cached outputs
     if (allow_caching_ && has_cached_outputs_) {
@@ -153,8 +180,36 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
         hooks.on_begin(this);
     }
 
+    // Audit D.3: replay the RNG state captured at original-forward time so
+    // any stochastic op inside forward_fn_ (Dropout, BatchNorm noise,
+    // multinomial/poisson/etc.) draws the same samples it drew the first
+    // time. Save the *current* RNG state first so we can restore it after
+    // the recompute and not perturb the outer training loop's stream.
+    GlobalRngState prev_global_rng;
+    std::vector<std::pair<Device, GeneratorState>> prev_gen_states;
+    if (rng_state_saved_) {
+        prev_global_rng = save_global_rng_state();
+        prev_gen_states.reserve(saved_generator_states_.size());
+        for (const auto& [dev, _] : saved_generator_states_) {
+            prev_gen_states.emplace_back(dev, default_generator(dev).get_state());
+        }
+        restore_global_rng_state(saved_global_rng_);
+        for (const auto& [dev, st] : saved_generator_states_) {
+            default_generator(dev).set_state(st);
+        }
+    }
+
     // Recompute forward function with gradient tracking enabled
     auto outputs = forward_fn_(inputs);
+
+    // Audit D.3: restore the outer RNG state so the recompute is invisible
+    // to whatever code runs after backward() returns.
+    if (rng_state_saved_) {
+        restore_global_rng_state(prev_global_rng);
+        for (const auto& [dev, st] : prev_gen_states) {
+            default_generator(dev).set_state(st);
+        }
+    }
 
     // Phase E (E2): notify the recompute-end hook so the consumer can release
     // whatever it gathered in on_begin (Stage-3 frees the gathered buffers
@@ -172,7 +227,29 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
         for (const auto& inp : inputs) {
             verify_inputs.emplace_back(inp.tensor(), false);
         }
+        // Audit D.3: replay saved RNG so verify_outputs uses the same draws
+        // as the just-executed recompute; otherwise determinism check would
+        // false-positive on legitimately deterministic-after-replay code.
+        GlobalRngState verify_prev_global;
+        std::vector<std::pair<Device, GeneratorState>> verify_prev_gens;
+        if (rng_state_saved_) {
+            verify_prev_global = save_global_rng_state();
+            verify_prev_gens.reserve(saved_generator_states_.size());
+            for (const auto& [dev, _] : saved_generator_states_) {
+                verify_prev_gens.emplace_back(dev, default_generator(dev).get_state());
+            }
+            restore_global_rng_state(saved_global_rng_);
+            for (const auto& [dev, st] : saved_generator_states_) {
+                default_generator(dev).set_state(st);
+            }
+        }
         auto verify_outputs = forward_fn_(verify_inputs);
+        if (rng_state_saved_) {
+            restore_global_rng_state(verify_prev_global);
+            for (const auto& [dev, st] : verify_prev_gens) {
+                default_generator(dev).set_state(st);
+            }
+        }
 
         if (verify_outputs.size() != outputs.size()) {
             // Audit I.4: unified logger so TENZOR_LOG_LEVEL filter applies.
@@ -250,10 +327,19 @@ static auto checkpoint_impl_shared(
     // Save input tensors for recomputation
     std::vector<Tensor> input_tensors;
     input_tensors.reserve(input_ptrs.size());
+    std::vector<Device> input_devices;
+    input_devices.reserve(input_ptrs.size());
     for (const auto& ptr : input_ptrs) {
         input_tensors.push_back(ptr->tensor());
+        input_devices.push_back(ptr->tensor().device());
     }
     checkpoint_fn->save_for_backward(std::move(input_tensors));
+
+    // Audit D.3: snapshot the RNG state *before* running the original
+    // forward so that the recompute on backward sees the same random draws
+    // for any stochastic op inside fn (Dropout, BatchNorm noise,
+    // multinomial sampling, etc.). Must precede the fn() call below.
+    checkpoint_fn->save_rng_state(input_devices);
 
     // Set up backward graph connections to original inputs
     std::vector<std::shared_ptr<Function>> next_funcs;
@@ -558,9 +644,16 @@ auto AutoCheckpointPolicy::apply(nn::Module& module) -> void {
 }
 
 auto AutoCheckpointPolicy::remove(nn::Module& /* module */) -> void {
-    // Clear registered hooks tracking
-    // Note: Module doesn't expose hook removal by ID, so we clear our tracking.
-    // The hooks remain registered but become no-ops after policy destruction.
+    // Audit D.3: actually unregister hooks instead of leaving them resident
+    // on the modules as silent no-ops (which would still toggle
+    // set_checkpoint_enabled on later forwards even after the policy was
+    // dropped). Module::remove_hook handles ID lookup across both the
+    // single- and multi-input hook maps.
+    for (auto& [mod, hook_id] : registered_hooks_) {
+        if (mod) {
+            mod->remove_hook(hook_id);
+        }
+    }
     registered_hooks_.clear();
 }
 

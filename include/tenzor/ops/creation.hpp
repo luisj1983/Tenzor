@@ -508,6 +508,17 @@ void manual_seed(unsigned int seed);
  */
 uint64_t get_global_seed();
 
+namespace detail {
+// Audit D.3 internals — used by checkpoint RNG save/restore. These access
+// the thread-local global RNG state that ALL stochastic ops on every
+// backend pull from (via get_global_seed()). NOT part of the public API.
+auto get_global_rng_engine() -> std::mt19937&;
+auto get_global_manual_seed_set() -> bool;
+auto set_global_manual_seed_set(bool v) -> void;
+auto get_global_manual_seed_value() -> uint64_t;
+auto set_global_manual_seed_value(uint64_t v) -> void;
+} // namespace detail
+
 /**
  * @brief Generate coordinate grids from 1-D coordinate tensors.
  *
