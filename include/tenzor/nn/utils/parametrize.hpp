@@ -100,8 +100,16 @@ public:
  * Stored as a member of the parametrized module.
  */
 struct ParametrizationList {
-    /** @brief Original parameter value (before any parametrization) */
+    /** @brief Original parameter value as a raw tensor (for restoring on
+     *         remove_parametrizations(leave_parametrized=false)). */
     Tensor original;
+
+    /** @brief The original parameter as a *leaf* Variable. Gradient
+     *         accumulation happens here during backward — the parameter
+     *         slot inside the module is repurposed each forward to hold
+     *         `chain(original_var)`, whose grad_fn flows gradients back
+     *         into this leaf. */
+    std::shared_ptr<Variable> original_var;
 
     /** @brief Chain of parametrizations applied in order */
     std::vector<std::shared_ptr<Parametrization>> chain;

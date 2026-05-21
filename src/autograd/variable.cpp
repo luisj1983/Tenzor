@@ -49,6 +49,20 @@ auto Variable::tensor() -> Tensor& {
     return impl_->data_;
 }
 
+auto Variable::set_data_view(Tensor data) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set data view on uninitialized Variable");
+    }
+    // Replace only the data_ field. grad_fn_, grad_, hooks_, requires_grad_,
+    // retain_grad_, was_non_leaf_, and creation_metadata_ are all left
+    // untouched so any autograd graph that already references this Variable
+    // (and any code that holds a stable shared_ptr<Variable> to this slot)
+    // keeps working. This is the storage swap requested by parametrize's
+    // pre-forward hook to redirect a parameter at the chain's output tensor
+    // without overwriting the parameter buffer in place.
+    impl_->data_ = std::move(data);
+}
+
 auto Variable::grad() const -> const std::optional<Tensor>& {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");

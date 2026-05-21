@@ -586,6 +586,29 @@ public:
      */
     auto grad_fn() const -> std::shared_ptr<Function>;
 
+    /**
+     * @brief Swap the underlying tensor storage without disturbing the
+     *        autograd state.
+     *
+     * Replaces this Variable's `data_` field with the given tensor while
+     * leaving `grad_fn_`, `grad_`, hooks, `requires_grad_`, and all other
+     * autograd-related state intact. Used by the parametrize utility to
+     * point the parameter slot at the chain's output tensor without
+     * destroying any computation graph that this Variable participates in.
+     *
+     * @param data New tensor data view (typically the tensor of another
+     *             Variable produced by Variable-level ops). Must be on the
+     *             same device and have the same dtype as the existing data
+     *             when used by autograd machinery downstream — this helper
+     *             does not enforce that itself.
+     *
+     * @note This is a low-level escape hatch. Most callers should use
+     *       regular autograd ops or Variable copy-assignment. Misuse can
+     *       lead to stale grad_fn references; prefer pairing with
+     *       set_grad_fn() when the new data has a different provenance.
+     */
+    auto set_data_view(Tensor data) -> void;
+
     // ============================================================================
     // Tensor Properties
     // ============================================================================

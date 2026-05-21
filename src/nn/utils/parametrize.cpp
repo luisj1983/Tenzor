@@ -32,7 +32,7 @@ void register_parametrization(std::shared_ptr<Module> module,
     auto& mod_params = parametrization_registry()[mod_ptr];
 
     if (mod_params.find(param_name) == mod_params.end()) {
-        // First parametrization on this parameter — save original
+        // First parametrization on this parameter — save original.
         auto param = module->get_parameter(param_name);
         if (!param) {
             throw std::runtime_error(
@@ -41,9 +41,21 @@ void register_parametrization(std::shared_ptr<Module> module,
 
         ParametrizationList list;
         list.original = param->tensor().clone();
+        // Promote the original parameter Variable to a stable leaf that
+        // owns its own buffer. Gradients accumulate here during backward;
+        // the parameter slot inside the module is repointed each forward
+        // to hold chain(original_var) so the autograd graph survives.
+        list.original_var = std::make_shared<Variable>(
+            list.original.clone(), param->requires_grad());
         list.chain.push_back(parametrization);
 
-        // Register a forward pre-hook that applies the parametrization chain
+        // Register an autograd-aware forward pre-hook. The hook builds
+        // chain.forward_impl(original_var) as a *Variable* computation,
+        // then swaps the parameter slot's tensor + grad_fn so downstream
+        // ops consume the parametrized value while still being able to
+        // backpropagate through the chain into original_var (and into
+        // any internal parameters owned by the parametrization modules
+        // themselves, e.g. WeightNorm's weight_g / weight_v).
         auto hook_id = module->register_forward_pre_hook(
             [mod_ptr, param_name](Module* /*self*/, const Variable& /*input*/) {
                 auto& reg = parametrization_registry();
@@ -52,28 +64,29 @@ void register_parametrization(std::shared_ptr<Module> module,
                 auto param_it = mod_it->second.find(param_name);
                 if (param_it == mod_it->second.end()) return;
 
-                // Apply chain: original -> p1 -> p2 -> ... -> pN
-                Tensor value = param_it->second.original;
-                for (auto& p : param_it->second.chain) {
-                    value = p->forward(value);
+                auto& list = param_it->second;
+                if (!list.original_var) return;
+
+                // Run the chain as a Variable computation. Each
+                // parametrization's forward_impl(Variable) is responsible
+                // for building autograd-tracked ops; if a parametrization
+                // overrides only forward(Tensor) the base default falls
+                // back to a non-grad Variable (matching prior behavior).
+                Variable value = *list.original_var;
+                for (auto& p : list.chain) {
+                    value = p->forward_impl(value);
                 }
 
-                // Update the parameter in-place
-                // This is done by modifying the parameter's data
+                // Repoint the module's parameter slot at the chain
+                // output. set_data_view swaps the tensor storage without
+                // disturbing other autograd state on the slot; set_grad_fn
+                // installs the chain's tail so loss.backward() walks back
+                // through every Variable op in the chain.
                 auto param = mod_ptr->get_parameter(param_name);
                 if (param) {
-                    param->tensor().fill_(0.0);  // Clear
-                    // Copy parametrized value
-                    // Use add_ to write the new values
-                    auto& t = param->tensor();
-                    // Simple approach: update via the underlying storage
-                    auto src = value.contiguous();
-                    auto dst_numel = t.numel();
-                    auto src_numel = src.numel();
-                    if (dst_numel == src_numel && t.dtype() == src.dtype()) {
-                        std::memcpy(t.data<uint8_t>(), src.data<uint8_t>(),
-                                    src_numel * dtype_size(src.dtype()));
-                    }
+                    param->set_data_view(value.tensor());
+                    param->set_grad_fn(value.grad_fn());
+                    param->set_requires_grad(value.requires_grad());
                 }
             }
         );
@@ -104,16 +117,25 @@ void remove_parametrizations(std::shared_ptr<Module> module,
 
     auto& list = param_it->second;
 
-    if (!leave_parametrized) {
-        // Restore original parameter value
-        auto param = module->get_parameter(param_name);
-        if (param) {
-            auto src = list.original.contiguous();
-            auto& t = param->tensor();
-            if (t.numel() == src.numel() && t.dtype() == src.dtype()) {
-                std::memcpy(t.data<uint8_t>(), src.data<uint8_t>(),
-                            src.numel() * dtype_size(src.dtype()));
-            }
+    // Detach the autograd graph from the parameter slot — after this
+    // call the slot must be a plain leaf again (no grad_fn pointing into
+    // the now-defunct chain).
+    auto param = module->get_parameter(param_name);
+    if (param) {
+        param->set_grad_fn(nullptr);
+        if (leave_parametrized) {
+            // Materialise the current chain output as a plain tensor so
+            // the parameter is a self-contained leaf going forward.
+            // (Cloning detaches it from list.original_var's storage.)
+            param->set_data_view(param->tensor().clone());
+        } else {
+            // Restore the original (pre-parametrization) tensor.
+            param->set_data_view(list.original.clone());
+        }
+        // Restore the requires_grad flag from the saved leaf so an
+        // unused-but-tracked parameter doesn't silently become inert.
+        if (list.original_var) {
+            param->set_requires_grad(list.original_var->requires_grad());
         }
     }
 
