@@ -667,7 +667,7 @@ __global__ void sum_along_dim_kernel(
 
     // Compute multi-dimensional indices for output position.
     // Decompose in reverse order (innermost dim first) to match row-major layout.
-    int64_t indices[8];  // Support up to 8D tensors
+    int64_t indices[DIM_META_MAX_RANK];  // Support up to DIM_META_MAX_RANK dims (audit F.12)
     int64_t tmp = out_idx;
 
     for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -713,7 +713,7 @@ __global__ void max_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -762,7 +762,7 @@ __global__ void min_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -810,7 +810,7 @@ __global__ void max_along_dim_kernel_half(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -858,7 +858,7 @@ __global__ void min_along_dim_kernel_half(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -906,7 +906,7 @@ __global__ void max_along_dim_kernel_bf16(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -954,7 +954,7 @@ __global__ void min_along_dim_kernel_bf16(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2109,7 +2109,7 @@ __global__ void argmax_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2162,7 +2162,7 @@ __global__ void argmin_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2336,7 +2336,7 @@ __global__ void argmax_along_dim_kernel_half(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2388,7 +2388,7 @@ __global__ void argmin_along_dim_kernel_half(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2652,7 +2652,7 @@ __global__ void argmax_along_dim_kernel_bf16(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -2704,7 +2704,7 @@ __global__ void argmin_along_dim_kernel_bf16(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -3441,7 +3441,7 @@ __global__ void prod_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -3816,7 +3816,7 @@ __global__ void var_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices for output position
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -4223,7 +4223,7 @@ __global__ void norm_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices for output position
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
     for (int64_t d = 0; d < ndim; d++) {
@@ -4664,7 +4664,7 @@ __global__ void any_along_dim_kernel(
     if (out_idx >= output_size) return;
 
     // Compute multi-dimensional indices for output position
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
@@ -4705,7 +4705,7 @@ __global__ void any_along_dim_kernel<__half>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -4737,7 +4737,7 @@ __global__ void any_along_dim_kernel<__nv_bfloat16>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -4769,7 +4769,7 @@ __global__ void all_along_dim_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -4807,7 +4807,7 @@ __global__ void all_along_dim_kernel<__half>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -4839,7 +4839,7 @@ __global__ void all_along_dim_kernel<__nv_bfloat16>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -5395,7 +5395,7 @@ __global__ void logsumexp_max_along_dim_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -5430,7 +5430,7 @@ __global__ void logsumexp_max_along_dim_kernel<float>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -5465,7 +5465,7 @@ __global__ void logsumexp_max_along_dim_kernel<double>(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -5502,7 +5502,7 @@ __global__ void logsumexp_sum_exp_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) { indices[d] = 0; continue; }
@@ -5772,7 +5772,7 @@ __global__ void cosine_similarity_along_dim_kernel(
     // LAST dim. Walking d from ndim-1 down to 0 with `tmp /= shape[d]`
     // gives the right (i_0, i_1, ...) tuple. Caught by
     // tests/backend_parity/test_stable_math_parity (CosineSimilarity_LastDim).
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; d--) {
         if (d == dim) {
@@ -5897,7 +5897,7 @@ __global__ void renorm_compute_norm_kernel(
     // across the complementary axes. This matches torch.renorm semantics:
     // each sub-tensor taken at a fixed value of dim has its p-norm clamped
     // to maxnorm.
-    int64_t indices[8] = {};
+    int64_t indices[DIM_META_MAX_RANK] = {};
     indices[dim] = slice_idx;
 
     T acc = T(0);
@@ -5950,7 +5950,7 @@ __global__ void renorm_scale_kernel(
         int64_t slice_idx = flat_idx / slice_size;
         int64_t within_slice = flat_idx % slice_size;
 
-        int64_t indices[8] = {};
+        int64_t indices[DIM_META_MAX_RANK] = {};
         indices[dim] = slice_idx;
         int64_t tmp = within_slice;
         for (int64_t d = ndim - 1; d >= 0; --d) {

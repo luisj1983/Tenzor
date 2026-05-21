@@ -3914,7 +3914,7 @@ __global__ void count_nonzero_along_dim_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
@@ -3978,7 +3978,7 @@ __global__ void nansum_along_dim_kernel(
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= output_size) return;
 
-    int64_t indices[8];
+    int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
     for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {

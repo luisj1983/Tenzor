@@ -50,16 +50,29 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
         CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
-// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
+// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays).
+//
+// Audit F.12: rank cap lifted from 8 to 16 with a runtime throw on overflow.
+// The previous code silently truncated any tensor with rank > 8 — the make
+// function looped `i < 8` and the kernel iterated only those slots, dropping
+// higher dimensions. 16 matches the cap used by reduction.cu / activations.cu
+// (DIM_META_MAX_RANK) and the maximum supported in CPU/ROCm.
+constexpr int TRANSFORM_DIM_META_MAX_RANK = 16;
 struct TransformMeta {
-    int64_t shape[8];
-    int64_t strides[8];
+    int64_t shape[TRANSFORM_DIM_META_MAX_RANK];
+    int64_t strides[TRANSFORM_DIM_META_MAX_RANK];
 };
 
 static TransformMeta make_transform_meta(const std::vector<int64_t>& shape,
                                           const std::vector<int64_t>& strides) {
+    if (shape.size() > TRANSFORM_DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA TransformMeta: tensor rank " + std::to_string(shape.size()) +
+            " exceeds maximum " + std::to_string(TRANSFORM_DIM_META_MAX_RANK) +
+            " (raise TRANSFORM_DIM_META_MAX_RANK if needed).");
+    }
     TransformMeta meta{};
-    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+    for (size_t i = 0; i < shape.size(); ++i) {
         meta.shape[i] = shape[i];
         meta.strides[i] = strides[i];
     }
@@ -308,7 +321,7 @@ __global__ void cat_kernel_impl(T** input_ptrs, T* output,
     TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Convert linear output index to multi-dimensional coordinates
         int64_t temp_idx = idx;
-        int64_t coords[8];  // Support up to 8 dimensions
+        int64_t coords[TRANSFORM_DIM_META_MAX_RANK];  // audit F.12: lifted from 8 → 16
 
         for (int64_t d = ndim - 1; d >= 0; --d) {
             coords[d] = temp_idx % output_shape[d];
@@ -361,6 +374,12 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     }
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("Dimension out of range for concatenation");
+    }
+    if (ndim > TRANSFORM_DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA cat_kernel: tensor rank " + std::to_string(ndim) +
+            " exceeds maximum " + std::to_string(TRANSFORM_DIM_META_MAX_RANK) +
+            " (audit F.12; raise TRANSFORM_DIM_META_MAX_RANK if needed).");
     }
 
     // Make all tensors contiguous
@@ -677,13 +696,18 @@ auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, cud
 // Slice
 // ============================================================================
 
-// Metadata struct passed by value to slice kernel (avoids 5x cudaMalloc for shape/stride arrays)
+// Metadata struct passed by value to slice kernel (avoids 5x cudaMalloc for shape/stride arrays).
+//
+// Audit F.12: rank cap lifted from 8 to TRANSFORM_DIM_META_MAX_RANK (16).
+// Previously the slice setup loop guarded `d < 8` and silently truncated
+// higher-rank tensors. The host dispatcher (slice_kernel) now throws when
+// ndim exceeds the cap.
 struct SliceMeta {
-    int64_t input_strides[8];
-    int64_t output_shape[8];
-    int64_t output_strides[8];
-    int64_t starts[8];
-    int64_t steps[8];
+    int64_t input_strides[TRANSFORM_DIM_META_MAX_RANK];
+    int64_t output_shape[TRANSFORM_DIM_META_MAX_RANK];
+    int64_t output_strides[TRANSFORM_DIM_META_MAX_RANK];
+    int64_t starts[TRANSFORM_DIM_META_MAX_RANK];
+    int64_t steps[TRANSFORM_DIM_META_MAX_RANK];
 };
 
 template<typename T>
@@ -766,9 +790,16 @@ auto slice_kernel(
         }
     }
 
-    // Build metadata struct passed by value (avoids 5x cudaMalloc)
+    // Build metadata struct passed by value (avoids 5x cudaMalloc).
+    // Audit F.12: enforce the rank cap explicitly instead of silently truncating.
+    if (ndim > TRANSFORM_DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA slice_kernel: tensor rank " + std::to_string(ndim) +
+            " exceeds maximum " + std::to_string(TRANSFORM_DIM_META_MAX_RANK) +
+            " (raise TRANSFORM_DIM_META_MAX_RANK if needed).");
+    }
     SliceMeta meta{};
-    for (int64_t d = 0; d < ndim && d < 8; ++d) {
+    for (int64_t d = 0; d < ndim; ++d) {
         meta.input_strides[d] = input_strides[d];
         meta.output_shape[d] = output_shape[d];
         meta.output_strides[d] = output_strides[d];

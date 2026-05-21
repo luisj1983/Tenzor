@@ -300,18 +300,27 @@ __global__ void add_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 }
 
 // Metadata struct passed by value to broadcast kernels (avoids cudaMalloc for small arrays)
+// Audit F.12: rank cap lifted from 8 → 16 across CUDA broadcast/expand kernels.
+// Matches DIM_META_MAX_RANK in reduction.cu/activations.cu and the maximum
+// rank supported by CPU/ROCm. The runtime throw is preserved so any tensor
+// exceeding the cap fails loudly rather than silently truncating.
+constexpr int MATH_DIM_META_MAX_RANK = 16;
+
 struct BroadcastMeta {
-    int64_t strides_a[8];
-    int64_t strides_b[8];
-    int64_t output_shape[8];
+    int64_t strides_a[MATH_DIM_META_MAX_RANK];
+    int64_t strides_b[MATH_DIM_META_MAX_RANK];
+    int64_t output_shape[MATH_DIM_META_MAX_RANK];
 };
 
 static BroadcastMeta make_broadcast_meta(
     const std::vector<int64_t>& strides_a,
     const std::vector<int64_t>& strides_b,
     const std::vector<int64_t>& output_shape) {
-    if (output_shape.size() > 8) {
-        throw std::runtime_error("CUDA broadcast: tensors with >8 dimensions not supported");
+    if (output_shape.size() > MATH_DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA broadcast: tensor rank " + std::to_string(output_shape.size()) +
+            " exceeds maximum " + std::to_string(MATH_DIM_META_MAX_RANK) +
+            " (raise MATH_DIM_META_MAX_RANK if needed).");
     }
     BroadcastMeta meta{};
     for (size_t i = 0; i < output_shape.size(); ++i) {
@@ -2824,11 +2833,13 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     return inout;
 }
 
-// Metadata struct passed by value to expand kernel (avoids cudaMalloc for shape/stride arrays)
+// Metadata struct passed by value to expand kernel (avoids cudaMalloc for shape/stride arrays).
+// Audit F.12: rank cap lifted from 8 → MATH_DIM_META_MAX_RANK (16). Previously
+// the make-time loop guarded `i < 8` and silently dropped higher dimensions.
 struct ExpandMeta {
-    int64_t input_shape[8];
-    int64_t input_strides[8];
-    int64_t output_shape[8];
+    int64_t input_shape[MATH_DIM_META_MAX_RANK];
+    int64_t input_strides[MATH_DIM_META_MAX_RANK];
+    int64_t output_shape[MATH_DIM_META_MAX_RANK];
 };
 
 // Expand kernel - replicate tensor along specified dimensions
@@ -2916,13 +2927,23 @@ auto expand_kernel(const Tensor& input_in, const std::vector<int64_t>& shape, vo
         input_stride *= input_shape_vec[i];
     }
 
-    // Build metadata struct passed by value (avoids cudaMalloc)
+    // Build metadata struct passed by value (avoids cudaMalloc).
+    // Audit F.12: enforce the rank cap explicitly instead of silently truncating.
+    if (input_shape_vec.size() > MATH_DIM_META_MAX_RANK ||
+        shape.size() > MATH_DIM_META_MAX_RANK) {
+        throw std::runtime_error(
+            "CUDA expand_kernel: tensor rank exceeds maximum " +
+            std::to_string(MATH_DIM_META_MAX_RANK) +
+            " (input ndim=" + std::to_string(input_shape_vec.size()) +
+            ", output ndim=" + std::to_string(shape.size()) +
+            "; raise MATH_DIM_META_MAX_RANK if needed).");
+    }
     ExpandMeta meta{};
-    for (size_t i = 0; i < input_shape_vec.size() && i < 8; ++i) {
+    for (size_t i = 0; i < input_shape_vec.size(); ++i) {
         meta.input_shape[i] = input_shape_vec[i];
         meta.input_strides[i] = input_strides[i];
     }
-    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+    for (size_t i = 0; i < shape.size(); ++i) {
         meta.output_shape[i] = shape[i];
     }
 
