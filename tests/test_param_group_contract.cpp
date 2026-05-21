@@ -10,6 +10,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
+#include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -176,6 +177,68 @@ TEST_F(ParamGroupContractTest, AdamPerGroupBetas) {
         << "beta1=0.99 ends up further from zero than beta1=0.1 after "
            "6 alternating-sign steps (heavy smoothing biases m toward "
            "the late-history grad sign)";
+}
+
+TEST_F(ParamGroupContractTest, AdagradPerGroupLearningRate) {
+    // Two params share the same gradient but live in groups with
+    // distinct learning rates.  Under Adagrad the parameter trajectory
+    // depends linearly on lr, so the ratio of parameter movements
+    // after one step equals the ratio of lrs.  A bug where step_impl
+    // reads lr_ instead of the active group's lr would produce
+    // identical trajectories.
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
+
+    optim::ParamGroup g1{{p1}, /*lr=*/0.01, /*wd=*/0.0};
+    optim::ParamGroup g2{{p2}, /*lr=*/0.10, /*wd=*/0.0};
+    optim::Adagrad ag({g1, g2});
+
+    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    p1->set_grad(grad);
+    p2->set_grad(grad);
+    ag.step();
+
+    auto v1 = p1->tensor().data<float>()[0];
+    auto v2 = p2->tensor().data<float>()[0];
+    // After one Adagrad step with g=1 and initial sum=0:
+    //   sum = 1, std_dev = sqrt(1) + eps ≈ 1
+    //   delta ≈ -lr * 1 / 1 = -lr
+    EXPECT_NEAR(v1, -0.01f, 1e-5f);
+    EXPECT_NEAR(v2, -0.10f, 1e-5f);
+}
+
+TEST_F(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
+    // Adagrad with constant-sign gradients has the well-known
+    // delta = -lr * sign(g) / sqrt(t) property that hides the
+    // magnitude of grad after the sqrt-normalisation.  Drive both
+    // groups with *zero* gradient — then only weight_decay moves the
+    // param.  g1.weight_decay=0 must keep p1 fixed; g2.weight_decay
+    // must shrink p2.
+    auto t1 = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto t2 = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(t1, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(t2, /*requires_grad=*/true);
+
+    optim::ParamGroup g1{{p1}, /*lr=*/0.01, /*wd=*/0.0};
+    optim::ParamGroup g2{{p2}, /*lr=*/0.01, /*wd=*/0.5};
+    optim::Adagrad ag({g1, g2});
+
+    auto zero_grad = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    p1->set_grad(zero_grad);
+    p2->set_grad(zero_grad);
+    ag.step();
+
+    auto v1 = p1->tensor().data<float>()[0];
+    auto v2 = p2->tensor().data<float>()[0];
+
+    // p1: grad'=0, sum stays 0, std=eps≈1e-10, delta=0 → v1=1.0
+    EXPECT_FLOAT_EQ(v1, 1.0f);
+    // p2: grad'=0+0.5*1=0.5, sum=0.25, std=0.5+eps, delta=-0.01*0.5/0.5=-0.01
+    //  → v2 ≈ 0.99
+    EXPECT_LT(v2, 1.0f) << "weight_decay=0.5 must shrink p2";
+    EXPECT_NEAR(v2, 0.99f, 1e-4f);
 }
 
 }  // namespace

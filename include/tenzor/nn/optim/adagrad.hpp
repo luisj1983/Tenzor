@@ -121,6 +121,16 @@ public:
             double eps = 1e-10);
 
     /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     */
+    explicit Adagrad(std::vector<optim::ParamGroup> groups,
+                     double default_lr = 1e-2,
+                     double default_lr_decay = 0.0,
+                     double default_weight_decay = 0.0,
+                     double default_initial_accumulator_value = 0.0,
+                     double default_eps = 1e-10);
+
+    /**
      * @brief Perform single Adagrad optimization step
      *
      * Accumulates squared gradients and updates parameters with

@@ -47,6 +47,20 @@ Adagrad::Adagrad(std::vector<std::shared_ptr<Variable>> params,
     initialize_buffers();
 }
 
+Adagrad::Adagrad(std::vector<optim::ParamGroup> groups,
+                 double default_lr, double default_lr_decay,
+                 double default_weight_decay,
+                 double default_initial_accumulator_value, double default_eps)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      lr_decay_(default_lr_decay),
+      weight_decay_(default_weight_decay),
+      initial_accumulator_value_(default_initial_accumulator_value),
+      eps_(default_eps),
+      step_count_(0) {
+    initialize_buffers();
+}
+
 auto Adagrad::initialize_buffers() -> void {
     sum_.clear();
 
@@ -91,7 +105,30 @@ auto Adagrad::effective_lr() const -> double {
 
 auto Adagrad::step_impl() -> void {
     step_count_++;
-    double current_lr = effective_lr();
+
+    // Audit D.4: each parameter's hyperparameters resolve from its
+    // ParamGroup override first, falling back to the optimiser-wide
+    // defaults stored on this Adagrad instance. Effective LR honours
+    // the per-group lr_decay independently.
+    struct AdagradHP {
+        double lr;
+        double lr_decay;
+        double weight_decay;
+        double eps;
+    };
+
+    auto resolve = [&](size_t i) -> AdagradHP {
+        AdagradHP hp{lr_, lr_decay_, weight_decay_, eps_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.lr_decay     = ParamGroup::or_else(g->lr_decay, lr_decay_);
+            hp.eps          = ParamGroup::or_else(g->eps, eps_);
+        }
+        // Adagrad effective lr: lr / (1 + (step-1) * lr_decay)
+        hp.lr = hp.lr / (1.0 + static_cast<double>(step_count_ - 1) * hp.lr_decay);
+        return hp;
+    };
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
@@ -99,6 +136,8 @@ auto Adagrad::step_impl() -> void {
         if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
+
+        const AdagradHP hp = resolve(i);
 
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
@@ -114,9 +153,9 @@ auto Adagrad::step_impl() -> void {
             // (was static_cast<float>, losing precision vs Adam/AdamW which
             // already preserve double via AttrKey::Lr).
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, current_lr);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
             continue;
@@ -129,11 +168,17 @@ auto Adagrad::step_impl() -> void {
             // CUDA registry expects: [param, grad, sum_sq]
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
 
+            // CUDA kernel receives the raw base lr + lr_decay + step and
+            // computes its own effective lr; pass base lr_ for this group,
+            // not hp.lr (which already has decay applied).
+            const ParamGroup* g = find_group_for_param(i);
+            double base_lr = g ? g->lr : lr_;
+
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, current_lr);
-            attrs.set(AttrKey::LrDecay, lr_decay_);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Lr, base_lr);
+            attrs.set(AttrKey::LrDecay, hp.lr_decay);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Step, step_count_);
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
@@ -145,16 +190,16 @@ auto Adagrad::step_impl() -> void {
         Tensor param_data = param_data_orig;
 
         // Apply weight decay: g = g + weight_decay * param
-        if (weight_decay_ > 0.0) {
-            grad = grad + param_data * static_cast<float>(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad = grad + param_data * static_cast<float>(hp.weight_decay);
         }
 
         // Update accumulator: G_t = G_{t-1} + g_t^2
         sum_[i] = sum_[i] + grad * grad;
 
         // Update parameters: theta = theta - lr * g / (sqrt(G) + eps)
-        auto std_dev = sqrt(sum_[i]) + static_cast<float>(eps_);
-        auto new_param = param_data - grad * static_cast<float>(current_lr) / std_dev;
+        auto std_dev = sqrt(sum_[i]) + static_cast<float>(hp.eps);
+        auto new_param = param_data - grad * static_cast<float>(hp.lr) / std_dev;
 
         // Copy result into existing tensor storage (preserves pointer stability on CPU)
         if (original_device.type == Device::Type::CPU) {
