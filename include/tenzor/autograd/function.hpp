@@ -3365,4 +3365,139 @@ public:
 // "scatter to first-occurrence-of-mode-value" implementation; that one
 // stands. We do not re-add a NonDifferentiable stub for mode().
 
+// ============================================================================
+// Audit E.7 continuation: additional Function wrappers for OpIds that
+// previously dispatched through the kernel registry without a corresponding
+// autograd Function. The differentiable ones below have closed-form backward;
+// the non-differentiable ones throw tenzor::NonDifferentiable from backward()
+// with a message that names the offending op.
+// ============================================================================
+
+/**
+ * @brief square(x) = x * x. Backward: grad * 2 * x.
+ *        Saves input for backward.
+ */
+class SquareBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SquareBackward"; }
+    auto op_id() const -> OpId override { return OpId::Square; }
+};
+
+/**
+ * @brief rsqrt(x) = 1/sqrt(x). Backward: grad * (-0.5 * y^3),
+ *        where y = rsqrt(x). Saves output for backward.
+ */
+class RsqrtBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "RsqrtBackward"; }
+    auto op_id() const -> OpId override { return OpId::Rsqrt; }
+};
+
+/**
+ * @brief deg2rad(x) = x * (pi / 180). Backward: grad * (pi / 180).
+ *        No saved tensors — slope is a constant.
+ */
+class Deg2RadBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "Deg2RadBackward"; }
+    auto op_id() const -> OpId override { return OpId::Deg2Rad; }
+};
+
+/**
+ * @brief rad2deg(x) = x * (180 / pi). Backward: grad * (180 / pi).
+ *        No saved tensors — slope is a constant.
+ */
+class Rad2DegBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "Rad2DegBackward"; }
+    auto op_id() const -> OpId override { return OpId::Rad2Deg; }
+};
+
+/**
+ * @brief logit(x) = log(x / (1 - x)). Backward: grad / (x * (1 - x)).
+ *        Saves input for backward. Undefined outside (0, 1).
+ */
+class LogitBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LogitBackward"; }
+    auto op_id() const -> OpId override { return OpId::Logit; }
+};
+
+/**
+ * @brief nan_to_num replaces NaN/+Inf/-Inf with finite scalars.
+ *        Wherever the input was finite, the output is the input value, so
+ *        the local Jacobian is 1; wherever the input was NaN/Inf, the
+ *        output is a constant and the local Jacobian is 0.
+ *        Backward: grad * isfinite(input).cast(input.dtype).
+ */
+class NanToNumBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NanToNumBackward"; }
+    auto op_id() const -> OpId override { return OpId::NanToNum; }
+};
+
+/**
+ * @brief Heaviside step function. Piecewise constant ⇒ derivative is the
+ *        Dirac delta at the jump and zero elsewhere. Non-differentiable.
+ *        Use a smooth surrogate (sigmoid scaled by temperature) if you
+ *        need gradients.
+ */
+class HeavisideBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "HeavisideBackward"; }
+    auto op_id() const -> OpId override { return OpId::Heaviside; }
+};
+
+/**
+ * @brief signbit returns a Bool tensor (true for negative values, including
+ *        -0.0). Output is discrete ⇒ non-differentiable.
+ */
+class SignbitBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SignbitBackward"; }
+    auto op_id() const -> OpId override { return OpId::Signbit; }
+};
+
+/**
+ * @brief frexp decomposes x = mantissa * 2^exponent. The exponent branch
+ *        is integer (non-differentiable); the mantissa branch is piecewise
+ *        constant in exponent intervals, so its derivative is also a sum
+ *        of Diracs at the dyadic boundaries. Treat as non-differentiable.
+ */
+class FrexpBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "FrexpBackward"; }
+    auto op_id() const -> OpId override { return OpId::Frexp; }
+};
+
+/**
+ * @brief histogram (fixed-bin counts + edges). Integer count tensor is
+ *        non-differentiable in the input values, same reason as histc.
+ */
+class HistogramBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "HistogramBackward"; }
+    auto op_id() const -> OpId override { return OpId::Histogram; }
+};
+
 } // namespace tenzor

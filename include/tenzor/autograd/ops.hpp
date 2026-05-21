@@ -11,7 +11,9 @@
 
 #include "variable.hpp"
 #include "function.hpp"
+#include <limits>
 #include <optional>
+#include <utility>
 
 namespace tenzor {
 
@@ -1187,6 +1189,51 @@ auto flex_attention(const Variable& Q,
                     float scale,
                     int64_t score_mod_id = 0,
                     const Tensor& block_mask = Tensor{}) -> Variable;
+
+// ============================================================================
+// Audit E.7 continuation: autograd wrappers for additional OpIds.
+//
+// The differentiable ones below build a real grad_fn chain so backward()
+// flows. The non-differentiable ones still build a Function wrapper so the
+// graph remains structurally valid, but the wrapper's backward() throws
+// tenzor::NonDifferentiable with a descriptive message.
+// ============================================================================
+
+/** @brief square(x) = x*x. d/dx = 2*x. */
+auto square(const Variable& input) -> Variable;
+
+/** @brief rsqrt(x) = 1/sqrt(x). d/dx = -0.5*y^3 where y = rsqrt(x). */
+auto rsqrt(const Variable& input) -> Variable;
+
+/** @brief deg2rad(x) = x * (pi/180). d/dx = pi/180. */
+auto deg2rad(const Variable& input) -> Variable;
+
+/** @brief rad2deg(x) = x * (180/pi). d/dx = 180/pi. */
+auto rad2deg(const Variable& input) -> Variable;
+
+/** @brief logit(x) = log(x/(1-x)). d/dx = 1/(x*(1-x)). Undefined outside (0,1). */
+auto logit(const Variable& input, double eps = -1.0) -> Variable;
+
+/** @brief nan_to_num: identity on finite, constant on NaN/Inf.
+ *         d/dx = isfinite(x) (1 on finite, 0 on NaN/Inf). */
+auto nan_to_num(const Variable& input,
+                double nan = 0.0,
+                double posinf = std::numeric_limits<double>::max(),
+                double neginf = std::numeric_limits<double>::lowest()) -> Variable;
+
+/** @brief Heaviside step function. NON-DIFFERENTIABLE — backward() throws. */
+auto heaviside(const Variable& input, const Variable& values) -> Variable;
+
+/** @brief signbit returns Bool. NON-DIFFERENTIABLE — backward() throws. */
+auto signbit(const Variable& input) -> Variable;
+
+/** @brief frexp returns (mantissa, exponent). NON-DIFFERENTIABLE — backward() throws. */
+auto frexp(const Variable& input) -> std::pair<Variable, Variable>;
+
+/** @brief histogram returns (counts, edges). NON-DIFFERENTIABLE — backward() throws. */
+auto histogram(const Variable& input, int64_t bins = 10,
+               double min = 0.0, double max = 0.0)
+    -> std::pair<Variable, Variable>;
 
 } // namespace tenzor
 

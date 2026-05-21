@@ -1834,4 +1834,134 @@ auto ArgSortBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vec
 // existing reduction-backward translation unit. We do not re-define it
 // here as a NonDifferentiable stub — that was an early-iteration mistake.
 
+// ============================================================================
+// Audit E.7 continuation: real-backward and non-diff wrappers for additional
+// OpIds that previously dispatched through the kernel registry without an
+// autograd Function. See function.hpp for one-line summaries.
+// ============================================================================
+
+// square(x) = x * x  -->  d/dx = 2*x
+auto SquareBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SquareBackward::forward should not be called directly");
+}
+auto SquareBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& x = saved_tensors_[0];
+    // 2 * x * grad
+    auto two_x = mul(x, 2.0);
+    return {mul(grad, two_x)};
+}
+
+// rsqrt(x) = 1/sqrt(x)  -->  d/dx = -0.5 * x^(-3/2) = -0.5 * y^3
+// We save the output y = rsqrt(x) and compute -0.5 * y^3 * grad.
+auto RsqrtBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("RsqrtBackward::forward should not be called directly");
+}
+auto RsqrtBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& y = saved_tensors_[0];  // y = rsqrt(x)
+    // -0.5 * y^3 * grad
+    auto y2 = mul(y, y);
+    auto y3 = mul(y2, y);
+    auto scaled = mul(y3, -0.5);
+    return {mul(grad, scaled)};
+}
+
+// deg2rad(x) = x * (pi/180)  -->  d/dx = pi/180 (constant)
+auto Deg2RadBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("Deg2RadBackward::forward should not be called directly");
+}
+auto Deg2RadBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    constexpr double kPiOver180 = 0.017453292519943295;  // M_PI / 180.0
+    return {mul(grad_outputs[0], kPiOver180)};
+}
+
+// rad2deg(x) = x * (180/pi)  -->  d/dx = 180/pi (constant)
+auto Rad2DegBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("Rad2DegBackward::forward should not be called directly");
+}
+auto Rad2DegBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    constexpr double k180OverPi = 57.29577951308232;  // 180.0 / M_PI
+    return {mul(grad_outputs[0], k180OverPi)};
+}
+
+// logit(x) = log(x / (1 - x))  -->  d/dx = 1 / (x * (1 - x))
+// Saves the input x. Outside (0, 1) the derivative is undefined; we let
+// the natural arithmetic propagate the inf/NaN so the caller sees the
+// invalid region rather than fabricating a silent zero.
+auto LogitBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("LogitBackward::forward should not be called directly");
+}
+auto LogitBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& x = saved_tensors_[0];
+    // (1 - x) = -(x - 1)
+    auto neg_one_minus_x = sub(x, 1.0);
+    auto one_minus_x = neg(neg_one_minus_x);
+    // x * (1 - x)
+    auto denom = mul(x, one_minus_x);
+    // grad / (x * (1 - x))
+    return {div(grad, denom)};
+}
+
+// nan_to_num: y = x where isfinite(x), else replacement constant.
+// Jacobian is identity on the finite-mask, zero on NaN/Inf.
+// backward: grad * isfinite(x).cast(grad.dtype())
+auto NanToNumBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("NanToNumBackward::forward should not be called directly");
+}
+auto NanToNumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& x = saved_tensors_[0];
+    auto finite_mask = isfinite(x);
+    // Promote bool mask to grad's dtype for elementwise multiply.
+    auto mask_f = finite_mask.to(grad.dtype());
+    return {mul(grad, mask_f)};
+}
+
+// --- non-differentiable wrappers ---------------------------------------
+
+auto HeavisideBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("HeavisideBackward::forward should not be called directly");
+}
+auto HeavisideBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "heaviside: the step function is piecewise constant; its derivative is "
+        "the Dirac delta at the jump and zero elsewhere, so it is not "
+        "differentiable in the classical sense. Use a smooth surrogate "
+        "(e.g. sigmoid(x / temperature)) if you need gradients.");
+}
+
+auto SignbitBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SignbitBackward::forward should not be called directly");
+}
+auto SignbitBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "signbit: output is a Bool tensor (discrete), so it is not "
+        "differentiable in the input. Use a soft sign surrogate "
+        "(e.g. tanh(k * x) for large k) for a differentiable approximation.");
+}
+
+auto FrexpBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("FrexpBackward::forward should not be called directly");
+}
+auto FrexpBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "frexp: the exponent branch is integer-valued and the mantissa branch "
+        "is piecewise constant in dyadic intervals (derivative is a sum of "
+        "Diracs at the boundaries). Use direct log2-based decomposition if "
+        "you need a differentiable factoring.");
+}
+
+auto HistogramBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("HistogramBackward::forward should not be called directly");
+}
+auto HistogramBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "histogram: integer count tensor is non-differentiable in the input "
+        "values (same as histc). Wrap with a custom Function and a "
+        "straight-through estimator if you need gradients through the "
+        "binning step.");
+}
+
 } // namespace tenzor

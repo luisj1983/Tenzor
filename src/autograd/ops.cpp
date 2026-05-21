@@ -2922,4 +2922,140 @@ auto affine_grid(const Variable& theta,
     return output;
 }
 
+// ===========================================================================
+// Audit E.7 continuation: wrappers for OpIds whose Function classes are
+// declared in function.hpp and implemented in function_new_ops.cpp.
+//
+// Differentiable wrappers use either unary_autograd<>{} (save input) or
+// unary_autograd_save_output<>{} (save output). Non-differentiable wrappers
+// still attach a Function so that calling .backward() through them raises
+// tenzor::NonDifferentiable instead of silently dropping the graph edge.
+// ===========================================================================
+
+// square(x) = x * x  — save input
+auto square(const Variable& input) -> Variable {
+    return unary_autograd<SquareBackward>(input,
+        [](const Tensor& t) { return tenzor::square(t); });
+}
+
+// rsqrt(x) = 1/sqrt(x)  — save output
+auto rsqrt(const Variable& input) -> Variable {
+    return unary_autograd_save_output<RsqrtBackward>(input,
+        [](const Tensor& t) { return tenzor::rsqrt(t); });
+}
+
+// deg2rad — no saved tensor, slope is a constant; reuse unary_autograd which
+// saves the input but the backward simply ignores it.
+auto deg2rad(const Variable& input) -> Variable {
+    return unary_autograd<Deg2RadBackward>(input,
+        [](const Tensor& t) { return tenzor::deg2rad(t); });
+}
+
+// rad2deg — same shape as deg2rad
+auto rad2deg(const Variable& input) -> Variable {
+    return unary_autograd<Rad2DegBackward>(input,
+        [](const Tensor& t) { return tenzor::rad2deg(t); });
+}
+
+// logit(x) = log(x/(1-x)) — save input
+auto logit(const Variable& input, double eps) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::logit(input.tensor(), eps), false);
+    }
+    auto grad_fn = std::make_shared<LogitBackward>();
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tenzor::logit(input.tensor(), eps);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// nan_to_num — save input (we need isfinite(x) for the mask in backward)
+auto nan_to_num(const Variable& input,
+                double nan, double posinf, double neginf) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::nan_to_num(input.tensor(), nan, posinf, neginf),
+                        false);
+    }
+    auto grad_fn = std::make_shared<NanToNumBackward>();
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tenzor::nan_to_num(input.tensor(), nan, posinf, neginf);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// --- non-differentiable wrappers ----------------------------------------
+//
+// We still attach a Function with set_next_functions/set_input_variables so
+// the graph topology is preserved. Calling backward() through any of these
+// raises tenzor::NonDifferentiable with the op's documented reason.
+
+auto heaviside(const Variable& input, const Variable& values) -> Variable {
+    auto result = tenzor::heaviside(input.tensor(), values.tensor());
+    if ((!input.requires_grad() && !values.requires_grad()) ||
+        !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<HeavisideBackward>();
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = values.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({input, values});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto signbit(const Variable& input) -> Variable {
+    auto result = tenzor::signbit(input.tensor());
+    // Output is Bool — gradient flow through it is meaningless, but we still
+    // wire a backward that throws NonDifferentiable if anyone tries to .backward().
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<SignbitBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto frexp(const Variable& input) -> std::pair<Variable, Variable> {
+    auto [mantissa_t, exponent_t] = tenzor::frexp(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(mantissa_t, false), Variable(exponent_t, false)};
+    }
+    auto grad_fn = std::make_shared<FrexpBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    // Only mantissa carries the (non-differentiable) grad_fn — exponent is
+    // integer-typed by construction and never participates in a grad graph.
+    Variable mantissa(mantissa_t, true);
+    mantissa.set_grad_fn(grad_fn);
+    Variable exponent(exponent_t, false);
+    return {mantissa, exponent};
+}
+
+auto histogram(const Variable& input, int64_t bins, double min, double max)
+    -> std::pair<Variable, Variable> {
+    auto [counts_t, edges_t] = tenzor::histogram(input.tensor(), bins, min, max);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(counts_t, false), Variable(edges_t, false)};
+    }
+    auto grad_fn = std::make_shared<HistogramBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable counts(counts_t, true);
+    counts.set_grad_fn(grad_fn);
+    Variable edges(edges_t, false);
+    return {counts, edges};
+}
+
 } // namespace tenzor
