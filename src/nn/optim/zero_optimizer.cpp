@@ -903,10 +903,17 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
         partition.variance.assign(1, zeros({slice_n}, state_dtype, dev));
 
         if (config_.use_master_fp32) {
-            // The master is a fp32 copy of the rank's parameter slice. We populate it
-            // by gathering each param's portion of the rank's slice; for now zero-init
-            // it (the all-gather of params at the end of the FIRST step copies real
-            // values into the master via the same code path used for legacy Stage 1).
+            // The master is a fp32 copy of the rank's parameter slice. We must populate
+            // it from the actual initial parameter values at construction time — *not*
+            // leave it zero-initialised. The previous comment claimed the post-step
+            // all-gather would fill the master via the legacy Stage 1 path, but the
+            // element-mode all-gather (`all_gather_parameters_element_mode`) writes
+            // into `parameters_[i]->tensor()`, never touching `master_params`. If we
+            // left master at zeros, the first `update_local_partition_element_mode`
+            // step would compute `target = 0 - m_hat/denom*lr` and scatter that
+            // nonsense back into the params, *and* any reader of state_dict /
+            // checkpoint before the first step would see zeros instead of the real
+            // fp32 weights.
             //
             // NOTE: master is meaningful only when training in fp16/bf16; if all params
             // are already fp32 the master is wasteful and we skip allocation.
@@ -915,7 +922,33 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
                 if (e.dtype != DType::Float32) { any_low_precision = true; break; }
             }
             if (any_low_precision) {
-                partition.master_params.assign(1, zeros({slice_n}, DType::Float32, dev));
+                Tensor master = zeros({slice_n}, DType::Float32, dev);
+                // Populate from each parameter's overlap with this rank's slice,
+                // upcast to fp32. Mirrors the no-master gather loop in
+                // update_local_partition_element_mode() but writes to fp32 master.
+                const auto& L = partition_layout_;
+                const int64_t rs = L.rank_starts[config_.rank];
+                const int64_t re = L.rank_starts[config_.rank + 1];
+                for (size_t i = 0; i < L.params.size(); ++i) {
+                    const auto& e = L.params[i];
+                    int64_t p_start = e.global_offset;
+                    int64_t p_end = e.global_offset + e.numel;
+                    int64_t lap_start = std::max(p_start, rs);
+                    int64_t lap_end = std::min(p_end, re);
+                    if (lap_end <= lap_start) continue;
+                    if (!parameters_[i]->tensor().is_contiguous()) {
+                        throw std::runtime_error(
+                            "ElementLevel master_params init requires contiguous "
+                            "parameter tensors; non-contiguous param at index "
+                            + std::to_string(i));
+                    }
+                    Tensor pflat = parameters_[i]->tensor().contiguous().view({-1});
+                    Tensor src = pflat.slice(0, lap_start - p_start, lap_end - p_start);
+                    if (src.dtype() != DType::Float32) src = src.to(DType::Float32);
+                    Tensor dst = master.slice(0, lap_start - rs, lap_end - rs);
+                    add_(dst, src);  // dst is zero
+                }
+                partition.master_params.assign(1, master);
             } else {
                 partition.master_params.assign(1, Tensor());  // no master needed
             }
