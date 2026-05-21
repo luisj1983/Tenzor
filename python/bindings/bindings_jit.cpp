@@ -194,9 +194,21 @@ void register_jit(py::module_& m) {
 
     // Compile API (torch.compile equivalent)
     jit.def("compile", [](py::function fn, bool fullgraph, std::string mode) {
-        auto cpp_fn = [fn](const tenzor::Variable& input) -> tenzor::Variable {
+        // The C++ side stores the callable in N-input form; the Python
+        // wrapper unpacks the span as positional arguments so user code
+        // can keep writing `def f(x):` or `def f(x, y, z):` naturally.
+        auto cpp_fn =
+            [fn](std::span<const tenzor::Variable> inputs) -> tenzor::Variable {
             py::gil_scoped_acquire acquire;
-            auto result = fn(input);
+            if (inputs.size() == 1) {
+                auto result = fn(inputs[0]);
+                return result.cast<tenzor::Variable>();
+            }
+            py::tuple args(inputs.size());
+            for (std::size_t i = 0; i < inputs.size(); ++i) {
+                args[i] = py::cast(inputs[i]);
+            }
+            auto result = fn(*args);
             return result.cast<tenzor::Variable>();
         };
 
@@ -205,11 +217,21 @@ void register_jit(py::module_& m) {
         config.mode = std::move(mode);
 
         auto compiled = std::make_shared<tenzor::jit::CompiledFunction>(
-            std::move(cpp_fn), std::move(config));
+            tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
+            std::move(config));
 
-        return py::cpp_function([compiled](const tenzor::Variable& input) {
+        // Returned py::cpp_function accepts any positional Variables. The
+        // pybind11 *args dispatch happens via py::args; we then forward to
+        // the span-based operator().
+        return py::cpp_function([compiled](py::args args) {
+            std::vector<tenzor::Variable> inputs;
+            inputs.reserve(args.size());
+            for (auto& a : args) {
+                inputs.push_back(a.cast<tenzor::Variable>());
+            }
             py::gil_scoped_release release;
-            return (*compiled)(input);
+            return (*compiled)(
+                std::span<const tenzor::Variable>(inputs.data(), inputs.size()));
         });
     },
     py::arg("fn"),
@@ -217,7 +239,8 @@ void register_jit(py::module_& m) {
     py::arg("mode") = "default",
     "Compile a function for automatic graph capture and optimization.\n"
     "First call traces and compiles; subsequent calls use cached compiled graph.\n"
-    "Shape mismatches trigger recompilation (up to 8 shapes cached).");
+    "Shape mismatches trigger recompilation (up to 8 shapes cached).\n"
+    "Accepts any number of positional Variable arguments.");
 
     // tenzor.compile alias
     m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode) {
@@ -260,20 +283,44 @@ void register_jit(py::module_& m) {
         "for invocation and is the argument accepted by the show_* free\n"
         "functions on tenzor_core.jit.")
         .def("__call__",
-             [](tenzor::jit::CompiledFunction& self,
-                const tenzor::Variable& x) {
+             [](tenzor::jit::CompiledFunction& self, py::args args) {
+                 std::vector<tenzor::Variable> inputs;
+                 inputs.reserve(args.size());
+                 for (auto& a : args) {
+                     inputs.push_back(a.cast<tenzor::Variable>());
+                 }
+                 if (inputs.empty()) {
+                     throw std::invalid_argument(
+                         "CompiledFunctionHandle.__call__: expected at "
+                         "least one positional Variable input");
+                 }
                  py::gil_scoped_release release;
-                 return self(x);
-             },
-             py::arg("input"));
+                 return self(std::span<const tenzor::Variable>(
+                     inputs.data(), inputs.size()));
+             });
 
     jit.def("compile_function",
         [](py::function fn, std::string backend, std::string target,
            bool fallback_to_eager) {
-            auto cpp_fn = [fn](const tenzor::Variable& input)
+            auto cpp_fn = [fn](std::span<const tenzor::Variable> inputs)
                 -> tenzor::Variable {
                 py::gil_scoped_acquire acquire;
-                auto result = fn(input);
+                // Forward inputs as positional arguments. Use pybind11's
+                // automatic conversion (same path the previous single-input
+                // form took when calling fn(input)) by building the args
+                // tuple via py::make_tuple's variadic spread — but since
+                // arity is dynamic, fall back to explicit cast which uses
+                // the same default return-value policy as the implicit
+                // single-arg path.
+                if (inputs.size() == 1) {
+                    auto result = fn(inputs[0]);
+                    return result.cast<tenzor::Variable>();
+                }
+                py::tuple args(inputs.size());
+                for (std::size_t i = 0; i < inputs.size(); ++i) {
+                    args[i] = py::cast(inputs[i]);
+                }
+                auto result = fn(*args);
                 return result.cast<tenzor::Variable>();
             };
 
@@ -287,7 +334,8 @@ void register_jit(py::module_& m) {
             config.strict = !fallback_to_eager;
 
             return std::make_shared<tenzor::jit::CompiledFunction>(
-                std::move(cpp_fn), std::move(config));
+                tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
+                std::move(config));
         },
         py::arg("fn"),
         py::arg("backend") = "mlir",
@@ -295,7 +343,8 @@ void register_jit(py::module_& m) {
         py::arg("fallback_to_eager") = false,
         "Build a CompiledFunctionHandle for @tz.jit. Use the returned\n"
         "object's __call__ to invoke and the show_* free functions on\n"
-        "this module to introspect the pipeline.");
+        "this module to introspect the pipeline.\n"
+        "Accepts any number of positional Variable arguments.");
 
     jit.def("show_graph",
         [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,

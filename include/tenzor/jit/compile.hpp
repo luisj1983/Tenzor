@@ -27,9 +27,12 @@
 #pragma once
 
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include "../autograd/variable.hpp"
@@ -100,15 +103,32 @@ struct CompileConfig {
  */
 class CompiledFunction {
 public:
+    /// Single-input function signature (legacy / common case). Retained as
+    /// the public type alias so callers like `tz::jit::compile(...)` keep
+    /// working unchanged when they pass a `Variable(const Variable&)` lambda.
     using FnType = std::function<Variable(const Variable&)>;
 
+    /// N-input function signature. The captured callable receives a span of
+    /// inputs and returns a single Variable. Construction from a single-input
+    /// FnType wraps the original callable into this form.
+    using FnTypeN = std::function<Variable(std::span<const Variable>)>;
+
     /**
-     * @brief Construct a compiled function wrapper.
+     * @brief Construct a compiled function wrapper from a single-input fn.
+     *
+     * Retained for backward compatibility: existing callers that pass a
+     * `Variable(const Variable&)` callable continue to work via this
+     * overload, which wraps the function into the N-input form internally.
      *
      * @param fn The function to compile
      * @param config Compilation configuration
      */
     CompiledFunction(FnType fn, CompileConfig config = {});
+
+    /**
+     * @brief Construct a compiled function wrapper from an N-input fn.
+     */
+    CompiledFunction(FnTypeN fn, CompileConfig config = {});
 
     /// Destructor declared out-of-line because `mlir_cache_` holds a
     /// std::unique_ptr to an incomplete type.
@@ -120,15 +140,43 @@ public:
     // be ill-formed.
 
     /**
-     * @brief Execute the compiled function.
+     * @brief Execute the compiled function (single-input convenience).
      *
-     * On first call (or cache miss), traces the function and compiles
-     * the resulting graph. Returns the eager execution result.
+     * Forwards to the N-input overload with a 1-element span. Preserves
+     * the historical `compiled_fn(x)` call site.
      *
      * @param input Input variable
      * @return Output variable
      */
     auto operator()(const Variable& input) -> Variable;
+
+    /**
+     * @brief Execute the compiled function with N inputs.
+     *
+     * On first call (or cache miss) for a given input-shape tuple, traces
+     * the function with the supplied inputs and compiles the resulting
+     * graph. Subsequent calls with matching shapes reuse the cached
+     * compilation. Shape mismatches trigger a re-trace.
+     *
+     * @param inputs Input variables (any positive arity)
+     * @return Output variable
+     */
+    auto operator()(std::span<const Variable> inputs) -> Variable;
+
+    /**
+     * @brief Variadic convenience for `compiled(x, y, z, ...)` calls.
+     *
+     * Packs the arguments into a fixed-size array and forwards to the
+     * span-based overload. SFINAE-restricted to `Variable` arguments so
+     * the single-Variable overload above is still selected unambiguously.
+     */
+    template <class... Vs,
+              class = std::enable_if_t<(sizeof...(Vs) >= 2) &&
+                  (std::is_same_v<std::decay_t<Vs>, Variable> && ...)>>
+    auto operator()(Vs&&... inputs) -> Variable {
+        const Variable arr[] = {static_cast<const Variable&>(inputs)...};
+        return (*this)(std::span<const Variable>(arr, sizeof...(Vs)));
+    }
 
     /**
      * @brief Get the number of cached shape specializations.
@@ -154,6 +202,7 @@ public:
      * not compile or invoke the MLIR pipeline.
      */
     auto dump_graph(const Variable& input) -> std::string;
+    auto dump_graph(std::span<const Variable> inputs) -> std::string;
 
     /**
      * @brief Trace + lower the function and return the StableHLO MLIR text
@@ -164,6 +213,7 @@ public:
      * with plugin_enabled=true (so Tenzor custom_calls survive in the text).
      */
     auto dump_mlir(const Variable& input) -> std::string;
+    auto dump_mlir(std::span<const Variable> inputs) -> std::string;
 
     /**
      * @brief Like dump_mlir, but lowers with plugin_enabled=false so all
@@ -171,6 +221,7 @@ public:
      *        tz.jit.show_stablehlo().
      */
     auto dump_stablehlo(const Variable& input) -> std::string;
+    auto dump_stablehlo(std::span<const Variable> inputs) -> std::string;
 
     /**
      * @brief Run iree-compile with --mlir-print-ir-after-all on the lowered
@@ -178,9 +229,11 @@ public:
      *        string. Used by tz.jit.show_iree().
      */
     auto dump_iree(const Variable& input) -> std::string;
+    auto dump_iree(std::span<const Variable> inputs) -> std::string;
 
 private:
-    FnType fn_;
+    /// Always stored as the N-input form. Single-input constructors wrap.
+    FnTypeN fn_;
     CompileConfig config_;
     mutable std::mutex mutex_;
     bool had_graph_break_{false};
@@ -206,15 +259,17 @@ private:
 
     /// Compute cache key from input tensor properties.
     static auto shape_key(const Variable& input) -> std::string;
+    static auto shape_key(std::span<const Variable> inputs) -> std::string;
 
-    /// Trace and compile the function for the given input.
-    auto trace_and_compile(const Variable& input) -> std::shared_ptr<CompiledModule>;
+    /// Trace and compile the function for the given inputs.
+    auto trace_and_compile(std::span<const Variable> inputs)
+        -> std::shared_ptr<CompiledModule>;
 
-    /// MLIR backend invoke path. Routes input → trace → lower → iree-compile →
+    /// MLIR backend invoke path. Routes inputs → trace → lower → iree-compile →
     /// IreeInvoker. Cached on a shape-key basis the same way the NVRTC path
-    /// is. Falls back to eager when the input is not on a device the MLIR
+    /// is. Falls back to eager when the inputs are not on a device the MLIR
     /// pipeline supports yet.
-    auto mlir_invoke(const Variable& input) -> Variable;
+    auto mlir_invoke(std::span<const Variable> inputs) -> Variable;
 };
 
 /**
@@ -235,6 +290,10 @@ private:
  * @endcode
  */
 auto compile(CompiledFunction::FnType fn, CompileConfig config = {})
+    -> CompiledFunction;
+
+/// N-input overload of compile().
+auto compile(CompiledFunction::FnTypeN fn, CompileConfig config = {})
     -> CompiledFunction;
 
 } // namespace jit

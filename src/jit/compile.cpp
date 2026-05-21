@@ -51,6 +51,19 @@ struct MlirInvokerCache {};
 // ============================================================================
 
 CompiledFunction::CompiledFunction(FnType fn, CompileConfig config)
+    : CompiledFunction(
+          FnTypeN([fn = std::move(fn)](std::span<const Variable> inputs) {
+              if (inputs.size() != 1) {
+                  throw std::invalid_argument(
+                      "CompiledFunction: this function was constructed from a "
+                      "single-input callable but was invoked with " +
+                      std::to_string(inputs.size()) + " inputs");
+              }
+              return fn(inputs[0]);
+          }),
+          std::move(config)) {}
+
+CompiledFunction::CompiledFunction(FnTypeN fn, CompileConfig config)
     : fn_(std::move(fn)), config_(std::move(config)) {
     if (config_.mode != "default" && config_.mode != "reduce-overhead" && config_.mode != "max-autotune") {
         throw std::invalid_argument("Unknown compilation mode: " + config_.mode +
@@ -75,11 +88,22 @@ CompiledFunction::CompiledFunction(FnType fn, CompileConfig config)
 CompiledFunction::~CompiledFunction() = default;
 
 auto CompiledFunction::operator()(const Variable& input) -> Variable {
-    if (config_.backend == "mlir") {
-        return mlir_invoke(input);
+    const Variable arr[1] = {input};
+    return (*this)(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable {
+    if (inputs.empty()) {
+        throw std::invalid_argument(
+            "CompiledFunction::operator(): expected at least one input "
+            "Variable, got zero");
     }
 
-    auto key = shape_key(input);
+    if (config_.backend == "mlir") {
+        return mlir_invoke(inputs);
+    }
+
+    auto key = shape_key(inputs);
 
     // Fast path: check cache without lock
     {
@@ -90,33 +114,67 @@ auto CompiledFunction::operator()(const Variable& input) -> Variable {
 
             // reduce-overhead mode: capture and replay CUDA graphs
             if (config_.mode == "reduce-overhead") {
+                std::vector<Tensor> input_tensors;
+                input_tensors.reserve(inputs.size());
+                for (const auto& v : inputs) input_tensors.push_back(v.tensor());
+
                 if (compiled_module->has_cuda_graph()) {
                     // Replay captured graph
-                    std::vector<Tensor> inputs = {input.tensor()};
-                    compiled_module->replay_cuda_graph(inputs);
-                    return compiled_module->forward(input);
+                    compiled_module->replay_cuda_graph(input_tensors);
+                    if (inputs.size() == 1) {
+                        return compiled_module->forward(inputs[0]);
+                    }
+                    std::vector<Variable> input_vars(inputs.begin(), inputs.end());
+                    auto outs = compiled_module->forward(input_vars);
+                    if (outs.empty()) {
+                        throw std::runtime_error(
+                            "CompiledFunction: compiled graph produced no outputs");
+                    }
+                    return outs[0];
                 }
                 ++warmup_count_;
                 if (warmup_count_ >= kReduceOverheadWarmupCalls) {
                     // Capture CUDA graph on this execution
-                    auto result = compiled_module->forward(input);
-                    compiled_module->capture_cuda_graph({input.tensor()});
-                    return result;
+                    if (inputs.size() == 1) {
+                        auto result = compiled_module->forward(inputs[0]);
+                        compiled_module->capture_cuda_graph(input_tensors);
+                        return result;
+                    }
+                    std::vector<Variable> input_vars(inputs.begin(), inputs.end());
+                    auto outs = compiled_module->forward(input_vars);
+                    compiled_module->capture_cuda_graph(input_tensors);
+                    if (outs.empty()) {
+                        throw std::runtime_error(
+                            "CompiledFunction: compiled graph produced no outputs");
+                    }
+                    return outs[0];
                 }
             }
 
-            // Cache hit: execute compiled graph
-            return compiled_module->forward(input);
+            // Cache hit: execute compiled graph. Prefer the single-input
+            // `forward(Variable)` overload when arity is 1 — it carries
+            // additional dtype/device-mismatch retrace machinery that the
+            // vector overload does not.
+            if (inputs.size() == 1) {
+                return compiled_module->forward(inputs[0]);
+            }
+            std::vector<Variable> input_vars(inputs.begin(), inputs.end());
+            auto outs = compiled_module->forward(input_vars);
+            if (outs.empty()) {
+                throw std::runtime_error(
+                    "CompiledFunction: compiled graph produced no outputs");
+            }
+            return outs[0];
         }
     }
 
     // Cache miss: trace, compile, and cache
     // Always execute eagerly first for correctness
-    auto result = fn_(input);
+    auto result = fn_(inputs);
 
     // Attempt compilation in the background
     try {
-        auto compiled = trace_and_compile(input);
+        auto compiled = trace_and_compile(inputs);
         if (compiled) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
@@ -157,18 +215,26 @@ auto CompiledFunction::clear_cache() -> void {
 }
 
 auto CompiledFunction::shape_key(const Variable& input) -> std::string {
+    const Variable arr[1] = {input};
+    return shape_key(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::string {
     std::ostringstream ss;
-    auto shape = input.tensor().shape();
-    for (size_t i = 0; i < shape.size(); ++i) {
-        if (i > 0) ss << "x";
-        ss << shape[i];
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (i > 0) ss << "|";
+        auto shape = inputs[i].tensor().shape();
+        for (size_t j = 0; j < shape.size(); ++j) {
+            if (j > 0) ss << "x";
+            ss << shape[j];
+        }
+        ss << "_" << static_cast<int>(inputs[i].tensor().dtype());
+        ss << "_" << static_cast<int>(inputs[i].tensor().device().type);
     }
-    ss << "_" << static_cast<int>(input.tensor().dtype());
-    ss << "_" << static_cast<int>(input.tensor().device().type);
     return ss.str();
 }
 
-auto CompiledFunction::trace_and_compile(const Variable& input)
+auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
     -> std::shared_ptr<CompiledModule> {
     had_graph_break_ = false;
     break_positions_.clear();
@@ -194,7 +260,7 @@ auto CompiledFunction::trace_and_compile(const Variable& input)
     // Execute the function (ops are recorded by the interceptor)
     Variable output;
     try {
-        output = fn_(input);
+        output = fn_(inputs);
     } catch (...) {
         DispatchInterceptorStack::pop();
         tracer.clear();
@@ -209,7 +275,8 @@ auto CompiledFunction::trace_and_compile(const Variable& input)
     }
 
     // Build graph from traced ops
-    auto graph = tracer.end_trace({input}, {output});
+    std::vector<Variable> input_vec(inputs.begin(), inputs.end());
+    auto graph = tracer.end_trace(input_vec, {output});
     if (!graph || graph->num_nodes() == 0) {
         return nullptr;
     }
@@ -256,8 +323,9 @@ namespace {
 /// a tracing interceptor onto the dispatch stack so every backend dispatch
 /// is recorded as a TracedOp. Without the interceptor, the tracer sees no
 /// ops and `end_trace` returns an empty graph.
-auto trace_single_input_graph(CompiledFunction::FnType& fn,
-                              const Variable& input) -> std::shared_ptr<Graph> {
+auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
+                              std::span<const Variable> inputs)
+    -> std::shared_ptr<Graph> {
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
     auto interceptor = make_tracing_interceptor(tracer, [](OpId /*op*/) {
@@ -269,14 +337,15 @@ auto trace_single_input_graph(CompiledFunction::FnType& fn,
 
     Variable output;
     try {
-        output = fn(input);
+        output = fn(inputs);
     } catch (...) {
         DispatchInterceptorStack::pop();
         tracer.clear();
         throw;
     }
     DispatchInterceptorStack::pop();
-    return tracer.end_trace({input}, {output});
+    std::vector<Variable> input_vec(inputs.begin(), inputs.end());
+    return tracer.end_trace(input_vec, {output});
 }
 
 }  // namespace
@@ -286,7 +355,12 @@ auto trace_single_input_graph(CompiledFunction::FnType& fn,
 // ============================================================================
 
 auto CompiledFunction::dump_graph(const Variable& input) -> std::string {
-    auto graph = trace_single_input_graph(fn_, input);
+    const Variable arr[1] = {input};
+    return dump_graph(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::dump_graph(std::span<const Variable> inputs) -> std::string {
+    auto graph = trace_single_input_graph(fn_, inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph>\n";
     }
@@ -318,10 +392,25 @@ auto resolve_target(const std::string& cfg_target,
 
 }  // namespace
 
-auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
+auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable {
     namespace mj = ::tenzor::jit::mlir_jit;
 
-    const auto key = shape_key(input);
+    if (inputs.empty()) {
+        throw std::invalid_argument(
+            "CompiledFunction::mlir_invoke: expected at least one input");
+    }
+
+    const auto key = shape_key(inputs);
+
+    // Materialize input tensors once; reused on hit path and after compile.
+    std::vector<::tenzor::Tensor> input_tensors;
+    input_tensors.reserve(inputs.size());
+    for (const auto& v : inputs) input_tensors.push_back(v.tensor());
+
+    bool any_requires_grad = false;
+    for (const auto& v : inputs) {
+        if (v.requires_grad()) { any_requires_grad = true; break; }
+    }
 
     // Cache-hit fast path.
     {
@@ -329,14 +418,14 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
         auto it = mlir_cache_->invokers.find(key);
         if (it != mlir_cache_->invokers.end()) {
             mj::internal::record_cache_hit();
-            auto outs = it->second->invoke({input.tensor()});
+            auto outs = it->second->invoke(input_tensors);
             if (outs.size() != 1) {
                 throw std::runtime_error(
                     "MLIR backend: expected exactly 1 output tensor from "
                     "@main, got " +
                     std::to_string(outs.size()));
             }
-            return Variable(std::move(outs[0]), input.requires_grad());
+            return Variable(std::move(outs[0]), any_requires_grad);
         }
         // Miss. If we've already compiled something else for a different
         // shape, this counts as a retrace (a new shape forces a fresh trace).
@@ -347,7 +436,7 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     }
 
     // Cache miss: trace → lower → compile → load invoker → cache.
-    auto graph = trace_single_input_graph(fn_, input);
+    auto graph = trace_single_input_graph(fn_, inputs);
     if (!graph || graph->num_nodes() == 0) {
         // Trace produced nothing (graph break in fullgraph mode, or the
         // function only ran ops the interceptor doesn't capture). Either
@@ -365,7 +454,7 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
         }
         TENZOR_LOG_WARN("MLIR JIT: trace produced no graph; falling back to "
                         "eager execution for this invocation.");
-        return fn_(input);
+        return fn_(inputs);
     }
 
     if (config_.enable_fusion) {
@@ -382,7 +471,7 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
     const std::string mlir_text = lowerer.lower(*graph);
 
     mj::CompileOptions opts;
-    opts.target          = resolve_target(config_.target, input.tensor().device());
+    opts.target          = resolve_target(config_.target, inputs[0].tensor().device());
     opts.plugin_enabled  = true;
 
     auto artifact = mj::compile_mlir(mlir_text, opts);
@@ -494,13 +583,13 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
         }
     }
 
-    auto outs = invoker->invoke({input.tensor()});
+    auto outs = invoker->invoke(input_tensors);
     if (outs.size() != 1) {
         throw std::runtime_error(
             "MLIR backend: expected exactly 1 output tensor from @main, got " +
             std::to_string(outs.size()));
     }
-    Variable result(std::move(outs[0]), input.requires_grad());
+    Variable result(std::move(outs[0]), any_requires_grad);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -522,8 +611,13 @@ auto CompiledFunction::mlir_invoke(const Variable& input) -> Variable {
 // ============================================================================
 
 auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
+    const Variable arr[1] = {input};
+    return dump_mlir(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::dump_mlir(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto graph = trace_single_input_graph(fn_, input);
+    auto graph = trace_single_input_graph(fn_, inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
     }
@@ -537,8 +631,13 @@ auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
 }
 
 auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
+    const Variable arr[1] = {input};
+    return dump_stablehlo(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::dump_stablehlo(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto graph = trace_single_input_graph(fn_, input);
+    auto graph = trace_single_input_graph(fn_, inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
     }
@@ -555,7 +654,16 @@ auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
 }
 
 auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
-    const std::string mlir_text = dump_mlir(input);
+    const Variable arr[1] = {input};
+    return dump_iree(std::span<const Variable>(arr, 1));
+}
+
+auto CompiledFunction::dump_iree(std::span<const Variable> inputs) -> std::string {
+    if (inputs.empty()) {
+        throw std::invalid_argument(
+            "CompiledFunction::dump_iree: expected at least one input");
+    }
+    const std::string mlir_text = dump_mlir(inputs);
     if (mlir_text.rfind("<empty", 0) == 0) {
         return mlir_text;
     }
@@ -563,7 +671,7 @@ auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
     // Resolve the IREE target the same way mlir_invoke does so the dump
     // exactly mirrors what the runtime compiles.
     const std::string target =
-        resolve_target(config_.target, input.tensor().device());
+        resolve_target(config_.target, inputs[0].tensor().device());
 
     // Write the MLIR text to a temp file and shell out to iree-compile with
     // --compile-to=vm (the fast pipeline that produces no .vmfb, just runs
@@ -614,7 +722,7 @@ auto CompiledFunction::dump_iree(const Variable& input) -> std::string {
 
 #else  // TENZOR_HAS_MLIR_JIT
 
-auto CompiledFunction::mlir_invoke(const Variable& /*input*/) -> Variable {
+auto CompiledFunction::mlir_invoke(std::span<const Variable> /*inputs*/) -> Variable {
     throw std::runtime_error(
         "CompiledFunction::mlir_invoke: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
@@ -626,13 +734,31 @@ auto CompiledFunction::dump_mlir(const Variable& /*input*/) -> std::string {
         "TENZOR_USE_MLIR_JIT=ON");
 }
 
+auto CompiledFunction::dump_mlir(std::span<const Variable> /*inputs*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_mlir: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
 auto CompiledFunction::dump_stablehlo(const Variable& /*input*/) -> std::string {
     throw std::runtime_error(
         "CompiledFunction::dump_stablehlo: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
 }
 
+auto CompiledFunction::dump_stablehlo(std::span<const Variable> /*inputs*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_stablehlo: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
 auto CompiledFunction::dump_iree(const Variable& /*input*/) -> std::string {
+    throw std::runtime_error(
+        "CompiledFunction::dump_iree: Tenzor was built without "
+        "TENZOR_USE_MLIR_JIT=ON");
+}
+
+auto CompiledFunction::dump_iree(std::span<const Variable> /*inputs*/) -> std::string {
     throw std::runtime_error(
         "CompiledFunction::dump_iree: Tenzor was built without "
         "TENZOR_USE_MLIR_JIT=ON");
@@ -645,6 +771,10 @@ auto CompiledFunction::dump_iree(const Variable& /*input*/) -> std::string {
 // ============================================================================
 
 auto compile(CompiledFunction::FnType fn, CompileConfig config) -> CompiledFunction {
+    return CompiledFunction(std::move(fn), std::move(config));
+}
+
+auto compile(CompiledFunction::FnTypeN fn, CompileConfig config) -> CompiledFunction {
     return CompiledFunction(std::move(fn), std::move(config));
 }
 
