@@ -378,6 +378,8 @@ class BernoulliDist : public Distribution {
 public:
     explicit BernoulliDist(Tensor probs) : probs_(std::move(probs)) {}
 
+    auto probs() const -> const Tensor& { return probs_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         return bernoulli(probs_);
     }
@@ -1059,6 +1061,10 @@ public:
         // Precompute Cholesky factor L of covariance for sampling + log_prob.
         scale_tril_ = linalg::cholesky(cov_, /*upper=*/false);
     }
+
+    auto loc() const -> const Tensor& { return loc_; }
+    auto covariance_matrix() const -> const Tensor& { return cov_; }
+    auto scale_tril() const -> const Tensor& { return scale_tril_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
@@ -2490,196 +2496,6 @@ private:
     int64_t p_;
 };
 
-// ============================================================================
-// kl_divergence
-// ============================================================================
-//
-// Closed-form KL divergences for supported distribution pairs. Falls back
-// to throwing for unknown pairs — users should use a Monte-Carlo estimator
-// via sampling when no closed form is registered.
-
-/**
- * @brief Compute KL(p || q) for matching distribution types.
- *
- * Supported pairs:
- *   - Normal || Normal
- *   - Bernoulli || Bernoulli
- *   - HalfNormal || HalfNormal
- *   - Uniform || Uniform
- *   - Exponential || Exponential
- *   - Laplace || Laplace
- *   - Gamma || Gamma
- *   - Beta || Beta
- *   - Categorical || Categorical
- *   - Dirichlet || Dirichlet
- *   - Poisson || Poisson
- *   - LogNormal || LogNormal
- *
- * For anything else, throws std::runtime_error. Use Monte-Carlo estimation
- * via `(p.sample() * (p.log_prob(x) - q.log_prob(x))).mean()` instead.
- */
-inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
-    // --- Normal || Normal ---
-    if (auto* pn = dynamic_cast<Normal*>(&p)) {
-        if (auto* qn = dynamic_cast<Normal*>(&q)) {
-            auto mu1 = pn->mean(); auto v1 = pn->variance();
-            auto mu2 = qn->mean(); auto v2 = qn->variance();
-            auto s1 = tenzor::sqrt(v1);
-            auto s2 = tenzor::sqrt(v2);
-            auto diff = mu1 - mu2;
-            return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
-        }
-    }
-    // --- Bernoulli || Bernoulli ---
-    if (auto* pb = dynamic_cast<BernoulliDist*>(&p)) {
-        if (auto* qb = dynamic_cast<BernoulliDist*>(&q)) {
-            auto p_mean = pb->mean();
-            auto q_mean = qb->mean();
-            auto eps = 1e-7f;
-            auto p_clamped = tenzor::clamp(p_mean, eps, 1.0f - eps);
-            auto q_clamped = tenzor::clamp(q_mean, eps, 1.0f - eps);
-            return p_clamped * (tenzor::log(p_clamped) - tenzor::log(q_clamped))
-                 + (1.0f - p_clamped) * (tenzor::log(1.0f - p_clamped) - tenzor::log(1.0f - q_clamped));
-        }
-    }
-    // --- HalfNormal || HalfNormal ---
-    if (auto* ph = dynamic_cast<HalfNormal*>(&p)) {
-        if (auto* qh = dynamic_cast<HalfNormal*>(&q)) {
-            auto s1 = ph->scale();
-            auto s2 = qh->scale();
-            auto v1 = s1 * s1;
-            auto v2 = s2 * s2;
-            return tenzor::log(s2 / s1) + v1 / (v2 * 2.0f) - 0.5f;
-        }
-    }
-    // --- Uniform || Uniform ---
-    if (auto* pu = dynamic_cast<Uniform*>(&p)) {
-        if (auto* qu = dynamic_cast<Uniform*>(&q)) {
-            // KL = log((b2 - a2) / (b1 - a1))
-            // Only valid when support(p) ⊆ support(q)
-            auto range_p = pu->high() - pu->low();
-            auto range_q = qu->high() - qu->low();
-            return tenzor::log(range_q / range_p);
-        }
-    }
-    // --- Exponential || Exponential ---
-    if (auto* pe = dynamic_cast<Exponential*>(&p)) {
-        if (auto* qe = dynamic_cast<Exponential*>(&q)) {
-            // KL = log(λ2/λ1) + λ1/λ2 - 1
-            auto r1 = pe->rate();
-            auto r2 = qe->rate();
-            return tenzor::log(r2 / r1) + r1 / r2 - 1.0f;
-        }
-    }
-    // --- Laplace || Laplace ---
-    if (auto* pl = dynamic_cast<Laplace*>(&p)) {
-        if (auto* ql = dynamic_cast<Laplace*>(&q)) {
-            // KL = |μ1 - μ2|/b2 + b1/b2 * exp(-|μ1 - μ2|/b1) + log(b2/b1) - 1
-            auto b1 = pl->scale();
-            auto b2 = ql->scale();
-            auto abs_diff = tenzor::abs(pl->loc() - ql->loc());
-            return abs_diff / b2
-                 + (b1 / b2) * tenzor::exp(tenzor::neg(abs_diff / b1))
-                 + tenzor::log(b2 / b1) - 1.0f;
-        }
-    }
-    // --- Gamma || Gamma ---
-    if (auto* pg = dynamic_cast<Gamma*>(&p)) {
-        if (auto* qg = dynamic_cast<Gamma*>(&q)) {
-            // KL = (α1-α2)ψ(α1) - lgamma(α1) + lgamma(α2)
-            //      + α2·log(β1/β2) + α1(β2/β1 - 1)
-            auto a1 = pg->concentration();
-            auto a2 = qg->concentration();
-            auto b1 = pg->rate();
-            auto b2 = qg->rate();
-            return (a1 - a2) * tenzor::digamma(a1)
-                 - tenzor::lgamma(a1) + tenzor::lgamma(a2)
-                 + a2 * tenzor::log(b1 / b2)
-                 + a1 * (b2 / b1 - 1.0f);
-        }
-    }
-    // --- Beta || Beta ---
-    if (auto* pb = dynamic_cast<Beta*>(&p)) {
-        if (auto* qb = dynamic_cast<Beta*>(&q)) {
-            // KL = lgamma(a1) + lgamma(b1) - lgamma(a1+b1)
-            //    - lgamma(a2) - lgamma(b2) + lgamma(a2+b2)
-            //    + (a1-a2)ψ(a1) + (b1-b2)ψ(b1)
-            //    - (a1+b1-a2-b2)ψ(a1+b1)
-            //  (note: sign flipped vs some references because
-            //   we compute lgamma(q) - lgamma(p) terms)
-            auto a1 = pb->concentration1();
-            auto b1 = pb->concentration0();
-            auto a2 = qb->concentration1();
-            auto b2 = qb->concentration0();
-            auto sum1 = a1 + b1;
-            auto sum2 = a2 + b2;
-            return tenzor::lgamma(a2) + tenzor::lgamma(b2) - tenzor::lgamma(sum2)
-                 - tenzor::lgamma(a1) - tenzor::lgamma(b1) + tenzor::lgamma(sum1)
-                 + (a1 - a2) * tenzor::digamma(a1)
-                 + (b1 - b2) * tenzor::digamma(b1)
-                 - (sum1 - sum2) * tenzor::digamma(sum1);
-        }
-    }
-    // --- Categorical || Categorical ---
-    if (auto* pc = dynamic_cast<Categorical*>(&p)) {
-        if (auto* qc = dynamic_cast<Categorical*>(&q)) {
-            // KL = Σ p_i (log p_i - log q_i)
-            auto eps = 1e-7f;
-            auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
-            auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
-            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
-            return tenzor::sum(t);
-        }
-    }
-    // --- Dirichlet || Dirichlet ---
-    if (auto* pd = dynamic_cast<Dirichlet*>(&p)) {
-        if (auto* qd = dynamic_cast<Dirichlet*>(&q)) {
-            // KL = lgamma(Σα1) - lgamma(Σα2) - Σlgamma(α1) + Σlgamma(α2)
-            //      + Σ(α1-α2)(ψ(α1) - ψ(Σα1))
-            auto a1 = pd->concentration();
-            auto a2 = qd->concentration();
-            auto sum_a1 = tenzor::sum(a1);
-            auto sum_a2 = tenzor::sum(a2);
-            return tenzor::lgamma(sum_a1) - tenzor::lgamma(sum_a2)
-                 - tenzor::sum(tenzor::lgamma(a1)) + tenzor::sum(tenzor::lgamma(a2))
-                 + tenzor::sum((a1 - a2) * (tenzor::digamma(a1) - tenzor::digamma(sum_a1)));
-        }
-    }
-    // --- Poisson || Poisson ---
-    if (auto* pp = dynamic_cast<Poisson*>(&p)) {
-        if (auto* qp = dynamic_cast<Poisson*>(&q)) {
-            // KL = λ1(log λ1 - log λ2) - (λ1 - λ2)
-            auto r1 = pp->rate();
-            auto r2 = qp->rate();
-            return r1 * (tenzor::log(r1) - tenzor::log(r2)) - (r1 - r2);
-        }
-    }
-    // --- LogNormal || LogNormal ---
-    if (auto* pln = dynamic_cast<LogNormal*>(&p)) {
-        if (auto* qln = dynamic_cast<LogNormal*>(&q)) {
-            // KL(LogNormal(μ1,σ1) || LogNormal(μ2,σ2))
-            //   = KL(Normal(μ1,σ1) || Normal(μ2,σ2))
-            auto mu1 = pln->loc(); auto s1 = pln->scale();
-            auto mu2 = qln->loc(); auto s2 = qln->scale();
-            auto v1 = s1 * s1;
-            auto v2 = s2 * s2;
-            auto diff = mu1 - mu2;
-            return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
-        }
-    }
-    // Audit item E.6: provide a Monte-Carlo fallback for pairs without a
-    // registered closed form.  Standard estimator:
-    //   KL(p || q) ≈ mean_{x ~ p}( log_prob_p(x) - log_prob_q(x) )
-    // with 1024 samples — accurate to ~2% for well-behaved supports.
-    // Users wanting tighter bounds can stack multiple calls.
-    constexpr int kMcSamples = 1024;
-    auto samples = p.sample({kMcSamples});
-    auto log_p = p.log_prob(samples);
-    auto log_q = q.log_prob(samples);
-    auto diff = log_p - log_q;
-    // Mean over the leading sample axis.
-    return tenzor::mean(diff, /*dim=*/0, /*keepdim=*/false);
-}
 
 // ============================================================================
 // Pareto Distribution
@@ -2982,6 +2798,8 @@ public:
         : probs_(std::move(probs)),
           categorical_(probs_) {}
 
+    auto probs() const -> const Tensor& { return probs_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto indices = categorical_.sample(sample_shape);
         auto num_classes = probs_.shape().back();
@@ -3090,6 +2908,10 @@ public:
     LowRankMultivariateNormal(Tensor loc, Tensor cov_factor, Tensor cov_diag)
         : loc_(std::move(loc)), cov_factor_(std::move(cov_factor)),
           cov_diag_(std::move(cov_diag)) {}
+
+    auto loc() const -> const Tensor& { return loc_; }
+    auto cov_factor() const -> const Tensor& { return cov_factor_; }
+    auto cov_diag() const -> const Tensor& { return cov_diag_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto p = loc_.shape().back();
@@ -3311,5 +3133,388 @@ private:
     Tensor concentration_;
 };
 
+
+// ============================================================================
+// kl_divergence
+// ============================================================================
+//
+// Closed-form KL divergences for supported distribution pairs. Falls back
+// to throwing for unknown pairs — users should use a Monte-Carlo estimator
+// via sampling when no closed form is registered.
+
+/**
+ * @brief Compute KL(p || q) for matching distribution types.
+ *
+ * Supported pairs:
+ *   - Normal || Normal
+ *   - Bernoulli || Bernoulli
+ *   - HalfNormal || HalfNormal
+ *   - Uniform || Uniform
+ *   - Exponential || Exponential
+ *   - Laplace || Laplace
+ *   - Gamma || Gamma
+ *   - Beta || Beta
+ *   - Categorical || Categorical
+ *   - Dirichlet || Dirichlet
+ *   - Poisson || Poisson
+ *   - LogNormal || LogNormal
+ *
+ * For anything else, throws std::runtime_error. Use Monte-Carlo estimation
+ * via `(p.sample() * (p.log_prob(x) - q.log_prob(x))).mean()` instead.
+ */
+inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
+    // --- Normal || Normal ---
+    if (auto* pn = dynamic_cast<Normal*>(&p)) {
+        if (auto* qn = dynamic_cast<Normal*>(&q)) {
+            auto mu1 = pn->mean(); auto v1 = pn->variance();
+            auto mu2 = qn->mean(); auto v2 = qn->variance();
+            auto s1 = tenzor::sqrt(v1);
+            auto s2 = tenzor::sqrt(v2);
+            auto diff = mu1 - mu2;
+            return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
+        }
+    }
+    // --- Bernoulli || Bernoulli ---
+    if (auto* pb = dynamic_cast<BernoulliDist*>(&p)) {
+        if (auto* qb = dynamic_cast<BernoulliDist*>(&q)) {
+            auto p_mean = pb->mean();
+            auto q_mean = qb->mean();
+            auto eps = 1e-7f;
+            auto p_clamped = tenzor::clamp(p_mean, eps, 1.0f - eps);
+            auto q_clamped = tenzor::clamp(q_mean, eps, 1.0f - eps);
+            return p_clamped * (tenzor::log(p_clamped) - tenzor::log(q_clamped))
+                 + (1.0f - p_clamped) * (tenzor::log(1.0f - p_clamped) - tenzor::log(1.0f - q_clamped));
+        }
+    }
+    // --- Bernoulli || Categorical (audit E.6) ---
+    // A Bernoulli(p) is equivalent to a Categorical with probs [1-p, p]
+    // over two classes. Closed form when q has exactly 2 classes.
+    if (auto* pb = dynamic_cast<BernoulliDist*>(&p)) {
+        if (auto* qc = dynamic_cast<Categorical*>(&q)) {
+            const auto& q_probs_full = qc->probs();
+            if (q_probs_full.shape().back() != 2) {
+                throw std::runtime_error(
+                    "kl_divergence(Bernoulli || Categorical): Categorical must "
+                    "have exactly 2 classes to be equivalent to Bernoulli");
+            }
+            auto eps = 1e-7f;
+            auto p_mean = pb->mean();
+            auto p_clamped = tenzor::clamp(p_mean, eps, 1.0f - eps);
+            auto q_clamped = tenzor::clamp(q_probs_full, eps, 1.0f);
+            // KL = (1-p)*(log(1-p) - log q0) + p*(log p - log q1)
+            // q0 = q_probs[..., 0], q1 = q_probs[..., 1]; use gather/slicing-free
+            // approach: split along last dim via narrow.
+            auto q0 = tenzor::narrow(q_clamped, /*dim=*/-1, /*start=*/0, /*length=*/1)
+                          .reshape(std::vector<int64_t>(p_clamped.shape().begin(),
+                                                        p_clamped.shape().end()));
+            auto q1 = tenzor::narrow(q_clamped, /*dim=*/-1, /*start=*/1, /*length=*/1)
+                          .reshape(std::vector<int64_t>(p_clamped.shape().begin(),
+                                                        p_clamped.shape().end()));
+            return (1.0f - p_clamped) * (tenzor::log(1.0f - p_clamped) - tenzor::log(q0))
+                 + p_clamped * (tenzor::log(p_clamped) - tenzor::log(q1));
+        }
+    }
+    // --- HalfNormal || HalfNormal ---
+    if (auto* ph = dynamic_cast<HalfNormal*>(&p)) {
+        if (auto* qh = dynamic_cast<HalfNormal*>(&q)) {
+            auto s1 = ph->scale();
+            auto s2 = qh->scale();
+            auto v1 = s1 * s1;
+            auto v2 = s2 * s2;
+            return tenzor::log(s2 / s1) + v1 / (v2 * 2.0f) - 0.5f;
+        }
+    }
+    // --- Uniform || Uniform ---
+    if (auto* pu = dynamic_cast<Uniform*>(&p)) {
+        if (auto* qu = dynamic_cast<Uniform*>(&q)) {
+            // KL = log((b2 - a2) / (b1 - a1))
+            // Only valid when support(p) ⊆ support(q)
+            auto range_p = pu->high() - pu->low();
+            auto range_q = qu->high() - qu->low();
+            return tenzor::log(range_q / range_p);
+        }
+    }
+    // --- Exponential || Exponential ---
+    if (auto* pe = dynamic_cast<Exponential*>(&p)) {
+        if (auto* qe = dynamic_cast<Exponential*>(&q)) {
+            // KL = log(λ2/λ1) + λ1/λ2 - 1
+            auto r1 = pe->rate();
+            auto r2 = qe->rate();
+            return tenzor::log(r2 / r1) + r1 / r2 - 1.0f;
+        }
+    }
+    // --- Laplace || Laplace ---
+    if (auto* pl = dynamic_cast<Laplace*>(&p)) {
+        if (auto* ql = dynamic_cast<Laplace*>(&q)) {
+            // KL = |μ1 - μ2|/b2 + b1/b2 * exp(-|μ1 - μ2|/b1) + log(b2/b1) - 1
+            auto b1 = pl->scale();
+            auto b2 = ql->scale();
+            auto abs_diff = tenzor::abs(pl->loc() - ql->loc());
+            return abs_diff / b2
+                 + (b1 / b2) * tenzor::exp(tenzor::neg(abs_diff / b1))
+                 + tenzor::log(b2 / b1) - 1.0f;
+        }
+    }
+    // --- Gamma || Exponential (audit E.6) ---
+    // Exponential(λ) = Gamma(1, λ); use the Gamma||Gamma formula specialised
+    // to α2=1, β2=λ:
+    //   KL(Gamma(a,b) || Exp(λ)) = (a-1)·ψ(a) - lgamma(a) + log(b)
+    //                              + log(λ) · (-1) ... actually derived:
+    //   Plug a2=1, b2=λ into Gamma||Gamma:
+    //     (a-1)ψ(a) - lgamma(a) + lgamma(1) + 1·log(b/λ) + a·(λ/b - 1)
+    //   = (a-1)ψ(a) - lgamma(a) + log(b) - log(λ) + a·λ/b - a
+    if (auto* pg = dynamic_cast<Gamma*>(&p)) {
+        if (auto* qe = dynamic_cast<Exponential*>(&q)) {
+            auto a  = pg->concentration();
+            auto b  = pg->rate();
+            auto lam = qe->rate();
+            return (a - 1.0f) * tenzor::digamma(a)
+                 - tenzor::lgamma(a)
+                 + tenzor::log(b) - tenzor::log(lam)
+                 + a * lam / b
+                 - a;
+        }
+    }
+    // --- Gamma || Gamma ---
+    if (auto* pg = dynamic_cast<Gamma*>(&p)) {
+        if (auto* qg = dynamic_cast<Gamma*>(&q)) {
+            // KL = (α1-α2)ψ(α1) - lgamma(α1) + lgamma(α2)
+            //      + α2·log(β1/β2) + α1(β2/β1 - 1)
+            auto a1 = pg->concentration();
+            auto a2 = qg->concentration();
+            auto b1 = pg->rate();
+            auto b2 = qg->rate();
+            return (a1 - a2) * tenzor::digamma(a1)
+                 - tenzor::lgamma(a1) + tenzor::lgamma(a2)
+                 + a2 * tenzor::log(b1 / b2)
+                 + a1 * (b2 / b1 - 1.0f);
+        }
+    }
+    // --- Beta || Beta ---
+    if (auto* pb = dynamic_cast<Beta*>(&p)) {
+        if (auto* qb = dynamic_cast<Beta*>(&q)) {
+            // KL = lgamma(a1) + lgamma(b1) - lgamma(a1+b1)
+            //    - lgamma(a2) - lgamma(b2) + lgamma(a2+b2)
+            //    + (a1-a2)ψ(a1) + (b1-b2)ψ(b1)
+            //    - (a1+b1-a2-b2)ψ(a1+b1)
+            //  (note: sign flipped vs some references because
+            //   we compute lgamma(q) - lgamma(p) terms)
+            auto a1 = pb->concentration1();
+            auto b1 = pb->concentration0();
+            auto a2 = qb->concentration1();
+            auto b2 = qb->concentration0();
+            auto sum1 = a1 + b1;
+            auto sum2 = a2 + b2;
+            return tenzor::lgamma(a2) + tenzor::lgamma(b2) - tenzor::lgamma(sum2)
+                 - tenzor::lgamma(a1) - tenzor::lgamma(b1) + tenzor::lgamma(sum1)
+                 + (a1 - a2) * tenzor::digamma(a1)
+                 + (b1 - b2) * tenzor::digamma(b1)
+                 - (sum1 - sum2) * tenzor::digamma(sum1);
+        }
+    }
+    // --- Categorical || Categorical ---
+    if (auto* pc = dynamic_cast<Categorical*>(&p)) {
+        if (auto* qc = dynamic_cast<Categorical*>(&q)) {
+            // KL = Σ p_i (log p_i - log q_i)
+            auto eps = 1e-7f;
+            auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
+            auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
+            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
+            return tenzor::sum(t);
+        }
+    }
+    // --- Categorical || OneHotCategorical (audit E.6) ---
+    // OneHotCategorical is the same distribution as Categorical (just a
+    // different sample parameterisation); KL collapses to Categorical||Categorical
+    // over the underlying probs vectors.
+    if (auto* pc = dynamic_cast<Categorical*>(&p)) {
+        if (auto* qoh = dynamic_cast<OneHotCategorical*>(&q)) {
+            auto eps = 1e-7f;
+            auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
+            auto q_probs = tenzor::clamp(qoh->probs(), eps, 1.0f);
+            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
+            return tenzor::sum(t);
+        }
+    }
+    // --- OneHotCategorical || Categorical (symmetric helper) ---
+    if (auto* poh = dynamic_cast<OneHotCategorical*>(&p)) {
+        if (auto* qc = dynamic_cast<Categorical*>(&q)) {
+            auto eps = 1e-7f;
+            auto p_probs = tenzor::clamp(poh->probs(), eps, 1.0f);
+            auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
+            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
+            return tenzor::sum(t);
+        }
+    }
+    // --- OneHotCategorical || OneHotCategorical (audit E.6) ---
+    if (auto* poh = dynamic_cast<OneHotCategorical*>(&p)) {
+        if (auto* qoh = dynamic_cast<OneHotCategorical*>(&q)) {
+            auto eps = 1e-7f;
+            auto p_probs = tenzor::clamp(poh->probs(), eps, 1.0f);
+            auto q_probs = tenzor::clamp(qoh->probs(), eps, 1.0f);
+            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
+            return tenzor::sum(t);
+        }
+    }
+    // --- Dirichlet || Dirichlet ---
+    if (auto* pd = dynamic_cast<Dirichlet*>(&p)) {
+        if (auto* qd = dynamic_cast<Dirichlet*>(&q)) {
+            // KL = lgamma(Σα1) - lgamma(Σα2) - Σlgamma(α1) + Σlgamma(α2)
+            //      + Σ(α1-α2)(ψ(α1) - ψ(Σα1))
+            auto a1 = pd->concentration();
+            auto a2 = qd->concentration();
+            auto sum_a1 = tenzor::sum(a1);
+            auto sum_a2 = tenzor::sum(a2);
+            return tenzor::lgamma(sum_a1) - tenzor::lgamma(sum_a2)
+                 - tenzor::sum(tenzor::lgamma(a1)) + tenzor::sum(tenzor::lgamma(a2))
+                 + tenzor::sum((a1 - a2) * (tenzor::digamma(a1) - tenzor::digamma(sum_a1)));
+        }
+    }
+    // --- Poisson || Poisson ---
+    if (auto* pp = dynamic_cast<Poisson*>(&p)) {
+        if (auto* qp = dynamic_cast<Poisson*>(&q)) {
+            // KL = λ1(log λ1 - log λ2) - (λ1 - λ2)
+            auto r1 = pp->rate();
+            auto r2 = qp->rate();
+            return r1 * (tenzor::log(r1) - tenzor::log(r2)) - (r1 - r2);
+        }
+    }
+    // --- LogNormal || LogNormal ---
+    if (auto* pln = dynamic_cast<LogNormal*>(&p)) {
+        if (auto* qln = dynamic_cast<LogNormal*>(&q)) {
+            // KL(LogNormal(μ1,σ1) || LogNormal(μ2,σ2))
+            //   = KL(Normal(μ1,σ1) || Normal(μ2,σ2))
+            auto mu1 = pln->loc(); auto s1 = pln->scale();
+            auto mu2 = qln->loc(); auto s2 = qln->scale();
+            auto v1 = s1 * s1;
+            auto v2 = s2 * s2;
+            auto diff = mu1 - mu2;
+            return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
+        }
+    }
+    // --- MultivariateNormal || MultivariateNormal (audit E.6) ---
+    // General closed form:
+    //   KL(N(μ1,Σ1) || N(μ2,Σ2))
+    //     = 0.5 · [ tr(Σ2⁻¹ Σ1) + (μ2-μ1)ᵀ Σ2⁻¹ (μ2-μ1) - k + log(|Σ2|/|Σ1|) ]
+    // Implementation notes:
+    //   * tr(Σ2⁻¹ Σ1) = sum over diagonal of solve(Σ2, Σ1).
+    //   * Mahalanobis term via the q-side scale_tril cached at construction.
+    //   * log|Σ| = 2·Σ log(diag(L)) using each distribution's cached Cholesky.
+    if (auto* pm = dynamic_cast<MultivariateNormal*>(&p)) {
+        if (auto* qm = dynamic_cast<MultivariateNormal*>(&q)) {
+            const auto& mu1 = pm->loc();
+            const auto& mu2 = qm->loc();
+            const auto& s1  = pm->scale_tril();
+            const auto& s2  = qm->scale_tril();
+            const auto& cov1 = pm->covariance_matrix();
+            const int64_t k = mu1.shape().back();
+
+            // log|Σ| = 2 · Σ log(diag(L))
+            auto log_det1 = 2.0f * tenzor::sum(tenzor::log(tenzor::diag(s1)));
+            auto log_det2 = 2.0f * tenzor::sum(tenzor::log(tenzor::diag(s2)));
+
+            // tr(Σ2⁻¹ Σ1) via Σ2⁻¹ Σ1 = cholesky_solve(Σ1, L2):
+            auto sigma2_inv_sigma1 = tenzor::linalg::cholesky_solve(cov1, s2, /*upper=*/false);
+            auto trace_term = tenzor::sum(tenzor::diag(sigma2_inv_sigma1));
+
+            // Mahalanobis term: (μ2-μ1)ᵀ Σ2⁻¹ (μ2-μ1) = ||L2⁻¹ (μ2-μ1)||².
+            auto diff = mu2 - mu1;
+            auto diff_col = tenzor::unsqueeze(diff, -1);
+            auto y_col = tenzor::linalg::solve_triangular(s2, diff_col, /*upper=*/false);
+            const auto& diff_shape = diff.shape();
+            std::vector<int64_t> y_shape(diff_shape.begin(), diff_shape.end());
+            auto y = y_col.reshape(y_shape);
+            auto mahal = tenzor::sum(y * y);
+
+            return 0.5f * (trace_term + mahal - static_cast<float>(k)
+                           + log_det2 - log_det1);
+        }
+    }
+    // --- LowRankMultivariateNormal || MultivariateNormal (audit E.6) ---
+    // Reconstruct Σ1 = W Wᵀ + diag(D) and plug into the general MVN formula.
+    if (auto* pl = dynamic_cast<LowRankMultivariateNormal*>(&p)) {
+        if (auto* qm = dynamic_cast<MultivariateNormal*>(&q)) {
+            const auto& mu1 = pl->loc();
+            const auto& mu2 = qm->loc();
+            const auto& W   = pl->cov_factor();      // (..., k, r)
+            const auto& D   = pl->cov_diag();        // (..., k)
+            const auto& s2  = qm->scale_tril();
+            const int64_t k = mu1.shape().back();
+
+            // Σ1 = W Wᵀ + diag(D)
+            auto Wt = tenzor::transpose(W, -2, -1);
+            auto cov1 = tenzor::matmul(W, Wt)
+                      + tenzor::diag(D);  // diag promotes (k,) -> (k,k)
+
+            // log|Σ1| via matrix-determinant lemma:
+            //   log|D + W Wᵀ| = log|D| + log|I_r + Wᵀ D⁻¹ W|
+            auto d_inv = tenzor::reciprocal(D);
+            auto d_inv_w = tenzor::unsqueeze(d_inv, -1) * W;
+            auto capacitance = tenzor::eye(W.shape().back(), std::nullopt,
+                                           mu1.dtype(), mu1.device())
+                             + tenzor::matmul(Wt, d_inv_w);
+            auto cap_chol = tenzor::linalg::cholesky(capacitance);
+            auto log_det_d   = tenzor::sum(tenzor::log(D));
+            auto log_det_cap = 2.0f * tenzor::sum(
+                tenzor::log(tenzor::abs(tenzor::diag(cap_chol))));
+            auto log_det1 = log_det_d + log_det_cap;
+
+            // log|Σ2| = 2 · Σ log(diag(L2))
+            auto log_det2 = 2.0f * tenzor::sum(tenzor::log(tenzor::diag(s2)));
+
+            // tr(Σ2⁻¹ Σ1)
+            auto sigma2_inv_sigma1 = tenzor::linalg::cholesky_solve(cov1, s2, /*upper=*/false);
+            auto trace_term = tenzor::sum(tenzor::diag(sigma2_inv_sigma1));
+
+            // Mahalanobis
+            auto diff = mu2 - mu1;
+            auto diff_col = tenzor::unsqueeze(diff, -1);
+            auto y_col = tenzor::linalg::solve_triangular(s2, diff_col, /*upper=*/false);
+            const auto& diff_shape = diff.shape();
+            std::vector<int64_t> y_shape(diff_shape.begin(), diff_shape.end());
+            auto y = y_col.reshape(y_shape);
+            auto mahal = tenzor::sum(y * y);
+
+            return 0.5f * (trace_term + mahal - static_cast<float>(k)
+                           + log_det2 - log_det1);
+        }
+    }
+    // Audit item E.6: provide a Monte-Carlo fallback for pairs without a
+    // registered closed form (e.g. Normal||Cauchy, Normal||LogNormal).
+    //
+    // Standard estimator:
+    //   KL(p || q) ≈ (1/N) Σ_i [ log_prob_p(x_i) - log_prob_q(x_i) ],  x_i ~ p
+    //
+    // We use N=1024 samples — accurate to ~2% for well-behaved supports.
+    // Users wanting tighter bounds can stack multiple calls.
+    //
+    // The fallback uses rsample() when available (preserves gradients through
+    // the sampler for reparameterizable p); otherwise sample() (no grad).
+    // When supports don't overlap, log_q is -inf on some samples and the
+    // mean becomes NaN/+inf — we detect this via has_inf_nan() and raise
+    // a clear error instead of returning silent garbage.
+    constexpr int kMcSamples = 1024;
+    Tensor samples;
+    try {
+        samples = p.rsample({kMcSamples});
+    } catch (const std::exception&) {
+        samples = p.sample({kMcSamples});
+    }
+    auto log_p = p.log_prob(samples);
+    auto log_q = q.log_prob(samples);
+    auto diff = log_p - log_q;
+    // Mean over the leading sample axis.
+    auto result = tenzor::mean(diff, /*dim=*/0, /*keepdim=*/false);
+    // Hard fail (no silent fallback) if supports don't overlap or the
+    // estimator otherwise blows up — caller needs to know.
+    if (tenzor::has_inf_nan(result).data<bool>()[0]) {
+        throw std::runtime_error(
+            "kl_divergence: no closed form is registered for this distribution "
+            "pair, and the Monte-Carlo fallback produced NaN/Inf (likely the "
+            "supports do not overlap or log_q(x_i) = -inf for some sample). "
+            "Provide a closed-form KL or ensure supp(p) ⊆ supp(q).");
+    }
+    return result;
+}
 } // namespace distributions
 } // namespace tenzor
