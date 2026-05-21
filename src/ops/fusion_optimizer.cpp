@@ -841,6 +841,43 @@ auto FusionOptimizer::get_supported_patterns() const -> std::vector<std::string>
 // Helper Functions
 // ==============================================================================
 
+// Audit C.5: map a Function's forward `OpId` to the fusion-graph's
+// `OpType`. Only the OpIds that fusion patterns can actually match
+// produce a concrete OpType; everything else returns `OpType::Unknown`,
+// so the fusion-graph builder still records the node (preserving
+// connectivity) but the optimiser's pattern matchers correctly skip it.
+//
+// The mapping is intentionally minimal — extending it lets new fusion
+// patterns activate (e.g. add OpId::Conv1dForward → OpType::Conv2d
+// once a Conv1d-aware fusion exists).
+static auto fusion_op_type_from_op_id(OpId id) -> OpType {
+    switch (id) {
+        case OpId::MatMul:           return OpType::MatMul;
+        case OpId::Linear:           return OpType::Linear;
+        case OpId::Conv2dForward:
+        case OpId::Conv2dBackwardInput:
+        case OpId::Conv2dBackwardWeight:
+                                     return OpType::Conv2d;
+        case OpId::Gelu:             return OpType::GELU;
+        case OpId::Sigmoid:          return OpType::Sigmoid;
+        case OpId::Tanh:             return OpType::Tanh;
+        case OpId::BatchNorm2dForward:
+        case OpId::BatchNorm2dForwardAffine:
+        case OpId::BatchNorm2dBackward:
+                                     return OpType::BatchNorm2d;
+        case OpId::LayerNorm:        return OpType::LayerNorm;
+        case OpId::Add:              return OpType::Add;
+        case OpId::Mul:              return OpType::Mul;
+        case OpId::Sub:              return OpType::Sub;
+        case OpId::Div:              return OpType::Div;
+        case OpId::Softmax:          return OpType::Softmax;
+        case OpId::Dropout:          return OpType::Dropout;
+        case OpId::FusedSoftmaxCrossEntropy:
+                                     return OpType::CrossEntropy;
+        default:                     return OpType::Unknown;
+    }
+}
+
 auto build_fusion_graph_from_autograd(
     [[maybe_unused]] const ComputationGraph& comp_graph,
     const std::shared_ptr<GraphNode>& root
@@ -869,10 +906,20 @@ auto build_fusion_graph_from_autograd(
             }
         }
 
-        // Extract operation type from function name
-        // This is simplified - real implementation would need proper introspection
+        // Audit C.5: replace the legacy "op_name = unknown; op_type =
+        // Unknown" stub with a real OpId-based mapping. The Function
+        // base class now exposes op_id() (audit A.2); subclasses that
+        // have opted in return their canonical forward OpId, which we
+        // translate into the fusion-graph's OpType. Functions that
+        // haven't opted in (OpId::Unknown) still land in OpType::
+        // Unknown, so the fusion node exists for connectivity tracking
+        // but matchers correctly skip it.
         std::string op_name = "unknown";
         OpType op_type = OpType::Unknown;
+        if (node->function) {
+            op_name = node->function->name();
+            op_type = fusion_op_type_from_op_id(node->function->op_id());
+        }
 
         size_t fusion_id = fusion_graph.add_node(op_type, op_name, inputs);
         node_map[node.get()] = fusion_id;
