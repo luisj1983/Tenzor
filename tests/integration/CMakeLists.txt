@@ -227,3 +227,13 @@ tenzor_discover_tests(test_program_export DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PR
 add_executable(test_quantization_e2e test_quantization_e2e.cpp)
 target_link_libraries(test_quantization_e2e PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;quantization" BACKENDS cpu)
+
+# G.13: eager-equivalence parity across lazy / JIT / lite execution paths.
+# First cut of the audit's "every model bitwise-identical across paths" target —
+# exercises representative modules (MLP, Conv stack) against lazy materialisation,
+# CPU JIT (CompiledModule + jit::compile), and the lite runtime. GPU JIT
+# variants and broader lite coverage roll in once Phase C.3 lands more op
+# coverage in the lite exporter.
+add_executable(test_eager_parity test_eager_parity.cpp)
+target_link_libraries(test_eager_parity PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_eager_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;parity" BACKENDS cpu)
