@@ -4,6 +4,7 @@
 #include <pybind11/functional.h>
 #include <optional>
 #include "bindings/register.hpp"  // split-out submodule registrars
+#include "bindings/future_binding.hpp"  // TensorFuture / TensorListFuture (audit C.6)
 #include <cassert>                 // 5th-audit B6 PyGILState_Check assertions
 #include <iostream>
 #include <sstream>
@@ -236,6 +237,10 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Core bindings: DType, Device, Tensor, Variable, context managers
     // See python/bindings/bindings_core.cpp
     tenzor::python::register_core(m);
+
+    // Future<Tensor> wrappers (audit C.6). Must precede any submodule that
+    // returns a TensorFuture / TensorListFuture (async_ops, distributed.rpc).
+    tenzor::python::register_future_types(m);
 
     // ========================================================================
     // Custom autograd Function base class

@@ -4,6 +4,7 @@
 // Covers: process group management, DDP, FSDP, gradient compression, RPC.
 
 #include "register.hpp"
+#include "future_binding.hpp"  // TensorListFuture (audit C.6)
 
 #include <pybind11/stl.h>
 
@@ -312,11 +313,14 @@ void register_distributed(py::module_& m) {
 
     rpc.def("rpc_async", [](int32_t dst, const std::string& func_name,
                              const std::vector<tenzor::Tensor>& args) {
-        auto future = tenzor::distributed::rpc::rpc_async(dst, func_name, args);
-        return future.get();  // Block in Python for simplicity
+        // Audit C.6: previously this blocked on `.get()`. Now we return a
+        // TensorListFuture so callers can overlap compute; they must call
+        // `.result()` (or `.wait()`) explicitly.
+        return TensorListFuture(
+            tenzor::distributed::rpc::rpc_async(dst, func_name, args));
     },
     py::arg("dst"), py::arg("func_name"), py::arg("args"),
-    "Asynchronous RPC call (blocks until result available in Python)");
+    "Asynchronous RPC call; returns a TensorListFuture (call .result()).");
 
     rpc.def("register_function",
         [](const std::string& name, py::function fn) {

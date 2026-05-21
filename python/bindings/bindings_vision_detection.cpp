@@ -4,6 +4,7 @@
 // module) and total ~170 lines — a natural extraction target.
 
 #include "register.hpp"
+#include "future_binding.hpp"  // TensorFuture (audit C.6)
 
 #include <pybind11/stl.h>
 
@@ -112,37 +113,37 @@ void register_vision_detection(py::module_& m) {
     // =========================================================================
     auto async_ops = m.def_submodule("async_ops", "Asynchronous tensor operations");
 
-    // Each async op returns Future<Tensor>. Python consumers get a blocking
-    // Tensor return here — the future is awaited on the C++ side. A true
-    // Future<T> binding is deferred until there's a Python user that actually
-    // wants to overlap compute; today every call site just needs the result.
+    // Each async op returns a TensorFuture (wrapping tenzor::Future<Tensor>).
+    // Audit C.6 fix: the bindings no longer call `.wait()` on the C++ side;
+    // callers receive a Future and must invoke `.result()` (or `.wait()`)
+    // themselves so they can overlap compute. Mirrors torch.futures.Future.
     async_ops.def("async_matmul", [](const Tensor& a, const Tensor& b) {
-        return tenzor::async_matmul(a, b).wait();
-    }, py::arg("a"), py::arg("b"), "Asynchronous matrix multiplication (blocks on completion)");
+        return TensorFuture(tenzor::async_matmul(a, b));
+    }, py::arg("a"), py::arg("b"), "Asynchronous matrix multiplication; returns TensorFuture");
     async_ops.def("async_add", [](const Tensor& a, const Tensor& b) {
-        return tenzor::async_add(a, b).wait();
-    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise addition (blocks on completion)");
+        return TensorFuture(tenzor::async_add(a, b));
+    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise addition; returns TensorFuture");
     async_ops.def("async_mul", [](const Tensor& a, const Tensor& b) {
-        return tenzor::async_mul(a, b).wait();
-    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise multiplication (blocks on completion)");
+        return TensorFuture(tenzor::async_mul(a, b));
+    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise multiplication; returns TensorFuture");
     async_ops.def("async_sub", [](const Tensor& a, const Tensor& b) {
-        return tenzor::async_sub(a, b).wait();
-    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise subtraction (blocks on completion)");
+        return TensorFuture(tenzor::async_sub(a, b));
+    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise subtraction; returns TensorFuture");
     async_ops.def("async_div", [](const Tensor& a, const Tensor& b) {
-        return tenzor::async_div(a, b).wait();
-    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise division (blocks on completion)");
+        return TensorFuture(tenzor::async_div(a, b));
+    }, py::arg("a"), py::arg("b"), "Asynchronous element-wise division; returns TensorFuture");
     async_ops.def("async_relu", [](const Tensor& input) {
-        return tenzor::async_relu(input).wait();
-    }, py::arg("input"), "Asynchronous ReLU activation (blocks on completion)");
+        return TensorFuture(tenzor::async_relu(input));
+    }, py::arg("input"), "Asynchronous ReLU activation; returns TensorFuture");
     async_ops.def("async_sigmoid", [](const Tensor& input) {
-        return tenzor::async_sigmoid(input).wait();
-    }, py::arg("input"), "Asynchronous sigmoid activation (blocks on completion)");
+        return TensorFuture(tenzor::async_sigmoid(input));
+    }, py::arg("input"), "Asynchronous sigmoid activation; returns TensorFuture");
     async_ops.def("async_tanh", [](const Tensor& input) {
-        return tenzor::async_tanh(input).wait();
-    }, py::arg("input"), "Asynchronous tanh activation (blocks on completion)");
+        return TensorFuture(tenzor::async_tanh(input));
+    }, py::arg("input"), "Asynchronous tanh activation; returns TensorFuture");
     async_ops.def("async_softmax", [](const Tensor& input, int64_t dim) {
-        return tenzor::async_softmax(input, dim).wait();
-    }, py::arg("input"), py::arg("dim") = -1, "Asynchronous softmax (blocks on completion)");
+        return TensorFuture(tenzor::async_softmax(input, dim));
+    }, py::arg("input"), py::arg("dim") = -1, "Asynchronous softmax; returns TensorFuture");
 
     // =========================================================================
     // Fused ops
