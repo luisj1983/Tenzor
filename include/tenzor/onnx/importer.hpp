@@ -142,6 +142,10 @@ private:
     auto convert_reduce_sum(const ONNXImportNode& node) -> void;
     auto convert_reduce_mean(const ONNXImportNode& node) -> void;
     auto convert_reduce_max(const ONNXImportNode& node) -> void;
+    auto convert_reduce_min(const ONNXImportNode& node) -> void;
+    auto convert_reduce_prod(const ONNXImportNode& node) -> void;
+    auto convert_reduce_l1(const ONNXImportNode& node) -> void;
+    auto convert_reduce_l2(const ONNXImportNode& node) -> void;
     auto convert_shape(const ONNXImportNode& node) -> void;
     auto convert_constant_of_shape(const ONNXImportNode& node) -> void;
     auto convert_where(const ONNXImportNode& node) -> void;

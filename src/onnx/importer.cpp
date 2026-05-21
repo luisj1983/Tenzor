@@ -723,6 +723,19 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
     } else if (node.op_type == "ReduceMax") {
         convert_reduce_max(node);
         return std::nullopt;
+    } else if (node.op_type == "ReduceMin") {
+        // Audit F.17: ReduceMin/Prod/L1/L2 honour the full axes array.
+        convert_reduce_min(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceProd") {
+        convert_reduce_prod(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceL1") {
+        convert_reduce_l1(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceL2") {
+        convert_reduce_l2(node);
+        return std::nullopt;
     } else if (node.op_type == "Shape") {
         convert_shape(node);
         return std::nullopt;
@@ -2310,6 +2323,61 @@ auto ONNXImporter::convert_reduce_max(const ONNXImportNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
+// Audit F.17: ReduceMin / Prod / L1 / L2.  Each routes through the
+// existing multi-axis reduce helper so a full axes-array import is
+// supported (the previous gap dropped every axis but axes[0]).
+
+auto ONNXImporter::convert_reduce_min(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+    auto axes = get_reduce_axes(node,
+        [this](const std::string& s) { return this->get_input(s); });
+    auto result = apply_multi_axis_reduce(input, axes, keepdims,
+        [](const Tensor& t, std::optional<int64_t> d, bool k) {
+            return tenzor::min(t, d, k);
+        });
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_prod(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+    auto axes = get_reduce_axes(node,
+        [this](const std::string& s) { return this->get_input(s); });
+    auto result = apply_multi_axis_reduce(input, axes, keepdims,
+        [](const Tensor& t, std::optional<int64_t> d, bool k) {
+            return tenzor::prod(t, d, k);
+        });
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_l1(const ONNXImportNode& node) -> void {
+    // ReduceL1: sum(|x|) over the given axes.
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+    auto axes = get_reduce_axes(node,
+        [this](const std::string& s) { return this->get_input(s); });
+    auto abs_in = tenzor::abs(input);
+    auto result = apply_multi_axis_reduce(abs_in, axes, keepdims,
+        [](const Tensor& t, std::optional<int64_t> d, bool k) {
+            return tenzor::sum(t, d, k);
+        });
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_l2(const ONNXImportNode& node) -> void {
+    // ReduceL2: sqrt(sum(x^2)) over the given axes.
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+    auto axes = get_reduce_axes(node,
+        [this](const std::string& s) { return this->get_input(s); });
+    auto sq = tenzor::mul(input, input);
+    auto sum = apply_multi_axis_reduce(sq, axes, keepdims,
+        [](const Tensor& t, std::optional<int64_t> d, bool k) {
+            return tenzor::sum(t, d, k);
+        });
+    register_output(node.outputs[0], tenzor::sqrt(sum));
+}
 
 
 auto ONNXImporter::convert_shape(const ONNXImportNode& node) -> void {
