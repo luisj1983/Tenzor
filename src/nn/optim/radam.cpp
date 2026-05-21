@@ -12,15 +12,54 @@ RAdam::RAdam(std::vector<std::shared_ptr<Variable>> params, double lr, double be
     initialize_buffers();
 }
 
-auto RAdam::step_impl() -> void {
-    step_count_++;
+RAdam::RAdam(std::vector<optim::ParamGroup> groups,
+             double default_lr, double default_beta1,
+             double default_beta2, double default_eps,
+             double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
 
-    double rho_inf = 2.0 / (1.0 - beta2_) - 1.0;
+auto RAdam::step_impl() -> void {
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this RAdam instance.
+    // step_count_ stays a single optimiser-wide counter (matches
+    // PyTorch's per-optimizer step semantics).
+    struct RAdamHP {
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+    };
+
+    auto resolve = [this](size_t i) -> RAdamHP {
+        RAdamHP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
+
+    step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const RAdamHP hp = resolve(i);
+        const double rho_inf = 2.0 / (1.0 - hp.beta2) - 1.0;
 
         const Tensor& grad = param.grad().value();
 
@@ -33,21 +72,21 @@ auto RAdam::step_impl() -> void {
         auto grad_copy = grad.clone();
 
         // Weight decay (L2 regularization)
-        if (weight_decay_ > 0.0) {
-            grad_copy = grad_copy + param.tensor() * scalar(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
         }
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
-                     grad_copy * scalar(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                     grad_copy * scalar(1.0 - hp.beta1);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
-                        grad_copy * grad_copy * scalar(1.0 - beta2_);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                        grad_copy * grad_copy * scalar(1.0 - hp.beta2);
 
         // Bias corrections
-        double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-        double beta2_t = std::pow(beta2_, step_count_);
+        double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
+        double beta2_t = std::pow(hp.beta2, step_count_);
         double rho_t = rho_inf - 2.0 * step_count_ * beta2_t / (1.0 - beta2_t);
 
         if (rho_t > 5.0) {
@@ -57,15 +96,15 @@ auto RAdam::step_impl() -> void {
                 (rho_t - 4.0) * (rho_t - 2.0) * rho_inf /
                 ((rho_inf - 4.0) * (rho_inf - 2.0) * rho_t)
             );
-            double step_size = lr_ * rect / bias_correction1;
+            double step_size = hp.lr * rect / bias_correction1;
 
             auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
-                        + scalar(eps_);
+                        + scalar(hp.eps);
             param.tensor() = param.tensor() -
                             div(exp_avg_[i], denom) * scalar(step_size);
         } else {
             // Variance is intractable — use SGD with momentum
-            double step_size = lr_ / bias_correction1;
+            double step_size = hp.lr / bias_correction1;
             param.tensor() = param.tensor() -
                             exp_avg_[i] * scalar(step_size);
         }

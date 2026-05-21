@@ -42,6 +42,13 @@ public:
            double eps = 1e-8,
            double weight_decay = 0.0);
 
+    explicit Adamax(std::vector<optim::ParamGroup> groups,
+                    double default_lr = 2e-3,
+                    double default_beta1 = 0.9,
+                    double default_beta2 = 0.999,
+                    double default_eps = 1e-8,
+                    double default_weight_decay = 0.0);
+
     auto step_impl() -> void override;
 
     auto set_lr(double lr) -> void;

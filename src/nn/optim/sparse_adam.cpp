@@ -13,13 +13,50 @@ SparseAdam::SparseAdam(std::vector<std::shared_ptr<Variable>> params,
     initialize_buffers();
 }
 
+SparseAdam::SparseAdam(std::vector<optim::ParamGroup> groups,
+                       double default_lr, double default_beta1,
+                       double default_beta2, double default_eps)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps) {
+    initialize_buffers();
+}
+
 auto SparseAdam::step_impl() -> void {
     step_count_++;
+
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this SparseAdam instance.
+    // SparseAdam has no weight_decay (PyTorch parity), so the
+    // ParamGroup's non-optional weight_decay field is intentionally
+    // ignored here.
+    struct SparseAdamHP {
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+    };
+
+    auto resolve = [&](size_t i) -> SparseAdamHP {
+        SparseAdamHP hp{lr_, beta1_, beta2_, eps_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr    = g->lr;
+            hp.beta1 = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2 = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps   = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const SparseAdamHP hp = resolve(i);
 
         const Tensor& grad = param.grad().value();
 
@@ -28,9 +65,9 @@ auto SparseAdam::step_impl() -> void {
         };
 
         // Bias correction factors (same for sparse and dense paths)
-        double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-        double bias_correction2 = 1.0 - std::pow(beta2_, step_count_);
-        double step_size = lr_ / bias_correction1;
+        double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
+        double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
+        double step_size = hp.lr / bias_correction1;
 
         // For 2D+ parameters (e.g., embedding tables), use the sparse path:
         // only update rows that have non-zero gradients.
@@ -59,8 +96,8 @@ auto SparseAdam::step_impl() -> void {
             auto v_rows = index_select(exp_avg_sq_[i], 0, row_indices);
 
             // Update moments for selected rows only
-            m_rows = m_rows * scalar(beta1_) + grad_rows * scalar(1.0 - beta1_);
-            v_rows = v_rows * scalar(beta2_) + grad_rows * grad_rows * scalar(1.0 - beta2_);
+            m_rows = m_rows * scalar(hp.beta1) + grad_rows * scalar(1.0 - hp.beta1);
+            v_rows = v_rows * scalar(hp.beta2) + grad_rows * grad_rows * scalar(1.0 - hp.beta2);
 
             // Write updated moments back using scatter
             // scatter(input, dim, index, src): places src values into input at index positions along dim
@@ -79,7 +116,7 @@ auto SparseAdam::step_impl() -> void {
 
             // Compute bias-corrected update for affected rows
             auto denom = sqrt(v_rows) * scalar(1.0 / std::sqrt(bias_correction2))
-                        + scalar(eps_);
+                        + scalar(hp.eps);
             auto update = div(m_rows, denom) * scalar(step_size);
 
             // Update only the affected parameter rows
@@ -90,13 +127,13 @@ auto SparseAdam::step_impl() -> void {
             // Dense fallback: standard Adam for 1D parameters (biases, etc.)
             auto grad_copy = grad.clone();
 
-            exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
-                         grad_copy * scalar(1.0 - beta1_);
-            exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
-                            grad_copy * grad_copy * scalar(1.0 - beta2_);
+            exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                         grad_copy * scalar(1.0 - hp.beta1);
+            exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                            grad_copy * grad_copy * scalar(1.0 - hp.beta2);
 
             auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
-                        + scalar(eps_);
+                        + scalar(hp.eps);
             param.tensor() = param.tensor() -
                             div(exp_avg_[i], denom) * scalar(step_size);
         }

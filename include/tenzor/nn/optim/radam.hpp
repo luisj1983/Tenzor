@@ -62,6 +62,23 @@ public:
           double eps = 1e-8,
           double weight_decay = 0.0);
 
+    /**
+     * @brief Construct with parameter groups (audit D.4).
+     *
+     * Hyperparameters set per-group on each `ParamGroup` (lr, weight_decay
+     * directly; beta1/beta2/eps via the corresponding `std::optional`
+     * members) override the optimizer-wide defaults stored on this
+     * instance for parameters in that group. Parameters outside any
+     * group, or groups with an unset optional, fall back to the
+     * defaults passed here.
+     */
+    explicit RAdam(std::vector<optim::ParamGroup> groups,
+                   double default_lr = 1e-3,
+                   double default_beta1 = 0.9,
+                   double default_beta2 = 0.999,
+                   double default_eps = 1e-8,
+                   double default_weight_decay = 0.0);
+
     /** @brief Perform single RAdam step */
     auto step_impl() -> void override;
 

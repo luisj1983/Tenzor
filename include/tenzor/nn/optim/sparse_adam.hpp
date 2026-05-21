@@ -66,6 +66,19 @@ public:
                double beta2 = 0.999,
                double eps = 1e-8);
 
+    /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     *
+     * Each group may override `lr` via ParamGroup's non-optional field
+     * and `beta1` / `beta2` / `eps` via the optional fields.
+     * Defaults supplied here apply when a group does not override.
+     */
+    explicit SparseAdam(std::vector<optim::ParamGroup> groups,
+                        double default_lr = 1e-3,
+                        double default_beta1 = 0.9,
+                        double default_beta2 = 0.999,
+                        double default_eps = 1e-8);
+
     /** @brief Perform single SparseAdam step */
     auto step_impl() -> void override;
 

@@ -12,16 +12,54 @@ Adamax::Adamax(std::vector<std::shared_ptr<Variable>> params, double lr, double 
     initialize_buffers();
 }
 
-auto Adamax::step_impl() -> void {
-    step_count_++;
+Adamax::Adamax(std::vector<optim::ParamGroup> groups,
+               double default_lr, double default_beta1, double default_beta2,
+               double default_eps, double default_weight_decay)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay) {
+    initialize_buffers();
+}
 
-    const double bias_correction1 = 1.0 - std::pow(beta1_, static_cast<double>(step_count_));
-    const double step_size = lr_ / bias_correction1;
+auto Adamax::step_impl() -> void {
+    // Audit D.4: per-parameter hyperparameters resolve from the
+    // active ParamGroup (when one was set up) or fall through to
+    // the optimiser-wide defaults stored on this Adamax instance.
+    struct AdamaxHP {
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+    };
+
+    auto resolve = [&](size_t i) -> AdamaxHP {
+        AdamaxHP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        if (const auto* g = find_group_for_param(i)) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
+
+    step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        const AdamaxHP hp = resolve(i);
+
+        const double bias_correction1 =
+            1.0 - std::pow(hp.beta1, static_cast<double>(step_count_));
+        const double step_size = hp.lr / bias_correction1;
 
         const Tensor& grad = param.grad().value();
 
@@ -31,20 +69,20 @@ auto Adamax::step_impl() -> void {
 
         auto grad_copy = grad.clone();
 
-        if (weight_decay_ > 0.0) {
-            grad_copy = grad_copy + param.tensor() * scalar(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
         }
 
         // m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
-                      grad_copy    * scalar(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                      grad_copy    * scalar(1.0 - hp.beta1);
 
         // u_t = max(beta2 * u_{t-1}, |g_t|)
         // element-wise via maximum(), not a reduction.
-        exp_inf_[i] = maximum(exp_inf_[i] * scalar(beta2_), abs(grad_copy));
+        exp_inf_[i] = maximum(exp_inf_[i] * scalar(hp.beta2), abs(grad_copy));
 
         // denom = u_t + eps
-        auto denom = exp_inf_[i] + scalar(eps_);
+        auto denom = exp_inf_[i] + scalar(hp.eps);
 
         // theta -= (lr / (1 - beta1^t)) * m_t / denom
         param.tensor() = param.tensor() -
