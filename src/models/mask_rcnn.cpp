@@ -496,51 +496,87 @@ auto MaskRCNN::forward_train(const Variable& images,
         sampled_labels_data[i] = 0;
     }
 
-    // For each image in batch, match ROIs to GT boxes
-    // Simplified: assign first few ROIs to GT boxes based on IoU
-    // In production, this would use proper ROI sampling with IoU matching
-    auto num_gt = gt_boxes.shape()[1];
+    // Audit G.7: per-image IoU-matched ROI assignment across the batch.
+    //
+    // sampled_rois has layout (num_sampled, 5) = (batch_idx, x1, y1, x2, y2).
+    // gt_boxes has shape (B, max_objects, 4); gt_labels has shape (B, max_objects).
+    // Each image's ROIs must be matched against THAT image's GT boxes, never
+    // against image 0's. We group sampled rows by their batch_idx column, then
+    // run a per-image IoU/argmax/threshold matcher on the same device as the
+    // ROI tensor, and finally scatter the results into the global label and
+    // target-box buffers at their original sampled positions.
+    //
+    // Mirrors torchvision.models.detection.roi_heads.RoIHeads.select_training_samples'
+    // per-image loop. Per-image IoU/argmax/max stay on `original_device`; only
+    // the small (Nb,) result vectors hit the CPU to write into the global
+    // CPU-side label/target buffers.
+    const int64_t num_gt = gt_boxes.shape()[1];
+    const int64_t batch_size_rois = gt_boxes.shape()[0];
 
     if (num_gt > 0 && num_sampled > 0) {
-        // Extract GT boxes and labels from first image (simplified for single-image batch)
-        auto gt_boxes_0 = tenzor::select(gt_boxes, 0, 0);  // (num_gt, 4)
-        auto gt_labels_0 = tenzor::select(gt_labels, 0, 0);  // (num_gt,)
+        // Single CPU copy of the batch_idx column to drive grouping.
+        auto batch_col_cpu = sampled_rois.slice(1, 0, 1)
+                                          .to(Device::cpu())
+                                          .to(DType::Float32);
+        const float* bc = batch_col_cpu.data<float>();
 
-        // Extract ROI boxes (remove batch index column if present)
-        // sampled_rois format: (num_sampled, 5) as (batch_idx, x1, y1, x2, y2)
-        auto roi_boxes = sampled_rois.slice(1, 1, 5);  // (num_sampled, 4)
+        std::vector<std::vector<int64_t>> rows_by_batch(
+            static_cast<size_t>(batch_size_rois));
+        for (int64_t r = 0; r < num_sampled; ++r) {
+            const int64_t b = static_cast<int64_t>(bc[r]);
+            if (b >= 0 && b < batch_size_rois) {
+                rows_by_batch[static_cast<size_t>(b)].push_back(r);
+            }
+        }
 
-        // Compute IoU between ROIs and GT boxes
-        auto iou_matrix = ops::box_iou(roi_boxes, gt_boxes_0);  // (num_sampled, num_gt)
-
-        // Assign each ROI to best matching GT box
-        auto matched_gt_idx = tenzor::argmax(iou_matrix, 1);  // (num_sampled,)
-        auto max_iou = tenzor::max(iou_matrix, 1);  // (num_sampled,)
-
-        // Move all tensors to CPU for data access
-        auto matched_idx_cpu = matched_gt_idx.to(Device::cpu());
-        auto* matched_idx_data = matched_idx_cpu.data<int64_t>();
-        auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
-        auto* max_iou_data = max_iou_f32.data<float>();
-        auto gt_labels_cpu = gt_labels_0.to(Device::cpu());
-        auto* gt_labels_data = gt_labels_cpu.data<int64_t>();
-
-        // Convert GT boxes to Float32 on CPU for data access
-        auto gt_boxes_0_f32 = gt_boxes_0.to(Device::cpu()).to(DType::Float32);
-        auto* gt_boxes_data = gt_boxes_0_f32.data<float>();
-
-        // Use the CPU target boxes buffer
         auto* target_boxes_data = sampled_target_boxes_cpu.data<float>();
 
-        // Assign labels and target boxes based on IoU threshold
-        for (int64_t i = 0; i < num_sampled; ++i) {
-            if (max_iou_data[i] >= 0.5f) {  // Positive threshold
-                int64_t gt_idx = matched_idx_data[i];
-                sampled_labels_data[i] = gt_labels_data[gt_idx];
+        for (int64_t b = 0; b < batch_size_rois; ++b) {
+            const auto& rows = rows_by_batch[static_cast<size_t>(b)];
+            if (rows.empty()) continue;
 
-                // Copy target box coordinates
-                for (int j = 0; j < 4; ++j) {
-                    target_boxes_data[i * 4 + j] = gt_boxes_data[gt_idx * 4 + j];
+            // Build the index tensor of this image's rows on `original_device`.
+            Tensor rows_cpu({static_cast<int64_t>(rows.size())},
+                             DType::Int64, Device::cpu());
+            std::memcpy(rows_cpu.data<int64_t>(), rows.data(),
+                        rows.size() * sizeof(int64_t));
+            Tensor rows_idx = rows_cpu.to(original_device);
+
+            // Per-image ROI boxes and GT (stay on device).
+            Tensor rois_b = tenzor::ops::index_select(sampled_rois, 0, rows_idx);
+            Tensor roi_boxes_b = rois_b.slice(1, 1, 5);          // (Nb, 4)
+            Tensor gt_boxes_b  = tenzor::select(gt_boxes, 0, b); // (M, 4)
+            Tensor gt_labels_b = tenzor::select(gt_labels, 0, b);// (M,)
+            if (gt_boxes_b.dtype() != roi_boxes_b.dtype()) {
+                gt_boxes_b = gt_boxes_b.to(roi_boxes_b.dtype());
+            }
+
+            // IoU + argmax + max on-device — no CPU fallback.
+            Tensor iou_b         = ops::box_iou(roi_boxes_b, gt_boxes_b);  // (Nb, M)
+            Tensor matched_gt_b  = tenzor::argmax(iou_b, 1);               // (Nb,)
+            Tensor max_iou_b     = tenzor::max(iou_b, 1);                  // (Nb,)
+
+            // Only the small per-image result vectors hit the CPU so we can
+            // scatter into the global CPU-side label/target buffers.
+            auto matched_idx_cpu = matched_gt_b.to(Device::cpu());
+            const int64_t* matched_idx_data = matched_idx_cpu.data<int64_t>();
+            auto max_iou_cpu     = max_iou_b.to(Device::cpu()).to(DType::Float32);
+            const float* max_iou_data = max_iou_cpu.data<float>();
+            auto gt_labels_b_cpu = gt_labels_b.to(Device::cpu()).to(DType::Int64);
+            const int64_t* gt_labels_data = gt_labels_b_cpu.data<int64_t>();
+            auto gt_boxes_b_cpu  = gt_boxes_b.to(Device::cpu()).to(DType::Float32);
+            const float* gt_boxes_data = gt_boxes_b_cpu.data<float>();
+
+            const int64_t Nb = static_cast<int64_t>(rows.size());
+            for (int64_t i = 0; i < Nb; ++i) {
+                if (max_iou_data[i] >= 0.5f) {  // Positive threshold (fg_iou_thresh)
+                    const int64_t gt_idx = matched_idx_data[i];
+                    const int64_t global_row = rows[static_cast<size_t>(i)];
+                    sampled_labels_data[global_row] = gt_labels_data[gt_idx];
+                    for (int j = 0; j < 4; ++j) {
+                        target_boxes_data[global_row * 4 + j] =
+                            gt_boxes_data[gt_idx * 4 + j];
+                    }
                 }
             }
         }
@@ -575,40 +611,53 @@ auto MaskRCNN::forward_train(const Variable& images,
                                     DType::Float32, Device::cpu());
     sampled_masks_cpu.fill_(0.0f);
 
-    // Simplified mask sampling: for foreground ROIs, extract corresponding GT masks
-    if (num_gt > 0) {
-        // Extract GT masks for first image
-        auto gt_masks_0 = tenzor::select(gt_masks, 0, 0);  // (num_gt, H, W)
+    // Audit G.7: per-image mask sampling. For each foreground ROI, locate the
+    // best-matching GT box IN ITS OWN IMAGE (via the sampled_rois batch_idx
+    // column), then pull the corresponding GT mask from gt_masks[that image].
+    // Previously every ROI was matched against image 0's GT boxes/masks.
+    if (num_gt > 0 && num_sampled > 0) {
+        auto batch_col_cpu_masks = sampled_rois.slice(1, 0, 1)
+                                                .to(Device::cpu())
+                                                .to(DType::Float32);
+        const float* bc_m = batch_col_cpu_masks.data<float>();
+        const int64_t batch_size_masks = gt_boxes.shape()[0];
 
         for (int64_t i = 0; i < num_sampled; ++i) {
-            if (sampled_labels_data[i] > 0) {  // Foreground ROI (using CPU labels)
-                // Find best matching GT box
-                auto roi_box = sampled_rois.slice(0, i, i+1).slice(1, 1, 5);  // (1, 4)
+            if (sampled_labels_data[i] <= 0) continue;  // Background ROI.
 
-                auto gt_boxes_0 = tenzor::select(gt_boxes, 0, 0);
-                auto iou = ops::box_iou(roi_box.squeeze(0).unsqueeze(0), gt_boxes_0);
-                auto best_gt_idx = tenzor::argmax(iou, 1).to(Device::cpu()).item<int64_t>();
+            const int64_t b = static_cast<int64_t>(bc_m[i]);
+            if (b < 0 || b >= batch_size_masks) continue;
 
-                if (best_gt_idx < num_gt) {
-                    // Extract GT mask and resize to match mask head output
-                    auto gt_mask = tenzor::select(gt_masks_0, 0, best_gt_idx);  // (H, W)
-
-                    // Resize GT mask to (mask_output_H, mask_output_W)
-                    auto resized_mask = ops::interpolate(
-                        gt_mask.unsqueeze(0).unsqueeze(0),  // (1, 1, H, W)
-                        std::vector<int64_t>{mask_output_H, mask_output_W},
-                        "bilinear",
-                        false
-                    );
-                    resized_mask = resized_mask.squeeze(0).squeeze(0).to(DType::Float32).to(Device::cpu());
-
-                    // Copy to sampled_masks_cpu
-                    auto target_mask_cpu = tenzor::select(sampled_masks_cpu, 0, i);
-                    auto* resized_data = resized_mask.data<float>();
-                    auto* target_data = target_mask_cpu.data<float>();
-                    std::copy(resized_data, resized_data + mask_output_H * mask_output_W, target_data);
-                }
+            // ROI box on its native device; GT for THIS image.
+            auto roi_box = sampled_rois.slice(0, i, i + 1).slice(1, 1, 5);  // (1, 4)
+            auto gt_boxes_b = tenzor::select(gt_boxes, 0, b);              // (num_gt, 4)
+            if (gt_boxes_b.dtype() != roi_box.dtype()) {
+                gt_boxes_b = gt_boxes_b.to(roi_box.dtype());
             }
+
+            auto iou = ops::box_iou(roi_box, gt_boxes_b);                  // (1, num_gt)
+            auto best_gt_idx = tenzor::argmax(iou, 1).to(Device::cpu()).item<int64_t>();
+            if (best_gt_idx < 0 || best_gt_idx >= num_gt) continue;
+
+            auto gt_masks_b = tenzor::select(gt_masks, 0, b);              // (num_gt, H, W)
+            auto gt_mask = tenzor::select(gt_masks_b, 0, best_gt_idx);     // (H, W)
+
+            // Resize GT mask to (mask_output_H, mask_output_W).
+            auto resized_mask = ops::interpolate(
+                gt_mask.unsqueeze(0).unsqueeze(0),  // (1, 1, H, W)
+                std::vector<int64_t>{mask_output_H, mask_output_W},
+                "bilinear",
+                false
+            );
+            resized_mask = resized_mask.squeeze(0).squeeze(0)
+                                       .to(DType::Float32).to(Device::cpu());
+
+            auto target_mask_cpu = tenzor::select(sampled_masks_cpu, 0, i);
+            auto* resized_data = resized_mask.data<float>();
+            auto* target_data  = target_mask_cpu.data<float>();
+            std::copy(resized_data,
+                      resized_data + mask_output_H * mask_output_W,
+                      target_data);
         }
     }
 
