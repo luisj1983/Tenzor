@@ -41,6 +41,12 @@ public:
         Variable mask_var(mask, false);
         return {grad_outputs[0] * mask_var};
     }
+
+    // Audit A.2: opt in to the OpId-keyed graph-optimizer matchers so a
+    // future switch from RTTI substring to OpId never silently loses
+    // this Function from the fusion candidate set.
+    auto op_id() const -> OpId override { return OpId::ReLU; }
+    auto name() const -> std::string override { return "ReLUBackward"; }
 };
 
 // NOTE: The former local backward classes (TanhBackward, LeakyReLUBackward,
@@ -364,6 +370,11 @@ public:
         Variable mask_var(grad_hs, false);
         return {grad_outputs[0] * mask_var};
     }
+
+    // Hardswish has no dedicated OpId yet (see Inf-D follow-up); keep
+    // the RTTI name match working via name() but leave op_id() at the
+    // default OpId::Unknown.
+    auto name() const -> std::string override { return "HardswishBackward"; }
 };
 
 // Backward function for Hardsigmoid
@@ -408,6 +419,9 @@ public:
         Variable mask_var(grad_hs, false);
         return {grad_outputs[0] * mask_var};
     }
+
+    // Hardsigmoid has no dedicated OpId yet; same convention as Hardswish.
+    auto name() const -> std::string override { return "HardsigmoidBackward"; }
 };
 
 // PReLU implementation
@@ -678,6 +692,9 @@ public:
     // create_graph=true.
     TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
 
+    auto op_id() const -> OpId override { return OpId::RReLU; }
+    auto name() const -> std::string override { return "RReLUBackward"; }
+
 private:
     double lower_;
     double upper_;
@@ -747,6 +764,9 @@ public:
                          false);
         return {grad_outputs[0] * (one_var - sig)};
     }
+
+    auto op_id() const -> OpId override { return OpId::LogSigmoid; }
+    auto name() const -> std::string override { return "LogSigmoidBackward"; }
 };
 
 auto log_sigmoid(const Variable& input) -> Variable {
