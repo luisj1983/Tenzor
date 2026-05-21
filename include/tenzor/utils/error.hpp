@@ -155,6 +155,24 @@ class NonDifferentiable : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+namespace error {
+
+/**
+ * @brief Raised when a distribution method (e.g. cdf, icdf, mean) is not
+ *        mathematically defined for that distribution.
+ *
+ * Audit item E.5: distributions like Categorical, Multinomial, Dirichlet
+ * have no canonical scalar order over their support and therefore no
+ * meaningful cdf/icdf. These methods raise this typed exception with a
+ * message that names the distribution and the method, rather than a
+ * generic ``std::runtime_error``.
+ */
+class DistributionMethodUndefined : public TenzorException {
+    using TenzorException::TenzorException;
+};
+
+} // namespace error
+
 // Error checking macros
 #define TENZOR_CHECK(condition, message) \
     do { \

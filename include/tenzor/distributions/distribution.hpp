@@ -15,6 +15,7 @@
 #include "../ops/linalg.hpp"
 #include "../ops/indexing.hpp"
 #include "../ops/transform.hpp"
+#include "../utils/error.hpp"
 #include <vector>
 #include <cmath>
 #include <optional>
@@ -263,6 +264,26 @@ public:
         return tenzor::sum(probs_ * diff * diff, /*dim=*/-1, /*keepdim=*/false);
     }
 
+    /**
+     * @brief cdf/icdf are not defined for Categorical (audit E.5).
+     *
+     * Categorical has no canonical scalar order on its support (class
+     * labels are nominal), so no cumulative distribution exists in the
+     * usual sense. Raise a typed ``DistributionMethodUndefined`` rather
+     * than a generic ``runtime_error``.
+     */
+    [[noreturn]] auto cdf(const Tensor& /*value*/) -> Tensor {
+        throw ::tenzor::error::DistributionMethodUndefined(
+            "Categorical::cdf is undefined: class labels are nominal, "
+            "no canonical scalar order on the support");
+    }
+
+    [[noreturn]] auto icdf(const Tensor& /*q*/) -> Tensor {
+        throw ::tenzor::error::DistributionMethodUndefined(
+            "Categorical::icdf is undefined: class labels are nominal, "
+            "no canonical scalar order on the support");
+    }
+
 private:
     Tensor probs_;
 };
@@ -403,6 +424,41 @@ public:
 
     auto mean() -> Tensor override { return probs_; }
     auto variance() -> Tensor override { return probs_ * (1.0f - probs_); }
+
+    /**
+     * @brief CDF of Bernoulli (audit E.5).
+     *
+     *   F(k) = 0       for k < 0
+     *        = 1 - p   for 0 <= k < 1
+     *        = 1       for k >= 1
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto val_f = value.to(probs_.dtype());
+        auto zeros_t = tenzor::zeros_like(probs_ * val_f);
+        auto ones_t  = zeros_t + 1.0f;
+        // mask_below: value < 0
+        auto mask_at_or_above = val_f >= ones_t;        // value >= 1
+        auto mask_negative    = val_f < zeros_t;        // value < 0
+        // Default (0 <= value < 1): 1 - p
+        auto base = 1.0f - probs_;
+        auto with_top    = tenzor::where(mask_at_or_above, ones_t, base);
+        auto with_bottom = tenzor::where(mask_negative, zeros_t, with_top);
+        return with_bottom;
+    }
+
+    /**
+     * @brief Inverse CDF of Bernoulli (audit E.5).
+     *
+     * Q(q) = 0  if q <= 1 - p
+     *      = 1  if q >  1 - p
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto qf = q.to(probs_.dtype());
+        auto threshold = 1.0f - probs_;
+        auto ones_t  = tenzor::ones_like(qf * probs_);
+        auto zeros_t = tenzor::zeros_like(ones_t);
+        return tenzor::where(qf > threshold, ones_t, zeros_t);
+    }
 
 private:
     Tensor probs_;
@@ -660,6 +716,53 @@ public:
     auto mean() -> Tensor override { return concentration_ / rate_; }
     auto variance() -> Tensor override { return concentration_ / (rate_ * rate_); }
 
+    /**
+     * @brief CDF of Gamma(α, β) (audit E.5).
+     *
+     * F(x; α, β) = P(α, β·x) = igamma(α, β·x), where igamma is the
+     * regularised lower incomplete gamma function (tenzor::igamma).
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        return tenzor::igamma(concentration_, rate_ * value);
+    }
+
+    /**
+     * @brief Inverse CDF of Gamma(α, β) via Newton iteration on the CDF
+     *        (audit E.5).
+     *
+     * Newton step: x_{n+1} = x_n - (F(x_n) - q) / f(x_n), where
+     *   f(x; α, β) = β^α · x^(α-1) · exp(-β·x) / Γ(α)
+     * The Wilson–Hilferty cube-root approximation seeds the iteration
+     * with a good first guess so convergence is reached in <10 steps
+     * across the typical (α, q) range. We clamp x > 0 to stay inside
+     * the support after each step.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        // Wilson–Hilferty seed: x0 ≈ α · (1 - 1/(9α) + Φ⁻¹(q)·√(1/(9α)))^3 / β
+        auto qf = q.to(concentration_.dtype());
+        auto a  = concentration_;
+        auto b  = rate_;
+        auto inv9a = 1.0f / (9.0f * a);
+        auto z = tenzor::ndtri(qf);                    // standard-normal quantile
+        auto base = 1.0f - inv9a + z * tenzor::sqrt(inv9a);
+        auto x = a * (base * base * base) / b;
+        x = tenzor::clamp(x, 1e-12f, std::numeric_limits<float>::infinity());
+
+        // Newton refinement: x ← x - (F(x) - q) / pdf(x).
+        constexpr int kIters = 10;
+        auto log_norm = a * tenzor::log(b) - tenzor::lgamma(a); // log(β^α / Γ(α))
+        for (int i = 0; i < kIters; ++i) {
+            auto F  = tenzor::igamma(a, b * x);
+            auto log_pdf = log_norm + (a - 1.0f) * tenzor::log(x) - b * x;
+            auto pdf = tenzor::exp(log_pdf);
+            auto pdf_safe = tenzor::clamp(pdf, 1e-30f,
+                                          std::numeric_limits<float>::infinity());
+            x = x - (F - qf) / pdf_safe;
+            x = tenzor::clamp(x, 1e-12f, std::numeric_limits<float>::infinity());
+        }
+        return x;
+    }
+
     // Wave Inf-B7: entropy = α - log(β) + lgamma(α) + (1-α)·ψ(α)
     // Matches torch.distributions.Gamma.entropy().
     auto entropy() -> Tensor override {
@@ -740,6 +843,49 @@ public:
                   + (c0_ - 1.0f) * tenzor::digamma(c0_)
                   - (sum - 2.0f) * tenzor::digamma(sum);
         return log_B - term;
+    }
+
+    /**
+     * @brief CDF of Beta(α, β) (audit E.5).
+     *
+     * F(x; α, β) = I_x(α, β), the regularised incomplete beta function.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto v = tenzor::clamp(value, 0.0f, 1.0f);
+        return tenzor::betainc(c1_, c0_, v);
+    }
+
+    /**
+     * @brief Inverse CDF of Beta(α, β) via Newton iteration on betainc
+     *        (audit E.5).
+     *
+     * Newton step:  x ← x - (F(x) - q) / pdf(x), with
+     *   pdf(x; α, β) = x^(α-1) (1-x)^(β-1) / B(α, β).
+     * Seed with the distribution mean α / (α + β); clamp to (0, 1) after
+     * each step.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto qf = q.to(c1_.dtype());
+        auto x = c1_ / (c1_ + c0_);                 // seed at the mean
+        x = tenzor::clamp(x, 1e-6f, 1.0f - 1e-6f);
+
+        // log B(α, β) = lgamma(α) + lgamma(β) - lgamma(α+β)
+        auto log_B = tenzor::lgamma(c1_) + tenzor::lgamma(c0_)
+                   - tenzor::lgamma(c1_ + c0_);
+
+        constexpr int kIters = 25;
+        for (int i = 0; i < kIters; ++i) {
+            auto F = tenzor::betainc(c1_, c0_, x);
+            auto log_pdf = (c1_ - 1.0f) * tenzor::log(x)
+                         + (c0_ - 1.0f) * tenzor::log(1.0f - x)
+                         - log_B;
+            auto pdf = tenzor::exp(log_pdf);
+            auto pdf_safe = tenzor::clamp(pdf, 1e-30f,
+                                          std::numeric_limits<float>::infinity());
+            x = x - (F - qf) / pdf_safe;
+            x = tenzor::clamp(x, 1e-6f, 1.0f - 1e-6f);
+        }
+        return x;
     }
 
 private:
@@ -823,6 +969,24 @@ public:
         // lbeta(α) = sum_lgamma - lgamma_sum
         auto lbeta = sum_lgamma - lgamma_sum;
         return lbeta + (sum_alpha - K) * digamma_sum - sum_term;
+    }
+
+    /**
+     * @brief cdf/icdf are not defined for Dirichlet (audit E.5).
+     *
+     * Dirichlet is supported on the (K-1)-simplex; there is no canonical
+     * total order on the support, so no scalar cumulative distribution.
+     */
+    [[noreturn]] auto cdf(const Tensor& /*value*/) -> Tensor {
+        throw ::tenzor::error::DistributionMethodUndefined(
+            "Dirichlet::cdf is undefined: simplex-valued support has no "
+            "canonical scalar order");
+    }
+
+    [[noreturn]] auto icdf(const Tensor& /*q*/) -> Tensor {
+        throw ::tenzor::error::DistributionMethodUndefined(
+            "Dirichlet::icdf is undefined: simplex-valued support has no "
+            "canonical scalar order");
     }
 
 private:
@@ -993,6 +1157,90 @@ public:
 
     auto mean() -> Tensor override { return rate_; }
     auto variance() -> Tensor override { return rate_; }
+
+    /**
+     * @brief CDF of Poisson(λ) (audit E.5).
+     *
+     * F(k; λ) = P(X ≤ floor(k)) = Q(floor(k) + 1, λ), where Q is the
+     * regularised upper incomplete gamma. ``tenzor::igammac`` implements Q.
+     * For k < 0 the CDF is 0 by convention.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto v = tenzor::floor(value.to(rate_.dtype()));
+        auto out = tenzor::igammac(v + 1.0f, rate_);
+        auto zeros_t = tenzor::zeros_like(out);
+        // For k < 0, CDF is 0.
+        return tenzor::where(v < zeros_t, zeros_t, out);
+    }
+
+    /**
+     * @brief Inverse CDF of Poisson(λ) (audit E.5).
+     *
+     * Discrete distribution: scan k = 0, 1, ... per element on CPU, then
+     * return the first k with F(k) >= q. We widen Float16/BFloat16 to
+     * Float32 for the scan and narrow back at the end. The search cutoff
+     * K = λ + 30·√λ + 50 covers the upper tail to well below float
+     * precision.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto orig_dtype = rate_.dtype();
+        auto orig_device = rate_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+
+        auto rate_cpu = rate_.to(Device::cpu()).contiguous();
+        auto q_cpu    = q.to(Device::cpu()).contiguous();
+        if (widen_for_f16) {
+            rate_cpu = rate_cpu.to(DType::Float32);
+            q_cpu    = q_cpu.to(DType::Float32);
+        }
+
+        const int64_t rn = rate_cpu.numel();
+        const int64_t qn = q_cpu.numel();
+        const int64_t n  = std::max(rn, qn);
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros({n}, out_dtype, Device::cpu());
+
+        auto compute = [&](auto* op, const auto* rp, const auto* qp) {
+            using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            for (int64_t i = 0; i < n; ++i) {
+                double lam  = static_cast<double>(rp[i % rn]);
+                double qval = static_cast<double>(qp[i % qn]);
+                if (qval <= 0.0) { op[i] = T{0}; continue; }
+                if (qval >= 1.0) { op[i] = static_cast<T>(
+                    std::numeric_limits<double>::infinity()); continue; }
+                const int64_t K = static_cast<int64_t>(
+                    std::max<double>(50.0, lam + 30.0 * std::sqrt(std::max(lam, 1.0))));
+                // Streaming sum: P(X=k) = P(X=k-1) * lam / k.
+                double pk = std::exp(-lam);   // P(X=0)
+                double cum = pk;
+                int64_t found = K;
+                for (int64_t k = 0; k <= K; ++k) {
+                    if (cum >= qval) { found = k; break; }
+                    pk *= lam / static_cast<double>(k + 1);
+                    cum += pk;
+                }
+                op[i] = static_cast<T>(found);
+            }
+        };
+
+        if (out_dtype == DType::Float32) {
+            compute(out.data<float>(), rate_cpu.data<float>(), q_cpu.data<float>());
+        } else if (out_dtype == DType::Float64) {
+            compute(out.data<double>(), rate_cpu.data<double>(), q_cpu.data<double>());
+        } else {
+            throw std::runtime_error("Poisson::icdf: rate must be Float32 or Float64");
+        }
+
+        // Reshape to broadcast shape (use larger of rate/q shapes).
+        auto target_shape = (rn >= qn ? rate_ : q).shape();
+        auto reshaped = out.reshape(
+            std::vector<int64_t>(target_shape.begin(), target_shape.end()));
+        if (widen_for_f16) {
+            reshaped = reshaped.to(orig_dtype);
+        }
+        return reshaped.to(orig_device);
+    }
 
     // Inf-B9 (deferred → landed): Poisson entropy has no closed form.
     // Use Stirling expansion for large λ (≥ 10):
@@ -1263,6 +1511,103 @@ public:
         return probs_ * (1.0f - probs_) * static_cast<float>(total_count_);
     }
 
+    /**
+     * @brief CDF of Binomial(n, p) (audit E.5).
+     *
+     * F(k) = P(X ≤ floor(k)) = I_{1-p}(n - floor(k), floor(k) + 1)
+     * where I_x(a, b) is the regularised incomplete beta function.
+     * For k < 0, F = 0; for k >= n, F = 1.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto v_raw = value.to(probs_.dtype());
+        auto v = tenzor::floor(v_raw);
+        auto n_scalar = full(std::vector<int64_t>(probs_.shape().begin(),
+                                                   probs_.shape().end()),
+                              static_cast<double>(total_count_),
+                              probs_.dtype(), probs_.device());
+        // Clamp arguments to keep betainc inside its domain.
+        auto a = tenzor::clamp(n_scalar - v, 1e-6f,
+                                static_cast<float>(total_count_) + 1.0f);
+        auto b = v + 1.0f;
+        auto x = 1.0f - probs_;
+        auto out = tenzor::betainc(a, b, x);
+        // k < 0  → 0;  k >= n → 1.
+        auto zeros_t = tenzor::zeros_like(out);
+        auto ones_t  = zeros_t + 1.0f;
+        out = tenzor::where(v < zeros_t, zeros_t, out);
+        auto n_t  = tenzor::full_like(out, static_cast<double>(total_count_));
+        out = tenzor::where(v >= n_t, ones_t, out);
+        return out;
+    }
+
+    /**
+     * @brief Inverse CDF of Binomial(n, p) (audit E.5).
+     *
+     * Discrete distribution: scan k = 0..n per element on CPU, return the
+     * first k with F(k) >= q. The element count is bounded by n, so this is
+     * O(n) per element and matches the discrete-Newton fallbacks used in
+     * SciPy / torch.distributions.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto orig_dtype = probs_.dtype();
+        auto orig_device = probs_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+
+        auto p_cpu = probs_.to(Device::cpu()).contiguous();
+        auto q_cpu = q.to(Device::cpu()).contiguous();
+        if (widen_for_f16) {
+            p_cpu = p_cpu.to(DType::Float32);
+            q_cpu = q_cpu.to(DType::Float32);
+        }
+
+        const int64_t pn = p_cpu.numel();
+        const int64_t qn = q_cpu.numel();
+        const int64_t n  = std::max(pn, qn);
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros({n}, out_dtype, Device::cpu());
+
+        auto compute = [&](auto* op, const auto* pp, const auto* qp) {
+            using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            const int64_t N = total_count_;
+            for (int64_t i = 0; i < n; ++i) {
+                double pv   = std::clamp(static_cast<double>(pp[i % pn]), 0.0, 1.0);
+                double qval = static_cast<double>(qp[i % qn]);
+                if (qval <= 0.0) { op[i] = T{0}; continue; }
+                if (qval >= 1.0) { op[i] = static_cast<T>(N); continue; }
+                // P(X=0) = (1-p)^N; streaming P(X=k) = P(X=k-1) * (N-k+1)/k * p/(1-p).
+                double log_pmf0 = static_cast<double>(N) * std::log(1.0 - pv);
+                double pk = std::exp(log_pmf0);
+                double cum = pk;
+                int64_t found = N;
+                const double ratio_p = pv / std::max(1.0 - pv, 1e-300);
+                for (int64_t k = 0; k <= N; ++k) {
+                    if (cum >= qval) { found = k; break; }
+                    pk *= ratio_p * static_cast<double>(N - k)
+                                  / static_cast<double>(k + 1);
+                    cum += pk;
+                }
+                op[i] = static_cast<T>(found);
+            }
+        };
+
+        if (out_dtype == DType::Float32) {
+            compute(out.data<float>(), p_cpu.data<float>(), q_cpu.data<float>());
+        } else if (out_dtype == DType::Float64) {
+            compute(out.data<double>(), p_cpu.data<double>(), q_cpu.data<double>());
+        } else {
+            throw std::runtime_error("Binomial::icdf: probs must be Float32 or Float64");
+        }
+
+        auto target_shape = (pn >= qn ? probs_ : q).shape();
+        auto reshaped = out.reshape(
+            std::vector<int64_t>(target_shape.begin(), target_shape.end()));
+        if (widen_for_f16) {
+            reshaped = reshaped.to(orig_dtype);
+        }
+        return reshaped.to(orig_device);
+    }
+
 private:
     int64_t total_count_;
     Tensor probs_;
@@ -1318,6 +1663,27 @@ public:
         // Var[X] = (exp(scale^2) - 1) * exp(2*loc + scale^2)
         auto s2 = scale_ * scale_;
         return (tenzor::exp(s2) - 1.0f) * tenzor::exp(2.0f * loc_ + s2);
+    }
+
+    /**
+     * @brief CDF of LogNormal(μ, σ) (audit E.5).
+     *
+     * F(x; μ, σ) = Φ((log x - μ) / σ) = 0.5 · [1 + erf((log x - μ) / (σ√2))].
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto z = (tenzor::log(value) - loc_) / scale_;
+        constexpr float kInvSqrt2 = 0.70710678118654752440f;
+        return 0.5f * (1.0f + tenzor::erf(z * kInvSqrt2));
+    }
+
+    /**
+     * @brief Inverse CDF of LogNormal(μ, σ) (audit E.5).
+     *
+     * icdf(q) = exp(μ + σ · Φ⁻¹(q)) — probit composition via tenzor::ndtri.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto qf = q.to(loc_.dtype());
+        return tenzor::exp(loc_ + scale_ * tenzor::ndtri(qf));
     }
 
 private:
@@ -1425,6 +1791,15 @@ public:
     // Wave Inf-B8: Chi2(df) = Gamma(df/2, 1/2), so entropy delegates.
     auto entropy() -> Tensor override { return gamma_.entropy(); }
 
+    /**
+     * @brief CDF / ICDF of Chi2(df) (audit E.5).
+     *
+     * Chi2(df) = Gamma(df/2, 1/2). Delegate to Gamma which uses
+     * tenzor::igamma (CDF) and Newton-iterated inverse igamma (ICDF).
+     */
+    auto cdf(const Tensor& value) -> Tensor { return gamma_.cdf(value); }
+    auto icdf(const Tensor& q)     -> Tensor { return gamma_.icdf(q); }
+
 private:
     Tensor df_;
     Gamma gamma_;
@@ -1488,6 +1863,40 @@ public:
 
     auto variance() -> Tensor override {
         return (1.0f - probs_) / (probs_ * probs_);
+    }
+
+    /**
+     * @brief CDF of Geometric(p) (audit E.5).
+     *
+     * Tenzor's Geometric uses the 1-indexed convention (X >= 1). For integer
+     * k >= 1:
+     *   F(k; p) = 1 - (1 - p)^floor(k)
+     * Returns 0 for k < 1.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto v = tenzor::floor(value.to(probs_.dtype()));
+        auto q = 1.0f - tenzor::clamp(probs_, 0.0f, 1.0f);
+        // 1 - q^k = 1 - exp(k * log(q)). For p=1 (q=0) this is 1 for k>=1.
+        auto cdf_pos = 1.0f - tenzor::exp(v * tenzor::log(tenzor::clamp(
+            q, 1e-30f, 1.0f)));
+        auto zeros_t = tenzor::zeros_like(cdf_pos);
+        auto ones_t  = zeros_t + 1.0f;
+        return tenzor::where(v < ones_t, zeros_t, cdf_pos);
+    }
+
+    /**
+     * @brief Inverse CDF of Geometric(p) (audit E.5).
+     *
+     * icdf(q) = ceil(log(1 - q) / log(1 - p)) for q in (0, 1).
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto qf = q.to(probs_.dtype());
+        constexpr float kEps = 1e-7f;
+        auto q_clamped = tenzor::clamp(qf, kEps, 1.0f - kEps);
+        auto p_clamped = tenzor::clamp(probs_, kEps, 1.0f - kEps);
+        auto val = tenzor::log(1.0f - q_clamped)
+                 / tenzor::log(1.0f - p_clamped);
+        return tenzor::ceil(val);
     }
 
 private:
@@ -1862,6 +2271,104 @@ public:
         return total_count_ * p / (q * q);
     }
 
+    /**
+     * @brief CDF of NegativeBinomial(r, p) (audit E.5).
+     *
+     * F(k; r, p) = I_{1-p}(r, floor(k) + 1), where I_x(a, b) is the
+     * regularised incomplete beta function. Returns 0 for k < 0.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto v = tenzor::floor(value.to(probs_.dtype()));
+        auto p_safe = tenzor::clamp(probs_, 1e-7f, 1.0f - 1e-7f);
+        auto x = 1.0f - p_safe;
+        auto a = total_count_;
+        auto b = v + 1.0f;
+        auto out = tenzor::betainc(a, b, x);
+        auto zeros_t = tenzor::zeros_like(out);
+        return tenzor::where(v < zeros_t, zeros_t, out);
+    }
+
+    /**
+     * @brief Inverse CDF of NegativeBinomial(r, p) (audit E.5).
+     *
+     * Discrete distribution: scan k = 0, 1, ... per element on CPU until the
+     * cumulative PMF exceeds q. The streaming PMF recursion
+     *   P(X=k+1) = P(X=k) * (k + r) / (k + 1) * p
+     * is stable across the whole tail; cutoff K = mean + 30·std + 50
+     * bounds the truncation error below float precision.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto r_cpu = total_count_.to(Device::cpu()).contiguous();
+        auto p_cpu = probs_.to(Device::cpu()).contiguous();
+        auto q_cpu = q.to(Device::cpu()).contiguous();
+        auto orig_dtype = probs_.dtype();
+        auto orig_device = probs_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+        if (widen_for_f16) {
+            r_cpu = r_cpu.to(DType::Float32);
+            p_cpu = p_cpu.to(DType::Float32);
+            q_cpu = q_cpu.to(DType::Float32);
+        }
+
+        const int64_t rn = r_cpu.numel();
+        const int64_t pn = p_cpu.numel();
+        const int64_t qn = q_cpu.numel();
+        const int64_t n  = std::max({rn, pn, qn});
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros({n}, out_dtype, Device::cpu());
+
+        auto compute = [&](auto* op, const auto* rp, const auto* pp,
+                           const auto* qp) {
+            using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            for (int64_t i = 0; i < n; ++i) {
+                double r    = static_cast<double>(rp[i % rn]);
+                double pv   = std::clamp(static_cast<double>(pp[i % pn]),
+                                          1e-12, 1.0 - 1e-12);
+                double qval = static_cast<double>(qp[i % qn]);
+                if (qval <= 0.0) { op[i] = T{0}; continue; }
+                if (qval >= 1.0) { op[i] = static_cast<T>(
+                    std::numeric_limits<double>::infinity()); continue; }
+                double q_ = 1.0 - pv;
+                double mean = r * pv / q_;
+                double var  = r * pv / (q_ * q_);
+                int64_t K = static_cast<int64_t>(
+                    std::max<double>(50.0, mean + 30.0 * std::sqrt(var)));
+                // P(X=0) = (1-p)^r = q^r.
+                double pk = std::exp(r * std::log(q_));
+                double cum = pk;
+                int64_t found = K;
+                for (int64_t k = 0; k <= K; ++k) {
+                    if (cum >= qval) { found = k; break; }
+                    pk *= (static_cast<double>(k) + r)
+                        / static_cast<double>(k + 1) * pv;
+                    cum += pk;
+                }
+                op[i] = static_cast<T>(found);
+            }
+        };
+
+        if (out_dtype == DType::Float32) {
+            compute(out.data<float>(), r_cpu.data<float>(),
+                    p_cpu.data<float>(), q_cpu.data<float>());
+        } else if (out_dtype == DType::Float64) {
+            compute(out.data<double>(), r_cpu.data<double>(),
+                    p_cpu.data<double>(), q_cpu.data<double>());
+        } else {
+            throw std::runtime_error(
+                "NegativeBinomial::icdf: probs must be Float32 or Float64");
+        }
+
+        auto target_shape = (pn >= qn ? probs_ : q).shape();
+        if (rn > std::max(pn, qn)) target_shape = total_count_.shape();
+        auto reshaped = out.reshape(
+            std::vector<int64_t>(target_shape.begin(), target_shape.end()));
+        if (widen_for_f16) {
+            reshaped = reshaped.to(orig_dtype);
+        }
+        return reshaped.to(orig_device);
+    }
+
     // Inf-B12 (deferred → landed): closed-form entropy is not available
     // for NegativeBinomial. Compute via truncated -Σ P(k) log P(k); the
     // distribution's tail decays exponentially, so a fixed cutoff
@@ -2013,6 +2520,205 @@ public:
         auto i1 = tenzor::bessel_i1(concentration_);
         return tenzor::log(i0) + static_cast<float>(std::log(2.0 * M_PI))
              - concentration_ * (i1 / i0);
+    }
+
+    /**
+     * @brief CDF of VonMises(μ, κ) on [-π, π] (audit E.5).
+     *
+     * Uses Marsaglia (1965) Fourier-series expansion of the wrapped CDF:
+     *   F(x; μ, κ) = (x - μ + π) / (2π)
+     *              + (1 / (π I₀(κ))) · Σ_{k=1..N} I_k(κ) · sin(k (x - μ)) / k
+     * The series converges in O(κ) terms; we use N = 50 which is well past
+     * convergence for κ ≤ 50 (precision ≈ 1e-7 for moderate κ). Evaluated
+     * scalar-wise on CPU; broadcasts across batched (loc, kappa, value)
+     * inputs via the standard element-modulo loop pattern used elsewhere
+     * in this header.
+     */
+    auto cdf(const Tensor& value) -> Tensor {
+        auto orig_dtype = loc_.dtype();
+        auto orig_device = loc_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+        auto loc_cpu = loc_.to(Device::cpu()).contiguous();
+        auto kappa_cpu = concentration_.to(Device::cpu()).contiguous();
+        auto val_cpu = value.to(Device::cpu()).contiguous();
+        if (widen_for_f16) {
+            loc_cpu = loc_cpu.to(DType::Float32);
+            kappa_cpu = kappa_cpu.to(DType::Float32);
+            val_cpu = val_cpu.to(DType::Float32);
+        }
+
+        const int64_t ln = loc_cpu.numel();
+        const int64_t kn = kappa_cpu.numel();
+        const int64_t vn = val_cpu.numel();
+        const int64_t n  = std::max({ln, kn, vn});
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros({n}, out_dtype, Device::cpu());
+
+        auto compute = [&](auto* op, const auto* lp, const auto* kp,
+                           const auto* vp) {
+            using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            constexpr int kMaxTerms = 50;
+            for (int64_t i = 0; i < n; ++i) {
+                double mu    = static_cast<double>(lp[i % ln]);
+                double kappa = static_cast<double>(kp[i % kn]);
+                double x     = static_cast<double>(vp[i % vn]);
+                double dx = std::remainder(x - mu, 2.0 * M_PI);   // wrap to (-π, π]
+                // Series: only meaningful for κ > 0; uniform limit for κ→0.
+                double base = (dx + M_PI) / (2.0 * M_PI);
+                if (kappa < 1e-6) {
+                    op[i] = static_cast<T>(std::clamp(base, 0.0, 1.0));
+                    continue;
+                }
+                // Compute I_k(κ) / I_0(κ) ratios via the recurrence
+                //   I_{k+1}(κ) = I_{k-1}(κ) - 2k/κ · I_k(κ).
+                // Start from a stable downward Miller recurrence; ratio
+                // formulation avoids overflow.
+                // We compute r_k = I_k(κ) / I_0(κ) by Miller's algorithm:
+                //   start at high index with r_M = 0, r_{M-1} = 1 (unnormalised),
+                //   recurse down, then normalise against the resulting r_0.
+                const int M = kMaxTerms + 20;
+                std::vector<double> r(M + 1, 0.0);
+                r[M] = 0.0;
+                r[M - 1] = 1.0;
+                for (int k = M - 1; k > 0; --k) {
+                    r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
+                }
+                const double norm = r[0];
+                double series = 0.0;
+                for (int k = 1; k <= kMaxTerms; ++k) {
+                    double rk = r[k] / norm;          // I_k(κ) / I_0(κ)
+                    series += rk * std::sin(k * dx) / static_cast<double>(k);
+                }
+                double F = base + series / M_PI;
+                F = std::clamp(F, 0.0, 1.0);
+                op[i] = static_cast<T>(F);
+            }
+        };
+
+        if (out_dtype == DType::Float32) {
+            compute(out.data<float>(), loc_cpu.data<float>(),
+                    kappa_cpu.data<float>(), val_cpu.data<float>());
+        } else if (out_dtype == DType::Float64) {
+            compute(out.data<double>(), loc_cpu.data<double>(),
+                    kappa_cpu.data<double>(), val_cpu.data<double>());
+        } else {
+            throw std::runtime_error("VonMises::cdf: only Float32/Float64 supported");
+        }
+
+        std::vector<int64_t> target_shape;
+        if (vn >= ln && vn >= kn) {
+            target_shape.assign(value.shape().begin(), value.shape().end());
+        } else if (ln >= kn) {
+            target_shape.assign(loc_.shape().begin(), loc_.shape().end());
+        } else {
+            target_shape.assign(concentration_.shape().begin(),
+                                concentration_.shape().end());
+        }
+        auto reshaped = out.reshape(target_shape);
+        if (widen_for_f16) {
+            reshaped = reshaped.to(orig_dtype);
+        }
+        return reshaped.to(orig_device);
+    }
+
+    /**
+     * @brief Inverse CDF of VonMises(μ, κ) via per-element bisection on the
+     *        Marsaglia CDF (audit E.5).
+     *
+     * No closed form exists. Bisection over [μ - π, μ + π] converges in
+     * ~52 iterations to float64 precision and is robust for all κ.
+     */
+    auto icdf(const Tensor& q) -> Tensor {
+        auto orig_dtype = loc_.dtype();
+        auto orig_device = loc_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+        auto loc_cpu = loc_.to(Device::cpu()).contiguous();
+        auto kappa_cpu = concentration_.to(Device::cpu()).contiguous();
+        auto q_cpu = q.to(Device::cpu()).contiguous();
+        if (widen_for_f16) {
+            loc_cpu = loc_cpu.to(DType::Float32);
+            kappa_cpu = kappa_cpu.to(DType::Float32);
+            q_cpu = q_cpu.to(DType::Float32);
+        }
+
+        const int64_t ln = loc_cpu.numel();
+        const int64_t kn = kappa_cpu.numel();
+        const int64_t qn = q_cpu.numel();
+        const int64_t n  = std::max({ln, kn, qn});
+        auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        auto out = zeros({n}, out_dtype, Device::cpu());
+
+        // Scalar Marsaglia CDF used inside the bisection — same series as in
+        // cdf() above, refactored to a local lambda for reuse.
+        auto scalar_cdf = [](double x, double mu, double kappa) -> double {
+            double dx = std::remainder(x - mu, 2.0 * M_PI);
+            double base = (dx + M_PI) / (2.0 * M_PI);
+            if (kappa < 1e-6) return std::clamp(base, 0.0, 1.0);
+            constexpr int kMaxTerms = 50;
+            const int M = kMaxTerms + 20;
+            std::vector<double> r(M + 1, 0.0);
+            r[M - 1] = 1.0;
+            for (int k = M - 1; k > 0; --k) {
+                r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
+            }
+            const double norm = r[0];
+            double series = 0.0;
+            for (int k = 1; k <= kMaxTerms; ++k) {
+                double rk = r[k] / norm;
+                series += rk * std::sin(k * dx) / static_cast<double>(k);
+            }
+            double F = base + series / M_PI;
+            return std::clamp(F, 0.0, 1.0);
+        };
+
+        auto compute = [&](auto* op, const auto* lp, const auto* kp,
+                           const auto* qp) {
+            using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            for (int64_t i = 0; i < n; ++i) {
+                double mu    = static_cast<double>(lp[i % ln]);
+                double kappa = static_cast<double>(kp[i % kn]);
+                double qval  = static_cast<double>(qp[i % qn]);
+                qval = std::clamp(qval, 0.0, 1.0);
+                double lo = mu - M_PI;
+                double hi = mu + M_PI;
+                for (int it = 0; it < 60; ++it) {
+                    double mid = 0.5 * (lo + hi);
+                    double F = scalar_cdf(mid, mu, kappa);
+                    if (F < qval) lo = mid; else hi = mid;
+                }
+                double result = 0.5 * (lo + hi);
+                // Wrap to (-π, π].
+                result = std::remainder(result, 2.0 * M_PI);
+                op[i] = static_cast<T>(result);
+            }
+        };
+
+        if (out_dtype == DType::Float32) {
+            compute(out.data<float>(), loc_cpu.data<float>(),
+                    kappa_cpu.data<float>(), q_cpu.data<float>());
+        } else if (out_dtype == DType::Float64) {
+            compute(out.data<double>(), loc_cpu.data<double>(),
+                    kappa_cpu.data<double>(), q_cpu.data<double>());
+        } else {
+            throw std::runtime_error("VonMises::icdf: only Float32/Float64 supported");
+        }
+
+        std::vector<int64_t> target_shape;
+        if (qn >= ln && qn >= kn) {
+            target_shape.assign(q.shape().begin(), q.shape().end());
+        } else if (ln >= kn) {
+            target_shape.assign(loc_.shape().begin(), loc_.shape().end());
+        } else {
+            target_shape.assign(concentration_.shape().begin(),
+                                concentration_.shape().end());
+        }
+        auto reshaped = out.reshape(target_shape);
+        if (widen_for_f16) {
+            reshaped = reshaped.to(orig_dtype);
+        }
+        return reshaped.to(orig_device);
     }
 
 private:
