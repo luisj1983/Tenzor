@@ -97,46 +97,32 @@ auto jvp_tanh(const DualTensor& x) -> DualTensor {
 }
 
 auto jvp_gelu(const DualTensor& x) -> DualTensor {
-    // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
-    // d(GELU)/dx = 0.5 * (1 + erf(x/sqrt(2))) + x * exp(-x^2/2) / sqrt(2*pi)
-    // We compute primal via the dispatch and tangent via the derivative formula.
+    // Audit A.4: use the exact erf primal via dispatch instead of the
+    // tanh approximation.  Tenzor exposes tenzor::erf so the dispatch
+    // path lands on the backend-native erf kernel.
+    //
+    //   GELU(x)     = 0.5 * x * (1 + erf(x / sqrt(2)))
+    //   d/dx GELU   = 0.5 * (1 + erf(x/sqrt(2)))
+    //               + x * exp(-x^2/2) / sqrt(2*pi)
     auto p = x.primal();
 
-    // Primal: 0.5 * x * (1 + erf(x/sqrt(2)))
-    // Use the existing ops to build it
-    // Actually compute properly using the identity:
-    // GELU(x) = x * sigmoid(1.702 * x)  (approximate)
-    // But for correctness let's use the exact formula via existing ops
+    // inv_sqrt2 = 1 / sqrt(2);  inv_sqrt_2pi = 1 / sqrt(2*pi)
+    constexpr double inv_sqrt2     = 0.7071067811865476;
+    constexpr double inv_sqrt_2pi  = 0.3989422804014327;
 
-    // The exact GELU primal: 0.5 * x * (1 + erf(x / sqrt(2)))
-    // We don't have a tensor-level erf, so use the approximation:
-    // GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    const double sqrt_2_over_pi = 0.7978845608028654;
+    auto erf_arg     = tenzor::mul(p, inv_sqrt2);
+    auto erf_val     = tenzor::erf(erf_arg);
+    auto one         = tenzor::ones_like(p);
+    auto one_plus    = tenzor::add(one, erf_val);
+    auto primal      = tenzor::mul(tenzor::mul(p, 0.5), one_plus);
 
-    auto x3 = tenzor::mul(p, tenzor::mul(p, p));
-    auto inner = tenzor::mul(
-        tenzor::add(p, tenzor::mul(x3, 0.044715)),
-        sqrt_2_over_pi
-    );
-    auto tanh_inner = tenzor::tanh(inner);
-    auto one = tenzor::ones_like(p);
-    auto primal = tenzor::mul(tenzor::mul(p, 0.5), tenzor::add(one, tanh_inner));
-
-    // Derivative of GELU (tanh approximation):
-    // Let u = sqrt(2/pi) * (x + 0.044715 * x^3)
-    // GELU = 0.5 * x * (1 + tanh(u))
-    // dGELU/dx = 0.5 * (1 + tanh(u)) + 0.5 * x * sech^2(u) * du/dx
-    // du/dx = sqrt(2/pi) * (1 + 3 * 0.044715 * x^2)
-    auto sech2 = tenzor::sub(one, tenzor::mul(tanh_inner, tanh_inner));
-    auto du_dx = tenzor::mul(
-        tenzor::add(one, tenzor::mul(tenzor::mul(p, p), 3.0 * 0.044715)),
-        sqrt_2_over_pi
-    );
-    auto deriv = tenzor::add(
-        tenzor::mul(tenzor::add(one, tanh_inner), 0.5),
-        tenzor::mul(tenzor::mul(tenzor::mul(p, 0.5), sech2), du_dx)
-    );
-    auto tangent = tenzor::mul(x.tangent(), deriv);
+    // tangent: 0.5*(1+erf(x/√2)) + x*exp(-x^2/2)/√(2π)
+    auto half_one_plus = tenzor::mul(one_plus, 0.5);
+    auto neg_half_x2   = tenzor::mul(tenzor::mul(p, p), -0.5);
+    auto pdf_factor    = tenzor::mul(tenzor::exp(neg_half_x2), inv_sqrt_2pi);
+    auto x_pdf         = tenzor::mul(p, pdf_factor);
+    auto deriv         = tenzor::add(half_one_plus, x_pdf);
+    auto tangent       = tenzor::mul(x.tangent(), deriv);
 
     return DualTensor(std::move(primal), std::move(tangent));
 }
@@ -165,12 +151,16 @@ auto jvp_sqrt(const DualTensor& x) -> DualTensor {
 }
 
 auto jvp_pow(const DualTensor& x, double exponent) -> DualTensor {
-    auto primal = tenzor::pow(x.primal(), static_cast<float>(exponent));
+    // Audit A.4: tenzor::pow takes a double exponent (no float cast
+    // needed) and preserves Float64 precision.  Previous code did
+    // static_cast<float>(exponent) twice, losing precision in
+    // Float64 jvp tests.
+    auto primal = tenzor::pow(x.primal(), exponent);
     // tangent = dx * exponent * x^(exponent-1)
     auto tangent = tenzor::mul(
         x.tangent(),
         tenzor::mul(
-            tenzor::pow(x.primal(), static_cast<float>(exponent - 1.0)),
+            tenzor::pow(x.primal(), exponent - 1.0),
             exponent
         )
     );
