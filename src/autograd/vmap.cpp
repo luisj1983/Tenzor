@@ -85,10 +85,33 @@ void init_builtin_batching_rules() {
         register_batching_rule(name, passthrough_rule);
     }
 
+    // Audit A.3: also register the OpId-keyed passthrough for the opted-in
+    // arithmetic + activation + math Functions (see A.2 commits). The vmap
+    // dispatch path tries the OpId registry first, so these are the
+    // primary hit-path entries for the corresponding Backward classes.
+    for (OpId op : {
+        OpId::Add, OpId::Sub, OpId::Mul, OpId::Div, OpId::Neg,
+        OpId::Gelu, OpId::Elu, OpId::Selu, OpId::Mish, OpId::Softplus,
+        OpId::Exp, OpId::Log, OpId::Sqrt, OpId::Abs,
+        OpId::Sin, OpId::Cos, OpId::Tan,
+        OpId::Asin, OpId::Acos, OpId::Atan,
+        OpId::Sinh, OpId::Cosh,
+        OpId::Log2, OpId::Log10, OpId::Log1p,
+        OpId::Exp2, OpId::Expm1,
+        OpId::Reciprocal, OpId::Pow,
+        OpId::Erf, OpId::Lgamma, OpId::Digamma,
+        OpId::Conj, OpId::Real, OpId::Imag,
+    }) {
+        register_batching_rule(op, passthrough_rule);
+    }
+
     // Softmax/LogSoftmax: operates on a specific dim, naturally batch-aware
     // (dim parameter refers to within-sample dimension, batch dim is separate)
     register_batching_rule("SoftmaxBackward", passthrough_rule);
     register_batching_rule("LogSoftmaxBackward", passthrough_rule);
+    // Audit A.3: OpId-keyed entries for Softmax/LogSoftmax.
+    register_batching_rule(OpId::Softmax, passthrough_rule);
+    register_batching_rule(OpId::LogSoftmax, passthrough_rule);
 
     // ====================================================================
     // MatMul: promote to BMM when batch_dim == 0
