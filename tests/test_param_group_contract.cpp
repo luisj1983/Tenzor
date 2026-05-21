@@ -13,6 +13,14 @@
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/nn/optim/adamax.hpp"
+#include "tenzor/nn/optim/nadam.hpp"
+#include "tenzor/nn/optim/radam.hpp"
+#include "tenzor/nn/optim/sparse_adam.hpp"
+#include "tenzor/nn/optim/lamb.hpp"
+#include "tenzor/nn/optim/asgd.hpp"
+#include "tenzor/nn/optim/lion.hpp"
+#include "tenzor/nn/optim/adam_atan2.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -303,6 +311,96 @@ TEST_F(ParamGroupContractTest, AdadeltaPerGroupRho) {
     EXPECT_LT(v2, 0.0f);
     EXPECT_GT(std::abs(v2), std::abs(v1))
         << "rho=0.95 (smaller (1-rho)*g²) must produce larger |delta|";
+}
+
+// ----- Helper: per-group lr ratio check for any optimiser ------------------
+// Returns p2 / p1 after one step with unit-grad on both params, when both
+// groups share weight_decay=0 and the only difference is lr.
+
+namespace {
+template <typename Opt>
+auto first_step_lr_ratio(double lr1, double lr2) -> float {
+    auto p1_t = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p2_t = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(p1_t, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(p2_t, /*requires_grad=*/true);
+
+    optim::ParamGroup g1{{p1}, lr1, 0.0};
+    optim::ParamGroup g2{{p2}, lr2, 0.0};
+    Opt opt({g1, g2});
+
+    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    p1->set_grad(grad);
+    p2->set_grad(grad);
+    opt.step();
+    auto v1 = p1->tensor().data<float>()[0];
+    auto v2 = p2->tensor().data<float>()[0];
+    return v2 / v1;
+}
+}  // namespace
+
+// ----- Adamax / NAdam / RAdam / SparseAdam / LAMB / Lion / AdamAtan2 ------
+//
+// For each of these Adam-family optimisers, a single-step lr-scaling
+// check is sufficient to prove the per-group lr override is being read.
+// Adamax/NAdam/RAdam/SparseAdam/LAMB/Lion/AdamAtan2 all produce
+// delta = -lr * f(grad, betas, eps, ...) for f independent of lr,
+// so the ratio v2/v1 must equal lr2/lr1.  An optimiser that ignored
+// the per-group lr would produce v2/v1 = 1.
+
+TEST_F(ParamGroupContractTest, AdamaxPerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::Adamax>(0.01, 0.10), 10.0f, 1e-3f);
+}
+TEST_F(ParamGroupContractTest, NAdamPerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::NAdam>(0.01, 0.10), 10.0f, 1e-3f);
+}
+TEST_F(ParamGroupContractTest, RAdamPerGroupLearningRate) {
+    // RAdam falls back to SGDM when the variance-rectification term is
+    // undefined (the first few steps with default beta2).  Use lr=0.01
+    // vs lr=0.10 and the SGDM update reduces to -lr * g on step 1.
+    EXPECT_NEAR(first_step_lr_ratio<optim::RAdam>(0.01, 0.10), 10.0f, 1e-3f);
+}
+TEST_F(ParamGroupContractTest, SparseAdamPerGroupLearningRate) {
+    // SparseAdam's dense fallback (no sparse grad) reduces to standard
+    // Adam, so the ratio also applies.
+    EXPECT_NEAR(first_step_lr_ratio<optim::SparseAdam>(0.01, 0.10), 10.0f, 1e-3f);
+}
+TEST_F(ParamGroupContractTest, LAMBPerGroupLearningRate) {
+    // LAMB's trust-ratio multiplies the update, but the trust ratio for
+    // params that start at zero is 0 — LAMB's update needs a non-zero
+    // ||θ||.  Use a different setup: per-param starting at 1.0 + unit
+    // gradient → trust ratio == 1, then ratio simplifies to lr.
+    auto p1_t = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto p2_t = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto p1 = std::make_shared<Variable>(p1_t, /*requires_grad=*/true);
+    auto p2 = std::make_shared<Variable>(p2_t, /*requires_grad=*/true);
+    optim::ParamGroup g1{{p1}, 0.01, 0.0};
+    optim::ParamGroup g2{{p2}, 0.10, 0.0};
+    optim::LAMB opt({g1, g2});
+    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    p1->set_grad(grad);
+    p2->set_grad(grad);
+    opt.step();
+    auto d1 = 1.0f - p1->tensor().data<float>()[0];
+    auto d2 = 1.0f - p2->tensor().data<float>()[0];
+    EXPECT_GT(d1, 0.0f);
+    EXPECT_GT(d2, 0.0f);
+    EXPECT_NEAR(d2 / d1, 10.0f, 5e-2f)
+        << "LAMB per-group lr must scale the update by lr ratio";
+}
+TEST_F(ParamGroupContractTest, LionPerGroupLearningRate) {
+    // Lion's update is delta = -lr * sign(mt) which is lr-independent
+    // in magnitude only via the lr scalar — verify lr ratio.
+    EXPECT_NEAR(first_step_lr_ratio<optim::Lion>(0.01, 0.10), 10.0f, 1e-3f);
+}
+TEST_F(ParamGroupContractTest, AdamAtan2PerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::AdamAtan2>(0.01, 0.10), 10.0f, 1e-3f);
+}
+
+TEST_F(ParamGroupContractTest, ASGDPerGroupLearningRate) {
+    // ASGD's update is θ -= lr * g (plus the running average bookkeeping
+    // that does not feed back into the active param).  Lr scaling holds.
+    EXPECT_NEAR(first_step_lr_ratio<optim::ASGD>(0.01, 0.10), 10.0f, 1e-3f);
 }
 
 }  // namespace
