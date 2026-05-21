@@ -47,6 +47,20 @@ RMSprop::RMSprop(std::vector<std::shared_ptr<Variable>> params,
     initialize_buffers();
 }
 
+RMSprop::RMSprop(std::vector<optim::ParamGroup> groups,
+                 double default_lr, double default_alpha, double default_eps,
+                 double default_weight_decay, double default_momentum,
+                 bool default_centered)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      alpha_(default_alpha),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay),
+      momentum_(default_momentum),
+      centered_(default_centered) {
+    initialize_buffers();
+}
+
 auto RMSprop::initialize_buffers() -> void {
     square_avg_.clear();
     grad_avg_.clear();
@@ -72,12 +86,35 @@ auto RMSprop::initialize_buffers() -> void {
 }
 
 auto RMSprop::step_impl() -> void {
+    // Audit D.4: resolve hyperparams per-param from the active ParamGroup
+    // with optimizer-member fallback.  Flat-param constructor →
+    // find_group_for_param returns nullptr → uses optimizer defaults.
+    struct HP {
+        double lr, alpha, eps, weight_decay, momentum;
+        bool   centered;
+    };
+    auto resolve = [this](size_t i) -> HP {
+        HP hp{lr_, alpha_, eps_, weight_decay_, momentum_, centered_};
+        const auto* g = find_group_for_param(i);
+        if (g) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.alpha        = ParamGroup::or_else(g->alpha,    alpha_);
+            hp.eps          = ParamGroup::or_else(g->eps,      eps_);
+            hp.momentum     = ParamGroup::or_else(g->momentum, momentum_);
+            hp.centered     = ParamGroup::or_else(g->centered, centered_);
+        }
+        return hp;
+    };
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
 
         if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
+
+        HP hp = resolve(i);
 
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
@@ -88,20 +125,20 @@ auto RMSprop::step_impl() -> void {
             grad_orig.device().type == Device::Type::Vulkan) {
 
             std::vector<Tensor> inputs = {grad_orig, param->tensor(), square_avg_[i]};
-            if (momentum_ > 0.0 && i < momentum_buffer_.size()) {
+            if (hp.momentum > 0.0 && i < momentum_buffer_.size()) {
                 inputs.push_back(momentum_buffer_[i]);
             }
-            if (centered_ && i < grad_avg_.size()) {
+            if (hp.centered && i < grad_avg_.size()) {
                 inputs.push_back(grad_avg_[i]);
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, lr_);
-            attrs.set(AttrKey::Alpha, alpha_);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
-            attrs.set(AttrKey::Momentum, momentum_);
-            attrs.set(AttrKey::Centered, centered_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Alpha, hp.alpha);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
+            attrs.set(AttrKey::Momentum, hp.momentum);
+            attrs.set(AttrKey::Centered, hp.centered);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);
             continue;
@@ -113,20 +150,20 @@ auto RMSprop::step_impl() -> void {
 
             // CUDA registry expects: [param, grad, square_avg, grad_avg?, momentum_buffer?]
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, square_avg_[i]};
-            if (centered_ && i < grad_avg_.size()) {
+            if (hp.centered && i < grad_avg_.size()) {
                 inputs.push_back(grad_avg_[i]);
             }
-            if (momentum_ > 0.0 && i < momentum_buffer_.size()) {
+            if (hp.momentum > 0.0 && i < momentum_buffer_.size()) {
                 inputs.push_back(momentum_buffer_[i]);
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, lr_);
-            attrs.set(AttrKey::Alpha, alpha_);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
-            attrs.set(AttrKey::Momentum, momentum_);
-            attrs.set(AttrKey::Centered, centered_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Alpha, hp.alpha);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
+            attrs.set(AttrKey::Momentum, hp.momentum);
+            attrs.set(AttrKey::Centered, hp.centered);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);
             continue;
@@ -135,13 +172,13 @@ auto RMSprop::step_impl() -> void {
         // Generic fallback using tensor-level ops (device-agnostic)
         Tensor grad = grad_orig;
         Tensor param_data = param_data_orig;
-        float alpha = static_cast<float>(alpha_);
-        float eps = static_cast<float>(eps_);
-        float lr = static_cast<float>(lr_);
+        float alpha = static_cast<float>(hp.alpha);
+        float eps = static_cast<float>(hp.eps);
+        float lr = static_cast<float>(hp.lr);
 
         // Apply weight decay: g = g + weight_decay * param
-        if (weight_decay_ > 0.0) {
-            grad = grad + param_data * static_cast<float>(weight_decay_);
+        if (hp.weight_decay > 0.0) {
+            grad = grad + param_data * static_cast<float>(hp.weight_decay);
         }
 
         // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
@@ -149,7 +186,7 @@ auto RMSprop::step_impl() -> void {
 
         // Compute denominator
         Tensor denom;
-        if (centered_) {
+        if (hp.centered) {
             // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
             grad_avg_[i] = grad_avg_[i] * alpha + grad * (1.0f - alpha);
             // denom = sqrt(v - m^2 + eps)
@@ -159,8 +196,8 @@ auto RMSprop::step_impl() -> void {
         }
 
         Tensor new_param;
-        if (momentum_ > 0.0) {
-            float mom = static_cast<float>(momentum_);
+        if (hp.momentum > 0.0) {
+            float mom = static_cast<float>(hp.momentum);
             // buf = momentum * buf + g / denom
             momentum_buffer_[i] = momentum_buffer_[i] * mom + grad / denom;
             // param -= lr * buf

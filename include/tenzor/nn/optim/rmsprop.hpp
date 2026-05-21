@@ -120,6 +120,17 @@ public:
             bool centered = false);
 
     /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     */
+    explicit RMSprop(std::vector<optim::ParamGroup> groups,
+                     double default_lr = 1e-2,
+                     double default_alpha = 0.99,
+                     double default_eps = 1e-8,
+                     double default_weight_decay = 0.0,
+                     double default_momentum = 0.0,
+                     bool default_centered = false);
+
+    /**
      * @brief Perform single RMSprop optimization step
      *
      * Updates parameters using adaptive learning rates based on
