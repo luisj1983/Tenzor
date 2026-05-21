@@ -344,13 +344,46 @@ AdamW::AdamW(std::vector<std::shared_ptr<Variable>> params, double lr, double be
     initialize_buffers();
 }
 
+AdamW::AdamW(std::vector<optim::ParamGroup> groups,
+             double default_lr, double default_beta1, double default_beta2,
+             double default_eps, double default_weight_decay, bool default_amsgrad)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay),
+      amsgrad_(default_amsgrad) {
+    initialize_buffers();
+}
+
 auto AdamW::step_impl() -> void {
     step_count_++;
+
+    // Audit D.4: resolve per-param hyperparams from the active
+    // ParamGroup (with optimizer-member fallback).
+    struct HP {
+        double lr, beta1, beta2, eps, weight_decay;
+        bool   amsgrad;
+    };
+    auto resolve = [this](size_t i) -> HP {
+        HP hp{lr_, beta1_, beta2_, eps_, weight_decay_, amsgrad_};
+        const auto* g = find_group_for_param(i);
+        if (g) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+        }
+        return hp;
+    };
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+        HP hp = resolve(i);
 
         const Tensor& grad = param.grad().value();
 
@@ -363,20 +396,20 @@ auto AdamW::step_impl() -> void {
             std::vector<Tensor> inputs = {
                 param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
             };
-            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+            if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
             // Prepare attributes (use double precision for Float64 accuracy)
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, lr_);
-            attrs.set(AttrKey::Beta1, beta1_);
-            attrs.set(AttrKey::Beta2, beta2_);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Beta1, hp.beta1);
+            attrs.set(AttrKey::Beta2, hp.beta2);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Step, step_count_);
             attrs.set(AttrKey::Decoupled, true);   // Decoupled weight decay for AdamW
-            attrs.set(AttrKey::Amsgrad, amsgrad_);
+            attrs.set(AttrKey::Amsgrad, hp.amsgrad);
 
             dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
@@ -391,22 +424,22 @@ auto AdamW::step_impl() -> void {
         auto grad_copy = grad.clone();
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
-                     grad_copy * scalar(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                     grad_copy * scalar(1.0 - hp.beta1);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
-                        grad_copy * grad_copy * scalar(1.0 - beta2_);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                        grad_copy * grad_copy * scalar(1.0 - hp.beta2);
 
         // Bias correction
-        double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-        double bias_correction2 = 1.0 - std::pow(beta2_, step_count_);
+        double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
+        double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
 
-        double step_size = lr_ / bias_correction1;
+        double step_size = hp.lr / bias_correction1;
 
         // Compute denominator: use max of second moment if AMSGrad is enabled
         Tensor denom_base;
-        if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+        if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
             max_exp_avg_sq_[i] = maximum(max_exp_avg_sq_[i], exp_avg_sq_[i]);
             denom_base = max_exp_avg_sq_[i];
         } else {
@@ -414,11 +447,11 @@ auto AdamW::step_impl() -> void {
         }
 
         auto denom = sqrt(denom_base) * scalar(1.0 / std::sqrt(bias_correction2))
-                    + scalar(eps_);
+                    + scalar(hp.eps);
 
         // Decoupled weight decay (AdamW)
-        if (weight_decay_ > 0) {
-            param.tensor() = param.tensor() * scalar(1.0 - lr_ * weight_decay_);
+        if (hp.weight_decay > 0) {
+            param.tensor() = param.tensor() * scalar(1.0 - hp.lr * hp.weight_decay);
         }
 
         // Update parameters

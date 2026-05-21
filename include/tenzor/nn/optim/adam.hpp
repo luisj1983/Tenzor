@@ -190,6 +190,17 @@ public:
           double weight_decay = 0.01,
           bool amsgrad = false);
 
+    /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     */
+    explicit AdamW(std::vector<optim::ParamGroup> groups,
+                   double default_lr = 1e-3,
+                   double default_beta1 = 0.9,
+                   double default_beta2 = 0.999,
+                   double default_eps = 1e-8,
+                   double default_weight_decay = 0.01,
+                   bool default_amsgrad = false);
+
     /** @brief Perform single AdamW step with decoupled weight decay */
     auto step_impl() -> void override;
 
