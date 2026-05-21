@@ -67,9 +67,22 @@ private:
     int64_t out_features_;
     double density_;
     bool has_bias_;
+    // CSR-format sparse weight.  The CSR *pattern* (crow_indices, col_indices,
+    // shape) is fixed for the lifetime of the layer — the audit's premise:
+    // "sparse pattern is fixed which is standard for SparseLinear".  The
+    // *values* are owned by the `"sparse_weight.values"` Parameter so that
+    // optimisers (SGD/Adam/Adagrad/...) can update them by treating the values
+    // vector as a dense Variable.  Before every forward we rebuild
+    // `sparse_weight_` so its `values()` Tensor reflects whatever Tensor the
+    // optimiser last wrote into the Parameter — this is necessary because
+    // optimisers replace `Variable::tensor()` rather than mutating in place.
     std::optional<SparseTensor> sparse_weight_;
 
     auto reset_parameters() -> void;
+    /// Refresh `sparse_weight_` so its `values()` matches the current
+    /// `"sparse_weight.values"` Parameter tensor.  No-op if pattern + values
+    /// are already in sync (same storage pointer).
+    auto sync_sparse_weight_values() -> void;
 };
 
 } // namespace nn
