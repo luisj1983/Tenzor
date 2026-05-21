@@ -364,19 +364,23 @@ TEST(EagerParity, JitVsEager_ConvStack_Cpu_Float32) {
     auto ref = to_cpu_contiguous(eager_out);
     auto alt = to_cpu_contiguous(jit_out);
 
-    // Known divergence: JIT-traced Conv2d drops padding=1 -> output shape
-    // mismatch (1024 vs 576). Don't ASSERT_EQ on numel here; record the
-    // observed mismatch via gtest and SKIP the per-element comparison so the
-    // surrounding test suite still produces a clean pass list. Re-enable by
-    // deleting this guard once the JIT padding bug is fixed.
-    if (ref.numel != alt.numel) {
-        GTEST_SKIP() << "Known JIT Conv2d padding bug: eager numel="
-                     << ref.numel << " jit numel=" << alt.numel
-                     << " (padding=1 dropped during trace)";
+    // Audit item G.13: JIT-traced Conv2d previously dropped its padding/
+    // stride/dilation attributes and silently ran with padding=0 (output
+    // [2,8,6,6] vs eager [2,8,8,8]). Now that Graph::execute_node Conv2d
+    // honors PaddingH/PaddingW (and the vec/scalar fallbacks the tracer
+    // emits), the JIT and eager paths drive the same Conv2dForward kernel
+    // with identical attrs and weights, so the outputs must match
+    // bit-exactly for Float32.
+    {
+        auto es = eager_out.shape();
+        auto js = jit_out.shape();
+        ASSERT_EQ(std::vector<int64_t>(es.begin(), es.end()),
+                  std::vector<int64_t>(js.begin(), js.end()))
+            << "JIT Conv2d output shape diverges from eager (padding bug regression)";
     }
-    EXPECT_TRUE(compare_f32(ref.owner.data<float>(),
-                            alt.owner.data<float>(), ref.numel,
-                            /*atol=*/1e-5f));
+    ASSERT_EQ(ref.numel, alt.numel);
+    EXPECT_TRUE(compare_bitwise_f32(ref.owner.data<float>(),
+                                    alt.owner.data<float>(), ref.numel));
 }
 
 // `jit::compile` wraps a callable into a CompiledFunction with the trace +

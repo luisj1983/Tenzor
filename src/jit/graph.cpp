@@ -1574,15 +1574,62 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::Conv2d:
             if (input_vars.size() >= 2) {
+                // Read per-axis stride/padding/dilation honoring all forms the
+                // tracer can emit: explicit per-axis ints ("stride_h"/"stride_w"
+                // from the dispatch interceptor's hw-pair copy), the
+                // pair-as-vec ("stride"/"padding"/"dilation" = {h, w}) the
+                // interceptor populates from AttrKey::PaddingH/PaddingW etc.,
+                // and the scalar int fallback ("stride") for square configs.
+                // Audit item G.13: previously this only read the (never-set)
+                // scalar int "stride_h"/"padding_h"/"dilation", so JIT-traced
+                // Conv2d silently ran with stride=1,padding=0,dilation=1
+                // regardless of what the eager module set.
+                // Resolve a {h, w} pair from any of the three forms the
+                // tracer emits: explicit per-axis ints, a 2-element vec, or
+                // a scalar int (square config). has_attr() returns true if
+                // the key lives in either int_attrs_ or vec_attrs_, so probe
+                // both maps explicitly.
+                auto pair_from = [&](const char* h_key, const char* w_key,
+                                      const char* shared_key,
+                                      int64_t default_v)
+                        -> std::pair<int64_t, int64_t> {
+                    if (node->has_attr(h_key) && node->has_attr(w_key)) {
+                        return {node->get_int_attr(h_key),
+                                node->get_int_attr(w_key)};
+                    }
+                    auto v = node->get_vec_attr(shared_key);
+                    if (v.size() == 2) return {v[0], v[1]};
+                    if (v.size() == 1) return {v[0], v[0]};
+                    if (node->has_attr(shared_key)) {
+                        int64_t s = node->get_int_attr(shared_key);
+                        return {s, s};
+                    }
+                    return {default_v, default_v};
+                };
+                auto [stride_h, stride_w]     = pair_from(
+                    "stride_h",   "stride_w",   "stride",   1);
+                auto [padding_h, padding_w]   = pair_from(
+                    "padding_h",  "padding_w",  "padding",  0);
+                auto [dilation_h, dilation_w] = pair_from(
+                    "dilation_h", "dilation_w", "dilation", 1);
+                int64_t groups = node->has_attr("groups") ?
+                    node->get_int_attr("groups") : static_cast<int64_t>(1);
+
                 OpAttributes conv_attrs;
-                conv_attrs.set(AttrKey::Stride, node->has_attr("stride_h") ?
-                    node->get_int_attr("stride_h") : static_cast<int64_t>(1));
-                conv_attrs.set(AttrKey::Padding, node->has_attr("padding_h") ?
-                    node->get_int_attr("padding_h") : static_cast<int64_t>(0));
-                conv_attrs.set(AttrKey::Dilation, node->has_attr("dilation") ?
-                    node->get_int_attr("dilation") : static_cast<int64_t>(1));
-                conv_attrs.set(AttrKey::Groups, node->has_attr("groups") ?
-                    node->get_int_attr("groups") : static_cast<int64_t>(1));
+                // Per-axis keys are what the backend kernels actually read
+                // (see cpu_kernel_registry.cpp Conv2dForward). Set the scalar
+                // forms too so kernels that only consult them still work.
+                conv_attrs.set(AttrKey::StrideH,   stride_h);
+                conv_attrs.set(AttrKey::StrideW,   stride_w);
+                conv_attrs.set(AttrKey::PaddingH,  padding_h);
+                conv_attrs.set(AttrKey::PaddingW,  padding_w);
+                conv_attrs.set(AttrKey::DilationH, dilation_h);
+                conv_attrs.set(AttrKey::DilationW, dilation_w);
+                conv_attrs.set(AttrKey::Stride,    stride_h);
+                conv_attrs.set(AttrKey::Padding,   padding_h);
+                conv_attrs.set(AttrKey::Dilation,  dilation_h);
+                conv_attrs.set(AttrKey::Groups,    groups);
+
                 std::vector<Tensor> inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
                 if (input_vars.size() >= 3) {
                     inputs.push_back(input_vars[2].tensor());
