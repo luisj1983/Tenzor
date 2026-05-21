@@ -76,6 +76,22 @@ public:
          double weight_decay = 0.0,
          bool amsgrad = false);
 
+    /**
+     * @brief Construct from `ParamGroup`s (audit D.4).
+     *
+     * Each group may override any subset of Adam's hyperparameters
+     * (lr, weight_decay via ParamGroup's non-optional fields; beta1,
+     * beta2, eps via the optional fields).  Groups that don't set an
+     * override fall back to the defaults supplied here.
+     */
+    explicit Adam(std::vector<optim::ParamGroup> groups,
+                  double default_lr = 1e-3,
+                  double default_beta1 = 0.9,
+                  double default_beta2 = 0.999,
+                  double default_eps = 1e-8,
+                  double default_weight_decay = 0.0,
+                  bool default_amsgrad = false);
+
     /** @brief Perform single Adam step */
     auto step_impl() -> void override;
 

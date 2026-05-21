@@ -7,6 +7,8 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
+#include <map>
+#include <tuple>
 
 namespace tenzor::optim {
 
@@ -18,28 +20,72 @@ Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta
     initialize_buffers();
 }
 
+Adam::Adam(std::vector<optim::ParamGroup> groups,
+           double default_lr, double default_beta1, double default_beta2,
+           double default_eps, double default_weight_decay, bool default_amsgrad)
+    : Optimizer(std::move(groups)),
+      lr_(default_lr),
+      beta1_(default_beta1),
+      beta2_(default_beta2),
+      eps_(default_eps),
+      weight_decay_(default_weight_decay),
+      amsgrad_(default_amsgrad) {
+    initialize_buffers();
+}
+
 auto Adam::step_impl() -> void {
     step_count_++;
 
-    // Bias correction factors — same for every parameter at this step.
-    double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
-    double bias_correction2 = 1.0 - std::pow(beta2_, step_count_);
-    double step_size = lr_ / bias_correction1;
+    // Audit D.4: resolve hyperparams per-param from the active
+    // ParamGroup, with optimizer-member fallback.  When constructed
+    // from a flat parameter list (no groups), `find_group_for_param`
+    // returns nullptr and every param uses the Adam member defaults —
+    // preserving pre-D.4 behaviour bit-for-bit.
+    struct HP {
+        double lr, beta1, beta2, eps, weight_decay;
+        bool   amsgrad;
+    };
+    auto resolve = [this](size_t i) -> HP {
+        HP hp{lr_, beta1_, beta2_, eps_, weight_decay_, amsgrad_};
+        const auto* g = find_group_for_param(i);
+        if (g) {
+            hp.lr           = g->lr;
+            hp.weight_decay = g->weight_decay;
+            hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
+            hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
+            hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+            // amsgrad isn't currently a ParamGroup field — kept on
+            // the optimizer member for now (D.4 follow-up).
+        }
+        return hp;
+    };
 
     // Collect CPU params eligible for _foreach_* batch path
     // (non-CUDA, non-AMSGrad).  AMSGrad needs a per-param maximum() call
     // that doesn't have a clean foreach equivalent yet; handle those below.
-    std::vector<Tensor*>  batch_params;
-    std::vector<Tensor>   batch_grads;
-    std::vector<Tensor*>  batch_exp_avg;
-    std::vector<Tensor*>  batch_exp_avg_sq;
-    std::vector<size_t>   batch_indices;
+    //
+    // Audit D.4: the foreach fast path requires uniform beta1/beta2/eps
+    // across the batch (the step_size and bias_correction factors are
+    // shared scalars).  We therefore key the batch by the resolved
+    // (beta1, beta2, eps) tuple and run one foreach pass per bucket.
+    // For the common case of a single ParamGroup this is identical to
+    // the old single-batch path; mixed groups simply do K passes.
+    struct CpuEntry {
+        Tensor* param;
+        Tensor  grad;
+        Tensor* exp_avg;
+        Tensor* exp_avg_sq;
+        size_t  idx;
+        HP      hp;
+    };
+    std::vector<CpuEntry> cpu;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
         const Tensor& grad = param.grad().value();
+        HP hp = resolve(i);
 
         // ── CUDA path: fused single-kernel dispatch ──────────────────────────
         if (param.tensor().device().type == Device::Type::CUDA &&
@@ -49,116 +95,114 @@ auto Adam::step_impl() -> void {
             std::vector<Tensor> inputs = {
                 param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
             };
-            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+            if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, lr_);
-            attrs.set(AttrKey::Beta1, beta1_);
-            attrs.set(AttrKey::Beta2, beta2_);
-            attrs.set(AttrKey::Eps, eps_);
-            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Beta1, hp.beta1);
+            attrs.set(AttrKey::Beta2, hp.beta2);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Step, step_count_);
             attrs.set(AttrKey::Decoupled, false);
-            attrs.set(AttrKey::Amsgrad, amsgrad_);
+            attrs.set(AttrKey::Amsgrad, hp.amsgrad);
             dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
         }
 
         // ── AMSGrad CPU: scalar per-param path (needs per-param maximum()) ──
-        if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+        if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
+            double bc1 = 1.0 - std::pow(hp.beta1, step_count_);
+            double bc2 = 1.0 - std::pow(hp.beta2, step_count_);
+            double step_size = hp.lr / bc1;
             auto scalar = [&](double value) -> Tensor {
                 return full({1}, value, param.tensor().dtype(), param.tensor().device());
             };
             auto grad_copy = grad.clone();
-            if (weight_decay_ > 0.0)
-                grad_copy = grad_copy + param.tensor() * scalar(weight_decay_);
+            if (hp.weight_decay > 0.0)
+                grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
 
-            exp_avg_[i]    = exp_avg_[i]    * scalar(beta1_) + grad_copy * scalar(1.0 - beta1_);
-            exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
-                             grad_copy * grad_copy * scalar(1.0 - beta2_);
+            exp_avg_[i]    = exp_avg_[i]    * scalar(hp.beta1) + grad_copy * scalar(1.0 - hp.beta1);
+            exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                             grad_copy * grad_copy * scalar(1.0 - hp.beta2);
 
             max_exp_avg_sq_[i] = maximum(max_exp_avg_sq_[i], exp_avg_sq_[i]);
-            auto denom = sqrt(max_exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
-                        + scalar(eps_);
+            auto denom = sqrt(max_exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bc2))
+                        + scalar(hp.eps);
             param.tensor() = param.tensor() - div(exp_avg_[i], denom) * scalar(step_size);
             continue;
         }
 
-        // ── Standard CPU: collect for _foreach_* batch ──────────────────────
+        // ── Standard CPU: collect with resolved hyperparams ─────────────────
         auto grad_copy = grad.clone();
-        if (weight_decay_ > 0.0) {
-            // Weight decay: grad += param * weight_decay (L2 reg)
-            // Use addcmul equivalent: grad_copy = grad + weight_decay * param
+        if (hp.weight_decay > 0.0) {
             grad_copy = grad_copy + param.tensor() *
-                full({1}, weight_decay_, param.tensor().dtype(), param.tensor().device());
+                full({1}, hp.weight_decay, param.tensor().dtype(), param.tensor().device());
         }
-        batch_params.push_back(&param.tensor());
-        batch_grads.push_back(std::move(grad_copy));
-        batch_exp_avg.push_back(&exp_avg_[i]);
-        batch_exp_avg_sq.push_back(&exp_avg_sq_[i]);
-        batch_indices.push_back(i);
+        cpu.push_back({&param.tensor(), std::move(grad_copy),
+                       &exp_avg_[i], &exp_avg_sq_[i], i, hp});
     }
 
-    if (batch_params.empty()) return;
+    if (cpu.empty()) return;
 
-    // Build mutable list views for _foreach_* (which take vector<Tensor>&)
-    std::vector<Tensor> params_view, exp_avg_view, exp_avg_sq_view;
-    params_view.reserve(batch_params.size());
-    exp_avg_view.reserve(batch_params.size());
-    exp_avg_sq_view.reserve(batch_params.size());
-    for (size_t k = 0; k < batch_params.size(); ++k) {
-        params_view.push_back(*batch_params[k]);        // shallow copies
-        exp_avg_view.push_back(*batch_exp_avg[k]);
-        exp_avg_sq_view.push_back(*batch_exp_avg_sq[k]);
+    // Audit D.4: bucket the CPU batch by (beta1, beta2, eps) tuple so
+    // the foreach fast path applies within each bucket (uniform betas
+    // and step_size are required because foreach_lerp_ takes a single
+    // scalar weight). With a single ParamGroup this is one bucket and
+    // identical to the pre-D.4 path; with mixed groups it's K buckets.
+    auto bucket_key = [](const CpuEntry& e) {
+        return std::make_tuple(e.hp.beta1, e.hp.beta2, e.hp.eps, e.hp.lr);
+    };
+    std::map<std::tuple<double, double, double, double>,
+             std::vector<size_t>> buckets;
+    for (size_t k = 0; k < cpu.size(); ++k) {
+        buckets[bucket_key(cpu[k])].push_back(k);
     }
 
-    // exp_avg  = beta1 * exp_avg  + (1-beta1) * grad
-    foreach_lerp_(exp_avg_view, batch_grads, 1.0 - beta1_);
+    for (auto& [key, indices] : buckets) {
+        const auto& [beta1, beta2, eps, lr] = key;
+        double bias_correction1 = 1.0 - std::pow(beta1, step_count_);
+        double bias_correction2 = 1.0 - std::pow(beta2, step_count_);
+        double step_size = lr / bias_correction1;
 
-    // grad_sq[i] = grad[i] * grad[i]
-    auto grad_sq = foreach_mul(batch_grads, batch_grads);
+        // Build per-bucket _foreach_* views.
+        std::vector<Tensor> bgrad, params_view, exp_avg_view, exp_avg_sq_view;
+        bgrad.reserve(indices.size());
+        params_view.reserve(indices.size());
+        exp_avg_view.reserve(indices.size());
+        exp_avg_sq_view.reserve(indices.size());
+        for (size_t k : indices) {
+            bgrad.push_back(cpu[k].grad);
+            params_view.push_back(*cpu[k].param);
+            exp_avg_view.push_back(*cpu[k].exp_avg);
+            exp_avg_sq_view.push_back(*cpu[k].exp_avg_sq);
+        }
 
-    // exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * grad^2
-    foreach_lerp_(exp_avg_sq_view, grad_sq, 1.0 - beta2_);
+        foreach_lerp_(exp_avg_view, bgrad, 1.0 - beta1);
+        auto grad_sq = foreach_mul(bgrad, bgrad);
+        foreach_lerp_(exp_avg_sq_view, grad_sq, 1.0 - beta2);
 
-    // denom[i] = sqrt(exp_avg_sq[i] / bias_correction2) + eps
-    //          = foreach_sqrt(exp_avg_sq) * (1/sqrt(bc2)) + eps
-    // Represent as: denom = foreach_sqrt(exp_avg_sq_bc2) + eps_tensor
-    // where exp_avg_sq_bc2[i] = exp_avg_sq[i] / bias_correction2.
-    //
-    // Use addcdiv: param[i] -= step_size * exp_avg[i] / denom[i]
-    // We compute denom inline without foreach (one extra alloc but still O(P*N)):
-    auto sqrt_exp_avg_sq_bc2 = foreach_sqrt(exp_avg_sq_view);  // sqrt(v_t)
-    // Scale by 1/sqrt(bc2) and add eps — not yet a foreach op, so use addcmul trick:
-    // denom[i] = sqrt_v[i] * inv_sqrt_bc2 + eps
-    // Implemented as: denom = addcmul(eps_vec, sqrt_v, ones, inv_sqrt_bc2)
-    // Simplest correct approach: build denom per-tensor (still O(elements), not O(params)):
-    double inv_sqrt_bc2 = 1.0 / std::sqrt(bias_correction2);
-    std::vector<Tensor> denom_list;
-    denom_list.reserve(sqrt_exp_avg_sq_bc2.size());
-    for (size_t k = 0; k < sqrt_exp_avg_sq_bc2.size(); ++k) {
-        // denom[k] = sqrt_v[k] * inv_sqrt_bc2 + eps  (scalar broadcast)
-        auto& sv = sqrt_exp_avg_sq_bc2[k];
-        auto dtype = sv.dtype();
-        auto dev   = sv.device();
-        denom_list.push_back(sv * full({1}, inv_sqrt_bc2, dtype, dev)
-                              + full({1}, eps_, dtype, dev));
-    }
+        auto sqrt_v = foreach_sqrt(exp_avg_sq_view);
+        double inv_sqrt_bc2 = 1.0 / std::sqrt(bias_correction2);
+        std::vector<Tensor> denom_list;
+        denom_list.reserve(sqrt_v.size());
+        for (size_t k = 0; k < sqrt_v.size(); ++k) {
+            auto& sv = sqrt_v[k];
+            auto dtype = sv.dtype();
+            auto dev   = sv.device();
+            denom_list.push_back(sv * full({1}, inv_sqrt_bc2, dtype, dev)
+                                  + full({1}, eps, dtype, dev));
+        }
+        foreach_addcdiv_(params_view, exp_avg_view, denom_list, -step_size);
 
-    // param -= step_size * exp_avg / denom
-    foreach_addcdiv_(params_view, exp_avg_view, denom_list, -step_size);
-
-    // Write updated tensors back (shallow copies don't auto-propagate writes
-    // when params_view[k] is reassigned — but foreach_addcdiv_ modifies in-place
-    // via the Tensor's shared storage, so the originals are already updated).
-    // Write back exp_avg and exp_avg_sq buffers (modified in-place via shared storage).
-    for (size_t k = 0; k < batch_indices.size(); ++k) {
-        size_t i = batch_indices[k];
-        exp_avg_[i]    = exp_avg_view[k];
-        exp_avg_sq_[i] = exp_avg_sq_view[k];
-        *batch_params[k] = params_view[k];
+        for (size_t b = 0; b < indices.size(); ++b) {
+            size_t k = indices[b];
+            *cpu[k].exp_avg    = exp_avg_view[b];
+            *cpu[k].exp_avg_sq = exp_avg_sq_view[b];
+            *cpu[k].param      = params_view[b];
+        }
     }
 }
 
