@@ -24,6 +24,7 @@
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/pooling.hpp"
+#include "tenzor/nn/layers/upsample.hpp"
 #include "tenzor/nn/module.hpp"
 #include "tenzor/ops/op_id.hpp"
 
@@ -44,6 +45,10 @@ struct GraphBuilder {
     LiteGraph graph;
     WriteOptions opts;
     int16_t next_id{0};
+    // C.3 audit batch 3: cache the graph-input shape so emitters that need
+    // to resolve relative sizes (Upsample.scale_factor) can do so at export
+    // time. Captured by declare_input(); empty before that call.
+    std::vector<int64_t> input_shape;
 
     auto fresh() -> int16_t { return next_id++; }
 
@@ -51,6 +56,7 @@ struct GraphBuilder {
         auto id = fresh();
         opts.input_ids.push_back(id);
         opts.input_specs[id] = {dtype, shape};
+        input_shape = shape;
         return id;
     }
 
@@ -701,6 +707,95 @@ auto emit_adaptive_max_pool3d(nn::AdaptiveMaxPool3d& p, GraphBuilder& b,
     return out_id;
 }
 
+// ---------------------------------------------------------------------------
+// C.3 audit batch 3: Softmax / LogSoftmax / RMSNorm / Upsample emitters.
+// ---------------------------------------------------------------------------
+
+// Emit a Softmax-like op (Softmax / LogSoftmax) keyed by AttrKey::Dim.
+auto emit_softmax_like(OpId op, GraphBuilder& b, int16_t in_id, int64_t dim)
+    -> int16_t {
+    LiteNode node;
+    node.op = op;
+    node.input_ids = {in_id};
+    node.attrs.i[0] = dim;
+    auto out_id = b.fresh();
+    node.output_ids = {out_id};
+    b.graph.add_node(std::move(node));
+    return out_id;
+}
+
+auto emit_rmsnorm(nn::RMSNorm& rn, GraphBuilder& b, int16_t in_id) -> int16_t {
+    // RMSNorm kernel contract: (x, weight) -> output. eps via AttrKey::Eps.
+    auto w_id = b.add_weight(get_param_tensor(rn, "weight", "nn::RMSNorm"));
+    LiteNode node;
+    node.op = OpId::RMSNorm;
+    node.input_ids = {in_id, w_id};
+    node.attrs.f[0] = static_cast<float>(rn.eps());
+    auto out_id = b.fresh();
+    node.output_ids = {out_id};
+    b.graph.add_node(std::move(node));
+    return out_id;
+}
+
+// Map nn::Upsample's mode string to the integer code consumed by the
+// dispatch bridge. Unknown modes raise — the kernel would fail later
+// anyway and a clear export-time error is more debuggable.
+auto upsample_mode_code(const std::string& mode) -> int64_t {
+    if (mode == "nearest")       return 0;
+    if (mode == "bilinear")      return 1;
+    if (mode == "trilinear")     return 2;
+    if (mode == "bicubic")       return 3;
+    if (mode == "linear")        return 4;
+    if (mode == "area")          return 5;
+    if (mode == "nearest-exact") return 6;
+    throw std::runtime_error(
+        std::string{"export_to_tzlite: nn::Upsample has unsupported mode '"} +
+        mode + "'. Supported: nearest, bilinear, trilinear, bicubic, "
+        "linear, area, nearest-exact.");
+}
+
+auto emit_upsample(nn::Upsample& up, GraphBuilder& b, int16_t in_id) -> int16_t {
+    const auto& input_shape = b.input_shape;
+    // Resolve target spatial sizes at export time.  Upsample stores either
+    // an absolute `size` (list of target spatial dims) or a multiplicative
+    // `scale_factor` against the input's spatial dims.  The exporter has
+    // `input_shape` (declared by the caller via ExportOptions), so we can
+    // always materialise the absolute size — the lite runtime then needs
+    // no shape inference for this op.
+    std::vector<int64_t> target_size;
+    if (up.size().has_value()) {
+        target_size = *up.size();
+    } else if (up.scale_factor().has_value()) {
+        // Expect input shape (N, C, [D,] H, W); spatial dims = last
+        // (rank - 2) axes.  Need at least rank 3.
+        if (input_shape.size() < 3) {
+            throw std::runtime_error(
+                "export_to_tzlite: nn::Upsample with scale_factor requires "
+                "input rank >= 3 (got " + std::to_string(input_shape.size()) +
+                ")");
+        }
+        double sf = *up.scale_factor();
+        for (size_t k = 2; k < input_shape.size(); ++k) {
+            target_size.push_back(
+                static_cast<int64_t>(static_cast<double>(input_shape[k]) * sf));
+        }
+    } else {
+        throw std::runtime_error(
+            "export_to_tzlite: nn::Upsample needs either size or scale_factor");
+    }
+
+    LiteNode node;
+    node.op = OpId::Interpolate;
+    node.input_ids = {in_id};
+    node.attrs.i[0] = up.align_corners() ? 1 : 0;
+    node.attrs.i[1] = upsample_mode_code(up.mode());
+    node.attrs.extra_i = target_size;
+    auto out_id = b.fresh();
+    node.output_ids = {out_id};
+    b.graph.add_node(std::move(node));
+    return out_id;
+}
+
 // Forward-declared recursive visitor.
 auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t;
 
@@ -841,20 +936,32 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
     if (dynamic_cast<nn::GELU*>(&m))      return emit_unary(OpId::Gelu,     b, in_id);
     if (dynamic_cast<nn::Mish*>(&m))      return emit_unary(OpId::Mish,     b, in_id);
     if (dynamic_cast<nn::SELU*>(&m))      return emit_unary(OpId::Selu,     b, in_id);
-    // H2 fix: Hardswish has different math from Swish (sigmoid·x). It is
-    // `x · clamp(x+3, 0, 6) / 6`. Adding a Hardswish OpId requires wiring
-    // dispatch + kernels for *all* backends (CPU, CUDA, ROCm, MPS, oneAPI,
-    // Vulkan) per project conventions — out of scope for batch 2 of the
-    // C.3 exporter audit. Refuse to export rather than silently emit the
-    // wrong math via Swish or x*clamp/6 decomposed nodes (which would
-    // require Clamp + Mul + AddScalar emitters that don't all exist yet).
-    if (dynamic_cast<nn::Hardswish*>(&m)) {
-        throw std::runtime_error(
-            "export_to_tzlite: nn::Hardswish has no dedicated Lite OpId. "
-            "Math is `x * clamp(x + 3, 0, 6) / 6`, distinct from Swish "
-            "(sigmoid * x). To export, replace the Hardswish module with "
-            "an equivalent composition the exporter does cover, or wait "
-            "for OpId::Hardswish to be wired across all backends.");
+    if (dynamic_cast<nn::Swish*>(&m))     return emit_unary(OpId::Swish,    b, in_id);
+    // C.3 audit batch 3: Hardswish / Hardsigmoid now have dedicated OpIds
+    // (98, 99) with CPU kernels registered; other backends will be wired
+    // in the F.11 pass once parity is validated.
+    if (dynamic_cast<nn::Hardswish*>(&m))   return emit_unary(OpId::Hardswish,   b, in_id);
+    if (dynamic_cast<nn::Hardsigmoid*>(&m)) return emit_unary(OpId::Hardsigmoid, b, in_id);
+    // C.3 audit batch 3: Softmax / LogSoftmax — dim attribute via Module
+    // accessor; dispatch_bridge already maps i[0] → AttrKey::Dim.
+    if (auto* sm = dynamic_cast<nn::Softmax*>(&m)) {
+        return emit_softmax_like(OpId::Softmax, b, in_id, sm->dim());
+    }
+    if (auto* lsm = dynamic_cast<nn::LogSoftmax*>(&m)) {
+        return emit_softmax_like(OpId::LogSoftmax, b, in_id, lsm->dim());
+    }
+    // C.3 audit batch 3: RMSNorm — weight-only norm with eps attribute.
+    if (auto* rn = dynamic_cast<nn::RMSNorm*>(&m)) {
+        return emit_rmsnorm(*rn, b, in_id);
+    }
+    // C.3 audit batch 3: Upsample — emits OpId::Interpolate with mode +
+    // align_corners + resolved spatial output_size (we resolve scale
+    // factor against b.input_shape so the runtime needs no shape
+    // inference). Caveat: the resolved size assumes the export-time input
+    // shape; consumers that vary input rank between export and inference
+    // must use the absolute `size` constructor rather than `scale_factor`.
+    if (auto* up = dynamic_cast<nn::Upsample*>(&m)) {
+        return emit_upsample(*up, b, in_id);
     }
     // H2 fix: load the activation parameter from the Module member before
     // emitting. Previously emitted with attrs.f[0] = 0 which silently
@@ -873,20 +980,26 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
         "'. Lite exporter supports nn::Linear, nn::Sequential, nn::Identity, "
         "nn::Conv1d, nn::Conv2d, nn::Conv3d, "
         "nn::ConvTranspose2d, nn::ConvTranspose3d, "
-        "nn::BatchNorm2d, nn::LayerNorm, nn::GroupNorm, "
+        "nn::BatchNorm2d, nn::LayerNorm, nn::GroupNorm, nn::RMSNorm, "
         "nn::InstanceNorm1d, nn::InstanceNorm2d, nn::InstanceNorm3d, "
         "nn::Flatten, nn::Dropout, "
         "nn::MaxPool1d, nn::MaxPool2d, nn::MaxPool3d, "
         "nn::AvgPool1d, nn::AvgPool2d, nn::AvgPool3d, "
         "nn::AdaptiveAvgPool1d/2d/3d, nn::AdaptiveMaxPool1d/2d/3d, "
-        "nn::Embedding, and the parameter-free / single-alpha activations "
-        "(ReLU, Sigmoid, Tanh, GELU, Mish, SELU, LeakyReLU, ELU). "
+        "nn::Upsample, nn::Embedding, "
+        "nn::Softmax, nn::LogSoftmax, "
+        "and the parameter-free / single-alpha activations "
+        "(ReLU, Sigmoid, Tanh, GELU, Mish, SELU, Swish, Hardswish, "
+        "Hardsigmoid, LeakyReLU, ELU). "
         "Deferred: nn::ConvTranspose1d (needs runtime unsqueeze), "
         "nn::BatchNorm1d / nn::BatchNorm3d (need Reshape pre/post nodes "
         "or dedicated 1d/3d OpIds), nn::EmbeddingBag (two-input forward "
-        "doesn't match the single-input visitor), nn::Hardswish (needs "
-        "dedicated OpId + backend kernels). File an issue or extend "
-        "exporter.cpp to add this layer.");
+        "doesn't match the single-input visitor), nn::ReflectionPad* / "
+        "nn::ReplicationPad* / nn::ConstantPad* / nn::CircularPad* / "
+        "nn::ZeroPad2d (no OpId::Pad yet; compose via pad_dim_* autograd "
+        "ops), nn::PixelShuffle / nn::PixelUnshuffle / nn::ChannelShuffle "
+        "(no dedicated OpIds). File an issue or extend exporter.cpp to "
+        "add this layer.");
 }
 
 }  // anonymous namespace

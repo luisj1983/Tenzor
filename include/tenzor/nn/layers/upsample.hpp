@@ -60,6 +60,18 @@ public:
 
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Target output spatial size (exposed for serializers).
+    [[nodiscard]] auto size() const -> const std::optional<std::vector<int64_t>>& { return size_; }
+
+    /// @brief Multiplicative scale factor (exposed for serializers).
+    [[nodiscard]] auto scale_factor() const -> std::optional<double> { return scale_factor_; }
+
+    /// @brief Interpolation mode name (exposed for serializers).
+    [[nodiscard]] auto mode() const -> const std::string& { return mode_; }
+
+    /// @brief Whether corner pixels are aligned (exposed for serializers).
+    [[nodiscard]] auto align_corners() const -> bool { return align_corners_; }
+
 private:
     std::optional<std::vector<int64_t>> size_;
     std::optional<double> scale_factor_;

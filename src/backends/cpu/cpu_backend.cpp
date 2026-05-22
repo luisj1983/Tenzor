@@ -151,6 +151,8 @@ namespace cpu {
     auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto mish_kernel(const Tensor& input) -> Tensor;
     auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto hardswish_kernel(const Tensor& input) -> Tensor;
+    auto hardsigmoid_kernel(const Tensor& input) -> Tensor;
     auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor;
     auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;

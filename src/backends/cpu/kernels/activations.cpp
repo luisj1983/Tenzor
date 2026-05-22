@@ -2946,5 +2946,113 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
     }
 }
 
+// ============================================================================
+// Hardswish Activation
+// ============================================================================
+//
+// Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
+//
+// Piecewise:
+//   x <= -3:  0
+//   -3 < x < 3:  x * (x + 3) / 6
+//   x >= 3:  x
+//
+// Float16 / BFloat16 follow the widen-narrow pattern (compute in float).
+
+auto hardswish_kernel(const Tensor& input) -> Tensor {
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         input.dtype(), input.device());
+    auto compute_f32 = [](float x) -> float {
+        float t = x + 3.0f;
+        if (t < 0.0f) t = 0.0f;
+        else if (t > 6.0f) t = 6.0f;
+        return x * t * (1.0f / 6.0f);
+    };
+    auto compute_f64 = [](double x) -> double {
+        double t = x + 3.0;
+        if (t < 0.0) t = 0.0;
+        else if (t > 6.0) t = 6.0;
+        return x * t * (1.0 / 6.0);
+    };
+    size_t n = input.numel();
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
+    } else {
+        throw std::runtime_error("hardswish_kernel: Unsupported dtype");
+    }
+    return output;
+}
+
+// ============================================================================
+// Hardsigmoid Activation
+// ============================================================================
+//
+// Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
+//
+// Piecewise:
+//   x <= -3:  0
+//   -3 < x < 3:  (x + 3) / 6
+//   x >= 3:  1
+
+auto hardsigmoid_kernel(const Tensor& input) -> Tensor {
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         input.dtype(), input.device());
+    auto compute_f32 = [](float x) -> float {
+        float t = x + 3.0f;
+        if (t < 0.0f) t = 0.0f;
+        else if (t > 6.0f) t = 6.0f;
+        return t * (1.0f / 6.0f);
+    };
+    auto compute_f64 = [](double x) -> double {
+        double t = x + 3.0;
+        if (t < 0.0) t = 0.0;
+        else if (t > 6.0) t = 6.0;
+        return t * (1.0 / 6.0);
+    };
+    size_t n = input.numel();
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
+    } else {
+        throw std::runtime_error("hardsigmoid_kernel: Unsupported dtype");
+    }
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

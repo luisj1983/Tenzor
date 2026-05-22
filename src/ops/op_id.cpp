@@ -122,6 +122,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::LogSigmoidBackward)] = "log_sigmoid_backward";
     names[static_cast<size_t>(OpId::RReLU)] = "rrelu";
     names[static_cast<size_t>(OpId::RReLUBackward)] = "rrelu_backward";
+    names[static_cast<size_t>(OpId::Hardswish)] = "hardswish";
+    names[static_cast<size_t>(OpId::Hardsigmoid)] = "hardsigmoid";
 
     // Shape operations
     names[static_cast<size_t>(OpId::Reshape)] = "reshape";
@@ -600,7 +602,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 464;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695) + 1 (CTCLossForward at 696)
+inline constexpr size_t EXPECTED_NAMED_OPS = 466;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695) + 1 (CTCLossForward at 696) + 2 (Hardswish, Hardsigmoid)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

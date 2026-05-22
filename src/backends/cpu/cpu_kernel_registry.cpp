@@ -255,6 +255,8 @@ namespace cpu {
     auto selu_kernel(const Tensor& input) -> Tensor;
     auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto mish_kernel(const Tensor& input) -> Tensor;
+    auto hardswish_kernel(const Tensor& input) -> Tensor;
+    auto hardsigmoid_kernel(const Tensor& input) -> Tensor;
     auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor;
@@ -1352,6 +1354,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_KERNEL(table, SeluBackward, cpu::selu_backward_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Mish, cpu::mish_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, MishBackward, cpu::mish_backward_kernel);
+    // C.3 audit batch 3: Hardswish / Hardsigmoid CPU kernels (backward
+    // remains autograd-composed via clamp + mul chain; no dedicated
+    // *Backward OpId — gradients flow through the composition's grad_fn).
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Hardswish, cpu::hardswish_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Hardsigmoid, cpu::hardsigmoid_kernel);
 
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // alpha kept as double so Float64 inputs preserve precision; the

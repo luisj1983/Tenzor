@@ -38,6 +38,10 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
         case OpId::Softplus:
         case OpId::Swish:
         case OpId::Linear:
+        // C.3 audit batch 3: Hardswish / Hardsigmoid are zero-attribute
+        // element-wise unaries (the math itself encodes the clamp + scale).
+        case OpId::Hardswish:
+        case OpId::Hardsigmoid:
             break;
 
         // Softmax / LogSoftmax: dim = i[0].
@@ -45,6 +49,44 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
         case OpId::LogSoftmax:
             oa.set(AttrKey::Dim, la.i[0]);
             break;
+
+        // C.3 audit batch 3: Upsample emits OpId::Interpolate. The kernel
+        // reads OutputSize as a comma-separated string of target spatial
+        // dims, Mode as the interpolation algorithm name, and AlignCorners
+        // as a bool. The exporter packs target spatial dims into extra_i
+        // (one entry per spatial axis) and the mode + align_corners flag
+        // into auxiliary slots:
+        //   extra_i = [target_d0, target_d1, ...] (spatial output sizes)
+        //   i[0]    = align_corners (0/1)
+        //   i[1]    = mode code: 0=nearest, 1=bilinear, 2=trilinear,
+        //                        3=bicubic, 4=linear, 5=area, 6=nearest-exact
+        case OpId::Interpolate: {
+            if (!la.extra_i.empty()) {
+                std::string sz_str;
+                for (size_t k = 0; k < la.extra_i.size(); ++k) {
+                    if (k > 0) sz_str += ",";
+                    sz_str += std::to_string(la.extra_i[k]);
+                }
+                oa.set(AttrKey::OutputSize, std::string_view(sz_str));
+            }
+            oa.set(AttrKey::AlignCorners, la.i[0] != 0);
+            // Mode encoded as a small int; map back to the kernel's
+            // string-typed AttrKey::Mode here so the kernel doesn't need
+            // to change.
+            const char* mode_name = "nearest";
+            switch (la.i[1]) {
+                case 0: mode_name = "nearest";       break;
+                case 1: mode_name = "bilinear";      break;
+                case 2: mode_name = "trilinear";     break;
+                case 3: mode_name = "bicubic";       break;
+                case 4: mode_name = "linear";        break;
+                case 5: mode_name = "area";          break;
+                case 6: mode_name = "nearest-exact"; break;
+                default:                              break;
+            }
+            oa.set(AttrKey::Mode, std::string_view(mode_name));
+            break;
+        }
 
         // Inf-E5 / C.3 audit: Conv1/2/3d — per-axis stride/padding/dilation/groups.
         // Scalar fallback (used when extras are empty / symmetric):

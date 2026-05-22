@@ -287,6 +287,9 @@ public:
     explicit Softmax(int64_t dim = -1);
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Reduction dim (exposed for serializers).
+    [[nodiscard]] auto dim() const -> int64_t { return dim_; }
+
 private:
     int64_t dim_;
 };
@@ -321,6 +324,9 @@ class LogSoftmax : public Module {
 public:
     explicit LogSoftmax(int64_t dim = -1);
     auto forward_impl(const Variable& input) -> Variable override;
+
+    /// @brief Reduction dim (exposed for serializers).
+    [[nodiscard]] auto dim() const -> int64_t { return dim_; }
 
 private:
     int64_t dim_;

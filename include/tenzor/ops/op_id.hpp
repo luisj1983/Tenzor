@@ -147,6 +147,8 @@ enum class OpId : uint16_t {
     LogSigmoidBackward,  // = 95
     RReLU,               // = 96, randomized leaky ReLU
     RReLUBackward,       // = 97
+    Hardswish,           // = 98, x * clamp(x+3, 0, 6) / 6
+    Hardsigmoid,         // = 99, clamp(x+3, 0, 6) / 6
 
     // =========================================================================
     // Shape/View Operations (100-119)

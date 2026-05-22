@@ -378,6 +378,12 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Numerical-stability epsilon (exposed for serializers).
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+
+    /// @brief Size of the last dim to normalize (exposed for serializers).
+    [[nodiscard]] auto normalized_shape() const -> int64_t { return normalized_shape_; }
+
 private:
     int64_t normalized_shape_;  ///< Size of dimension to normalize
     double eps_;                ///< Numerical stability constant
