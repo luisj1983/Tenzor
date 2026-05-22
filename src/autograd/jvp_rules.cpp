@@ -1,5 +1,7 @@
 #include "tenzor/autograd/jvp_rules.hpp"
 #include "tenzor/autograd/jvp_dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -776,6 +778,231 @@ auto jvp_index_select(const DualTensor& x, int64_t dim, const Tensor& index) -> 
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
+// ============================================================================
+// Audit A.4 batch 3: linalg / conv / view long-tail
+// ============================================================================
+
+// ---- Linear algebra --------------------------------------------------------
+
+auto jvp_bmm(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    // Batched matmul: d(A @ B)[i] = dA[i] @ B[i] + A[i] @ dB[i]
+    auto primal = tenzor::bmm(a.primal(), b.primal());
+    auto tangent = tenzor::add(
+        tenzor::bmm(a.tangent(), b.primal()),
+        tenzor::bmm(a.primal(), b.tangent())
+    );
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_inv(const DualTensor& a) -> DualTensor {
+    // Y = inv(A) ⇒ A @ Y = I.  Differentiating: dA @ Y + A @ dY = 0
+    //   ⇒ dY = -A^{-1} @ dA @ Y = -Y @ dA @ Y.
+    auto y = tenzor::linalg::inv(a.primal());
+    auto tangent = tenzor::neg(
+        tenzor::matmul(tenzor::matmul(y, a.tangent()), y)
+    );
+    return DualTensor(std::move(y), std::move(tangent));
+}
+
+auto jvp_solve(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    // Y = solve(A, B) ⇒ A @ Y = B.  Differentiating:
+    //   dA @ Y + A @ dY = dB  ⇒  A @ dY = dB - dA @ Y
+    //   ⇒  dY = solve(A, dB - dA @ Y).
+    auto y = tenzor::linalg::solve(a.primal(), b.primal());
+    auto rhs = tenzor::sub(b.tangent(), tenzor::matmul(a.tangent(), y));
+    auto tangent = tenzor::linalg::solve(a.primal(), rhs);
+    return DualTensor(std::move(y), std::move(tangent));
+}
+
+auto jvp_cholesky(const DualTensor& a, bool upper) -> DualTensor {
+    // L = chol(A) with A = L @ L^T (lower form).  Differentiating:
+    //   dA = dL @ L^T + L @ dL^T
+    // The standard solution is:
+    //   dL = L @ Φ(L^{-1} @ dA @ L^{-T})
+    // where Φ takes the strict lower-triangular part plus half the diagonal:
+    //   Φ(M) = tril(M, -1) + 0.5 * diag(diag(M)).
+    //
+    // For the upper form (U = chol(A, upper=true), A = U^T @ U) the rule is
+    // analogous on the transposed factor: dU = Φ_upper(U^{-T} @ dA @ U^{-1}) @ U.
+    // We implement lower-form via the explicit formula and recover upper-form
+    // by transposing.
+    auto L_lower = tenzor::linalg::cholesky(a.primal(), /*upper=*/false);
+    // Solve L * X = dA for X = L^{-1} @ dA, then X * L^T... use inv for clarity.
+    auto Linv = tenzor::linalg::inv(L_lower);
+    auto LinvT = tenzor::transpose(Linv, /*dim0=*/-2, /*dim1=*/-1);
+    auto M = tenzor::matmul(tenzor::matmul(Linv, a.tangent()), LinvT);
+    // Φ(M) = tril(M, -1) + 0.5 * diag of M, on the last two dims.
+    auto strict_lower = tenzor::tril(M, /*diagonal=*/-1);
+    auto diag_part   = tenzor::sub(M, tenzor::tril(M, /*diagonal=*/-1));
+    diag_part        = tenzor::sub(diag_part, tenzor::triu(M, /*diagonal=*/1));
+    // diag_part now holds just the diagonal entries (zeros elsewhere).
+    auto half_diag = tenzor::mul(diag_part, 0.5);
+    auto phi = tenzor::add(strict_lower, half_diag);
+    auto dL = tenzor::matmul(L_lower, phi);
+
+    if (upper) {
+        auto U = tenzor::transpose(L_lower, -2, -1);
+        auto dU = tenzor::transpose(dL, -2, -1);
+        return DualTensor(std::move(U), std::move(dU));
+    }
+    return DualTensor(std::move(L_lower), std::move(dL));
+}
+
+auto jvp_trace(const DualTensor& x) -> DualTensor {
+    // y = sum_i A[i,i] ⇒ dy = sum_i dA[i,i] = trace(dA).
+    auto primal = tenzor::trace(x.primal());
+    auto tangent = tenzor::trace(x.tangent());
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_det(const DualTensor& a) -> DualTensor {
+    // y = det(A) ⇒ dy = det(A) * trace(A^{-1} @ dA) = y * trace(inv(A) @ dA).
+    auto y = tenzor::linalg::det(a.primal());
+    auto Ainv = tenzor::linalg::inv(a.primal());
+    auto inner = tenzor::trace(tenzor::matmul(Ainv, a.tangent()));
+    auto tangent = tenzor::mul(y, inner);
+    return DualTensor(std::move(y), std::move(tangent));
+}
+
+// ---- Convolution forward (Conv{1,2,3}d / ConvTranspose{2,3}d) -------------
+
+auto jvp_conv_forward(OpId op,
+                      const DualTensor& input,
+                      const DualTensor& weight,
+                      const std::optional<DualTensor>& bias,
+                      const OpAttributes& attrs) -> DualTensor {
+    // y  = conv(x, w) (+ b)
+    // dy = conv(dx, w) + conv(x, dw) (+ db)
+    // The convolution is linear in both x and w; bias is a pure additive
+    // broadcast, so its tangent is broadcast-added to the output tangent.
+    //
+    // We re-dispatch the same OpId/attrs for the primal and the two tangent
+    // contributions. The primal pass uses (x, w[, b]); each tangent pass is
+    // bias-less (the convolution part) and the bias tangent (if any) is
+    // added directly to the result.
+    std::vector<Tensor> primal_inputs;
+    primal_inputs.push_back(input.primal());
+    primal_inputs.push_back(weight.primal());
+    if (bias.has_value()) {
+        primal_inputs.push_back(bias->primal());
+    }
+    auto primal = tenzor::dispatch(op, primal_inputs, attrs)[0];
+
+    // Tangent contribution from input perturbation: conv(dx, w) — no bias.
+    std::vector<Tensor> tan_x_inputs;
+    tan_x_inputs.push_back(input.tangent());
+    tan_x_inputs.push_back(weight.primal());
+    auto tan_from_x = tenzor::dispatch(op, tan_x_inputs, attrs)[0];
+
+    // Tangent contribution from weight perturbation: conv(x, dw) — no bias.
+    std::vector<Tensor> tan_w_inputs;
+    tan_w_inputs.push_back(input.primal());
+    tan_w_inputs.push_back(weight.tangent());
+    auto tan_from_w = tenzor::dispatch(op, tan_w_inputs, attrs)[0];
+
+    auto tangent = tenzor::add(tan_from_x, tan_from_w);
+    if (bias.has_value()) {
+        // Bias tangent: broadcast-add along the channel dim. The backend
+        // already handles bias broadcasting in the primal; we mirror by
+        // routing through a bias-only conv that adds db to a zeroed-input
+        // forward — but that would double the tangent. The cheap route is
+        // a plain elementwise add against db reshaped to broadcast over
+        // {N, *spatial}. Conv outputs always have layout (N, C_out, *), so
+        // reshape db to (1, C_out, 1, …) and broadcast-add.
+        const auto& db = bias->tangent();
+        auto out_shape = tangent.shape();
+        std::vector<int64_t> br_shape(out_shape.size(), 1);
+        if (out_shape.size() >= 2 && static_cast<int64_t>(db.numel()) == out_shape[1]) {
+            br_shape[1] = out_shape[1];
+            auto db_br = tenzor::reshape(db, br_shape);
+            tangent = tenzor::add(tangent, db_br);
+        } else {
+            // Fallback: trust broadcasting (handles already-shaped db).
+            tangent = tenzor::add(tangent, db);
+        }
+    }
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ---- View / shape long-tail ------------------------------------------------
+
+auto jvp_repeat(const DualTensor& x, std::vector<int64_t> repeats) -> DualTensor {
+    // repeat is a linear view-replication; tangent gets the same replication.
+    auto primal = tenzor::repeat(x.primal(), repeats);
+    auto tangent = tenzor::repeat(x.tangent(), std::move(repeats));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_tile(const DualTensor& x, std::vector<int64_t> reps) -> DualTensor {
+    auto primal = tenzor::tile(x.primal(), reps);
+    auto tangent = tenzor::tile(x.tangent(), std::move(reps));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_diag(const DualTensor& x, int64_t diagonal) -> DualTensor {
+    // diag is linear (either extracts a diagonal vector from a matrix, or
+    // embeds a vector into a diagonal matrix). Same op on the tangent.
+    auto primal = tenzor::diag(x.primal(), diagonal);
+    auto tangent = tenzor::diag(x.tangent(), diagonal);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_tril(const DualTensor& x, int64_t diagonal) -> DualTensor {
+    // tril is a linear projection by a zero/one mask; mask the tangent the
+    // same way.
+    auto primal = tenzor::tril(x.primal(), diagonal);
+    auto tangent = tenzor::tril(x.tangent(), diagonal);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_triu(const DualTensor& x, int64_t diagonal) -> DualTensor {
+    auto primal = tenzor::triu(x.primal(), diagonal);
+    auto tangent = tenzor::triu(x.tangent(), diagonal);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_flip(const DualTensor& x, std::vector<int64_t> dims) -> DualTensor {
+    auto primal = tenzor::flip(x.primal(), dims);
+    auto tangent = tenzor::flip(x.tangent(), std::move(dims));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_roll(const DualTensor& x, int64_t shifts, int64_t dim) -> DualTensor {
+    auto primal = tenzor::roll(x.primal(), shifts, dim);
+    auto tangent = tenzor::roll(x.tangent(), shifts, dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_repeat_interleave(const DualTensor& x, int64_t repeats,
+                           std::optional<int64_t> dim) -> DualTensor {
+    auto primal = tenzor::repeat_interleave(x.primal(), repeats, dim);
+    auto tangent = tenzor::repeat_interleave(x.tangent(), repeats, dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_take(const DualTensor& x, const Tensor& index) -> DualTensor {
+    // take(x, idx) is a gather-by-flat-index; linear in x.
+    auto primal = tenzor::take(x.primal(), index);
+    auto tangent = tenzor::take(x.tangent(), index);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_take_along_dim(const DualTensor& x, const Tensor& indices, int64_t dim) -> DualTensor {
+    auto primal = tenzor::take_along_dim(x.primal(), indices, dim);
+    auto tangent = tenzor::take_along_dim(x.tangent(), indices, dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_diagonal_scatter(const DualTensor& input, const DualTensor& src,
+                          int64_t offset, int64_t dim1, int64_t dim2) -> DualTensor {
+    // y = diagonal_scatter(input, src, …) is linear in both input and src
+    // (it replaces a diagonal slice of `input` with `src`). Same op on the
+    // tangents.
+    auto primal = tenzor::diagonal_scatter(input.primal(), src.primal(), offset, dim1, dim2);
+    auto tangent = tenzor::diagonal_scatter(input.tangent(), src.tangent(), offset, dim1, dim2);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
 auto jvp_masked_select(const DualTensor& x, const Tensor& mask) -> DualTensor {
     auto primal = tenzor::masked_select(x.primal(), mask);
     auto tangent = tenzor::masked_select(x.tangent(), mask);
@@ -1352,6 +1579,287 @@ JvpResult jvp_adapter_cast(std::span<const Tensor> primals,
     return dual_to_result(jvp_cast(x, target));
 }
 
+// ---- Audit A.4 batch 3 adapters: linalg / conv / view long-tail ----
+
+// Bmm: (a, b) -> a @ b batched. Same signature as MatMul.
+JvpResult jvp_adapter_bmm(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes&) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_bmm: expected 2 inputs (a, b)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_bmm(a, b));
+}
+
+JvpResult jvp_adapter_inv(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_inv: expected 1 input (A)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_inv(a));
+}
+
+JvpResult jvp_adapter_solve(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes&) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_solve: expected 2 inputs (A, B)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_solve(a, b));
+}
+
+JvpResult jvp_adapter_cholesky(std::span<const Tensor> primals,
+                               std::span<const Tensor> tangents,
+                               const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_cholesky: expected 1 input (A)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    bool upper = attrs.get_int(AttrKey::Upper, 0) != 0;
+    return dual_to_result(jvp_cholesky(a, upper));
+}
+
+JvpResult jvp_adapter_trace(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_trace: expected 1 input (A)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_trace(a));
+}
+
+JvpResult jvp_adapter_det(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_det: expected 1 input (A)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_det(a));
+}
+
+// Convolution adapters. The Tensor-level dispatch table accepts inputs of
+// {x, w} or {x, w, b}, plus stride/padding/dilation/groups attrs. The JVP
+// rule re-uses the same OpId for both primal and tangent passes.
+template <OpId ConvOp>
+JvpResult jvp_adapter_conv_impl(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if ((primals.size() != 2 && primals.size() != 3) ||
+        primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_conv: expected 2 or 3 inputs (input, weight[, bias])");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto w = make_dual(primals[1], tangents[1]);
+    std::optional<DualTensor> b;
+    if (primals.size() == 3) {
+        b.emplace(make_dual(primals[2], tangents[2]));
+    }
+    return dual_to_result(jvp_conv_forward(ConvOp, x, w, b, attrs));
+}
+
+JvpResult jvp_adapter_conv1d(std::span<const Tensor> p, std::span<const Tensor> t,
+                             const OpAttributes& a) {
+    return jvp_adapter_conv_impl<OpId::Conv1dForward>(p, t, a);
+}
+JvpResult jvp_adapter_conv2d(std::span<const Tensor> p, std::span<const Tensor> t,
+                             const OpAttributes& a) {
+    return jvp_adapter_conv_impl<OpId::Conv2dForward>(p, t, a);
+}
+JvpResult jvp_adapter_conv3d(std::span<const Tensor> p, std::span<const Tensor> t,
+                             const OpAttributes& a) {
+    return jvp_adapter_conv_impl<OpId::Conv3dForward>(p, t, a);
+}
+JvpResult jvp_adapter_conv_transpose2d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                       const OpAttributes& a) {
+    return jvp_adapter_conv_impl<OpId::ConvTranspose2dForward>(p, t, a);
+}
+JvpResult jvp_adapter_conv_transpose3d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                       const OpAttributes& a) {
+    return jvp_adapter_conv_impl<OpId::ConvTranspose3dForward>(p, t, a);
+}
+
+// View / shape long-tail.
+
+JvpResult jvp_adapter_expand(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_expand: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::vector<int64_t> shape;
+    if (attrs.has(AttrKey::Shape)) {
+        shape = attrs.get_int_list(AttrKey::Shape);
+    } else {
+        auto sp = primals[0].shape();
+        shape.assign(sp.begin(), sp.end());
+    }
+    return dual_to_result(jvp_expand(x, std::move(shape)));
+}
+
+JvpResult jvp_adapter_repeat(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_repeat: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::vector<int64_t> repeats;
+    if (attrs.has(AttrKey::Repeats)) {
+        repeats = attrs.get_int_list(AttrKey::Repeats);
+    } else {
+        // No repeats attr means identity along all dims.
+        repeats.assign(primals[0].shape().size(), 1);
+    }
+    return dual_to_result(jvp_repeat(x, std::move(repeats)));
+}
+
+JvpResult jvp_adapter_tile(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_tile: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::vector<int64_t> reps;
+    if (attrs.has(AttrKey::Reps)) {
+        reps = attrs.get_int_list(AttrKey::Reps);
+    } else {
+        reps.assign(primals[0].shape().size(), 1);
+    }
+    return dual_to_result(jvp_tile(x, std::move(reps)));
+}
+
+JvpResult jvp_adapter_flatten(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_flatten: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t start_dim = attrs.get_int(AttrKey::StartDim, 0);
+    int64_t end_dim   = attrs.get_int(AttrKey::EndDim, -1);
+    return dual_to_result(jvp_flatten(x, start_dim, end_dim));
+}
+
+JvpResult jvp_adapter_diag(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_diag: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+    return dual_to_result(jvp_diag(x, diagonal));
+}
+
+JvpResult jvp_adapter_tril(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_tril: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+    return dual_to_result(jvp_tril(x, diagonal));
+}
+
+JvpResult jvp_adapter_triu(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_triu: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+    return dual_to_result(jvp_triu(x, diagonal));
+}
+
+JvpResult jvp_adapter_flip(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_flip: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::vector<int64_t> dims;
+    if (attrs.has(AttrKey::Dims)) {
+        dims = attrs.get_int_list(AttrKey::Dims);
+    }
+    return dual_to_result(jvp_flip(x, std::move(dims)));
+}
+
+JvpResult jvp_adapter_roll(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_roll: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t shifts = attrs.get_int(AttrKey::Shift, 0);
+    int64_t dim    = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_roll(x, shifts, dim));
+}
+
+JvpResult jvp_adapter_repeat_interleave(std::span<const Tensor> primals,
+                                        std::span<const Tensor> tangents,
+                                        const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_repeat_interleave: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+    std::optional<int64_t> dim;
+    if (attrs.has(AttrKey::Dim)) {
+        dim = attrs.get_int(AttrKey::Dim);
+    }
+    return dual_to_result(jvp_repeat_interleave(x, repeats, dim));
+}
+
+JvpResult jvp_adapter_take(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes&) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_take: expected 2 inputs (input, index)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_take(x, primals[1]));
+}
+
+JvpResult jvp_adapter_take_along_dim(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_take_along_dim: expected 2 inputs (input, indices)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_take_along_dim(x, primals[1], dim));
+}
+
+JvpResult jvp_adapter_diagonal_scatter(std::span<const Tensor> primals,
+                                       std::span<const Tensor> tangents,
+                                       const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_diagonal_scatter: expected 2 inputs (input, src)");
+    }
+    auto input = make_dual(primals[0], tangents[0]);
+    auto src   = make_dual(primals[1], tangents[1]);
+    int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+    int64_t dim1   = attrs.get_int(AttrKey::Dim1, 0);
+    int64_t dim2   = attrs.get_int(AttrKey::Dim2, 1);
+    return dual_to_result(jvp_diagonal_scatter(input, src, offset, dim1, dim2));
+}
+
 } // anonymous namespace
 
 namespace detail {
@@ -1457,6 +1965,40 @@ void register_builtin_jvp_rules() {
 
     // Cast
     register_jvp_rule(OpId::Cast,       &jvp_adapter_cast);
+
+    // ---------------- Audit A.4 batch 3 ------------------
+
+    // Linear algebra
+    register_jvp_rule(OpId::Bmm,             &jvp_adapter_bmm);
+    register_jvp_rule(OpId::LinalgInv,       &jvp_adapter_inv);
+    register_jvp_rule(OpId::LinalgSolve,     &jvp_adapter_solve);
+    register_jvp_rule(OpId::LinalgCholesky,  &jvp_adapter_cholesky);
+    register_jvp_rule(OpId::Trace,           &jvp_adapter_trace);
+    register_jvp_rule(OpId::LinalgDet,       &jvp_adapter_det);
+
+    // Convolution forward (no BN/LN; multi-output ops handled separately)
+    register_jvp_rule(OpId::Conv1dForward,            &jvp_adapter_conv1d);
+    register_jvp_rule(OpId::Conv2dForward,            &jvp_adapter_conv2d);
+    register_jvp_rule(OpId::Conv3dForward,            &jvp_adapter_conv3d);
+    register_jvp_rule(OpId::ConvTranspose2dForward,   &jvp_adapter_conv_transpose2d);
+    register_jvp_rule(OpId::ConvTranspose3dForward,   &jvp_adapter_conv_transpose3d);
+
+    // View / shape long-tail
+    register_jvp_rule(OpId::Expand,            &jvp_adapter_expand);
+    register_jvp_rule(OpId::Repeat,            &jvp_adapter_repeat);
+    register_jvp_rule(OpId::Tile,              &jvp_adapter_tile);
+    register_jvp_rule(OpId::Flatten,           &jvp_adapter_flatten);
+    register_jvp_rule(OpId::Diag,              &jvp_adapter_diag);
+    register_jvp_rule(OpId::Tril,              &jvp_adapter_tril);
+    register_jvp_rule(OpId::Triu,              &jvp_adapter_triu);
+    register_jvp_rule(OpId::Flip,              &jvp_adapter_flip);
+    register_jvp_rule(OpId::Roll,              &jvp_adapter_roll);
+    register_jvp_rule(OpId::RepeatInterleave,  &jvp_adapter_repeat_interleave);
+
+    // Indexing long-tail
+    register_jvp_rule(OpId::Take,             &jvp_adapter_take);
+    register_jvp_rule(OpId::TakeAlongDim,     &jvp_adapter_take_along_dim);
+    register_jvp_rule(OpId::DiagonalScatter,  &jvp_adapter_diagonal_scatter);
 }
 
 } // namespace detail

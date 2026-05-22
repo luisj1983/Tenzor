@@ -9,6 +9,9 @@
 #pragma once
 
 #include "dual.hpp"
+#include "../ops/op_id.hpp"
+#include "../backend/op_attributes.hpp"
+#include "../backend/backend.hpp"  // for `using OpAttributes = NewOpAttributes;`
 #include <optional>
 #include <vector>
 #include <cstdint>
@@ -106,6 +109,46 @@ auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor;
 /// @name Linear Algebra JVP Rules
 /// @{
 auto jvp_linear(const DualTensor& input, const DualTensor& weight, const DualTensor& bias) -> DualTensor;
+auto jvp_bmm(const DualTensor& a, const DualTensor& b) -> DualTensor;
+auto jvp_inv(const DualTensor& a) -> DualTensor;
+auto jvp_solve(const DualTensor& a, const DualTensor& b) -> DualTensor;
+auto jvp_cholesky(const DualTensor& a, bool upper = false) -> DualTensor;
+auto jvp_trace(const DualTensor& x) -> DualTensor;
+auto jvp_det(const DualTensor& a) -> DualTensor;
+/// @}
+
+/// @name Conv JVP Rules
+/// @{
+/**
+ * Convolution forward-mode JVP. Works for Conv{1,2,3}d and ConvTranspose{2,3}d
+ * via the supplied OpId. JVP formula (linearity of conv in (x, w) + bias add):
+ *     y  = conv(x, w) + b
+ *     dy = conv(dx, w) + conv(x, dw) + db
+ * `attrs` carries the same stride/padding/dilation/groups attributes that the
+ * primal op consumes; both the primal and the two tangent passes reuse them.
+ */
+auto jvp_conv_forward(OpId op,
+                      const DualTensor& input,
+                      const DualTensor& weight,
+                      const std::optional<DualTensor>& bias,
+                      const OpAttributes& attrs) -> DualTensor;
+/// @}
+
+/// @name View / Shape long-tail JVP Rules
+/// @{
+auto jvp_repeat(const DualTensor& x, std::vector<int64_t> repeats) -> DualTensor;
+auto jvp_tile(const DualTensor& x, std::vector<int64_t> reps) -> DualTensor;
+auto jvp_diag(const DualTensor& x, int64_t diagonal = 0) -> DualTensor;
+auto jvp_tril(const DualTensor& x, int64_t diagonal = 0) -> DualTensor;
+auto jvp_triu(const DualTensor& x, int64_t diagonal = 0) -> DualTensor;
+auto jvp_flip(const DualTensor& x, std::vector<int64_t> dims) -> DualTensor;
+auto jvp_roll(const DualTensor& x, int64_t shifts, int64_t dim) -> DualTensor;
+auto jvp_repeat_interleave(const DualTensor& x, int64_t repeats,
+                           std::optional<int64_t> dim = std::nullopt) -> DualTensor;
+auto jvp_take(const DualTensor& x, const Tensor& index) -> DualTensor;
+auto jvp_take_along_dim(const DualTensor& x, const Tensor& indices, int64_t dim) -> DualTensor;
+auto jvp_diagonal_scatter(const DualTensor& input, const DualTensor& src,
+                          int64_t offset = 0, int64_t dim1 = 0, int64_t dim2 = 1) -> DualTensor;
 /// @}
 
 } // namespace tenzor
