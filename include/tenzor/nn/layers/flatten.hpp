@@ -79,6 +79,9 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    [[nodiscard]] auto start_dim() const -> int64_t { return start_dim_; }
+    [[nodiscard]] auto end_dim()   const -> int64_t { return end_dim_; }
+
 private:
     int64_t start_dim_;  ///< First dimension to include in flattening
     int64_t end_dim_;    ///< Last dimension to include in flattening

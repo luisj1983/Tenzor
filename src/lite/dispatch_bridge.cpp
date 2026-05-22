@@ -46,23 +46,91 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             oa.set(AttrKey::Dim, la.i[0]);
             break;
 
-        // Inf-E5: Conv1/2/3d — per-axis stride/padding/dilation/groups.
+        // Inf-E5 / C.3 audit: Conv1/2/3d — per-axis stride/padding/dilation/groups.
+        // Scalar fallback (used when extras are empty / symmetric):
         //   i[0] = stride, i[1] = padding, i[2] = dilation, i[3] = groups
-        case OpId::Conv1dForward:
-        case OpId::Conv2dForward:
-        case OpId::Conv3dForward:
-        case OpId::DepthwiseConv2d:
+        // Per-axis extras (when present) override the scalar via per-axis keys:
+        //   Conv1d:  extra_i = [stride_w, padding_w, dilation_w, groups, kernel_w]
+        //   Conv2d:  extra_i = [stride_h, stride_w, padding_h, padding_w,
+        //                       dilation_h, dilation_w, groups,
+        //                       kernel_h, kernel_w]
+        //   Conv3d:  extra_i = [stride_d, stride_h, stride_w,
+        //                       padding_d, padding_h, padding_w,
+        //                       dilation_d, dilation_h, dilation_w,
+        //                       groups, kernel_d, kernel_h, kernel_w]
+        // DepthwiseConv2d uses the Conv2d layout.
+        case OpId::Conv1dForward: {
             oa.set(AttrKey::Stride,   la.i[0]);
             oa.set(AttrKey::Padding,  la.i[1]);
             oa.set(AttrKey::Dilation, la.i[2]);
             oa.set(AttrKey::Groups,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::StrideW,   ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::PaddingW,  ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::DilationW, ei[2]);
+            if (ei.size() >= 4) oa.set(AttrKey::Groups,    ei[3]);
+            if (ei.size() >= 5) oa.set(AttrKey::KernelSizeW, ei[4]);
             break;
+        }
+        case OpId::Conv2dForward:
+        case OpId::DepthwiseConv2d: {
+            oa.set(AttrKey::Stride,   la.i[0]);
+            oa.set(AttrKey::Padding,  la.i[1]);
+            oa.set(AttrKey::Dilation, la.i[2]);
+            oa.set(AttrKey::Groups,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::StrideH,   ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::StrideW,   ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::PaddingH,  ei[2]);
+            if (ei.size() >= 4) oa.set(AttrKey::PaddingW,  ei[3]);
+            if (ei.size() >= 5) oa.set(AttrKey::DilationH, ei[4]);
+            if (ei.size() >= 6) oa.set(AttrKey::DilationW, ei[5]);
+            if (ei.size() >= 7) oa.set(AttrKey::Groups,    ei[6]);
+            if (ei.size() >= 8) oa.set(AttrKey::KernelSizeH, ei[7]);
+            if (ei.size() >= 9) oa.set(AttrKey::KernelSizeW, ei[8]);
+            break;
+        }
+        case OpId::Conv3dForward: {
+            oa.set(AttrKey::Stride,   la.i[0]);
+            oa.set(AttrKey::Padding,  la.i[1]);
+            oa.set(AttrKey::Dilation, la.i[2]);
+            oa.set(AttrKey::Groups,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::StrideD,   ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::StrideH,   ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::StrideW,   ei[2]);
+            if (ei.size() >= 4) oa.set(AttrKey::PaddingD,  ei[3]);
+            if (ei.size() >= 5) oa.set(AttrKey::PaddingH,  ei[4]);
+            if (ei.size() >= 6) oa.set(AttrKey::PaddingW,  ei[5]);
+            if (ei.size() >= 7) oa.set(AttrKey::DilationD, ei[6]);
+            if (ei.size() >= 8) oa.set(AttrKey::DilationH, ei[7]);
+            if (ei.size() >= 9) oa.set(AttrKey::DilationW, ei[8]);
+            if (ei.size() >= 10) oa.set(AttrKey::Groups,        ei[9]);
+            if (ei.size() >= 11) oa.set(AttrKey::KernelSizeD,   ei[10]);
+            if (ei.size() >= 12) oa.set(AttrKey::KernelSizeH,   ei[11]);
+            if (ei.size() >= 13) oa.set(AttrKey::KernelSizeW,   ei[12]);
+            break;
+        }
 
         // Inf-E5: Norms — f[0]=eps, i[0]=num_groups (GroupNorm only).
-        case OpId::LayerNorm:
         case OpId::InstanceNorm:
             oa.set(AttrKey::Eps, la.f[0]);
             break;
+        // C.3 audit: LayerNorm — f[0]=eps, normalized_shape carried in
+        //   extra_i as the trailing dims to reduce. The kernel reads it via
+        //   AttrKey::NormalizedShape (comma-separated int list).
+        case OpId::LayerNorm: {
+            oa.set(AttrKey::Eps, la.f[0]);
+            if (!la.extra_i.empty()) {
+                std::string norm_shape_str;
+                for (size_t k = 0; k < la.extra_i.size(); ++k) {
+                    if (k > 0) norm_shape_str += ",";
+                    norm_shape_str += std::to_string(la.extra_i[k]);
+                }
+                oa.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
+            }
+            break;
+        }
         case OpId::GroupNorm:
             oa.set(AttrKey::Eps, la.f[0]);
             oa.set(AttrKey::NumGroups, la.i[0]);
@@ -77,10 +145,36 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             oa.set(AttrKey::Momentum, la.f[1]);
             break;
 
-        // Inf-E5: Pooling — i[0]=kernel, i[1]=stride, i[2]=padding,
-        //                   i[3]=dilation (MaxPool only).
+        // Inf-E5 / C.3: Pooling — i[0]=kernel, i[1]=stride, i[2]=padding,
+        //   i[3]=dilation (MaxPool only).
+        // Per-axis 2D extras (when present) override scalar via per-axis keys:
+        //   MaxPool2d: extra_i = [kH, kW, sH, sW, pH, pW, dH, dW,
+        //                         ceil_mode (0/1)]
+        //   AvgPool2d: extra_i = [kH, kW, sH, sW, pH, pW,
+        //                         ceil_mode (0/1), count_include_pad (0/1)]
         case OpId::MaxPool1dForward:
-        case OpId::MaxPool2dForward:
+            oa.set(AttrKey::KernelSize, la.i[0]);
+            oa.set(AttrKey::Stride,     la.i[1]);
+            oa.set(AttrKey::Padding,    la.i[2]);
+            oa.set(AttrKey::Dilation,   la.i[3]);
+            break;
+        case OpId::MaxPool2dForward: {
+            oa.set(AttrKey::KernelSize, la.i[0]);
+            oa.set(AttrKey::Stride,     la.i[1]);
+            oa.set(AttrKey::Padding,    la.i[2]);
+            oa.set(AttrKey::Dilation,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::KernelSizeH, ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::KernelSizeW, ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::StrideH,     ei[2]);
+            if (ei.size() >= 4) oa.set(AttrKey::StrideW,     ei[3]);
+            if (ei.size() >= 5) oa.set(AttrKey::PaddingH,    ei[4]);
+            if (ei.size() >= 6) oa.set(AttrKey::PaddingW,    ei[5]);
+            if (ei.size() >= 7) oa.set(AttrKey::DilationH,   ei[6]);
+            if (ei.size() >= 8) oa.set(AttrKey::DilationW,   ei[7]);
+            if (ei.size() >= 9) oa.set(AttrKey::CeilMode,    ei[8] != 0);
+            break;
+        }
         case OpId::MaxPool3dForward:
             oa.set(AttrKey::KernelSize, la.i[0]);
             oa.set(AttrKey::Stride,     la.i[1]);
@@ -88,7 +182,25 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             oa.set(AttrKey::Dilation,   la.i[3]);
             break;
         case OpId::AvgPool1dForward:
-        case OpId::AvgPool2dForward:
+            oa.set(AttrKey::KernelSize, la.i[0]);
+            oa.set(AttrKey::Stride,     la.i[1]);
+            oa.set(AttrKey::Padding,    la.i[2]);
+            break;
+        case OpId::AvgPool2dForward: {
+            oa.set(AttrKey::KernelSize, la.i[0]);
+            oa.set(AttrKey::Stride,     la.i[1]);
+            oa.set(AttrKey::Padding,    la.i[2]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::KernelSizeH, ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::KernelSizeW, ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::StrideH,     ei[2]);
+            if (ei.size() >= 4) oa.set(AttrKey::StrideW,     ei[3]);
+            if (ei.size() >= 5) oa.set(AttrKey::PaddingH,    ei[4]);
+            if (ei.size() >= 6) oa.set(AttrKey::PaddingW,    ei[5]);
+            if (ei.size() >= 7) oa.set(AttrKey::CeilMode,        ei[6] != 0);
+            if (ei.size() >= 8) oa.set(AttrKey::CountIncludePad, ei[7] != 0);
+            break;
+        }
         case OpId::AvgPool3dForward:
             oa.set(AttrKey::KernelSize, la.i[0]);
             oa.set(AttrKey::Stride,     la.i[1]);
@@ -103,18 +215,33 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             oa.set(AttrKey::OutputSize, la.i[0]);
             break;
 
-        // Inf-E5: Dropout — f[0]=p (forced 0 at inference per ONNX
-        // precedent; the export visitor records training=0).
+        // C.3 audit fix: the CPU Dropout kernel reads AttrKey::P (not
+        // DropoutP) and AttrKey::Training. Inference-only Lite runtime
+        // forces training=false so the kernel becomes identity (scaled
+        // mask of all-ones).
         case OpId::Dropout:
-            oa.set(AttrKey::DropoutP, la.f[0]);
+            oa.set(AttrKey::P,        la.f[0]);
             oa.set(AttrKey::Training, false);
             break;
 
-        // Inf-E5: Shape ops with a dim attribute.
+        // C.3 audit fix: Flatten reads StartDim / EndDim, not Dim. Encoded
+        //   i[0] = start_dim, i[1] = end_dim
         case OpId::Flatten:
+            oa.set(AttrKey::StartDim, la.i[0]);
+            oa.set(AttrKey::EndDim,   la.i[1]);
+            break;
+
+        // Inf-E5: Shape ops with a single dim attribute.
         case OpId::Squeeze:
         case OpId::Unsqueeze:
             oa.set(AttrKey::Dim, la.i[0]);
+            break;
+
+        // C.3 audit: Embedding reads optional PaddingIdx; encoded
+        //   i[0] = padding_idx (negative = none)
+        case OpId::Embedding:
+        case OpId::EmbeddingWithBoundsCheck:
+            if (la.i[0] >= 0) oa.set(AttrKey::PaddingIdx, la.i[0]);
             break;
 
         // Inf-E5: Reductions — i[0]=dim, f[0]=keepdim flag (0/1).

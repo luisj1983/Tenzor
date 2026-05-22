@@ -178,6 +178,11 @@ public:
                ", affine=" + std::string(affine_ ? "True" : "False");
     }
 
+    [[nodiscard]] auto num_groups() const -> int64_t { return num_groups_; }
+    [[nodiscard]] auto num_channels() const -> int64_t { return num_channels_; }
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+    [[nodiscard]] auto affine() const -> bool { return affine_; }
+
 private:
     int64_t num_groups_;    ///< Number of groups
     int64_t num_channels_;  ///< Number of channels
