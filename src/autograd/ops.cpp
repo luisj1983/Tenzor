@@ -3555,4 +3555,139 @@ auto logcumsumexp(const Variable& input, int64_t dim) -> Variable {
     return output;
 }
 
+// ============================================================================
+// Audit E.7 continuation (batch 5): 10 more wrappers.
+// ============================================================================
+
+// --- non-differentiable ------------------------------------------------
+
+auto isposinf(const Variable& input) -> Variable {
+    return make_nondiff_unary<IsPosInfBackward>(
+        input, [](const Tensor& x) { return tenzor::isposinf(x); });
+}
+
+auto isneginf(const Variable& input) -> Variable {
+    return make_nondiff_unary<IsNegInfBackward>(
+        input, [](const Tensor& x) { return tenzor::isneginf(x); });
+}
+
+auto trunc(const Variable& input) -> Variable {
+    return make_nondiff_unary<TruncBackward>(
+        input, [](const Tensor& x) { return tenzor::trunc(x); });
+}
+
+namespace {
+template <typename BackwardCls, typename EagerFn>
+auto make_nondiff_reduction(const Variable& input, EagerFn&& eager) -> Variable {
+    auto result = eager(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<BackwardCls>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+} // namespace
+
+auto any(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    return make_nondiff_reduction<AnyBackward>(
+        input, [&](const Tensor& x) { return tenzor::any(x, dim, keepdim); });
+}
+
+auto all(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    return make_nondiff_reduction<AllBackward>(
+        input, [&](const Tensor& x) { return tenzor::all(x, dim, keepdim); });
+}
+
+auto has_inf_nan(const Variable& input) -> Variable {
+    return make_nondiff_unary<HasInfNanBackward>(
+        input, [](const Tensor& x) { return tenzor::has_inf_nan(x); });
+}
+
+// --- differentiable ----------------------------------------------------
+
+// nanmean(x, dim, keepdim): saves the input so backward can recompute the
+// non-NaN count and the NaN mask.
+auto nanmean(const Variable& input, std::optional<int64_t> dim, bool keepdim)
+    -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::nanmean(input.tensor(), dim, keepdim), false);
+    }
+    auto grad_fn = std::make_shared<NanmeanBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tenzor::nanmean(input.tensor(), dim, keepdim);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// masked_fill(x, mask, value): mask is a plain Tensor (not a Variable), value
+// is a constant scalar. Saves the mask so backward can zero grad at masked
+// positions.
+auto masked_fill(const Variable& input, const Tensor& mask, float value)
+    -> Variable {
+    auto result = tenzor::masked_fill(input.tensor(), mask, value);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<MaskedFillBackward>();
+    grad_fn->save_for_backward({mask});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// masked_select(x, mask): saves the mask and a CPU Int64 tensor encoding the
+// input shape so backward can scatter grad_y back into a zeros_like(x).
+auto masked_select(const Variable& input, const Tensor& mask) -> Variable {
+    auto result = tenzor::masked_select(input.tensor(), mask);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<MaskedSelectBackward>();
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())},
+                              DType::Int64, Device::cpu());
+    if (!sh.empty()) {
+        std::memcpy(shape_tensor.data_ptr(), sh.data(),
+                    sh.size() * sizeof(int64_t));
+    }
+    grad_fn->save_for_backward({mask, shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// masked_scatter(x, mask, source): mask is a plain Tensor (non-diff); source
+// is a Variable that participates in the autograd graph. Saves the mask and
+// source.shape so backward can pad the source grad to match source's shape.
+auto masked_scatter(const Variable& input, const Tensor& mask,
+                    const Variable& source) -> Variable {
+    auto result = tenzor::masked_scatter(input.tensor(), mask, source.tensor());
+    bool any_requires =
+        (input.requires_grad() || source.requires_grad()) && is_grad_enabled();
+    if (!any_requires) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<MaskedScatterBackward>();
+    grad_fn->save_for_backward({mask});
+    grad_fn->source_shape_ =
+        std::vector<int64_t>(source.tensor().shape().begin(),
+                             source.tensor().shape().end());
+    grad_fn->set_next_functions({input.grad_fn(), source.grad_fn()});
+    grad_fn->set_input_variables({input, source});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

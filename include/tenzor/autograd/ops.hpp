@@ -1364,6 +1364,52 @@ auto isfinite(const Variable& input) -> Variable;
  *         Backward: grad_x = exp(x) * reverse_cumsum(grad_y * exp(-y), dim). */
 auto logcumsumexp(const Variable& input, int64_t dim) -> Variable;
 
+// ============================================================================
+// Audit E.7 continuation (batch 5): 10 more wrappers — 6 non-diff, 4 diff.
+// ============================================================================
+
+/** @brief isposinf(x). NON-DIFFERENTIABLE — backward() throws. */
+auto isposinf(const Variable& input) -> Variable;
+
+/** @brief isneginf(x). NON-DIFFERENTIABLE — backward() throws. */
+auto isneginf(const Variable& input) -> Variable;
+
+/** @brief trunc(x): round toward zero. NON-DIFFERENTIABLE — backward() throws. */
+auto trunc(const Variable& input) -> Variable;
+
+/** @brief any(x, dim, keepdim). NON-DIFFERENTIABLE — backward() throws. */
+auto any(const Variable& input,
+         std::optional<int64_t> dim = std::nullopt,
+         bool keepdim = false) -> Variable;
+
+/** @brief all(x, dim, keepdim). NON-DIFFERENTIABLE — backward() throws. */
+auto all(const Variable& input,
+         std::optional<int64_t> dim = std::nullopt,
+         bool keepdim = false) -> Variable;
+
+/** @brief has_inf_nan(x). NON-DIFFERENTIABLE — backward() throws. */
+auto has_inf_nan(const Variable& input) -> Variable;
+
+/** @brief nanmean(x, dim, keepdim): mean with NaN treated as missing.
+ *         Backward: grad_x = where(isnan(x), 0, grad_y_broadcast / count_non_nan). */
+auto nanmean(const Variable& input,
+             std::optional<int64_t> dim = std::nullopt,
+             bool keepdim = false) -> Variable;
+
+/** @brief masked_fill(x, mask, value): overwrite x[mask] with scalar value.
+ *         Backward: grad_x = where(mask, 0, grad_y); value is non-diff scalar. */
+auto masked_fill(const Variable& input, const Tensor& mask, float value) -> Variable;
+
+/** @brief masked_select(x, mask): flat gather at mask=true positions.
+ *         Backward scatters grad_y back into zeros_like(x). */
+auto masked_select(const Variable& input, const Tensor& mask) -> Variable;
+
+/** @brief masked_scatter(x, mask, source): overwrite x[mask] with leading
+ *         source elements. Backward routes grad to x (where !mask) and to
+ *         source (padded with zeros beyond the masked count). */
+auto masked_scatter(const Variable& input, const Tensor& mask,
+                    const Variable& source) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

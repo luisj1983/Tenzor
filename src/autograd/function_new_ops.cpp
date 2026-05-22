@@ -2546,4 +2546,241 @@ auto LogcumsumexpBackward::backward(std::vector<Tensor> grad_outputs) -> std::ve
     return {grad_x};
 }
 
+// ============================================================================
+// Audit E.7 continuation (batch 5): 10 more OpIds.
+// ============================================================================
+
+// --- non-differentiable: isposinf / isneginf (bool metadata) ------------
+
+auto IsPosInfBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("IsPosInfBackward::forward should not be called directly");
+}
+auto IsPosInfBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "isposinf: output is a Bool tensor flagging +inf positions — "
+        "discrete classification of the input's IEEE-754 bit pattern, not "
+        "a smooth function of the input values. Non-differentiable.");
+}
+
+auto IsNegInfBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("IsNegInfBackward::forward should not be called directly");
+}
+auto IsNegInfBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "isneginf: output is a Bool tensor flagging -inf positions — "
+        "discrete classification of the input's IEEE-754 bit pattern, not "
+        "a smooth function of the input values. Non-differentiable.");
+}
+
+// --- non-differentiable: trunc (piecewise-constant) ---------------------
+
+auto TruncBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("TruncBackward::forward should not be called directly");
+}
+auto TruncBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "trunc: round-toward-zero is piecewise-constant — gradient is "
+        "zero almost everywhere and a Dirac comb at integer jumps. Use "
+        "a custom STE Function (straight-through estimator) if a surrogate "
+        "gradient is needed.");
+}
+
+// --- non-differentiable: any / all / has_inf_nan (bool reductions) ------
+
+auto AnyBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AnyBackward::forward should not be called directly");
+}
+auto AnyBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "any: output is a Bool reduction (true if any input element is "
+        "nonzero) — discrete and not a smooth function of the inputs. "
+        "Non-differentiable.");
+}
+
+auto AllBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AllBackward::forward should not be called directly");
+}
+auto AllBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "all: output is a Bool reduction (true if all input elements are "
+        "nonzero) — discrete and not a smooth function of the inputs. "
+        "Non-differentiable.");
+}
+
+auto HasInfNanBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("HasInfNanBackward::forward should not be called directly");
+}
+auto HasInfNanBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "has_inf_nan: output is a Bool scalar flagging the presence of "
+        "any inf or NaN element — discrete classification of the input's "
+        "IEEE-754 bit patterns. Non-differentiable.");
+}
+
+// --- differentiable: nanmean --------------------------------------------
+
+// nanmean(x, dim, keepdim) = sum_{i not NaN} x_i / N, where N is the per-output
+// count of non-NaN entries along the reduction axis. The Jacobian wrt a
+// non-NaN entry x_i is 1/N; wrt a NaN entry it is 0 (the NaN contributed
+// neither to the numerator nor to the denominator). Backward broadcasts
+// grad_y back to input shape and divides by the broadcast count, then zeros
+// out the NaN positions. N is recomputed from the saved input.
+auto NanmeanBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("NanmeanBackward::forward should not be called directly");
+}
+auto NanmeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "NanmeanBackward: cannot compute gradient of nanmean over empty tensor");
+
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // non_nan_mask: 1 at non-NaN positions, 0 at NaN positions; cast to the
+    // input dtype so we can sum it to a float count.
+    auto nan_mask = tenzor::isnan(input);
+    auto non_nan_mask = tenzor::logical_not(nan_mask).to(input.dtype());
+
+    // Per-output count N of non-NaN entries along the reduction axis,
+    // produced with keepdim=true so it broadcasts back to input shape.
+    Tensor count_keepdim;
+    Tensor grad_broadcast;
+    if (!dim_.has_value()) {
+        // Full reduction: count is a scalar; grad is a scalar; both broadcast
+        // to input shape.
+        count_keepdim = tenzor::sum(non_nan_mask);
+        auto grad = grad_output;
+        if (grad.ndim() > 0) {
+            grad = reshape(grad, {});
+        }
+        grad_broadcast = expand(grad, input_shape_vec);
+        count_keepdim = expand(count_keepdim, input_shape_vec);
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+        TENZOR_CHECK_SHAPE(dim >= 0 && dim < static_cast<int64_t>(input.shape().size()),
+            "NanmeanBackward: dim out of range for saved input rank");
+
+        count_keepdim = tenzor::sum(non_nan_mask, dim, /*keepdim=*/true);
+        auto grad = grad_output;
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+        }
+        grad_broadcast = expand(grad, input_shape_vec);
+        count_keepdim = expand(count_keepdim, input_shape_vec);
+    }
+
+    // grad / N at non-NaN positions; 0 at NaN positions (using mul by mask
+    // also handles divide-by-zero rows where the entire reduction window is
+    // NaN — those rows produce NaN output anyway, but the grad we route
+    // upstream is well-defined as zero).
+    auto safe_count = tenzor::where(
+        tenzor::eq(count_keepdim, zeros(input_shape_vec, count_keepdim.dtype(), count_keepdim.device())),
+        ones(input_shape_vec, count_keepdim.dtype(), count_keepdim.device()),
+        count_keepdim);
+    auto grad_per_elem = tenzor::div(grad_broadcast, safe_count);
+    auto zero = zeros(input_shape_vec, grad_per_elem.dtype(), grad_per_elem.device());
+    auto result = tenzor::where(nan_mask, zero, grad_per_elem);
+    return {result};
+}
+
+// --- differentiable: masked_fill ---------------------------------------
+
+// masked_fill(x, mask, value): y_i = mask_i ? value : x_i.
+// dy_i/dx_i = 1 - mask_i (i.e. 0 where mask=true, 1 where mask=false).
+// value is a constant scalar and is not part of the autograd graph.
+auto MaskedFillBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("MaskedFillBackward::forward should not be called directly");
+}
+auto MaskedFillBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& mask = saved_tensors_[0];
+    const auto& grad_output = grad_outputs[0];
+
+    auto shape_vec =
+        std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end());
+    auto zero = zeros(shape_vec, grad_output.dtype(), grad_output.device());
+    auto grad_x = tenzor::where(mask, zero, grad_output);
+    return {grad_x};
+}
+
+// --- differentiable: masked_select -------------------------------------
+
+// masked_select(x, mask): y = flat tensor of x's elements where mask=true
+// (in row-major iteration order). dy_k/dx_i = 1 iff i is the k-th masked
+// position, else 0. Backward scatters grad_y into a zeros_like(x) at the
+// masked positions, which is exactly masked_scatter(zeros_like(x), mask, grad_y).
+auto MaskedSelectBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("MaskedSelectBackward::forward should not be called directly");
+}
+auto MaskedSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& mask = saved_tensors_[0];
+    const auto& input_shape_t = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    // Recover the input shape from the saved Int64 shape tensor (kept on CPU).
+    std::vector<int64_t> input_shape_vec(input_shape_t.numel());
+    if (input_shape_t.numel() > 0) {
+        std::memcpy(input_shape_vec.data(), input_shape_t.data_ptr(),
+                    input_shape_vec.size() * sizeof(int64_t));
+    }
+
+    auto zero = zeros(input_shape_vec, grad_output.dtype(), grad_output.device());
+    auto grad_x = tenzor::masked_scatter(zero, mask, grad_output);
+    return {grad_x};
+}
+
+// --- differentiable: masked_scatter ------------------------------------
+
+// masked_scatter(x, mask, source): y = x with the first popcount(mask)
+// elements of source written into the masked positions of x (in mask-iteration
+// order). The remaining elements of source are unused.
+// d/dx_i = 1 - mask_i (passes grad through at non-masked positions).
+// d/dsource_k = grad_y at the position of the k-th masked entry, for
+// k < popcount(mask); else 0. That is: masked_select(grad_y, mask), padded
+// with zeros up to source.numel() and reshaped to source.shape.
+auto MaskedScatterBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("MaskedScatterBackward::forward should not be called directly");
+}
+auto MaskedScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& mask = saved_tensors_[0];
+    const auto& grad_output = grad_outputs[0];
+
+    auto shape_vec =
+        std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end());
+
+    // grad_x: zero out the masked positions (overwritten by source in forward).
+    auto zero_like = zeros(shape_vec, grad_output.dtype(), grad_output.device());
+    auto grad_x = tenzor::where(mask, zero_like, grad_output);
+
+    // grad_source: take grad at masked positions, pad with zeros to source
+    // total numel, reshape to source.shape.
+    auto selected = tenzor::masked_select(grad_output, mask);
+    int64_t source_numel = 1;
+    for (auto d : source_shape_) source_numel *= d;
+
+    int64_t selected_n = selected.numel();
+    Tensor grad_source_flat;
+    if (selected_n >= source_numel) {
+        // popcount(mask) >= source.numel(): every source element was used.
+        // Trim to source_numel along the only dim.
+        grad_source_flat = (selected_n == source_numel)
+            ? selected
+            : selected.slice(0, 0, source_numel);
+    } else {
+        // popcount(mask) < source.numel(): pad with zeros at the tail.
+        int64_t pad = source_numel - selected_n;
+        auto tail = zeros({pad}, grad_output.dtype(), grad_output.device());
+        std::vector<Tensor> parts = {selected, tail};
+        grad_source_flat = tenzor::cat(parts, /*dim=*/0);
+    }
+    auto grad_source = reshape(grad_source_flat, source_shape_);
+    return {grad_x, grad_source};
+}
+
 } // namespace tenzor

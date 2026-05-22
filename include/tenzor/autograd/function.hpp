@@ -3962,4 +3962,145 @@ private:
     int64_t dim_;
 };
 
+// ============================================================================
+// Audit E.7 continuation (batch 5): 10 more OpIds.
+//   non-differentiable: IsPosInf, IsNegInf, Trunc, Any, All, HasInfNan
+//   differentiable:     Nanmean, MaskedFill, MaskedSelect, MaskedScatter
+// IndexSelect / Nansum already covered in earlier batches and are skipped.
+// ============================================================================
+
+/**
+ * @brief isposinf(x). Bool tensor flagging +inf positions. Non-differentiable.
+ */
+class IsPosInfBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IsPosInfBackward"; }
+    auto op_id() const -> OpId override { return OpId::IsPosInf; }
+};
+
+/**
+ * @brief isneginf(x). Bool tensor flagging -inf positions. Non-differentiable.
+ */
+class IsNegInfBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IsNegInfBackward"; }
+    auto op_id() const -> OpId override { return OpId::IsNegInf; }
+};
+
+/**
+ * @brief trunc(x): round toward zero. Piecewise-constant, non-differentiable.
+ */
+class TruncBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "TruncBackward"; }
+    auto op_id() const -> OpId override { return OpId::Trunc; }
+};
+
+/**
+ * @brief any(x, dim, keepdim). Bool reduction. Non-differentiable.
+ */
+class AnyBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AnyBackward"; }
+    auto op_id() const -> OpId override { return OpId::Any; }
+};
+
+/**
+ * @brief all(x, dim, keepdim). Bool reduction. Non-differentiable.
+ */
+class AllBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AllBackward"; }
+    auto op_id() const -> OpId override { return OpId::All; }
+};
+
+/**
+ * @brief has_inf_nan(x). Bool scalar tensor flagging any inf/NaN element.
+ *        Non-differentiable.
+ */
+class HasInfNanBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "HasInfNanBackward"; }
+    auto op_id() const -> OpId override { return OpId::HasInfNan; }
+};
+
+/**
+ * @brief nanmean(x, dim, keepdim) — mean ignoring NaN entries.
+ *        Forward sums non-NaN values and divides by the per-output count of
+ *        non-NaN entries. Backward distributes grad_y / count to non-NaN
+ *        positions and zero to NaN positions:
+ *            grad_x = where(isnan(x), 0, grad_y_broadcast / count_non_nan)
+ *        Saves x; the mask and count are recomputed at backward time.
+ */
+class NanmeanBackward : public Function {
+public:
+    NanmeanBackward(std::optional<int64_t> dim, bool keepdim)
+        : dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NanmeanBackward"; }
+    auto op_id() const -> OpId override { return OpId::Nanmean; }
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
+/**
+ * @brief masked_fill(x, mask, value) = x with mask=true positions overwritten
+ *        by the scalar value. Backward:
+ *            grad_x = where(mask, 0, grad_y)
+ *        The value is a non-differentiable scalar. Saves the mask.
+ */
+class MaskedFillBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MaskedFillBackward"; }
+    auto op_id() const -> OpId override { return OpId::MaskedFill; }
+};
+
+/**
+ * @brief masked_select(x, mask) — flattened gather of x at mask=true positions.
+ *        Backward scatters grad_y back into a zeros_like(x) at the masked
+ *        positions:  grad_x = masked_scatter(zeros_like(x), mask, grad_y).
+ *        Saves the mask and the input's shape.
+ */
+class MaskedSelectBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MaskedSelectBackward"; }
+    auto op_id() const -> OpId override { return OpId::MaskedSelect; }
+};
+
+/**
+ * @brief masked_scatter(x, mask, source) — x with mask=true positions
+ *        overwritten by leading elements of source (in mask-iteration order).
+ *        Backward:
+ *            grad_x      = where(mask, 0, grad_y)
+ *            grad_source = pad_to_source_shape(masked_select(grad_y, mask))
+ *        Saves the mask and source.shape so the source grad can be padded
+ *        with zeros for the trailing unused elements of source.
+ */
+class MaskedScatterBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MaskedScatterBackward"; }
+    auto op_id() const -> OpId override { return OpId::MaskedScatter; }
+    std::vector<int64_t> source_shape_;
+};
+
 } // namespace tenzor
