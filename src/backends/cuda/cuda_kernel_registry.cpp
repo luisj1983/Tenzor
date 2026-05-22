@@ -2571,56 +2571,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input, weight] or [input, weight, bias]
-        // Audit E1: read per-axis stride/padding/dilation, falling back to
-        // the scalar attribute for back-compat. cuDNN supports asymmetric
-        // values natively via cudnnSetConvolution2dDescriptor.
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        // F.11: per-axis stride/padding/dilation via attr_macros helpers.
+        // cuDNN supports asymmetric values natively via cudnnSetConvolution2dDescriptor.
+        TENZOR_READ_CONV2D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias,
-                                           stride_h, stride_w, pad_h, pad_w,
-                                           dil_h, dil_w, groups,
+                                           stride[0], stride[1], padding[0], padding[1],
+                                           dilation[0], dilation[1], groups,
                                            get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_READ_CONV2D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_READ_CONV2D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
@@ -2635,39 +2607,42 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_bias};
     });
 #else
-    table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis read with scalar fallback; non-cuDNN scalar kernel
+    // requires symmetric stride/padding/dilation — fail loudly rather than
+    // silently collapse asymmetric input.
+    auto conv2d_iso_or_throw = [](const OpAttributes& attrs, const char* op_name) {
+        TENZOR_READ_CONV2D_ATTRS();
+        if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+            throw std::invalid_argument(
+                std::string(op_name) + " (CUDA non-cuDNN): backend kernel only supports symmetric "
+                "stride/padding/dilation; got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]) +
+                ". Build with cuDNN for asymmetric support.");
+        }
+        return std::make_tuple(stride[0], padding[0], dilation[0], groups);
+    };
+    table.register_single_output_kernel(OpId::Conv2dForward, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dForward");
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, s, p, d, g, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    table.register_kernel(OpId::Conv2dBackwardInput, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardInput");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[2], s, p, d, g, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
-    table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    table.register_kernel(OpId::Conv2dBackwardWeight, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardWeight");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[2], s, p, d, g, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
-    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    table.register_kernel(OpId::Conv2dBackwardBias, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardBias");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[2], s, p, d, g, false, false, true, get_cuda_stream(attrs));
         return {grad_bias};
     });
 #endif
@@ -2713,21 +2688,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // error on asymmetric (the cuDNN wrapper is scalar-only; native per-axis
     // is a deeper followup paralleling E1's cuDNN work for Conv2d).
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sH = attrs.get_int(AttrKey::StrideH,        s),  sW = attrs.get_int(AttrKey::StrideW,        s);
-        int64_t pH = attrs.get_int(AttrKey::PaddingH,       p),  pW = attrs.get_int(AttrKey::PaddingW,       p);
-        int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, op), opW= attrs.get_int(AttrKey::OutputPaddingW, op);
-        int64_t dH = attrs.get_int(AttrKey::DilationH,      d),  dW = attrs.get_int(AttrKey::DilationW,      d);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        // M12 fix: asymmetric stride/padding/output_padding/dilation now
-        // supported. The native (non-cuDNN) device kernels are per-axis.
+        // F.11: per-axis stride/padding/output_padding/dilation via attr_macros.
+        // M12: native (non-cuDNN) device kernels accept per-axis values.
+        TENZOR_READ_CONVT2D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv_transpose2d_forward_kernel(
             inputs[0], inputs[1], bias,
-            sH, sW, pH, pW, opH, opW, dH, dW,
+            stride[0], stride[1], padding[0], padding[1],
+            output_padding[0], output_padding[1], dilation[0], dilation[1],
             groups, get_cuda_stream(attrs));
     });
 
@@ -2747,51 +2715,43 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
 
     // DeformableConv2dForward: inputs = {input, offset, weight, bias, mask}
+    // F.11: per-axis via attr_macros (with scalar fallback).
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         return std::vector<Tensor>{cuda::deformable_conv2d_forward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, get_cuda_stream(attrs))};
     });
 
     // DeformableConv2dBackwardInput: inputs = {grad_output, input, offset, weight, mask}
     table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         return cuda::deformable_conv2d_backward_input_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, get_cuda_stream(attrs));
     });
 
     // DeformableConv2dBackwardWeight: inputs = {grad_output, input, offset, mask}
     table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{cuda::deformable_conv2d_backward_weight_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, weight_shape, get_cuda_stream(attrs))};
     });
 
@@ -2809,42 +2769,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Conv3d Operations (cuDNN Nd)
     // =========================================================================
 #ifdef TENZOR_HAS_CUDNN
-    // Wave B4: CUDA Conv3d now honours per-axis StrideD/H/W, PaddingD/H/W,
+    // Wave B4 + F.11: CUDA Conv3d honours per-axis StrideD/H/W, PaddingD/H/W,
     // DilationD/H/W natively via cudnnSetConvolutionNdDescriptor (which has
-    // always accepted per-axis int[3] arrays). The previous
-    // TENZOR_CUDA_READ_3D_ISO_OR_THROW macro that rejected asymmetric values
-    // is gone; the macro below just reads per-axis attrs (with scalar
-    // fallback) into std::array<int64_t, 3> that cuDNN wrappers consume.
-#   define TENZOR_CUDA_READ_3D_PER_AXIS() \
-        int64_t s_iso = attrs.get_int(AttrKey::Stride, 1); \
-        int64_t p_iso = attrs.get_int(AttrKey::Padding, 0); \
-        int64_t d_iso = attrs.get_int(AttrKey::Dilation, 1); \
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1); \
-        std::array<int64_t, 3> stride { \
-            attrs.get_int(AttrKey::StrideD, s_iso), \
-            attrs.get_int(AttrKey::StrideH, s_iso), \
-            attrs.get_int(AttrKey::StrideW, s_iso) }; \
-        std::array<int64_t, 3> padding { \
-            attrs.get_int(AttrKey::PaddingD, p_iso), \
-            attrs.get_int(AttrKey::PaddingH, p_iso), \
-            attrs.get_int(AttrKey::PaddingW, p_iso) }; \
-        std::array<int64_t, 3> dilation { \
-            attrs.get_int(AttrKey::DilationD, d_iso), \
-            attrs.get_int(AttrKey::DilationH, d_iso), \
-            attrs.get_int(AttrKey::DilationW, d_iso) };
+    // always accepted per-axis int[3] arrays). Reads per-axis attrs (with
+    // scalar fallback) via the shared attr_macros helpers.
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv3d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
@@ -2863,43 +2804,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // ConvTranspose3d Operations (cuDNN Nd)
     // =========================================================================
-    // Wave B4: ConvT3d now honours per-axis StrideD/H/W, PaddingD/H/W,
-    // OutputPaddingD/H/W, DilationD/H/W. Macro reads per-axis attrs (with
-    // scalar fallback) into std::array<int64_t, 3>.
-#   define TENZOR_CUDA_READ_T3D_PER_AXIS() \
-        int64_t s_iso  = attrs.get_int(AttrKey::Stride, 1); \
-        int64_t p_iso  = attrs.get_int(AttrKey::Padding, 0); \
-        int64_t op_iso = attrs.get_int(AttrKey::OutputPadding, 0); \
-        int64_t d_iso  = attrs.get_int(AttrKey::Dilation, 1); \
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1); \
-        std::array<int64_t, 3> stride { \
-            attrs.get_int(AttrKey::StrideD, s_iso), \
-            attrs.get_int(AttrKey::StrideH, s_iso), \
-            attrs.get_int(AttrKey::StrideW, s_iso) }; \
-        std::array<int64_t, 3> padding { \
-            attrs.get_int(AttrKey::PaddingD, p_iso), \
-            attrs.get_int(AttrKey::PaddingH, p_iso), \
-            attrs.get_int(AttrKey::PaddingW, p_iso) }; \
-        std::array<int64_t, 3> output_padding { \
-            attrs.get_int(AttrKey::OutputPaddingD, op_iso), \
-            attrs.get_int(AttrKey::OutputPaddingH, op_iso), \
-            attrs.get_int(AttrKey::OutputPaddingW, op_iso) }; \
-        std::array<int64_t, 3> dilation { \
-            attrs.get_int(AttrKey::DilationD, d_iso), \
-            attrs.get_int(AttrKey::DilationH, d_iso), \
-            attrs.get_int(AttrKey::DilationW, d_iso) };
+    // Wave B4 + F.11: ConvT3d honours per-axis StrideD/H/W, PaddingD/H/W,
+    // OutputPaddingD/H/W, DilationD/H/W via cuDNN Nd descriptors. Reads
+    // per-axis attrs (with scalar fallback) via shared attr_macros helpers.
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        TENZOR_CUDA_READ_T3D_PER_AXIS()
+        TENZOR_READ_CONVT3D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv_transpose3d_forward(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        TENZOR_CUDA_READ_T3D_PER_AXIS()
+        TENZOR_READ_CONVT3D_ATTRS();
         return cuda::cudnn_conv_transpose3d_backward_input(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        TENZOR_CUDA_READ_T3D_PER_AXIS()
+        TENZOR_READ_CONVT3D_ATTRS();
         return cuda::cudnn_conv_transpose3d_backward_weight(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
@@ -2918,23 +2837,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Conv3d / ConvTranspose3d fallback registrations (no cuDNN).
     // Direct-convolution kernels in src/backends/cuda/kernels/conv3d.cu.
     // -------------------------------------------------------------------------
-    // Wave B4: non-cuDNN Conv3d fallback. The per-axis macro is still in
-    // preprocessor scope from the #ifdef branch above. The kernel functions
-    // accept std::array signatures (with internal iso-assert until the device
-    // kernels gain per-axis index math as a separate refactor).
+    // Wave B4 + F.11: non-cuDNN Conv3d fallback. The kernel functions accept
+    // std::array signatures (with internal iso-assert until the device kernels
+    // gain per-axis index math as a separate refactor). Reads per-axis attrs
+    // via the shared attr_macros helpers.
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        TENZOR_CUDA_READ_3D_PER_AXIS()
+        TENZOR_READ_CONV3D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
@@ -2948,28 +2867,26 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_bias};
     });
 
-    // Wave B4: non-cuDNN ConvT3d fallback — these device kernels still take
-    // scalar stride/padding/output_padding/dilation, so we assert iso here.
+    // Wave B4 + F.11: non-cuDNN ConvT3d fallback — these device kernels still
+    // take scalar stride/padding/output_padding/dilation, so we assert iso here.
     // (Native per-axis ConvT3d device kernels are a separate refactor; the
     // cuDNN path already supports asymmetric.)
     auto t3d_iso_or_throw = [](const OpAttributes& attrs, const char* op_name)
         -> std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+        const auto stride         = ::tenzor::backend::attrs::stride_3d(attrs);
+        const auto padding        = ::tenzor::backend::attrs::padding_3d(attrs);
+        const auto output_padding = ::tenzor::backend::attrs::output_padding_3d(attrs);
+        const auto dilation       = ::tenzor::backend::attrs::dilation_3d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        int64_t sD = attrs.get_int(AttrKey::StrideD, s), sH = attrs.get_int(AttrKey::StrideH, s), sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t opD = attrs.get_int(AttrKey::OutputPaddingD, op), opH = attrs.get_int(AttrKey::OutputPaddingH, op), opW = attrs.get_int(AttrKey::OutputPaddingW, op);
-        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
-        if (sD != sH || sH != sW || pD != pH || pH != pW ||
-            opD != opH || opH != opW || dD != dH || dH != dW) {
+        if (stride[0] != stride[1] || stride[1] != stride[2] ||
+            padding[0] != padding[1] || padding[1] != padding[2] ||
+            output_padding[0] != output_padding[1] || output_padding[1] != output_padding[2] ||
+            dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
             throw std::runtime_error(
                 std::string("CUDA ") + op_name + ": asymmetric stride/padding/"
                 "output_padding/dilation requires cuDNN; rebuild with TENZOR_HAS_CUDNN.");
         }
-        return {sD, pD, opD, dD, groups};
+        return {stride[0], padding[0], output_padding[0], dilation[0], groups};
     };
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [t3d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto [stride, padding, output_padding, dilation, groups] = t3d_iso_or_throw(attrs, "ConvTranspose3d (non-cuDNN fallback)");
@@ -3114,13 +3031,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // =========================================================================
     // 1D Pooling Operations
+    // F.11: per-axis (W-only) read via attr_macros helpers. AvgPool/MaxPool 1d
+    // only have one spatial axis, but the helpers preserve the scalar-fallback
+    // semantics and keep the registry uniform with 2d/3d sites.
     // =========================================================================
     table.register_kernel(OpId::MaxPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        auto [output, indices] = cuda::maxpool1d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_1d(attrs);
+        auto [output, indices] = cuda::maxpool1d_forward_kernel(inputs[0],
+            kernel_size[0], stride[0], padding[0], dilation[0], get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -3130,18 +3052,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return cuda::avgpool1d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        return cuda::avgpool1d_forward_kernel(inputs[0],
+            kernel_size[0], stride[0], padding[0], get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return cuda::avgpool1d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, get_cuda_stream(attrs));
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        return cuda::avgpool1d_backward_kernel(inputs[0], input_shape,
+            kernel_size[0], stride[0], padding[0], get_cuda_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -4205,9 +4131,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t out_channels = weight_shape[0];
         int64_t kernel_size = weight_shape[2];
 
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // F.11: per-axis read with scalar fallback; the QuantizedConv2d cuda
+        // kernel is scalar-only — fail loudly rather than silently collapse.
+        const auto stride_arr   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding_arr  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation_arr = ::tenzor::backend::attrs::dilation_2d(attrs);
+        if (stride_arr[0] != stride_arr[1] || padding_arr[0] != padding_arr[1] ||
+            dilation_arr[0] != dilation_arr[1]) {
+            throw std::invalid_argument(
+                "QuantizedConv2d (CUDA): backend kernel only supports symmetric "
+                "stride/padding/dilation; got stride=" + std::to_string(stride_arr[0]) + "x" + std::to_string(stride_arr[1]) +
+                ", padding=" + std::to_string(padding_arr[0]) + "x" + std::to_string(padding_arr[1]) +
+                ", dilation=" + std::to_string(dilation_arr[0]) + "x" + std::to_string(dilation_arr[1]));
+        }
+        int64_t stride = stride_arr[0];
+        int64_t padding = padding_arr[0];
+        int64_t dilation = dilation_arr[0];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
