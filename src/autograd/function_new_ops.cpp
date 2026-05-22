@@ -4072,4 +4072,219 @@ auto LcmBackward::backward(std::vector<Tensor> /*grad_outputs*/)
         "NonDifferentiable.");
 }
 
+// ============================================================================
+// Audit E.7 batch 10 — RNN kernel-level forwards + small math/transform ops
+// ============================================================================
+
+// --- LSTMCellForward / GRUCellForward / LSTMForward / GRUForward /
+//     LSTMMultiLayerForward / GRUMultiLayerForward / BiLSTMForward
+//
+// Kernel-level fused RNN forwards. The autograd-aware path is the
+// nn::LSTMCell / nn::GRUCell / nn::LSTM / nn::GRU Modules which compose the
+// computation graph from Variable-level Linear / sigmoid / tanh / slice ops
+// (see src/nn/layers/lstm.cpp, gru.cpp, rnn.cpp). A Function-layer adjoint
+// that re-dispatches the matching kernel-level backward and threads grads
+// back to the right input Variables is not wired, so direct
+// OpId::*CellForward / OpId::*Forward dispatch routed through autograd
+// raises NonDifferentiable.
+
+auto LSTMCellForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "LSTMCellForwardBackward::forward should not be called directly");
+}
+auto LSTMCellForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "lstm_cell_forward: fused kernel-level single-step LSTM cell. The "
+        "autograd-aware path in this project is nn::LSTMCell, which builds "
+        "the per-step computation graph from Variable-level Linear / "
+        "sigmoid / tanh / slice / add / mul ops (see "
+        "src/nn/layers/lstm.cpp). The kernel-level OpId::LSTMCellBackward "
+        "exists in every backend's registry and is the right vehicle for "
+        "gradients here; routing it through a Function-layer adjoint that "
+        "threads grad_input / grad_hx / grad_cx / grad_W_ih / grad_W_hh / "
+        "grad_b_ih / grad_b_hh back to the right input Variables is not "
+        "wired. NonDifferentiable until a Function-layer wrapper is added; "
+        "use nn::LSTMCell for autograd-aware LSTM cells.");
+}
+
+auto GRUCellForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "GRUCellForwardBackward::forward should not be called directly");
+}
+auto GRUCellForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "gru_cell_forward: fused kernel-level single-step GRU cell. The "
+        "autograd-aware path is nn::GRUCell (src/nn/layers/gru.cpp) which "
+        "composes the cell's three gates (r, z, n) from Variable-level "
+        "Linear / sigmoid / tanh ops. The kernel-level "
+        "OpId::GRUCellBackward exists and is the right vehicle for "
+        "gradients here; routing it through a Function-layer adjoint is "
+        "not wired. NonDifferentiable until that wrapper is added; use "
+        "nn::GRUCell for autograd-aware GRU cells.");
+}
+
+auto LSTMForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "LSTMForwardBackward::forward should not be called directly");
+}
+auto LSTMForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "lstm_forward: fused kernel-level single-layer multi-step LSTM "
+        "forward. The autograd-aware path is nn::LSTM, which unrolls per-"
+        "timestep nn::LSTMCell forwards so each step's Variable graph "
+        "composes into the sequence graph. Per-step intermediates (gate "
+        "activations, cell state) are not exposed by the fused kernel, so "
+        "a closed-form Function-layer adjoint cannot reconstruct the "
+        "backward without re-running the unrolled forward. "
+        "NonDifferentiable; use nn::LSTM for autograd-aware sequence LSTM.");
+}
+
+auto GRUForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "GRUForwardBackward::forward should not be called directly");
+}
+auto GRUForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "gru_forward: fused kernel-level single-layer multi-step GRU "
+        "forward. Same rationale as lstm_forward — the per-step gate "
+        "activations needed for the closed-form gate-derivative chain "
+        "are not exposed by the fused kernel. NonDifferentiable; use "
+        "nn::GRU for autograd-aware sequence GRU.");
+}
+
+auto LSTMMultiLayerForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "LSTMMultiLayerForwardBackward::forward should not be called "
+        "directly");
+}
+auto LSTMMultiLayerForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "lstm_multi_layer_forward: stacked-layer fused LSTM forward. The "
+        "autograd-aware path is nn::LSTM(num_layers > 1), which loops "
+        "nn::LSTMCell forwards per layer per timestep so the graph carries "
+        "gradients through every layer's Linear weights and per-step "
+        "hidden/cell states. The fused kernel does not expose those "
+        "intermediates, so a Function-layer adjoint cannot reconstruct "
+        "the backward. NonDifferentiable; use nn::LSTM with num_layers > 1.");
+}
+
+auto GRUMultiLayerForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "GRUMultiLayerForwardBackward::forward should not be called "
+        "directly");
+}
+auto GRUMultiLayerForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "gru_multi_layer_forward: stacked-layer fused GRU forward. Same "
+        "rationale as lstm_multi_layer_forward — the per-step gate "
+        "activations needed for the closed-form gate-derivative chain "
+        "are not exposed by the fused kernel. NonDifferentiable; use "
+        "nn::GRU with num_layers > 1.");
+}
+
+auto BiLSTMForwardBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "BiLSTMForwardBackward::forward should not be called directly");
+}
+auto BiLSTMForwardBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bilstm_forward: single-layer bidirectional LSTM forward. The "
+        "autograd-aware path is nn::LSTM(bidirectional=true), which wires "
+        "forward and reverse nn::LSTMCell sweeps and concatenates the "
+        "per-step hidden outputs along the feature dim. The fused kernel "
+        "does not expose the per-direction per-step intermediates, so a "
+        "Function-layer adjoint cannot reconstruct the backward. "
+        "NonDifferentiable; use nn::LSTM(bidirectional=true).");
+}
+
+// --- nextafter — discrete float step (Jacobian zero a.e., undefined at
+//     the representable-boundary jumps). NonDifferentiable.
+auto NextafterBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "NextafterBackward::forward should not be called directly");
+}
+auto NextafterBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "nextafter: returns the next representable float after `from` in "
+        "the direction of `to`. The output is piecewise-constant in `from` "
+        "(jumping by one ULP at every representable boundary, where the "
+        "derivative is undefined) and discrete in `to` (sign-only "
+        "dependence). The Jacobian is identically zero where defined, so "
+        "we fail loudly instead of returning the deceptive zero gradient "
+        "that would silently compose in user models.");
+}
+
+// --- ldexp(x, n) = x * 2^n. Differentiable in x with grad_x = 2^n * grad_y
+//     = ldexp(grad_y, n). The exponent `n` is integer-typed (an exact
+//     bit-shift of the binary exponent field), so route a zero gradient
+//     to it — same convention the project uses for integer-indexed inputs
+//     elsewhere.
+auto LdexpBackward::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    if (inputs.size() != 2) {
+        throw std::runtime_error("LdexpBackward::forward expects 2 inputs");
+    }
+    save_for_backward({inputs[1].tensor()});  // save n
+    input_shape_x_ = std::vector<int64_t>(inputs[0].shape().begin(),
+                                          inputs[0].shape().end());
+    input_shape_n_ = std::vector<int64_t>(inputs[1].shape().begin(),
+                                          inputs[1].shape().end());
+    auto result = tenzor::ldexp(inputs[0].tensor(), inputs[1].tensor());
+    return {Variable(result, true)};
+}
+auto LdexpBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& n = saved_tensors_[0];
+    const auto& grad = grad_outputs[0];
+
+    // grad_x = grad * 2^n = ldexp(grad, n). ldexp() handles broadcasting
+    // between grad and n the same way the forward did.
+    auto grad_x_unreduced = tenzor::ldexp(grad, n);
+    auto grad_x = reduce_grad_for_broadcasting(grad_x_unreduced,
+                                                input_shape_x_);
+
+    // n is integer-typed and non-differentiable; return zeros matching its
+    // shape and dtype so the autograd engine can still accumulate without
+    // dtype mismatches in downstream Variable arithmetic.
+    auto grad_n = zeros(input_shape_n_, n.dtype(), n.device());
+    return {grad_x, grad_n};
+}
+
+// --- idct — mirror of DCTBackward; linear in principle but the adjoint
+//     depends on (type, norm, n) which the kernels do not export.
+auto IDCTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "IDCTBackward::forward should not be called directly");
+}
+auto IDCTBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "idct: inverse Discrete Cosine Transform. Linear and therefore "
+        "differentiable in principle (the adjoint of IDCT-{II,III,IV} is "
+        "its matching DCT under the same `norm`), but the kernels do not "
+        "export a parameter-matched DCT helper to compose the adjoint "
+        "from. Mirrors DCTBackward's rationale: getting the (type, norm, "
+        "n) matrix wrong silently distorts gradients. NonDifferentiable "
+        "until the type/norm/length adjoint matrix is implemented. Use "
+        "norm=\"ortho\" plus an explicit DCT call if you need gradients "
+        "through IDCT.");
+}
+
 } // namespace tenzor

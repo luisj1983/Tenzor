@@ -5006,4 +5006,259 @@ public:
     auto op_id() const -> OpId override { return OpId::Lcm; }
 };
 
+// ============================================================================
+// Audit E.7 batch 10 — RNN kernel-level forwards + small math/transform ops
+//
+// RNN cell + multi-step forwards (LSTMCellForward, GRUCellForward, LSTMForward,
+// GRUForward, BiLSTMForward, LSTMMultiLayerForward, GRUMultiLayerForward) are
+// kernel-level OpIds. The autograd-aware path in this project is the
+// nn::LSTMCell / nn::GRUCell / nn::LSTM / nn::GRU Modules, which build the
+// computation graph by composing Variable-level Linear/sigmoid/tanh/slice
+// (see src/nn/layers/lstm.cpp, gru.cpp, rnn.cpp). The kernel forwards exist
+// for fused-inference paths and have matching kernel-level *Backward kernels
+// (OpId::LSTMCellBackward, OpId::GRUCellBackward); a Function-layer adjoint
+// that re-dispatches those kernels and threads gradients back to the right
+// input Variables is not currently wired, so we install typed
+// NonDifferentiable stubs to fail loudly with a pointer to the Module-level
+// autograd path.
+//
+// NonDifferentiable: NextafterBackward (discrete float step), IDCTBackward
+// (mirror of DCTBackward — linear in principle but the inverse transform's
+// adjoint depends on the (type, norm, n) tuple which is not exposed).
+// Differentiable: LdexpBackward — d/dx ldexp(x, n) = 2^n (the integer
+// exponent n is non-differentiable; we only route the gradient back to x).
+// ============================================================================
+
+/**
+ * @brief LSTMCellForward kernel op — fused single-step LSTM cell forward
+ *        (returns [h_new, c_new]).
+ *
+ *        Autograd-aware path: nn::LSTMCell (see src/nn/layers/lstm.cpp)
+ *        which decomposes the cell into Variable-level Linear / sigmoid /
+ *        tanh / slice / add / mul. The composed graph carries gradients to
+ *        input, hx, cx and the cell's weight Modules with no Function-layer
+ *        bookkeeping required here.
+ *
+ *        A unified Function-layer adjoint that re-dispatches the kernel
+ *        OpId::LSTMCellBackward (which exists in every backend's registry)
+ *        and threads grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh,
+ *        grad_b_ih, grad_b_hh back to the right input Variables is not
+ *        currently wired, so direct OpId::LSTMCellForward dispatch routed
+ *        through autograd raises NonDifferentiable. Use nn::LSTMCell.
+ */
+class LSTMCellForwardBackward : public Function {
+public:
+    LSTMCellForwardBackward(int64_t input_size, int64_t hidden_size)
+        : input_size_(input_size), hidden_size_(hidden_size) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LSTMCellForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::LSTMCellForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+};
+
+/**
+ * @brief GRUCellForward kernel op — fused single-step GRU cell forward.
+ *        Three gates (r, z, n). Same rationale as LSTMCellForwardBackward:
+ *        the autograd-aware path is nn::GRUCell (src/nn/layers/gru.cpp)
+ *        which composes the cell from Variable ops. Direct kernel dispatch
+ *        through autograd raises NonDifferentiable.
+ */
+class GRUCellForwardBackward : public Function {
+public:
+    GRUCellForwardBackward(int64_t input_size, int64_t hidden_size)
+        : input_size_(input_size), hidden_size_(hidden_size) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GRUCellForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::GRUCellForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+};
+
+/**
+ * @brief LSTMForward kernel op — fused single-layer multi-step LSTM forward.
+ *        The autograd-aware path is nn::LSTM (src/nn/layers/lstm.cpp) which
+ *        unrolls per-timestep LSTMCell::forward calls so each step's
+ *        Variable graph composes into the sequence graph. Direct kernel
+ *        dispatch through autograd raises NonDifferentiable.
+ */
+class LSTMForwardBackward : public Function {
+public:
+    LSTMForwardBackward(int64_t input_size, int64_t hidden_size,
+                        bool batch_first)
+        : input_size_(input_size), hidden_size_(hidden_size),
+          batch_first_(batch_first) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LSTMForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::LSTMForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    bool batch_first_;
+};
+
+/**
+ * @brief GRUForward kernel op — fused single-layer multi-step GRU forward.
+ *        Same rationale as LSTMForwardBackward: nn::GRU is the autograd-
+ *        aware path. Direct kernel dispatch through autograd raises
+ *        NonDifferentiable.
+ */
+class GRUForwardBackward : public Function {
+public:
+    GRUForwardBackward(int64_t input_size, int64_t hidden_size,
+                       bool batch_first)
+        : input_size_(input_size), hidden_size_(hidden_size),
+          batch_first_(batch_first) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GRUForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::GRUForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    bool batch_first_;
+};
+
+/**
+ * @brief LSTMMultiLayerForward kernel op — stacked-layer fused LSTM forward.
+ *        The autograd-aware path is nn::LSTM (with num_layers > 1) which
+ *        loops nn::LSTMCell forwards per layer per timestep, so the graph
+ *        carries gradients through every layer's Linear weights and the
+ *        per-step hidden/cell states. Direct kernel dispatch through
+ *        autograd raises NonDifferentiable.
+ */
+class LSTMMultiLayerForwardBackward : public Function {
+public:
+    LSTMMultiLayerForwardBackward(int64_t input_size, int64_t hidden_size,
+                                   int64_t num_layers, bool batch_first)
+        : input_size_(input_size), hidden_size_(hidden_size),
+          num_layers_(num_layers), batch_first_(batch_first) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LSTMMultiLayerForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::LSTMMultiLayerForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    int64_t num_layers_;
+    bool batch_first_;
+};
+
+/**
+ * @brief GRUMultiLayerForward kernel op — stacked-layer fused GRU forward.
+ *        Same rationale as LSTMMultiLayerForwardBackward. Use nn::GRU
+ *        with num_layers > 1 for autograd-aware multi-layer GRU.
+ */
+class GRUMultiLayerForwardBackward : public Function {
+public:
+    GRUMultiLayerForwardBackward(int64_t input_size, int64_t hidden_size,
+                                  int64_t num_layers, bool batch_first)
+        : input_size_(input_size), hidden_size_(hidden_size),
+          num_layers_(num_layers), batch_first_(batch_first) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GRUMultiLayerForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::GRUMultiLayerForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    int64_t num_layers_;
+    bool batch_first_;
+};
+
+/**
+ * @brief BiLSTMForward kernel op — single-layer bidirectional LSTM forward.
+ *        The autograd-aware path is nn::LSTM(bidirectional=true) which
+ *        wires forward and reverse LSTMCell sweeps and concatenates the
+ *        per-step hidden outputs. Direct kernel dispatch through autograd
+ *        raises NonDifferentiable.
+ */
+class BiLSTMForwardBackward : public Function {
+public:
+    BiLSTMForwardBackward(int64_t input_size, int64_t hidden_size,
+                          bool batch_first)
+        : input_size_(input_size), hidden_size_(hidden_size),
+          batch_first_(batch_first) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BiLSTMForwardBackward"; }
+    auto op_id() const -> OpId override { return OpId::BiLSTMForward; }
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    bool batch_first_;
+};
+
+/**
+ * @brief nextafter(from, to) — returns the next representable floating-
+ *        point value after `from` in the direction of `to`. The output
+ *        jumps to the next ULP, so it is piecewise-constant in `from`
+ *        (Jacobian zero a.e. with a measure-zero jump at every
+ *        representable boundary) and discrete in `to` (sign-only
+ *        dependence). Marked NonDifferentiable to fail loudly instead
+ *        of returning the deceptive zero gradient that "Mul by 1.0"
+ *        would produce.
+ */
+class NextafterBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NextafterBackward"; }
+    auto op_id() const -> OpId override { return OpId::Nextafter; }
+};
+
+/**
+ * @brief ldexp(x, n) = x * 2^n. Differentiable in `x`: d/dx ldexp(x, n)
+ *        = 2^n, so grad_x = ldexp(grad_out, n). The exponent `n` is
+ *        integer-typed (it is interpreted as an exact bit-shift of the
+ *        binary exponent field), so we route a zero gradient to it
+ *        rather than throwing — same convention the project uses for
+ *        integer-indexed Variable inputs elsewhere (Gather index,
+ *        IndexSelect index, etc.).
+ *
+ *        Saves: the exponent tensor `n` (needed to recompute 2^n at
+ *        backward time).
+ */
+class LdexpBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LdexpBackward"; }
+    auto op_id() const -> OpId override { return OpId::Ldexp; }
+private:
+    std::vector<int64_t> input_shape_x_;
+    std::vector<int64_t> input_shape_n_;
+};
+
+/**
+ * @brief idct(input, type, n, dim, norm) — Inverse Discrete Cosine
+ *        Transform. Linear and therefore differentiable in principle
+ *        (the adjoint of IDCT-{II,III,IV} is its matching DCT under the
+ *        same `norm`), but the exact adjoint depends on the (type, norm,
+ *        n) tuple in the same way DCTBackward does. The kernels do not
+ *        export a parameter-matched DCT helper to compose the adjoint
+ *        from, so we mirror DCTBackward and mark NonDifferentiable until
+ *        the type/norm/length matrix is implemented. Use norm="ortho"
+ *        plus an explicit DCT call if you need gradients through IDCT.
+ */
+class IDCTBackward : public Function {
+public:
+    IDCTBackward(int type, int64_t n, int64_t dim, std::string norm)
+        : type_(type), n_(n), dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IDCTBackward"; }
+    auto op_id() const -> OpId override { return OpId::IDCT; }
+private:
+    int type_;
+    int64_t n_;
+    int64_t dim_;
+    std::string norm_;
+};
+
 } // namespace tenzor
