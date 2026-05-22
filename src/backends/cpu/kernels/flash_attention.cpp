@@ -309,11 +309,20 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t seq_len = shape[2];
     int64_t head_dim = shape[3];
 
-    // Multi-dtype support: Float32 computed directly, Float64/Float16/BFloat16
-    // upcast to Float32, compute, then downcast output. LSE stays Float32 in
-    // every case per the contract (the dynamic range of max+log(sum) exceeds
-    // FP16/BF16 even when the input dtype is small).
-    if (Q.dtype() == DType::Float64 || Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+    // Multi-dtype dispatch (audit A.11):
+    //   Float32 → native float typed kernel.
+    //   Float64 → native double typed kernel (no Float32 round-trip — keeps
+    //             full FP64 mantissa precision through GEMM, softmax, dropout
+    //             so autograd gradcheck against the composed-ops backward
+    //             matches to FP64 tolerance).
+    //   Float16 / BFloat16 → widen to Float32, compute, narrow output. These
+    //             dtypes have less mantissa than Float32, so widen-narrow is
+    //             mathematically lossless and matches PyTorch SDPA.
+    //
+    // LSE stays Float32 in every case per the contract (the dynamic range of
+    // max + log(sum) exceeds FP16/BF16, and Float32 is sufficient for FP64
+    // backward — which in any case recomputes softmax rather than reading LSE).
+    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
         auto orig_dtype = Q.dtype();
         auto outs_f32 = flash_attention_forward(
             Q.to(DType::Float32), K.to(DType::Float32), V.to(DType::Float32),
@@ -322,147 +331,176 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
         outs_f32[0] = outs_f32[0].to(orig_dtype);
         // L stays Float32. seed/offset are int64 — leave them as-is.
         return outs_f32;
-    } else if (Q.dtype() != DType::Float32) {
+    } else if (Q.dtype() != DType::Float32 && Q.dtype() != DType::Float64) {
         throw std::runtime_error("Flash attention: unsupported dtype " +
                                  std::string(dtype_name(Q.dtype())));
     }
+
+    const bool is_f64 = (Q.dtype() == DType::Float64);
 
     // Block sizes tuned for L2 cache (~256KB)
     constexpr int64_t BLOCK_Q = 64;
     constexpr int64_t BLOCK_KV = 64;
 
-    // Output tensor (Float32 path only reaches here) and LSE buffer
-    auto O = zeros({batch, num_heads, seq_len, head_dim}, DType::Float32, Q.device());
+    // Output tensor (matches input dtype) and LSE buffer (always Float32 per
+    // attention contract).
+    auto O = zeros({batch, num_heads, seq_len, head_dim}, Q.dtype(), Q.device());
     auto L = zeros({batch, num_heads, seq_len}, DType::Float32, Q.device());
 
-    const float* q_data = Q.data<float>();
-    const float* k_data = K.data<float>();
-    const float* v_data = V.data<float>();
-    float* o_data = O.data<float>();
     float* lse_data = L.data<float>();
 
     // Dropout configuration
     const bool apply_dropout = is_training && dropout_p > 0.0f;
-    const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
 
     // Seed for Philox RNG. If the caller passed seed_in == 0 (the default),
     // derive a per-call seed from the data pointer for backward reproducibility
     // within a single forward; the saved seed below is then echoed back so the
-    // backward can replay the exact same mask.
+    // backward can replay the exact same mask. Use the output buffer's pointer
+    // (typed below per dtype) — read the raw storage address generically.
+    const void* q_addr = (Q.dtype() == DType::Float64)
+        ? static_cast<const void*>(Q.data<double>())
+        : static_cast<const void*>(Q.data<float>());
     const uint64_t actual_seed = seed_in != 0
         ? seed_in
-        : (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(q_data)) * 2654435761ULL);
+        : (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(q_addr)) * 2654435761ULL);
     const uint32_t rng_seed = static_cast<uint32_t>(actual_seed);
 
-    // Parallelize over batch and heads
-    #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t h = 0; h < num_heads; ++h) {
-            int64_t bh_offset = (b * num_heads + h) * seq_len * head_dim;
-            const float* q_bh = q_data + bh_offset;
-            const float* k_bh = k_data + bh_offset;
-            const float* v_bh = v_data + bh_offset;
-            float* o_bh = o_data + bh_offset;
+    // Templated hot-loop body. T = float (Float32) or double (Float64). All
+    // arithmetic — running max, running sum, exp, log, Philox compare —
+    // happens in T; the only Float32 cross-over is the LSE write (cast on
+    // store) per the contract.
+    auto run_typed = [&](auto tag) {
+        using T = decltype(tag);
+        const T* q_data = Q.data<T>();
+        const T* k_data = K.data<T>();
+        const T* v_data = V.data<T>();
+        T* o_data = O.data<T>();
+        const T dropout_p_T = static_cast<T>(dropout_p);
+        const T scale_T = static_cast<T>(scale);
+        const T dropout_scale_T = apply_dropout ? T(1) / (T(1) - dropout_p_T) : T(1);
 
-            // Per-row running max and sum for online softmax
-            std::vector<float> row_max(seq_len, -std::numeric_limits<float>::infinity());
-            std::vector<float> row_sum(seq_len, 0.0f);
+        // Parallelize over batch and heads
+        #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t h = 0; h < num_heads; ++h) {
+                int64_t bh_offset = (b * num_heads + h) * seq_len * head_dim;
+                const T* q_bh = q_data + bh_offset;
+                const T* k_bh = k_data + bh_offset;
+                const T* v_bh = v_data + bh_offset;
+                T* o_bh = o_data + bh_offset;
 
-            // Process Q blocks
-            for (int64_t q_start = 0; q_start < seq_len; q_start += BLOCK_Q) {
-                int64_t q_end = std::min(q_start + BLOCK_Q, seq_len);
+                // Per-row running max and sum for online softmax
+                std::vector<T> row_max(seq_len, -std::numeric_limits<T>::infinity());
+                std::vector<T> row_sum(seq_len, T(0));
 
-                // Process K/V blocks
-                for (int64_t kv_start = 0; kv_start < seq_len; kv_start += BLOCK_KV) {
-                    int64_t kv_end = std::min(kv_start + BLOCK_KV, seq_len);
+                // Process Q blocks
+                for (int64_t q_start = 0; q_start < seq_len; q_start += BLOCK_Q) {
+                    int64_t q_end = std::min(q_start + BLOCK_Q, seq_len);
 
-                    // Compute S_block = Q_block @ K_block^T * scale
-                    // S_block: [block_q, block_kv]
-                    for (int64_t qi = q_start; qi < q_end; ++qi) {
-                        // Causal: skip this qi's contribution from this KV block
-                        // if all K positions in this block are after qi
-                        if (causal && kv_start > qi) continue;
+                    // Process K/V blocks
+                    for (int64_t kv_start = 0; kv_start < seq_len; kv_start += BLOCK_KV) {
+                        int64_t kv_end = std::min(kv_start + BLOCK_KV, seq_len);
 
-                        const float* q_row = q_bh + qi * head_dim;
+                        // Compute S_block = Q_block @ K_block^T * scale
+                        // S_block: [block_q, block_kv]
+                        for (int64_t qi = q_start; qi < q_end; ++qi) {
+                            // Causal: skip this qi's contribution from this KV block
+                            // if all K positions in this block are after qi
+                            if (causal && kv_start > qi) continue;
 
-                        for (int64_t ki = kv_start; ki < kv_end; ++ki) {
-                            // Causal mask
-                            if (causal && ki > qi) {
-                                continue;
-                            }
+                            const T* q_row = q_bh + qi * head_dim;
 
-                            const float* k_row = k_bh + ki * head_dim;
-
-                            // Dot product (SIMD-vectorized)
-                            float dot = dot_product(q_row, k_row, head_dim) * scale;
-
-                            // Online softmax update
-                            float prev_max = row_max[qi];
-                            float new_max = std::max(prev_max, dot);
-
-                            // Rescale previous accumulator
-                            float rescale = std::exp(prev_max - new_max);
-                            row_sum[qi] = row_sum[qi] * rescale;
-
-                            // Rescale previous output (SIMD-vectorized)
-                            float* o_row = o_bh + qi * head_dim;
-                            scale_vector(o_row, rescale, head_dim);
-
-                            // Add current contribution
-                            float weight = std::exp(dot - new_max);
-
-                            // Apply dropout to the attention weight (post-softmax)
-                            // Philox counter: (batch, head, qi, ki) uniquely identifies
-                            // each attention weight element.
-                            if (apply_dropout) {
-                                Philox4x32 philox;
-                                philox.counter[0] = static_cast<uint32_t>(b);
-                                philox.counter[1] = static_cast<uint32_t>(h);
-                                philox.counter[2] = static_cast<uint32_t>(qi);
-                                philox.counter[3] = static_cast<uint32_t>(ki);
-                                philox.key[0] = rng_seed;
-                                philox.key[1] = rng_seed ^ 0x1BD11BDAU;  // secondary key
-
-                                uint32_t rng_out[4];
-                                philox.generate(rng_out);
-
-                                float rand_val = Philox4x32::uint32_to_uniform(rng_out[0]);
-                                if (rand_val < dropout_p) {
-                                    weight = 0.0f;  // Drop this attention connection
-                                } else {
-                                    weight *= dropout_scale;  // Inverted dropout scaling
+                            for (int64_t ki = kv_start; ki < kv_end; ++ki) {
+                                // Causal mask
+                                if (causal && ki > qi) {
+                                    continue;
                                 }
+
+                                const T* k_row = k_bh + ki * head_dim;
+
+                                // Dot product (SIMD-vectorized; overloads for float/double)
+                                T dot = dot_product(q_row, k_row, head_dim) * scale_T;
+
+                                // Online softmax update
+                                T prev_max = row_max[qi];
+                                T new_max = std::max(prev_max, dot);
+
+                                // Rescale previous accumulator
+                                T rescale = std::exp(prev_max - new_max);
+                                row_sum[qi] = row_sum[qi] * rescale;
+
+                                // Rescale previous output (SIMD-vectorized)
+                                T* o_row = o_bh + qi * head_dim;
+                                scale_vector(o_row, rescale, head_dim);
+
+                                // Add current contribution
+                                T weight = std::exp(dot - new_max);
+
+                                // Apply dropout to the attention weight (post-softmax)
+                                // Philox counter: (batch, head, qi, ki) uniquely identifies
+                                // each attention weight element. Philox emits Float32
+                                // uniform — promote to T for the compare so the dropout
+                                // mask is bit-identical across float and double paths.
+                                if (apply_dropout) {
+                                    Philox4x32 philox;
+                                    philox.counter[0] = static_cast<uint32_t>(b);
+                                    philox.counter[1] = static_cast<uint32_t>(h);
+                                    philox.counter[2] = static_cast<uint32_t>(qi);
+                                    philox.counter[3] = static_cast<uint32_t>(ki);
+                                    philox.key[0] = rng_seed;
+                                    philox.key[1] = rng_seed ^ 0x1BD11BDAU;  // secondary key
+
+                                    uint32_t rng_out[4];
+                                    philox.generate(rng_out);
+
+                                    T rand_val = static_cast<T>(
+                                        Philox4x32::uint32_to_uniform(rng_out[0]));
+                                    if (rand_val < dropout_p_T) {
+                                        weight = T(0);  // Drop this attention connection
+                                    } else {
+                                        weight *= dropout_scale_T;  // Inverted dropout scaling
+                                    }
+                                }
+
+                                row_sum[qi] += weight;
+
+                                // Weighted V accumulation (SIMD-vectorized FMA; overloads for float/double)
+                                const T* v_row = v_bh + ki * head_dim;
+                                fma_vector(o_row, weight, v_row, head_dim);
+
+                                row_max[qi] = new_max;
                             }
-
-                            row_sum[qi] += weight;
-
-                            // Weighted V accumulation (SIMD-vectorized FMA)
-                            const float* v_row = v_bh + ki * head_dim;
-                            fma_vector(o_row, weight, v_row, head_dim);
-
-                            row_max[qi] = new_max;
                         }
                     }
                 }
-            }
 
-            // Final normalization by softmax denominator (SIMD-vectorized)
-            // and LSE write per-row. LSE = row_max + log(row_sum), with
-            // -INFINITY for fully-masked rows (row_sum == 0). The contract
-            // requires LSE to be a sentinel that produces zero P in backward
-            // (`P = exp(S - L)` with `L=-INFINITY` evaluates to 0).
-            float* lse_bh = lse_data + (b * num_heads + h) * seq_len;
-            for (int64_t qi = 0; qi < seq_len; ++qi) {
-                if (row_sum[qi] > 0.0f) {
-                    float inv_sum = 1.0f / row_sum[qi];
-                    float* o_row = o_bh + qi * head_dim;
-                    scale_vector(o_row, inv_sum, head_dim);
-                    lse_bh[qi] = row_max[qi] + std::logf(row_sum[qi]);
-                } else {
-                    lse_bh[qi] = -std::numeric_limits<float>::infinity();
+                // Final normalization by softmax denominator (SIMD-vectorized)
+                // and LSE write per-row. LSE = row_max + log(row_sum), with
+                // -INFINITY for fully-masked rows (row_sum == 0). The contract
+                // requires LSE to be a sentinel that produces zero P in backward
+                // (`P = exp(S - L)` with `L=-INFINITY` evaluates to 0).
+                float* lse_bh = lse_data + (b * num_heads + h) * seq_len;
+                for (int64_t qi = 0; qi < seq_len; ++qi) {
+                    if (row_sum[qi] > T(0)) {
+                        T inv_sum = T(1) / row_sum[qi];
+                        T* o_row = o_bh + qi * head_dim;
+                        scale_vector(o_row, inv_sum, head_dim);
+                        // LSE remains Float32 per the contract. Compute in T,
+                        // then narrow on store.
+                        lse_bh[qi] = static_cast<float>(
+                            row_max[qi] + std::log(row_sum[qi]));
+                    } else {
+                        lse_bh[qi] = -std::numeric_limits<float>::infinity();
+                    }
                 }
             }
         }
+    };
+
+    if (is_f64) {
+        run_typed(double{});
+    } else {
+        run_typed(float{});
     }
 
     // Allocate seed/offset return tensors only when dropout actually fired —

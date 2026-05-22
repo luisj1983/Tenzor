@@ -31,6 +31,8 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/philox_dropout.hpp"
 #include "tenzor/utils/error.hpp"
 
 #include <stdexcept>
@@ -133,15 +135,19 @@ auto composed_attention_backward(const Tensor& dO,
     }
 
     if (causal) {
-        // Apply -INFINITY mask above diagonal. Per attention-contract.md sentinels:
-        // never -1e9 (FP16 saturates to -65504, leaks gradient mass).
+        // Apply -INFINITY mask above diagonal via where(mask>0, -inf, S) —
+        // replaces the previous additive form `S + (mask * -inf)` which
+        // computes 0 * -inf = NaN at unmasked positions on backends that
+        // don't short-circuit the multiply. See attention-contract.md
+        // (sentinel must be -INFINITY; never -1e9 / -1e30 — FP16 saturates
+        // and leaks gradient mass).
         int64_t S_q = S.shape()[1];
         int64_t S_k = S.shape()[2];
         Tensor mask = tenzor::triu(tenzor::ones({S_q, S_k}, S.dtype(), S.device()),
                                    1 + (S_k - S_q));
         Tensor neg_inf = tenzor::full({1}, -std::numeric_limits<float>::infinity(),
                                       S.dtype(), S.device());
-        S = S + (mask * neg_inf);
+        S = tenzor::where(mask, neg_inf, S);
     }
 
     // P = softmax(S, dim=-1) — inlined stable softmax (no Tensor overload exists;
@@ -153,34 +159,24 @@ auto composed_attention_backward(const Tensor& dO,
     Tensor S_exp_sum = tenzor::sum(S_exp, /*dim=*/std::optional<int64_t>{-1}, /*keepdim=*/true);
     Tensor P = S_exp / S_exp_sum;
 
-    // Replay forward Philox dropout on P (audit M4-rem follow-up):
-    // For dropout_p > 0 and rng_seed != 0, build the same dropout mask the
-    // forward applied. P is shape [batch_heads, S_q, S_k]. Mask is built
-    // on host then moved to P's device. dropout_scale = 1/(1-p) (inverted
-    // dropout).
+    // Replay forward Philox dropout on P (audit M4-rem follow-up, A.11):
+    // Build the same dropout mask the forward applied using the shared
+    // `philox_dropout_mask` op (same counter convention `(bh, qi, ki, 0)`
+    // as host_philox_uniform / forward replay). The mask is generated on
+    // CPU then ferried to P's device — replaces the previous host triple-
+    // for-loop, which was effectively a hand-rolled re-implementation of
+    // philox_dropout_mask. The mask op already returns scale=1/(1-p) for
+    // kept positions and 0 for dropped, which is exactly the
+    // multiplicative correction we need on P (inverted dropout).
     if (dropout_p > 0.0f && rng_seed != 0u) {
         auto P_shape = P.shape();
-        int64_t bh = P_shape[0];
-        int64_t S_q_ax = P_shape[1];
-        int64_t S_k_ax = P_shape[2];
-        const float scale_drop = 1.0f / (1.0f - dropout_p);
-        // Build per-element mask on CPU (Float32, multiplicative): kept = scale_drop,
-        // dropped = 0. The forward produces the same value distribution per the
-        // (batch_head, query_idx, kv_pos, 0) Philox counter convention.
-        Tensor mask_cpu = tenzor::zeros({bh, S_q_ax, S_k_ax}, DType::Float32, Device::cpu());
-        float* mptr = mask_cpu.data<float>();
-        for (int64_t bh_i = 0; bh_i < bh; ++bh_i) {
-            for (int64_t qi = 0; qi < S_q_ax; ++qi) {
-                for (int64_t ki = 0; ki < S_k_ax; ++ki) {
-                    float u = host_philox_uniform(static_cast<uint32_t>(bh_i),
-                                                   static_cast<uint32_t>(qi),
-                                                   static_cast<uint32_t>(ki),
-                                                   rng_seed);
-                    mptr[bh_i * S_q_ax * S_k_ax + qi * S_k_ax + ki]
-                        = (u < dropout_p) ? 0.0f : scale_drop;
-                }
-            }
-        }
+        std::vector<int64_t> mask_shape(P_shape.begin(), P_shape.end());
+        Tensor mask_cpu = philox_dropout_mask(
+            mask_shape,
+            static_cast<double>(dropout_p),
+            static_cast<uint64_t>(rng_seed),
+            /*offset=*/0,
+            DType::Float32);
         Tensor mask_dev = mask_cpu.to(P.device()).to(P.dtype());
         P = P * mask_dev;
     }
@@ -430,6 +426,10 @@ auto composed_attention_backward_variable(const Variable& dO,
     }
 
     if (causal) {
+        // Use where(mask>0, -inf, S) instead of S + (mask * -inf).
+        // The additive form computes 0 * -inf = NaN at unmasked positions
+        // on backends that don't short-circuit the multiply, breaking
+        // softmax. See attention-contract.md (sentinel must be -INFINITY).
         auto S_shape = S.tensor().shape();
         int64_t S_q = S_shape[1];
         int64_t S_k = S_shape[2];
@@ -438,8 +438,9 @@ auto composed_attention_backward_variable(const Variable& dO,
             1 + (S_k - S_q));
         auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
                                          S.tensor().dtype(), S.tensor().device());
-        Variable mask_v(mask_t * neg_inf_t, false);
-        S = S + mask_v;
+        Variable mask_v(mask_t, false);
+        Variable neg_inf_v(neg_inf_t, false);
+        S = tenzor::where(mask_v, neg_inf_v, S);
     }
 
     auto P = tenzor::softmax(S, -1);
@@ -593,15 +594,25 @@ auto flash_attention(const Variable& Q,
                      bool is_training) -> Variable {
     bool any_grad = Q.requires_grad() || K.requires_grad() || V.requires_grad();
 
-    // audit-2026-05-03 — Float64 path: backend FlashAttention kernels all
-    // upcast Float64→Float32 internally before computing (per
-    // attention-contract.md). For autograd gradcheck the dispatched
-    // kernel's Float32-precision output disagrees with the composed-ops
-    // backward, breaking Float64 gradcheck on every backend that doesn't
-    // have a true Float64 attention kernel. Route Float64 through pure
-    // Variable-level ops so forward and backward (and numerical-vs-
-    // analytical) all use the same double-precision math.
-    if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f) {
+    // audit-2026-05-03 / audit A.11 — Float64 path.
+    //
+    // Most backend FlashAttention kernels still upcast Float64 → Float32
+    // internally before computing (per attention-contract.md). When the
+    // dispatched kernel returns Float32-precision output but the composed
+    // backward computes in Float64, Float64 gradcheck breaks. Route Float64
+    // through pure Variable-level ops so forward and backward (and
+    // numerical-vs-analytical) all use the same double-precision math.
+    //
+    // EXCEPTION: CPU now has a native Float64 FlashAttention kernel (this
+    // file's CPU registry calls `flash_attention_forward` which dispatches on
+    // dtype to a `double` typed kernel — no Float32 round-trip). On CPU we
+    // therefore go through the fused kernel + FlashAttentionBackward like
+    // Float32, gaining the cache-tiled / SIMD speedup and exercising the
+    // real kernel under test rather than the composed-ops scaffold.
+    const bool cpu_native_f64 =
+        (Q.tensor().device().type == Device::Type::CPU);
+    if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f
+        && !cpu_native_f64) {
         auto Kt = transpose(K, -1, -2);
         auto S = matmul(Q, Kt);
         auto S_shape = S.shape();
@@ -611,11 +622,18 @@ auto flash_attention(const Variable& Q,
         if (causal) {
             int64_t S_q = S_shape[S_shape.size() - 2];
             int64_t S_k = S_shape[S_shape.size() - 1];
+            // Use where(mask > 0, -inf, S) instead of S + (mask * -inf).
+            // The additive form computes 0 * -inf = NaN at masked positions
+            // and propagates NaN through softmax for certain dtype/backend
+            // combinations. where() is the contract-compliant pattern.
             auto mask_t = ::tenzor::triu(::tenzor::ones({S_q, S_k},
                 S.tensor().dtype(), S.tensor().device()), 1 + (S_k - S_q));
-            auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
+            auto neg_inf_t = ::tenzor::full({1},
+                -std::numeric_limits<double>::infinity(),
                 S.tensor().dtype(), S.tensor().device());
-            S = S + Variable(mask_t * neg_inf_t, false);
+            Variable mask_var(mask_t, false);
+            Variable neg_inf_var(neg_inf_t, false);
+            S = where(mask_var, neg_inf_var, S);
         }
         auto P = softmax(S, -1);
         return matmul(P, V);
