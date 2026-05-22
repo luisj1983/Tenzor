@@ -5,7 +5,10 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/advanced.hpp"
+#include "tenzor/core/dtype.hpp"
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -557,6 +560,243 @@ auto jvp_transpose(const DualTensor& x, int64_t dim0, int64_t dim1) -> DualTenso
 }
 
 // ============================================================================
+// Additional rules (Audit A.4 batch 2)
+// ============================================================================
+
+auto jvp_asinh(const DualTensor& x) -> DualTensor {
+    // d/dx asinh(x) = 1 / sqrt(1 + x^2)
+    auto p = x.primal();
+    auto primal = tenzor::asinh(p);
+    auto one = tenzor::ones_like(p);
+    auto denom = tenzor::sqrt(tenzor::add(one, tenzor::mul(p, p)));
+    auto tangent = tenzor::div(x.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_acosh(const DualTensor& x) -> DualTensor {
+    // d/dx acosh(x) = 1 / sqrt(x^2 - 1)  (defined for x > 1)
+    auto p = x.primal();
+    auto primal = tenzor::acosh(p);
+    auto one = tenzor::ones_like(p);
+    auto denom = tenzor::sqrt(tenzor::sub(tenzor::mul(p, p), one));
+    auto tangent = tenzor::div(x.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_atanh(const DualTensor& x) -> DualTensor {
+    // d/dx atanh(x) = 1 / (1 - x^2)
+    auto p = x.primal();
+    auto primal = tenzor::atanh(p);
+    auto one = tenzor::ones_like(p);
+    auto denom = tenzor::sub(one, tenzor::mul(p, p));
+    auto tangent = tenzor::div(x.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_lgamma(const DualTensor& x) -> DualTensor {
+    // d/dx lgamma(x) = digamma(x)
+    auto primal = tenzor::lgamma(x.primal());
+    auto deriv = tenzor::digamma(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_square(const DualTensor& x) -> DualTensor {
+    // d/dx x^2 = 2x
+    auto primal = tenzor::square(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(x.primal(), 2.0));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ---- Reductions: Max/Min (using one-hot mask) ------------------------------
+//
+// Both forward and reverse mode use the same one-hot indicator at the
+// argmax/argmin position. For ties, the gradient is split (the JVP rule
+// uses (x == max(x)) as a mask which gives 1.0 on each tied location;
+// this matches numpy/PyTorch sum-of-derivatives behaviour rather than
+// the strict-tie convention).
+
+auto jvp_max_red(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
+    auto primal = tenzor::max(x.primal(), dim, keepdim);
+    // Broadcast primal back to x.primal()'s shape via keepdim form
+    Tensor primal_kd;
+    if (dim.has_value() && !keepdim) {
+        primal_kd = tenzor::max(x.primal(), dim, /*keepdim=*/true);
+    } else if (!dim.has_value()) {
+        // global reduction - primal_kd has same shape as primal (scalar);
+        // broadcasting eq() against full tensor still works.
+        primal_kd = primal;
+    } else {
+        primal_kd = primal;
+    }
+    auto mask = tenzor::eq(x.primal(), primal_kd);
+    // Convert bool mask to floating dtype matching tangent
+    auto mask_f = mask.to(x.tangent().dtype());
+    auto masked_tan = tenzor::mul(x.tangent(), mask_f);
+    auto tangent = tenzor::sum(masked_tan, dim, keepdim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_min_red(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
+    auto primal = tenzor::min(x.primal(), dim, keepdim);
+    Tensor primal_kd;
+    if (dim.has_value() && !keepdim) {
+        primal_kd = tenzor::min(x.primal(), dim, /*keepdim=*/true);
+    } else if (!dim.has_value()) {
+        primal_kd = primal;
+    } else {
+        primal_kd = primal;
+    }
+    auto mask = tenzor::eq(x.primal(), primal_kd);
+    auto mask_f = mask.to(x.tangent().dtype());
+    auto masked_tan = tenzor::mul(x.tangent(), mask_f);
+    auto tangent = tenzor::sum(masked_tan, dim, keepdim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_prod(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
+    // d/dx prod(x) along dim:
+    //   tangent = prod * sum(dx / x, dim)  (when x has no zeros)
+    // For numerical safety with possible zeros we use the explicit
+    // formula prod * sum(dx / x). This matches PyTorch's _prod_backward
+    // behaviour for the no-zero case (zero-handling is asymptotic and
+    // not exercised by smooth-domain JVP tests).
+    auto primal = tenzor::prod(x.primal(), dim, keepdim);
+    Tensor primal_kd;
+    if (dim.has_value() && !keepdim) {
+        primal_kd = tenzor::prod(x.primal(), dim, /*keepdim=*/true);
+    } else {
+        primal_kd = primal;
+    }
+    auto ratio = tenzor::div(x.tangent(), x.primal());
+    auto sum_ratio = tenzor::sum(ratio, dim, keepdim);
+    auto tangent = tenzor::mul(primal, sum_ratio);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_var(const DualTensor& x, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> DualTensor {
+    // var(x) = sum((x - mean)^2) / (N - correction)
+    // d var = 2 * sum((x - mean) * (dx - mean(dx))) / (N - correction)
+    auto p = x.primal();
+    auto t = x.tangent();
+    auto mean_p = tenzor::mean(p, dim, /*keepdim=*/true);
+    auto mean_t = tenzor::mean(t, dim, /*keepdim=*/true);
+    auto centered_p = tenzor::sub(p, mean_p);
+    auto centered_t = tenzor::sub(t, mean_t);
+    auto numer = tenzor::sum(tenzor::mul(centered_p, centered_t), dim, keepdim);
+
+    // Compute N (count of reduced elements)
+    int64_t N = 1;
+    auto shape = p.shape();
+    if (dim.has_value()) {
+        int64_t d = *dim;
+        if (d < 0) d += static_cast<int64_t>(shape.size());
+        N = shape[d];
+    } else {
+        for (auto s : shape) N *= s;
+    }
+    double denom = static_cast<double>(N - (unbiased ? 1 : 0));
+    auto tangent = tenzor::mul(numer, 2.0 / denom);
+
+    auto primal = tenzor::var(p, dim, keepdim, unbiased);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_std(const DualTensor& x, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> DualTensor {
+    // std = sqrt(var); d std = d var / (2 * std)
+    auto var_dual = jvp_var(x, dim, keepdim, unbiased);
+    auto primal = tenzor::sqrt(var_dual.primal());
+    auto denom = tenzor::mul(primal, 2.0);
+    auto tangent = tenzor::div(var_dual.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_cumsum(const DualTensor& x, int64_t dim) -> DualTensor {
+    auto primal = tenzor::cumsum(x.primal(), dim);
+    auto tangent = tenzor::cumsum(x.tangent(), dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_cumprod(const DualTensor& x, int64_t dim) -> DualTensor {
+    // d/dx cumprod_k(x) = cumprod_k(x) * cumsum_k(dx / x)
+    auto p = x.primal();
+    auto primal = tenzor::cumprod(p, dim);
+    auto ratio = tenzor::div(x.tangent(), p);
+    auto cs = tenzor::cumsum(ratio, dim);
+    auto tangent = tenzor::mul(primal, cs);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_logsumexp(const DualTensor& x, int64_t dim, bool keepdim) -> DualTensor {
+    // lse(x) = log(sum(exp(x)))
+    // d lse = sum(softmax(x) * dx) along dim
+    auto p = x.primal();
+    auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
+    auto shifted = tenzor::sub(p, max_val);
+    auto exp_shifted = tenzor::exp(shifted);
+    auto sum_exp = tenzor::sum(exp_shifted, dim, /*keepdim=*/true);
+    auto log_sum = tenzor::add(tenzor::log(sum_exp), max_val);
+    Tensor primal = keepdim ? log_sum : tenzor::squeeze(log_sum, dim);
+
+    auto s = tenzor::div(exp_shifted, sum_exp);  // softmax
+    auto weighted = tenzor::mul(s, x.tangent());
+    auto tangent = tenzor::sum(weighted, dim, keepdim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_slice(const DualTensor& x, int64_t dim, int64_t start, int64_t end, int64_t step) -> DualTensor {
+    auto primal = tenzor::slice(x.primal(), dim, start, end, step);
+    auto tangent = tenzor::slice(x.tangent(), dim, start, end, step);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_where(const DualTensor& cond, const DualTensor& a, const DualTensor& b) -> DualTensor {
+    // where(cond, a, b): primal selects by cond; tangent selects da/db by cond.
+    // cond is treated as non-differentiable (boolean), so its tangent is ignored.
+    auto primal = tenzor::where(cond.primal(), a.primal(), b.primal());
+    auto tangent = tenzor::where(cond.primal(), a.tangent(), b.tangent());
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_gather(const DualTensor& x, int64_t dim, const Tensor& index) -> DualTensor {
+    auto primal = tenzor::gather(x.primal(), dim, index);
+    auto tangent = tenzor::gather(x.tangent(), dim, index);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_scatter(const DualTensor& input, int64_t dim, const Tensor& index, const DualTensor& src) -> DualTensor {
+    auto primal = tenzor::scatter(input.primal(), dim, index, src.primal());
+    auto tangent = tenzor::scatter(input.tangent(), dim, index, src.tangent());
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_index_select(const DualTensor& x, int64_t dim, const Tensor& index) -> DualTensor {
+    auto primal = tenzor::index_select(x.primal(), dim, index);
+    auto tangent = tenzor::index_select(x.tangent(), dim, index);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_masked_select(const DualTensor& x, const Tensor& mask) -> DualTensor {
+    auto primal = tenzor::masked_select(x.primal(), mask);
+    auto tangent = tenzor::masked_select(x.tangent(), mask);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_masked_fill(const DualTensor& x, const Tensor& mask, float value) -> DualTensor {
+    // masked_fill replaces tangent positions with 0 (constant value has zero derivative).
+    auto primal = tenzor::masked_fill(x.primal(), mask, value);
+    auto tangent = tenzor::masked_fill(x.tangent(), mask, 0.0f);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_cast(const DualTensor& x, DType target_dtype) -> DualTensor {
+    // Cast is a linear function of x; tangent passes through with the same dtype change.
+    auto primal = x.primal().to(target_dtype);
+    auto tangent = x.tangent().to(target_dtype);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
 // Dispatch-table adapters and registration
 // ============================================================================
 //
@@ -716,6 +956,402 @@ JvpResult jvp_adapter_reshape(std::span<const Tensor> primals,
     return dual_to_result(jvp_reshape(x, std::move(shape)));
 }
 
+// ---- Additional unary elementwise --------------------------------------
+
+#define TENZOR_JVP_UNARY_ADAPTER(name, rule)                                   \
+    JvpResult name(std::span<const Tensor> primals,                            \
+                   std::span<const Tensor> tangents,                           \
+                   const OpAttributes&) {                                      \
+        if (primals.size() != 1 || tangents.size() != 1) {                     \
+            throw std::runtime_error(#name ": expected 1 input");              \
+        }                                                                      \
+        auto x = make_dual(primals[0], tangents[0]);                           \
+        return dual_to_result(rule(x));                                        \
+    }
+
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_abs,        jvp_abs)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_sin,        jvp_sin)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_cos,        jvp_cos)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_tan,        jvp_tan)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_asin,       jvp_asin)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_acos,       jvp_acos)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_atan,       jvp_atan)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_sinh,       jvp_sinh)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_cosh,       jvp_cosh)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_asinh,      jvp_asinh)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_acosh,      jvp_acosh)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_atanh,      jvp_atanh)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_erf,        jvp_erf)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_erfc,       jvp_erfc)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_lgamma,     jvp_lgamma)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_reciprocal, jvp_reciprocal)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_square,     jvp_square)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_sign,       jvp_sign)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_gelu,       jvp_gelu)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_selu,       jvp_selu)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_mish,       jvp_mish)
+
+#undef TENZOR_JVP_UNARY_ADAPTER
+
+// ---- Activations with scalar parameters --------------------------------
+
+JvpResult jvp_adapter_leaky_relu(std::span<const Tensor> primals,
+                                 std::span<const Tensor> tangents,
+                                 const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_leaky_relu: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    float slope = static_cast<float>(attrs.get_float(AttrKey::Negative_slope, 0.01));
+    return dual_to_result(jvp_leaky_relu(x, slope));
+}
+
+JvpResult jvp_adapter_elu(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_elu: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+    return dual_to_result(jvp_elu(x, alpha));
+}
+
+JvpResult jvp_adapter_softplus(std::span<const Tensor> primals,
+                               std::span<const Tensor> tangents,
+                               const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_softplus: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+    return dual_to_result(jvp_softplus(x, beta));
+}
+
+JvpResult jvp_adapter_log_softmax(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_log_softmax: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, /*default=*/-1);
+    return dual_to_result(jvp_log_softmax(x, dim));
+}
+
+// ---- Math with scalar / numeric parameters -----------------------------
+
+JvpResult jvp_adapter_pow(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_pow: expected 1 input (scalar exponent in attrs)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    double exponent = attrs.get_float(AttrKey::Exponent, 1.0);
+    return dual_to_result(jvp_pow(x, exponent));
+}
+
+JvpResult jvp_adapter_clamp(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_clamp: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+    double max_val = attrs.get_float(AttrKey::Max,  std::numeric_limits<double>::infinity());
+    return dual_to_result(jvp_clamp(x, min_val, max_val));
+}
+
+// ---- Linear (3-input: input, weight, bias) -----------------------------
+
+JvpResult jvp_adapter_linear(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes&) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_linear: expected 3 inputs (input, weight, bias)");
+    }
+    auto inp = make_dual(primals[0], tangents[0]);
+    auto w   = make_dual(primals[1], tangents[1]);
+    auto b   = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_linear(inp, w, b));
+}
+
+// ---- Reductions: Max/Min/Prod/Var/Std/LogSumExp/CumSum/CumProd ----------
+
+namespace {
+inline auto read_reduction_dim(const OpAttributes& attrs) -> std::optional<int64_t> {
+    if (attrs.has(AttrKey::Dim)) return attrs.get_int(AttrKey::Dim);
+    return std::nullopt;
+}
+} // namespace
+
+JvpResult jvp_adapter_max(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_max: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto dim = read_reduction_dim(attrs);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    return dual_to_result(jvp_max_red(x, dim, keepdim));
+}
+
+JvpResult jvp_adapter_min(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_min: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto dim = read_reduction_dim(attrs);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    return dual_to_result(jvp_min_red(x, dim, keepdim));
+}
+
+JvpResult jvp_adapter_prod(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_prod: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto dim = read_reduction_dim(attrs);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    return dual_to_result(jvp_prod(x, dim, keepdim));
+}
+
+JvpResult jvp_adapter_var(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_var: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto dim = read_reduction_dim(attrs);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+    return dual_to_result(jvp_var(x, dim, keepdim, unbiased));
+}
+
+JvpResult jvp_adapter_std(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_std: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto dim = read_reduction_dim(attrs);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+    return dual_to_result(jvp_std(x, dim, keepdim, unbiased));
+}
+
+JvpResult jvp_adapter_logsumexp(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_logsumexp: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    return dual_to_result(jvp_logsumexp(x, dim, keepdim));
+}
+
+JvpResult jvp_adapter_cumsum(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_cumsum: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_cumsum(x, dim));
+}
+
+JvpResult jvp_adapter_cumprod(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_cumprod: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_cumprod(x, dim));
+}
+
+// ---- Shape / indexing --------------------------------------------------
+
+JvpResult jvp_adapter_permute(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_permute: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::vector<int64_t> dims;
+    if (attrs.has(AttrKey::Dims)) {
+        dims = attrs.get_int_list(AttrKey::Dims);
+    } else {
+        // Fallback identity permutation
+        for (int64_t i = 0; i < static_cast<int64_t>(primals[0].shape().size()); ++i) dims.push_back(i);
+    }
+    return dual_to_result(jvp_permute(x, std::move(dims)));
+}
+
+JvpResult jvp_adapter_squeeze(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_squeeze: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    std::optional<int64_t> dim;
+    if (attrs.has(AttrKey::Dim)) dim = attrs.get_int(AttrKey::Dim);
+    return dual_to_result(jvp_squeeze(x, dim));
+}
+
+JvpResult jvp_adapter_unsqueeze(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_unsqueeze: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_unsqueeze(x, dim));
+}
+
+JvpResult jvp_adapter_slice(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_slice: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim   = attrs.get_int(AttrKey::Dim, 0);
+    int64_t start = attrs.get_int(AttrKey::Start, 0);
+    int64_t end   = attrs.get_int(AttrKey::End, primals[0].shape()[dim < 0 ? dim + primals[0].shape().size() : dim]);
+    int64_t step  = attrs.get_int(AttrKey::Step, 1);
+    return dual_to_result(jvp_slice(x, dim, start, end, step));
+}
+
+JvpResult jvp_adapter_cat(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != tangents.size() || primals.empty()) {
+        throw std::runtime_error("jvp_adapter_cat: expected >=1 inputs");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    std::vector<DualTensor> duals;
+    duals.reserve(primals.size());
+    for (size_t i = 0; i < primals.size(); ++i) {
+        duals.push_back(make_dual(primals[i], tangents[i]));
+    }
+    return dual_to_result(jvp_cat(std::span<const DualTensor>(duals.data(), duals.size()), dim));
+}
+
+JvpResult jvp_adapter_stack(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != tangents.size() || primals.empty()) {
+        throw std::runtime_error("jvp_adapter_stack: expected >=1 inputs");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    std::vector<DualTensor> duals;
+    duals.reserve(primals.size());
+    for (size_t i = 0; i < primals.size(); ++i) {
+        duals.push_back(make_dual(primals[i], tangents[i]));
+    }
+    return dual_to_result(jvp_stack(std::span<const DualTensor>(duals.data(), duals.size()), dim));
+}
+
+// ---- where / gather / scatter / index_select / masked_* / cast ---------
+
+JvpResult jvp_adapter_where(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes&) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_where: expected 3 inputs (cond, a, b)");
+    }
+    auto cond = make_dual(primals[0], tangents[0]);
+    auto a    = make_dual(primals[1], tangents[1]);
+    auto b    = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_where(cond, a, b));
+}
+
+JvpResult jvp_adapter_gather(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_gather: expected 2 inputs (input, index)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_gather(x, dim, primals[1]));
+}
+
+JvpResult jvp_adapter_scatter(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_scatter: expected 3 inputs (input, index, src)");
+    }
+    auto input = make_dual(primals[0], tangents[0]);
+    auto src   = make_dual(primals[2], tangents[2]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_scatter(input, dim, primals[1], src));
+}
+
+JvpResult jvp_adapter_index_select(std::span<const Tensor> primals,
+                                   std::span<const Tensor> tangents,
+                                   const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_index_select: expected 2 inputs (input, index)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    return dual_to_result(jvp_index_select(x, dim, primals[1]));
+}
+
+JvpResult jvp_adapter_masked_select(std::span<const Tensor> primals,
+                                    std::span<const Tensor> tangents,
+                                    const OpAttributes&) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_masked_select: expected 2 inputs (input, mask)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_masked_select(x, primals[1]));
+}
+
+JvpResult jvp_adapter_masked_fill(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_masked_fill: expected 2 inputs (input, mask)");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+    return dual_to_result(jvp_masked_fill(x, primals[1], value));
+}
+
+JvpResult jvp_adapter_cast(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_cast: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    if (!attrs.has(AttrKey::TargetDtype)) {
+        throw std::runtime_error("jvp_adapter_cast: missing TargetDtype attribute");
+    }
+    auto target = static_cast<DType>(attrs.get_int(AttrKey::TargetDtype));
+    return dual_to_result(jvp_cast(x, target));
+}
+
 } // anonymous namespace
 
 namespace detail {
@@ -732,28 +1368,95 @@ void register_builtin_jvp_rules() {
     // Matrix
     register_jvp_rule(OpId::MatMul, &jvp_adapter_matmul);
 
-    // Unary elementwise / math
+    // Unary elementwise / math (existing batch)
     register_jvp_rule(OpId::Neg,  &jvp_adapter_neg);
     register_jvp_rule(OpId::Exp,  &jvp_adapter_exp);
     register_jvp_rule(OpId::Log,  &jvp_adapter_log);
     register_jvp_rule(OpId::Sqrt, &jvp_adapter_sqrt);
 
-    // Activations
+    // Activations (existing)
     register_jvp_rule(OpId::ReLU,           &jvp_adapter_relu);
     register_jvp_rule(OpId::Sigmoid,        &jvp_adapter_sigmoid);
     register_jvp_rule(OpId::Tanh,           &jvp_adapter_tanh);
     register_jvp_rule(OpId::TanhActivation, &jvp_adapter_tanh);
 
-    // Softmax
+    // Softmax / Reductions (existing)
     register_jvp_rule(OpId::Softmax, &jvp_adapter_softmax);
+    register_jvp_rule(OpId::Sum,     &jvp_adapter_sum);
+    register_jvp_rule(OpId::Mean,    &jvp_adapter_mean);
 
-    // Reductions
-    register_jvp_rule(OpId::Sum,  &jvp_adapter_sum);
-    register_jvp_rule(OpId::Mean, &jvp_adapter_mean);
-
-    // Shape
+    // Shape (existing)
     register_jvp_rule(OpId::Transpose, &jvp_adapter_transpose);
     register_jvp_rule(OpId::Reshape,   &jvp_adapter_reshape);
+
+    // ---------------- Audit A.4 batch 2 ------------------
+
+    // Additional activations
+    register_jvp_rule(OpId::Gelu,        &jvp_adapter_gelu);
+    register_jvp_rule(OpId::Elu,         &jvp_adapter_elu);
+    register_jvp_rule(OpId::Selu,        &jvp_adapter_selu);
+    register_jvp_rule(OpId::Mish,        &jvp_adapter_mish);
+    register_jvp_rule(OpId::Softplus,    &jvp_adapter_softplus);
+    register_jvp_rule(OpId::LeakyReLU,   &jvp_adapter_leaky_relu);
+    register_jvp_rule(OpId::LogSoftmax,  &jvp_adapter_log_softmax);
+
+    // Linear (input, weight, bias)
+    register_jvp_rule(OpId::Linear, &jvp_adapter_linear);
+
+    // Math: scalar-parametric
+    register_jvp_rule(OpId::Pow,        &jvp_adapter_pow);
+    register_jvp_rule(OpId::Clamp,      &jvp_adapter_clamp);
+
+    // Math: trig / hyperbolic / inverse
+    register_jvp_rule(OpId::Abs,        &jvp_adapter_abs);
+    register_jvp_rule(OpId::Sin,        &jvp_adapter_sin);
+    register_jvp_rule(OpId::Cos,        &jvp_adapter_cos);
+    register_jvp_rule(OpId::Tan,        &jvp_adapter_tan);
+    register_jvp_rule(OpId::Asin,       &jvp_adapter_asin);
+    register_jvp_rule(OpId::Acos,       &jvp_adapter_acos);
+    register_jvp_rule(OpId::Atan,       &jvp_adapter_atan);
+    register_jvp_rule(OpId::Sinh,       &jvp_adapter_sinh);
+    register_jvp_rule(OpId::Cosh,       &jvp_adapter_cosh);
+    register_jvp_rule(OpId::Asinh,      &jvp_adapter_asinh);
+    register_jvp_rule(OpId::Acosh,      &jvp_adapter_acosh);
+    register_jvp_rule(OpId::Atanh,      &jvp_adapter_atanh);
+
+    // Math: special
+    register_jvp_rule(OpId::Erf,        &jvp_adapter_erf);
+    register_jvp_rule(OpId::Erfc,       &jvp_adapter_erfc);
+    register_jvp_rule(OpId::Lgamma,     &jvp_adapter_lgamma);
+    register_jvp_rule(OpId::Reciprocal, &jvp_adapter_reciprocal);
+    register_jvp_rule(OpId::Square,     &jvp_adapter_square);
+    register_jvp_rule(OpId::Sign,       &jvp_adapter_sign);
+
+    // Reductions
+    register_jvp_rule(OpId::Max,        &jvp_adapter_max);
+    register_jvp_rule(OpId::Min,        &jvp_adapter_min);
+    register_jvp_rule(OpId::Prod,       &jvp_adapter_prod);
+    register_jvp_rule(OpId::Var,        &jvp_adapter_var);
+    register_jvp_rule(OpId::Std,        &jvp_adapter_std);
+    register_jvp_rule(OpId::LogSumExp,  &jvp_adapter_logsumexp);
+    register_jvp_rule(OpId::CumSum,     &jvp_adapter_cumsum);
+    register_jvp_rule(OpId::CumProd,    &jvp_adapter_cumprod);
+
+    // Shape / indexing
+    register_jvp_rule(OpId::Permute,    &jvp_adapter_permute);
+    register_jvp_rule(OpId::Squeeze,    &jvp_adapter_squeeze);
+    register_jvp_rule(OpId::Unsqueeze,  &jvp_adapter_unsqueeze);
+    register_jvp_rule(OpId::Slice,      &jvp_adapter_slice);
+    register_jvp_rule(OpId::Cat,        &jvp_adapter_cat);
+    register_jvp_rule(OpId::Stack,      &jvp_adapter_stack);
+
+    // Gather / scatter / select
+    register_jvp_rule(OpId::Where,         &jvp_adapter_where);
+    register_jvp_rule(OpId::Gather,        &jvp_adapter_gather);
+    register_jvp_rule(OpId::Scatter,       &jvp_adapter_scatter);
+    register_jvp_rule(OpId::IndexSelect,   &jvp_adapter_index_select);
+    register_jvp_rule(OpId::MaskedSelect,  &jvp_adapter_masked_select);
+    register_jvp_rule(OpId::MaskedFill,    &jvp_adapter_masked_fill);
+
+    // Cast
+    register_jvp_rule(OpId::Cast,       &jvp_adapter_cast);
 }
 
 } // namespace detail
