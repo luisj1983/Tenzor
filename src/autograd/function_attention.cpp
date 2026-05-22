@@ -638,13 +638,29 @@ auto flash_attention(const Variable& Q,
     // Outside the fast-path constraints the composed FP64 op dispatch
     // already runs in double on Vulkan, so the Variable-level bypass is
     // no longer needed for Vulkan either.
+    //
+    // audit A.11 (MPS): Apple Metal has no Float64 — the Metal Shading
+    // Language specification defines no `double` scalar type, and there is
+    // no MSL FP64 extension. A "native Float64 FlashAttention" is therefore
+    // impossible on MPS. The MPS dispatch table registers FlashAttention
+    // (and FlashAttentionBackward / FusedAttention) with a wrapper that
+    // throws std::runtime_error on Float64 inputs (see
+    // src/backends/mps/mps_kernel_registry.mm). We list MPS in
+    // backend_native_f64 deliberately so the Variable-level composed-ops
+    // bypass does NOT run on MPS — that bypass would silently downcast
+    // through the underlying MPS op kernels (matmul/softmax/where), which
+    // is the exact "Float32 upcast workaround" the project forbids. The
+    // throw at dispatch is the honest answer: users must move to a backend
+    // that actually supports FP64 (CPU, CUDA, ROCm, OneAPI, or a Vulkan
+    // device that advertises shaderFloat64).
     const Device::Type dev_type = Q.tensor().device().type;
     const bool backend_native_f64 =
         (dev_type == Device::Type::CPU) ||
         (dev_type == Device::Type::CUDA) ||
         (dev_type == Device::Type::ROCm) ||
         (dev_type == Device::Type::OneAPI) ||
-        (dev_type == Device::Type::Vulkan);
+        (dev_type == Device::Type::Vulkan) ||
+        (dev_type == Device::Type::MPS);
     if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f
         && !backend_native_f64) {
         auto Kt = transpose(K, -1, -2);
