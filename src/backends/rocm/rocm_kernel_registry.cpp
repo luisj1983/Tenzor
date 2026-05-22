@@ -1357,39 +1357,29 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Convolution Operations
     // ========================================================================
     // Conv2dBackwardInput: inputs = {grad_output, input, weight}
-    // Audit E2: per-axis read with scalar fallback.
+    // Audit F.11: per-axis read with scalar fallback via shared helpers.
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::conv2d_backward_input(inputs[0], inputs[2], input_shape,
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, get_hip_stream(attrs))};
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs))};
     });
 
     // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
-    // Audit E2: per-axis read with scalar fallback.
+    // Audit F.11: per-axis read with scalar fallback via shared helpers.
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{rocm::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, get_hip_stream(attrs))};
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1433,42 +1423,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // Audit F.11: read per-axis StrideD/H/W, PaddingD/H/W, DilationD/H/W
-    // with scalar fallback, instead of replicating a single scalar into
-    // {s, s, s}.  Anisotropic 3-D conv configs (depth dilation != height
-    // dilation, etc.) silently degraded to isotropic before.
+    // with scalar fallback via shared helpers. Anisotropic 3-D conv configs
+    // (depth dilation != height dilation, etc.) silently degraded to
+    // isotropic before; now routed through stride_3d_vec / padding_3d_vec /
+    // dilation_3d_vec which read the per-axis keys with scalar fallback.
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride   = {attrs.get_int(AttrKey::StrideD,   s),
-                                          attrs.get_int(AttrKey::StrideH,   s),
-                                          attrs.get_int(AttrKey::StrideW,   s)};
-        std::vector<int64_t> padding  = {attrs.get_int(AttrKey::PaddingD,  p),
-                                          attrs.get_int(AttrKey::PaddingH,  p),
-                                          attrs.get_int(AttrKey::PaddingW,  p)};
-        std::vector<int64_t> dilation = {attrs.get_int(AttrKey::DilationD, d),
-                                          attrs.get_int(AttrKey::DilationH, d),
-                                          attrs.get_int(AttrKey::DilationW, d)};
+        const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::conv3d_backward_input_hip(inputs[0], inputs[2], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride   = {attrs.get_int(AttrKey::StrideD,   s),
-                                          attrs.get_int(AttrKey::StrideH,   s),
-                                          attrs.get_int(AttrKey::StrideW,   s)};
-        std::vector<int64_t> padding  = {attrs.get_int(AttrKey::PaddingD,  p),
-                                          attrs.get_int(AttrKey::PaddingH,  p),
-                                          attrs.get_int(AttrKey::PaddingW,  p)};
-        std::vector<int64_t> dilation = {attrs.get_int(AttrKey::DilationD, d),
-                                          attrs.get_int(AttrKey::DilationH, d),
-                                          attrs.get_int(AttrKey::DilationW, d)};
+        const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{rocm::conv3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
@@ -1478,40 +1451,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::conv3d_backward_bias_hip(inputs[0], get_hip_stream(attrs))};
     });
 
-    // Audit F.11: same per-axis treatment for ConvTranspose3d.
+    // Audit F.11: same per-axis treatment for ConvTranspose3d via shared helpers.
     table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride   = {attrs.get_int(AttrKey::StrideD,   s),
-                                          attrs.get_int(AttrKey::StrideH,   s),
-                                          attrs.get_int(AttrKey::StrideW,   s)};
-        std::vector<int64_t> padding  = {attrs.get_int(AttrKey::PaddingD,  p),
-                                          attrs.get_int(AttrKey::PaddingH,  p),
-                                          attrs.get_int(AttrKey::PaddingW,  p)};
-        std::vector<int64_t> dilation = {attrs.get_int(AttrKey::DilationD, d),
-                                          attrs.get_int(AttrKey::DilationH, d),
-                                          attrs.get_int(AttrKey::DilationW, d)};
+        const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::conv_transpose3d_backward_input_hip(inputs[0], inputs[2], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride   = {attrs.get_int(AttrKey::StrideD,   s),
-                                          attrs.get_int(AttrKey::StrideH,   s),
-                                          attrs.get_int(AttrKey::StrideW,   s)};
-        std::vector<int64_t> padding  = {attrs.get_int(AttrKey::PaddingD,  p),
-                                          attrs.get_int(AttrKey::PaddingH,  p),
-                                          attrs.get_int(AttrKey::PaddingW,  p)};
-        std::vector<int64_t> dilation = {attrs.get_int(AttrKey::DilationD, d),
-                                          attrs.get_int(AttrKey::DilationH, d),
-                                          attrs.get_int(AttrKey::DilationW, d)};
+        const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{rocm::conv_transpose3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
@@ -1552,11 +1507,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // 1D Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        auto [output, indices] = rocm::maxpool1d_forward_hip(inputs[0], kernel_size, stride, padding, dilation, get_hip_stream(attrs));
+        // Audit F.11: read per-axis W keys with scalar fallback. PyTorch's
+        // 1-D pool API only has one spatial axis (W), but the dispatcher may
+        // still pass AttrKey::StrideW / PaddingW / DilationW.
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_1d(attrs);
+        auto [output, indices] = rocm::maxpool1d_forward_hip(inputs[0],
+            kernel_size[0], stride[0], padding[0], dilation[0], get_hip_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -1566,18 +1526,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return rocm::avgpool1d_forward_hip(inputs[0], kernel_size, stride, padding, get_hip_stream(attrs));
+        // Audit F.11: per-axis W key with scalar fallback.
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        return rocm::avgpool1d_forward_hip(inputs[0],
+            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Audit F.11: per-axis W key with scalar fallback.
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return rocm::avgpool1d_backward_hip(inputs[0], input_shape, kernel_size, stride, padding, get_hip_stream(attrs));
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
+            AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        return rocm::avgpool1d_backward_hip(inputs[0], input_shape,
+            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3811,25 +3777,20 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Convolution Operations ------------------------------------------------
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Audit E2: read per-axis stride/padding/dilation, falling back to
-        // scalars. The per-axis ROCm overload routes symmetric runs to the
-        // existing scalar kernel (no behavior change) and throws cleanly on
-        // asymmetric until the im2col/MIOpen-descriptor refactor lands —
-        // replacing the previous silent wrong-output behavior.
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-        int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+        // Audit F.11: read per-axis stride/padding/dilation via shared
+        // helpers, falling back to scalars. The per-axis ROCm overload
+        // routes symmetric runs to the existing scalar kernel (no behavior
+        // change) and throws cleanly on asymmetric until the im2col/MIOpen-
+        // descriptor refactor lands — replacing the previous silent
+        // wrong-output behavior.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups,
-            get_hip_stream(attrs));
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // Phase 2.1: use shared per-axis helpers (replaces I5-followup inline
@@ -3843,43 +3804,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, dilation, groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
-        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
+        // Audit F.11: per-axis stride/padding/output_padding via shared helpers.
+        const auto stride         = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding        = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto output_padding = ::tenzor::backend::attrs::output_padding_2d(attrs);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride_h, stride_w, padding_h, padding_w, output_padding_h, output_padding_w,
+            stride[0], stride[1], padding[0], padding[1],
+            output_padding[0], output_padding[1],
             get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Audit I5-followup: read per-axis attrs with scalar fallback.
-        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
-        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        std::vector<int64_t> stride = {
-            attrs.get_int(AttrKey::StrideD, s),
-            attrs.get_int(AttrKey::StrideH, s),
-            attrs.get_int(AttrKey::StrideW, s)};
-        std::vector<int64_t> padding = {
-            attrs.get_int(AttrKey::PaddingD, p),
-            attrs.get_int(AttrKey::PaddingH, p),
-            attrs.get_int(AttrKey::PaddingW, p)};
-        std::vector<int64_t> output_padding = {
-            attrs.get_int(AttrKey::OutputPaddingD, op),
-            attrs.get_int(AttrKey::OutputPaddingH, op),
-            attrs.get_int(AttrKey::OutputPaddingW, op)};
-        std::vector<int64_t> dilation = {
-            attrs.get_int(AttrKey::DilationD, d),
-            attrs.get_int(AttrKey::DilationH, d),
-            attrs.get_int(AttrKey::DilationW, d)};
+        // Audit F.11: per-axis attrs via shared helpers (replaces inline
+        // I5-followup reads). Mirrors Conv3dForward.
+        const auto stride         = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+        const auto padding        = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+        const auto output_padding = ::tenzor::backend::attrs::output_padding_3d_vec(attrs);
+        const auto dilation       = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
         return rocm::conv_transpose3d_forward_hip(inputs[0], inputs[1], bias,
             stride, padding, output_padding, dilation, groups, get_hip_stream(attrs));
@@ -3951,21 +3893,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Pooling Operations (2D) -----------------------------------------------
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        // Audit F.11: read per-axis kernel/stride/padding via shared
+        // helpers. Previously replicated a single scalar into (kH,kH) etc.,
+        // silently squashing asymmetric configs.
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
         // by the count of valid (non-padded) positions. Older ROCm code
         // defaulted to `true` which diverged from every other backend.
         bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_forward_hip(inputs[0],
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream);
+            kernel_size[0], kernel_size[1], stride[0], stride[1],
+            padding[0], padding[1], count_include_pad, stream);
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        // Audit F.11: per-axis kernel/stride/padding via shared helpers.
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
         // by the count of valid (non-padded) positions. Older ROCm code
         // defaulted to `true` which diverged from every other backend.
@@ -3973,7 +3922,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_backward_hip(inputs[0], input_shape,
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream);
+            kernel_size[0], kernel_size[1], stride[0], stride[1],
+            padding[0], padding[1], count_include_pad, stream);
     });
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
@@ -4140,44 +4090,51 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // do NOT call fused_conv_batchnorm_relu_hip here — that op needs 5 inputs
     // (input, weight, bias, bn_running_mean, bn_running_var) and is registered
     // as FusedConv2dBnReLU. Mirroring the FusedConv2dSigmoid path below.
+    // Audit F.11: FusedConv2d* activation variants now read per-axis attrs
+    // and dispatch through the per-axis conv2d_forward_kernel overload.
+    // Previously the scalar overload silently squashed asymmetric configs.
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs));
         return rocm::relu_kernel(result, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs));
         return rocm::sigmoid_kernel(result, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs));
         return rocm::tanh_kernel(result, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
+            groups, get_hip_stream(attrs));
         return rocm::swish_kernel(result, get_hip_stream(attrs));
     });
 
@@ -4196,10 +4153,21 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             output_scale, output_zp, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::QuantizedConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Audit F.11: read per-axis stride/padding/dilation. The underlying
+        // ROCm quantized_conv2d_hip kernel only accepts scalar values, so
+        // reject asymmetric configs loudly instead of silently squashing.
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+            throw std::invalid_argument(
+                "QuantizedConv2d (ROCm): backend kernel only supports symmetric "
+                "stride/padding/dilation across H/W; got stride=(" +
+                std::to_string(stride[0]) + "," + std::to_string(stride[1]) +
+                "), padding=(" + std::to_string(padding[0]) + "," + std::to_string(padding[1]) +
+                "), dilation=(" + std::to_string(dilation[0]) + "," + std::to_string(dilation[1]) + ")");
+        }
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -4209,7 +4177,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int32_t output_zp = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
         return rocm::quantized_conv2d_hip(
             inputs[0], inputs[1], bias,
-            stride, padding, dilation, groups,
+            stride[0], padding[0], dilation[0], groups,
             input_scale, input_zp, weight_scale, weight_zp,
             output_scale, output_zp, get_hip_stream(attrs));
     });
