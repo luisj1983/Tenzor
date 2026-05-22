@@ -197,6 +197,9 @@ auto ceil(const Tensor& input) -> Tensor;
 /** @brief Round to nearest integer */
 auto round(const Tensor& input) -> Tensor;
 
+/** @brief Truncate toward zero (drop the fractional part). */
+auto trunc(const Tensor& input) -> Tensor;
+
 /// @}
 /// @name Clamping Operations
 /// @{

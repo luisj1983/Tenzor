@@ -2412,4 +2412,138 @@ auto EqBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<T
         "(eq/ne/lt/le/gt/ge) is all non-differentiable.");
 }
 
+// ============================================================================
+// Audit E.7 continuation (batch 4): forward/backward impls for the fourth set
+// of 10 OpIds. The five comparisons (ne/lt/le/gt/ge) share one reason string
+// referencing the full eq/ne/lt/le/gt/ge family — kept verbatim across all
+// five so future grep + audit lines up.
+// ============================================================================
+
+// Shared comparison-family reason — kept in one place so the message stays
+// consistent across the whole boolean-compare cluster.
+namespace {
+constexpr const char* kComparisonFamilyReason =
+    "output is a Bool tensor — discrete comparison, not a smooth function "
+    "of the inputs. The comparison family (eq/ne/lt/le/gt/ge) is all "
+    "non-differentiable.";
+} // namespace
+
+auto NeBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("NeBackward::forward should not be called directly");
+}
+auto NeBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(std::string("ne: ") + kComparisonFamilyReason);
+}
+
+auto LtBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("LtBackward::forward should not be called directly");
+}
+auto LtBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(std::string("lt: ") + kComparisonFamilyReason);
+}
+
+auto LeBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("LeBackward::forward should not be called directly");
+}
+auto LeBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(std::string("le: ") + kComparisonFamilyReason);
+}
+
+auto GtBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("GtBackward::forward should not be called directly");
+}
+auto GtBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(std::string("gt: ") + kComparisonFamilyReason);
+}
+
+auto GeBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("GeBackward::forward should not be called directly");
+}
+auto GeBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(std::string("ge: ") + kComparisonFamilyReason);
+}
+
+// --- bitwise ops (integer / bool, discrete bit-level) -------------------
+
+auto BitwiseOrBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BitwiseOrBackward::forward should not be called directly");
+}
+auto BitwiseOrBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bitwise_or: integer / bool inputs and output — operates on the "
+        "discrete bit representation. The operation is not differentiable.");
+}
+
+auto BitwiseXorBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BitwiseXorBackward::forward should not be called directly");
+}
+auto BitwiseXorBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bitwise_xor: integer / bool inputs and output — operates on the "
+        "discrete bit representation. The operation is not differentiable.");
+}
+
+auto BitwiseNotBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BitwiseNotBackward::forward should not be called directly");
+}
+auto BitwiseNotBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bitwise_not: integer / bool input — unary bit complement on the "
+        "discrete bit representation. The operation is not differentiable.");
+}
+
+// --- introspection ------------------------------------------------------
+
+auto IsFiniteBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("IsFiniteBackward::forward should not be called directly");
+}
+auto IsFiniteBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "isfinite: output is a Bool tensor classifying the input as "
+        "finite vs. (±inf, NaN). The finiteness-pattern is metadata, not "
+        "a smooth function of the input values.");
+}
+
+// --- differentiable: logcumsumexp ---------------------------------------
+
+// logcumsumexp(x, dim): y_j = log( sum_{k <= j} exp(x_k) )  along dim.
+//
+// dL/dx_i = sum_{j >= i} (dL/dy_j) * exp(x_i - y_j)
+//         = exp(x_i) * sum_{j >= i} (dL/dy_j) * exp(-y_j)
+//
+// The "sum_{j >= i}" along dim is a reverse cumulative sum, which equals
+// flip(cumsum(flip(z, dim), dim), dim). exp(-y) is numerically safe here
+// because y = log(cumsum(exp(x))) is bounded below by max-over-prefix(x),
+// so exp(-y) <= 1 / exp(min_prefix(x)) and never overflows for normal x.
+auto LogcumsumexpBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("LogcumsumexpBackward::forward should not be called directly");
+}
+auto LogcumsumexpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& x = saved_tensors_[0];
+    const auto& y = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    // Normalise dim against the saved input's rank.
+    int64_t dim = dim_;
+    int64_t ndim = static_cast<int64_t>(x.shape().size());
+    if (dim < 0) dim += ndim;
+    TENZOR_CHECK_SHAPE(dim >= 0 && dim < ndim,
+        "LogcumsumexpBackward: dim out of range for saved input rank");
+
+    // z = grad * exp(-y)
+    auto neg_y = neg(y);
+    auto exp_neg_y = exp(neg_y);
+    auto z = mul(grad, exp_neg_y);
+
+    // rev_cum = flip(cumsum(flip(z, dim), dim), dim)
+    auto flipped = flip(z, {dim});
+    auto cum = cumsum(flipped, dim);
+    auto rev_cum = flip(cum, {dim});
+
+    // grad_x = exp(x) * rev_cum
+    auto grad_x = mul(exp(x), rev_cum);
+    return {grad_x};
+}
+
 } // namespace tenzor

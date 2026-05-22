@@ -397,6 +397,7 @@ auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
 auto floor(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Floor>(input); }
 auto ceil(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Ceil>(input); }
 auto round(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Round>(input); }
+auto trunc(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Trunc>(input); }
 
 auto clamp(const Tensor& input, double min, double max) -> Tensor {
     NewOpAttributes attrs;

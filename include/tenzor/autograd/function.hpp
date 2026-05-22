@@ -3827,4 +3827,139 @@ public:
     auto op_id() const -> OpId override { return OpId::Eq; }
 };
 
+// ============================================================================
+// Audit E.7 continuation (batch 4): another 10 OpIds. Knocks out the rest of
+// the boolean-comparison family (ne / lt / le / gt / ge), three integer bit
+// ops (bitwise_or / bitwise_xor / bitwise_not), one Bool introspection op
+// (isfinite) and one differentiable op (logcumsumexp).
+//
+// Same pattern as batches 1–3: differentiable Functions compute a closed-form
+// backward; non-differentiable Functions throw tenzor::NonDifferentiable with
+// a message that names the op and explains why no smooth gradient exists.
+// The five comparisons share a single reason string referencing the full
+// eq/ne/lt/le/gt/ge family.
+// ============================================================================
+
+/**
+ * @brief ne(a, b). Bool output (a != b) — discrete comparison, non-differentiable.
+ *        See EqBackward for the shared comparison-family reason.
+ */
+class NeBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NeBackward"; }
+    auto op_id() const -> OpId override { return OpId::Ne; }
+};
+
+/**
+ * @brief lt(a, b). Bool output (a < b) — discrete, non-differentiable.
+ */
+class LtBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LtBackward"; }
+    auto op_id() const -> OpId override { return OpId::Lt; }
+};
+
+/**
+ * @brief le(a, b). Bool output (a <= b) — discrete, non-differentiable.
+ */
+class LeBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LeBackward"; }
+    auto op_id() const -> OpId override { return OpId::Le; }
+};
+
+/**
+ * @brief gt(a, b). Bool output (a > b) — discrete, non-differentiable.
+ */
+class GtBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GtBackward"; }
+    auto op_id() const -> OpId override { return OpId::Gt; }
+};
+
+/**
+ * @brief ge(a, b). Bool output (a >= b) — discrete, non-differentiable.
+ */
+class GeBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GeBackward"; }
+    auto op_id() const -> OpId override { return OpId::Ge; }
+};
+
+/**
+ * @brief bitwise_or(a, b). Integer / bool inputs and output — discrete bit-level op.
+ *        Non-differentiable.
+ */
+class BitwiseOrBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BitwiseOrBackward"; }
+    auto op_id() const -> OpId override { return OpId::BitwiseOr; }
+};
+
+/**
+ * @brief bitwise_xor(a, b). Integer / bool inputs and output. Non-differentiable.
+ */
+class BitwiseXorBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BitwiseXorBackward"; }
+    auto op_id() const -> OpId override { return OpId::BitwiseXor; }
+};
+
+/**
+ * @brief bitwise_not(x). Unary integer / bool bit complement. Non-differentiable.
+ */
+class BitwiseNotBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BitwiseNotBackward"; }
+    auto op_id() const -> OpId override { return OpId::BitwiseNot; }
+};
+
+/**
+ * @brief isfinite(x). Bool output classifying x as finite vs. (±inf, NaN).
+ *        Pure metadata — non-differentiable.
+ */
+class IsFiniteBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IsFiniteBackward"; }
+    auto op_id() const -> OpId override { return OpId::IsFinite; }
+};
+
+/**
+ * @brief logcumsumexp(x, dim): y = log(cumsum(exp(x), dim)).
+ *        Backward: grad_x[i] = sum_{j >= i} grad_y[j] * exp(x[i] - y[j])
+ *                = exp(x) * reverse_cumsum_along_dim(grad_y * exp(-y))
+ *        where reverse_cumsum_along_dim(z) = flip(cumsum(flip(z, dim), dim), dim).
+ *        Saves x and y to recompute the per-position weights without storing
+ *        the full softmax window. dim is normalised at backward-call time
+ *        against the saved x's rank.
+ */
+class LogcumsumexpBackward : public Function {
+public:
+    explicit LogcumsumexpBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LogcumsumexpBackward"; }
+    auto op_id() const -> OpId override { return OpId::Logcumsumexp; }
+private:
+    int64_t dim_;
+};
+
 } // namespace tenzor

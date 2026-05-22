@@ -1327,6 +1327,43 @@ auto round(const Variable& input) -> Variable;
 /** @brief eq(a, b). NON-DIFFERENTIABLE — backward() throws. */
 auto eq(const Variable& a, const Variable& b) -> Variable;
 
+// ============================================================================
+// Audit E.7 continuation (batch 4): autograd wrappers for another 10 OpIds.
+// Closes out the boolean-comparison family plus bitwise_or / xor / not,
+// isfinite, and one differentiable op (logcumsumexp).
+// ============================================================================
+
+/** @brief ne(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto ne(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief lt(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto lt(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief le(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto le(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief gt(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto gt(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief ge(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto ge(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief bitwise_or(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto bitwise_or(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief bitwise_xor(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto bitwise_xor(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief bitwise_not(x). NON-DIFFERENTIABLE — backward() throws. */
+auto bitwise_not(const Variable& input) -> Variable;
+
+/** @brief isfinite(x). NON-DIFFERENTIABLE — backward() throws. */
+auto isfinite(const Variable& input) -> Variable;
+
+/** @brief logcumsumexp(x, dim) = log(cumsum(exp(x), dim)).
+ *         Backward: grad_x = exp(x) * reverse_cumsum(grad_y * exp(-y), dim). */
+auto logcumsumexp(const Variable& input, int64_t dim) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

@@ -3448,4 +3448,111 @@ auto eq(const Variable& a, const Variable& b) -> Variable {
     return output;
 }
 
+// ===========================================================================
+// Audit E.7 continuation (batch 4): autograd wrappers for another 10 OpIds.
+// Non-differentiable wrappers still attach a Function with full
+// next_functions / input_variables wiring so calling backward() through them
+// raises tenzor::NonDifferentiable instead of silently dropping the edge.
+// ===========================================================================
+
+// Local helper: build a non-diff binary wrapper. Cuts copy-paste across the
+// five comparisons + two bitwise binaries. FactoryFn returns a fresh Function
+// instance for the OpId (any of {Ne,Lt,Le,Gt,Ge,BitwiseOr,BitwiseXor}Backward).
+namespace {
+template <typename BackwardCls, typename EagerFn>
+auto make_nondiff_binary(const Variable& a, const Variable& b, EagerFn&& eager)
+    -> Variable {
+    auto result = eager(a.tensor(), b.tensor());
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<BackwardCls>();
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+template <typename BackwardCls, typename EagerFn>
+auto make_nondiff_unary(const Variable& input, EagerFn&& eager) -> Variable {
+    auto result = eager(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<BackwardCls>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+} // namespace
+
+auto ne(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<NeBackward>(
+        a, b, [](const Tensor& x, const Tensor& y) { return tenzor::ne(x, y); });
+}
+
+auto lt(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<LtBackward>(
+        a, b, [](const Tensor& x, const Tensor& y) { return tenzor::lt(x, y); });
+}
+
+auto le(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<LeBackward>(
+        a, b, [](const Tensor& x, const Tensor& y) { return tenzor::le(x, y); });
+}
+
+auto gt(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<GtBackward>(
+        a, b, [](const Tensor& x, const Tensor& y) { return tenzor::gt(x, y); });
+}
+
+auto ge(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<GeBackward>(
+        a, b, [](const Tensor& x, const Tensor& y) { return tenzor::ge(x, y); });
+}
+
+auto bitwise_or(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<BitwiseOrBackward>(
+        a, b,
+        [](const Tensor& x, const Tensor& y) { return tenzor::bitwise_or(x, y); });
+}
+
+auto bitwise_xor(const Variable& a, const Variable& b) -> Variable {
+    return make_nondiff_binary<BitwiseXorBackward>(
+        a, b,
+        [](const Tensor& x, const Tensor& y) { return tenzor::bitwise_xor(x, y); });
+}
+
+auto bitwise_not(const Variable& input) -> Variable {
+    return make_nondiff_unary<BitwiseNotBackward>(
+        input, [](const Tensor& x) { return tenzor::bitwise_not(x); });
+}
+
+auto isfinite(const Variable& input) -> Variable {
+    return make_nondiff_unary<IsFiniteBackward>(
+        input, [](const Tensor& x) { return tenzor::isfinite(x); });
+}
+
+// logcumsumexp(x, dim): saves x and y because the backward needs both
+//   grad_x = exp(x) * flip(cumsum(flip(grad_y * exp(-y), dim), dim), dim).
+auto logcumsumexp(const Variable& input, int64_t dim) -> Variable {
+    auto result = tenzor::logcumsumexp(input.tensor(), dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<LogcumsumexpBackward>(dim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor
