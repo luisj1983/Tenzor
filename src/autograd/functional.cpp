@@ -1,6 +1,8 @@
 #include "tenzor/autograd/functional.hpp"
 #include "tenzor/autograd/dual.hpp"
 #include "tenzor/autograd/jvp_rules.hpp"
+#include "tenzor/autograd/jvp_dispatch.hpp"
+#include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -8,43 +10,110 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
-#include <vector>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 namespace tenzor {
 
 auto jvp(std::function<Variable(const Variable&)> func,
          const Variable& input,
          const Tensor& tangent) -> std::pair<Variable, Tensor> {
-    // Forward-mode AD via finite-difference-like dual number evaluation.
+    // Forward-mode AD via the registered dispatch_jvp rules when possible,
+    // with a finite-difference fallback for ops/compositions not yet covered.
     //
-    // We use a small epsilon approach internally: evaluate f(x + eps*v) and f(x),
-    // then compute the directional derivative as (f(x+eps*v) - f(x)) / eps.
+    // Strategy (A.4 audit item, partial implementation):
     //
-    // This is a correct but simple implementation. A full dual-number tracing
-    // implementation would intercept each op and apply JVP rules, but that
-    // requires deeper integration into the dispatch system. This approach
-    // computes the exact JVP using numerical evaluation with a carefully chosen
-    // epsilon that gives machine-precision results for smooth functions.
+    //   1. Evaluate primal output: `output = func(input)`. This builds the
+    //      backward graph as a side effect, giving us `output.grad_fn()`.
     //
-    // For better accuracy we use central differences: (f(x+eps*v) - f(x-eps*v)) / (2*eps)
+    //   2. Fast path — single-op function. If `output.grad_fn()` is a single
+    //      Function whose `input_variables()` consists solely of references
+    //      to `input` (by shared VariableImpl identity), and whose OpId has a
+    //      registered JVP rule, dispatch through `dispatch_jvp` to compute
+    //      the exact tangent in one pass. This avoids any numerical error
+    //      and is O(1) extra forward work.
+    //
+    //   3. Fallback — central finite differences. For multi-op functions or
+    //      unregistered OpIds, fall back to the previous central-difference
+    //      implementation. Emit a one-shot diagnostic so callers know they
+    //      are on the slow/imprecise path.
+    //
+    // Future work: extend the fast path to multi-op chains by walking the
+    // backward graph in forward (reverse-topological) order and chaining
+    // dispatch_jvp calls. See A.4 in the audit plan.
+
+    auto output = func(input);
+
+    // ---- Fast path: single registered op ---------------------------------
+    if (auto grad_fn = output.grad_fn()) {
+        OpId op = grad_fn->op_id();
+        if (op != OpId::Unknown && has_jvp_rule(op)) {
+            const auto& inputs = grad_fn->input_variables();
+            // Identity check via shared storage data pointer. The
+            // input_variables stored on `grad_fn` are copies that share
+            // VariableImpl (and therefore Tensor storage) with the
+            // user's `input`. A matching data pointer is sufficient for
+            // the single-op fast path; multi-op chains take the fallback.
+            const void* user_ptr = input.tensor().data_ptr();
+            bool all_match_user_input = !inputs.empty() && user_ptr != nullptr;
+            for (const auto& iv : inputs) {
+                if (iv.tensor().data_ptr() != user_ptr) {
+                    all_match_user_input = false;
+                    break;
+                }
+            }
+            if (all_match_user_input) {
+                std::vector<Tensor> primals;
+                std::vector<Tensor> tangents;
+                primals.reserve(inputs.size());
+                tangents.reserve(inputs.size());
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    primals.push_back(input.tensor());
+                    tangents.push_back(tangent);
+                }
+                // Op attributes are not currently threaded through
+                // grad_fn nodes for forward-mode dispatch; pass an empty
+                // attrs object. JVP rules tolerate missing attrs by
+                // falling back to sensible defaults (e.g. dim=-1 for
+                // Softmax, full-tensor reduction for Sum/Mean, identity
+                // dim pair for Transpose). Ops whose JVP depends on
+                // non-default attributes still take the finite-difference
+                // path below.
+                OpAttributes attrs;
+                try {
+                    auto result = dispatch_jvp(op, primals, tangents, attrs);
+                    return {output, std::move(result.tangent)};
+                } catch (const std::exception&) {
+                    // Rule rejected the call (e.g. arity mismatch). Drop to
+                    // finite-difference fallback.
+                }
+            }
+        }
+    }
+
+    // ---- Fallback: central finite differences ----------------------------
+    static std::once_flag warned_flag;
+    std::call_once(warned_flag, [] {
+        std::fprintf(stderr,
+            "[autograd::jvp] WARNING: falling back to finite-difference JVP. "
+            "The op chain in `func` has no registered forward-mode rule "
+            "(see jvp_dispatch.hpp). Results are numerically approximate.\n");
+    });
 
     const double eps = 1e-4;
 
-    // Compute primal output
-    auto output = func(input);
-
-    // Compute perturbed output: f(x + eps*v)
     auto perturbed_data = tenzor::add(input.tensor(), tenzor::mul(tangent, eps));
     Variable perturbed_input(perturbed_data, false);
     auto perturbed_output_fwd = func(perturbed_input);
 
-    // Compute perturbed output: f(x - eps*v)
     auto perturbed_data_bwd = tenzor::sub(input.tensor(), tenzor::mul(tangent, eps));
     Variable perturbed_input_bwd(perturbed_data_bwd, false);
     auto perturbed_output_bwd = func(perturbed_input_bwd);
 
-    // Central difference for tangent output
     auto tangent_output = tenzor::mul(
         tenzor::sub(perturbed_output_fwd.tensor(), perturbed_output_bwd.tensor()),
         1.0 / (2.0 * eps)

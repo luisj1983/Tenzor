@@ -76,6 +76,7 @@ set(TENZOR_CORE_SOURCES
     autograd/graph_viz.cpp
     autograd/dual.cpp
     autograd/jvp_rules.cpp
+    autograd/jvp_dispatch.cpp
     autograd/functional.cpp
     autograd/vmap.cpp
     autograd/chrome_trace.cpp
