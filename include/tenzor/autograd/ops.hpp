@@ -1526,6 +1526,78 @@ auto unique(const Variable& input,
             bool return_inverse = false,
             bool return_counts = false) -> Variable;
 
+// ---- Audit E.7 batch 8 — order stats, integration, segment ops ----------
+
+/** @brief aminmax(x, dim, keepdim): simultaneous (min, max) along dim.
+ *         Backward sums grad_min scatter-to-argmin and grad_max scatter-
+ *         to-argmax (tie-normalised). Returns the pair as a vector to
+ *         match the multi-output convention. */
+auto aminmax(const Variable& input,
+             std::optional<int64_t> dim = std::nullopt,
+             bool keepdim = false) -> std::pair<Variable, Variable>;
+
+/** @brief kthvalue(x, k, dim, keepdim): k-th smallest along dim. Backward
+ *         scatters grad onto the k-th-value position (tie-normalised).
+ *         Returns only the value Variable; the index is integer-typed. */
+auto kthvalue(const Variable& input, int64_t k,
+              int64_t dim = -1, bool keepdim = false) -> Variable;
+
+/** @brief quantile(x, q, dim, keepdim): interpolated q-th quantile.
+ *         NON-DIFFERENTIABLE — backward needs a stable per-row argsort
+ *         with interpolation weights; see QuantileBackward. */
+auto quantile(const Variable& input, double q,
+              std::optional<int64_t> dim = std::nullopt,
+              bool keepdim = false) -> Variable;
+
+/** @brief nanmedian(x, dim): median along dim, NaN entries skipped.
+ *         Backward: scatter grad onto positions equal to the median value,
+ *         excluding NaN positions; tie-normalised. */
+auto nanmedian(const Variable& input,
+               std::optional<int64_t> dim = std::nullopt) -> Variable;
+
+/** @brief trapezoid(y, dx, dim): trapezoidal integration with uniform dx.
+ *         Backward applies linear weights along dim (dx interior, dx/2 at
+ *         endpoints). */
+auto trapezoid(const Variable& y, double dx = 1.0, int64_t dim = -1) -> Variable;
+
+/** @brief trapezoid(y, x, dim): trapezoidal integration with non-uniform x.
+ *         Backward routes grad only to y (x is non-diff, matching PyTorch). */
+auto trapezoid(const Variable& y, const Variable& x, int64_t dim = -1) -> Variable;
+
+/** @brief cumulative_trapezoid(y, dx, dim): cumulative trapezoidal
+ *         integration with uniform dx. Backward is the reverse-cumsum of
+ *         dx-weighted halves; see CumulativeTrapezoidBackward. */
+auto cumulative_trapezoid(const Variable& y, double dx = 1.0,
+                          int64_t dim = -1) -> Variable;
+
+/** @brief cumulative_trapezoid(y, x, dim): cumulative trapezoidal
+ *         integration with non-uniform x. Backward routes grad only to y. */
+auto cumulative_trapezoid(const Variable& y, const Variable& x,
+                          int64_t dim = -1) -> Variable;
+
+/** @brief segment_reduce(data, offsets, reduce, axis): segmented reduction.
+ *         NON-DIFFERENTIABLE — the kernel does not return per-segment
+ *         argmax/argmin indices needed for max/min, and prod is
+ *         numerically unsafe through zeros. See SegmentReduceBackward. */
+auto segment_reduce(const Variable& data, const Tensor& offsets,
+                    const std::string& reduce = "sum",
+                    int64_t axis = 0) -> Variable;
+
+/** @brief gumbel_softmax(logits, tau, hard, dim): Gumbel-softmax sampling.
+ *         NON-DIFFERENTIABLE — forward doesn't save the drawn Gumbel noise,
+ *         so the soft+STE backward cannot be reconstructed. See
+ *         GumbelSoftmaxBackward. */
+auto gumbel_softmax(const Variable& logits, double tau = 1.0,
+                    bool hard = false, int64_t dim = -1) -> Variable;
+
+/** @brief cummax(x, dim): cumulative max returning (values, indices).
+ *         Backward: scatter_add of grad_values along dim using saved
+ *         indices. Returns the pair; indices are non-differentiable. */
+auto cummax(const Variable& input, int64_t dim) -> std::pair<Variable, Variable>;
+
+/** @brief cummin(x, dim): cumulative min returning (values, indices). */
+auto cummin(const Variable& input, int64_t dim) -> std::pair<Variable, Variable>;
+
 } // namespace tenzor
 
 namespace tenzor {

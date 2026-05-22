@@ -3289,4 +3289,497 @@ auto UniqueBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vect
         "or a learned attention/clustering relaxation.");
 }
 
+// =========================================================================
+// Audit E.7 batch 8 — order statistics, integration, segment reductions
+// =========================================================================
+
+namespace {
+
+// Mask helper: 1.0 at positions where |x - target| < tie_eps (broadcast),
+// 0.0 elsewhere. dtype/device matches `x`. Used by Aminmax/Nanmedian to
+// scatter grad onto value-matching positions (same epsilon ladder as
+// MaxBackward/MedianBackward).
+auto value_tie_mask(const Tensor& x, const Tensor& target_expanded) -> Tensor {
+    auto input_shape_vec = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    double eps_val;
+    switch (x.dtype()) {
+        case DType::Float64:  eps_val = 1e-12; break;
+        case DType::Float16:
+        case DType::BFloat16: eps_val = 1e-3; break;
+        default:              eps_val = 1e-7; break;
+    }
+    auto diff = sub(x, target_expanded);
+    auto abs_diff = abs(diff);
+    auto epsilon = full(input_shape_vec, eps_val, x.dtype(), x.device());
+    auto mask_bool = lt(abs_diff, epsilon);
+    auto ones_t = ones(input_shape_vec, x.dtype(), x.device());
+    auto zeros_t = zeros(input_shape_vec, x.dtype(), x.device());
+    return where(mask_bool, ones_t, zeros_t);
+}
+
+}  // namespace
+
+// --- Aminmax (differentiable: scatter to argmin OR argmax positions) -----
+//
+// One AminmaxBackward instance per output Variable. is_max_=false handles
+// the min branch (scatter incoming grad onto positions equal to the saved
+// min value); is_max_=true handles the max branch. The autograd engine
+// sums upstream when the same input feeds both branches.
+//
+// Saves: input, this branch's value tensor.
+auto AminmaxBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("AminmaxBackward::forward should not be called directly");
+}
+auto AminmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& input = saved_tensors_[0];
+    const auto& vals  = saved_tensors_[1];
+    const auto& grad_out = grad_outputs[0];
+
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // Broadcast saved values and grad back to input shape.
+    Tensor v = vals;
+    Tensor g = grad_out;
+    if (!dim_.has_value()) {
+        if (v.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            v = reshape(v, ones_shape);
+        }
+        if (g.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            g = reshape(g, ones_shape);
+        }
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+        if (!keepdim_) {
+            v = unsqueeze(v, dim);
+            g = unsqueeze(g, dim);
+        }
+    }
+    auto v_exp = expand(v, input_shape_vec);
+    auto g_exp = expand(g, input_shape_vec);
+
+    auto mask = value_tie_mask(input, v_exp);
+    Tensor tie_count;
+    if (!dim_.has_value()) {
+        tie_count = expand(sum(mask), input_shape_vec);
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+        tie_count = expand(sum(mask, dim, /*keepdim=*/true), input_shape_vec);
+    }
+    auto norm = div(mask, tie_count);
+    (void)is_max_;  // The branch's value is already saved; flag is metadata.
+    return {mul(g_exp, norm)};
+}
+
+// --- Kthvalue (differentiable: scatter at k-th position) -----------------
+//
+// y = kthvalue(x, k, dim)[0] is a single order statistic per reduction
+// row. Backward is identical to Median's tie-mask scatter, but the value
+// to match is the saved k-th value (no NaN handling). Saves: input, values.
+auto KthvalueBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("KthvalueBackward::forward should not be called directly");
+}
+auto KthvalueBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "KthvalueBackward: cannot compute gradient over empty tensor");
+
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+
+    Tensor out = output;
+    Tensor grad = grad_output;
+    if (!keepdim_) {
+        out = unsqueeze(out, dim);
+        grad = unsqueeze(grad, dim);
+    }
+    auto out_exp = expand(out, input_shape_vec);
+    auto grad_exp = expand(grad, input_shape_vec);
+
+    auto mask = value_tie_mask(input, out_exp);
+    auto tie_count = sum(mask, dim, /*keepdim=*/true);
+    auto tie_exp = expand(tie_count, input_shape_vec);
+    auto norm_mask = div(mask, tie_exp);
+    return {mul(grad_exp, norm_mask)};
+}
+
+// --- Quantile (non-diff: needs stable per-row argsort with interp weights)
+auto QuantileBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("QuantileBackward::forward should not be called directly");
+}
+auto QuantileBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "quantile: the linear adjoint of an interpolated quantile is a "
+        "two-position scatter onto the per-row sort permutation flanking q. "
+        "The project does not currently expose a stable per-row argsort "
+        "primitive together with the interpolation weights, and computing "
+        "the backward from saved inputs/outputs alone would require sorting "
+        "again at backward time and re-deriving the two flanking indices "
+        "for every reduction window — a workaround we will not ship. "
+        "Marking NonDifferentiable until that primitive lands.");
+}
+
+// --- Nanmedian (differentiable: median backward with NaN positions zeroed)
+auto NanmedianBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("NanmedianBackward::forward should not be called directly");
+}
+auto NanmedianBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "NanmedianBackward: cannot compute gradient of nanmedian over "
+        "empty tensor");
+
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // Zero NaN positions before tie matching so the median-value mask never
+    // picks them up. Use a sentinel (output + 2 * tie_eps) for NaN entries.
+    auto nan_mask = isnan(input);
+    auto non_nan = logical_not(nan_mask).to(input.dtype());
+
+    if (!dim_.has_value()) {
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_exp = expand(output_reshaped, input_shape_vec);
+
+        auto mask = value_tie_mask(input, output_exp);
+        // Exclude NaN positions from the mask (their value-comparison was
+        // against an arbitrary expanded output and would be unreliable).
+        mask = mul(mask, non_nan);
+
+        auto tie_count = sum(mask);
+        auto safe_tie = where(eq(tie_count, zeros({}, tie_count.dtype(), tie_count.device())),
+                              ones({}, tie_count.dtype(), tie_count.device()),
+                              tie_count);
+        mask = div(mask, safe_tie);
+
+        auto grad = grad_output;
+        if (grad.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad = reshape(grad, ones_shape);
+        }
+        auto grad_exp = expand(grad, input_shape_vec);
+        return {mul(grad_exp, mask)};
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+
+        // nanmedian along a dim returns the values tensor with that dim
+        // collapsed (keepdim=false by default; the project doesn't expose a
+        // keepdim variant on this overload). Unsqueeze to broadcast.
+        Tensor out = output;
+        Tensor grad = grad_output;
+        if (out.ndim() == input.ndim() - 1) {
+            out = unsqueeze(out, dim);
+        }
+        if (grad.ndim() == input.ndim() - 1) {
+            grad = unsqueeze(grad, dim);
+        }
+        auto out_exp = expand(out, input_shape_vec);
+        auto grad_exp = expand(grad, input_shape_vec);
+
+        auto mask = value_tie_mask(input, out_exp);
+        mask = mul(mask, non_nan);
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        // Guard against all-NaN rows (tie_count = 0) — route zero grad up.
+        auto tie_count_exp = expand(tie_count, input_shape_vec);
+        auto safe_tie = where(eq(tie_count_exp,
+                                 zeros(input_shape_vec, tie_count_exp.dtype(),
+                                       tie_count_exp.device())),
+                              ones(input_shape_vec, tie_count_exp.dtype(),
+                                   tie_count_exp.device()),
+                              tie_count_exp);
+        mask = div(mask, safe_tie);
+        return {mul(grad_exp, mask)};
+    }
+}
+
+// --- Trapezoid (differentiable: linear weights on each sample) -----------
+//
+// Backward broadcasts grad_out (a scalar along `dim`) and applies the
+// trapezoidal weights:
+//   * uniform dx: weight = dx for interior, dx/2 at the two endpoints
+//   * x given:    weight_i = 0.5 * (x_{i+1} - x_{i-1}) for interior; endpoints
+//                  are 0.5 * (x_1 - x_0) and 0.5 * (x_{N-1} - x_{N-2}).
+auto TrapezoidBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("TrapezoidBackward::forward should not be called directly");
+}
+auto TrapezoidBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(has_x_ ? 2 : 1);
+    const auto& y = saved_tensors_[0];
+    const auto& grad_out = grad_outputs[0];
+
+    auto y_shape = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(y.ndim());
+    int64_t N = y.shape()[dim];
+    TENZOR_CHECK_SHAPE(N >= 2,
+        "TrapezoidBackward: integration axis must have at least 2 samples");
+
+    // Build per-sample weight along `dim`. Final shape = y.shape().
+    Tensor weights;
+    if (has_x_) {
+        const auto& x = saved_tensors_[1];
+        TENZOR_CHECK_SHAPE(x.shape()[dim] == N,
+            "TrapezoidBackward: x and y must agree along the integration axis");
+        // dx_i = x_{i+1} - x_i  (length N-1 along dim)
+        auto x_left  = narrow(x, dim, 0,     N - 1);
+        auto x_right = narrow(x, dim, 1,     N - 1);
+        auto dx_full = sub(x_right, x_left);
+        // Endpoint weights: 0.5 * dx_full[0] and 0.5 * dx_full[-1].
+        // Interior weights: 0.5 * (dx_full[i-1] + dx_full[i]) for i=1..N-2.
+        std::vector<Tensor> chunks;
+        chunks.reserve(3);
+        auto half = full({}, 0.5, y.dtype(), y.device());
+        // First endpoint: 0.5 * dx_full[..., 0]
+        auto w_first = mul(narrow(dx_full, dim, 0, 1), half);
+        chunks.push_back(w_first);
+        if (N > 2) {
+            auto interior_l = narrow(dx_full, dim, 0,         N - 2);
+            auto interior_r = narrow(dx_full, dim, 1,         N - 2);
+            auto interior   = mul(add(interior_l, interior_r), half);
+            chunks.push_back(interior);
+        }
+        // Last endpoint: 0.5 * dx_full[..., -1]
+        auto w_last = mul(narrow(dx_full, dim, N - 2, 1), half);
+        chunks.push_back(w_last);
+        weights = cat(chunks, dim);
+    } else {
+        // Uniform dx: shape (1,...,N,...,1) broadcastable along dim.
+        std::vector<int64_t> w_shape(y.ndim(), 1);
+        w_shape[dim] = N;
+        // Build [dx/2, dx, dx, ..., dx, dx/2] in y.dtype() on y.device().
+        // Use ones * dx, then patch the endpoints by half-weighting via
+        // a multiplicative mask.
+        auto w_full = full(w_shape, dx_, y.dtype(), y.device());
+        // mask = 1 everywhere except 0.5 at the two endpoints.
+        // Build by concat([0.5], 1s of length N-2, [0.5]).
+        auto half_t = full({}, 0.5, y.dtype(), y.device());
+        std::vector<int64_t> endpoint_shape(y.ndim(), 1);
+        endpoint_shape[dim] = 1;
+        std::vector<int64_t> interior_shape(y.ndim(), 1);
+        interior_shape[dim] = N - 2;
+        auto half_t_shaped = expand(reshape(half_t, endpoint_shape), endpoint_shape);
+        auto interior_ones = ones(interior_shape, y.dtype(), y.device());
+        std::vector<Tensor> mask_chunks;
+        mask_chunks.push_back(half_t_shaped);
+        if (N > 2) {
+            mask_chunks.push_back(interior_ones);
+        }
+        mask_chunks.push_back(half_t_shaped);
+        auto mask = cat(mask_chunks, dim);
+        weights = mul(w_full, mask);
+    }
+
+    // grad_out has y's shape with `dim` removed. Unsqueeze and expand to
+    // y's shape so we can multiply by per-sample weights.
+    Tensor grad = grad_out;
+    if (grad.ndim() == y.ndim() - 1) {
+        grad = unsqueeze(grad, dim);
+    }
+    auto grad_exp = expand(grad, y_shape);
+
+    // Broadcast weights to y_shape and multiply.
+    auto weights_exp = expand(weights, y_shape);
+    auto grad_y = mul(grad_exp, weights_exp);
+
+    if (has_x_) {
+        // Non-diff wrt x (matches PyTorch's trapezoid backward).
+        const auto& xs = saved_tensors_[1].shape();
+        std::vector<int64_t> x_shape(xs.begin(), xs.end());
+        return {grad_y, zeros(x_shape,
+                              saved_tensors_[1].dtype(),
+                              saved_tensors_[1].device())};
+    }
+    return {grad_y};
+}
+
+// --- CumulativeTrapezoid (differentiable) --------------------------------
+//
+// Output has dim's extent reduced from N to N-1, with
+//   out[k] = sum_{i=0..k-1} 0.5 * (y[i] + y[i+1]) * dx_i
+// d out[k] / d y[i] is:
+//   * 0       if i > k
+//   * 0.5*dx_{i-1}                 if i == k    (top edge)
+//   * 0.5*(dx_{i-1} + dx_i)        if 1<=i<k   (interior)
+//   * 0.5*dx_0                     if i == 0 and k >= 1
+//
+// Equivalently, define G_i = sum_{k=i..N-2} grad_out[k] (reverse cumsum).
+// Then  grad_y[i] = 0.5 * (dx_{i-1} * G_i + dx_i * G_i) with the convention
+// dx_{-1} = 0 (so y[0] only gets dx_0 * G_0) and dx_{N-1} = 0 (so y[N-1]
+// only gets dx_{N-2} * G_{N-2}).
+auto CumulativeTrapezoidBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CumulativeTrapezoidBackward::forward should not be called directly");
+}
+auto CumulativeTrapezoidBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(has_x_ ? 2 : 1);
+    const auto& y = saved_tensors_[0];
+    const auto& grad_out = grad_outputs[0];
+
+    auto y_shape = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(y.ndim());
+    int64_t N = y.shape()[dim];
+    TENZOR_CHECK_SHAPE(N >= 2,
+        "CumulativeTrapezoidBackward: integration axis must have at least 2 samples");
+    TENZOR_CHECK_SHAPE(grad_out.shape()[dim] == N - 1,
+        "CumulativeTrapezoidBackward: grad_out's integration axis must have "
+        "y's extent minus 1");
+
+    // Reverse cumsum of grad_out along dim: G_i = sum_{k>=i} grad_out[k].
+    // Implement via flip → cumsum → flip.
+    auto g_flipped = flip(grad_out, {dim});
+    auto g_cum = cumsum(g_flipped, dim);
+    auto G = flip(g_cum, {dim});  // length N-1
+
+    // Build dx of length N-1 along dim.
+    Tensor dx;  // shape with `dim` extent = N-1
+    if (has_x_) {
+        const auto& x = saved_tensors_[1];
+        TENZOR_CHECK_SHAPE(x.shape()[dim] == N,
+            "CumulativeTrapezoidBackward: x and y must agree along the "
+            "integration axis");
+        auto x_left  = narrow(x, dim, 0, N - 1);
+        auto x_right = narrow(x, dim, 1, N - 1);
+        dx = sub(x_right, x_left);
+    } else {
+        std::vector<int64_t> dx_shape = y_shape;
+        dx_shape[dim] = N - 1;
+        dx = full(dx_shape, dx_, y.dtype(), y.device());
+    }
+
+    // dxG = dx * G along dim (length N-1).
+    auto dxG = mul(dx, G);
+
+    // Build per-sample grad_y of length N:
+    //   y[0]   gets 0.5 * dxG[0]
+    //   y[i]   for 1<=i<N-1 gets 0.5 * (dxG[i-1] + dxG[i])
+    //   y[N-1] gets 0.5 * dxG[N-2]
+    auto half = full({}, 0.5, y.dtype(), y.device());
+
+    auto first   = mul(narrow(dxG, dim, 0,     1),    half);
+    auto last    = mul(narrow(dxG, dim, N - 2, 1),    half);
+
+    std::vector<Tensor> chunks;
+    chunks.reserve(3);
+    chunks.push_back(first);
+    if (N > 2) {
+        auto left_part  = narrow(dxG, dim, 0,     N - 2);
+        auto right_part = narrow(dxG, dim, 1,     N - 2);
+        auto interior   = mul(add(left_part, right_part), half);
+        chunks.push_back(interior);
+    }
+    chunks.push_back(last);
+    auto grad_y = cat(chunks, dim);
+
+    if (has_x_) {
+        const auto& xs = saved_tensors_[1].shape();
+        std::vector<int64_t> x_shape(xs.begin(), xs.end());
+        return {grad_y, zeros(x_shape,
+                              saved_tensors_[1].dtype(),
+                              saved_tensors_[1].device())};
+    }
+    return {grad_y};
+}
+
+// --- SegmentReduce (non-diff) --------------------------------------------
+auto SegmentReduceBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("SegmentReduceBackward::forward should not be called directly");
+}
+auto SegmentReduceBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "segment_reduce: backward is well-defined for sum/mean only. For "
+        "max/min it requires per-segment argmax/argmin indices that the "
+        "kernel does not currently return, and for prod a numerically-safe "
+        "chain that handles zeros. Implementing only sum/mean would "
+        "silently break callers using the other modes. Marked "
+        "NonDifferentiable (project policy: fail loudly) until the kernel "
+        "returns the necessary index/state.");
+}
+
+// --- GumbelSoftmax (non-diff: forward doesn't save the Gumbel noise) -----
+auto GumbelSoftmaxBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("GumbelSoftmaxBackward::forward should not be called directly");
+}
+auto GumbelSoftmaxBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "gumbel_softmax: the correct backward is SoftmaxBackward applied to "
+        "the perturbed logits (logits + Gumbel noise) / tau, with the "
+        "straight-through estimator routed through the soft sample when "
+        "hard=true. The current forward does not save the Gumbel noise "
+        "drawn during sampling, so any backward we add here would either "
+        "re-sample (producing wrong, non-reproducible gradients) or ignore "
+        "tau. Marked NonDifferentiable until the forward saves the noise. "
+        "Compose softmax((logits + gumbel) / tau) directly if you need the "
+        "gradient.");
+}
+
+// --- CumMax (differentiable: scatter_add of grad_values along dim using
+//             saved indices) ----------------------------------------------
+auto CumMaxBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CumMaxBackward::forward should not be called directly");
+}
+auto CumMaxBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    // saved: input_shape (encoded as a 1-D Int64 placeholder, see wrapper),
+    //        indices (Int64, same shape as input).
+    require_saved_tensors(2);
+    const auto& shape_holder = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];
+    const auto& grad_out = grad_outputs[0];
+
+    auto input_shape = std::vector<int64_t>(
+        shape_holder.shape().begin(), shape_holder.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+
+    auto zero = zeros(input_shape, grad_out.dtype(), grad_out.device());
+    return {scatter_add(zero, dim, indices, grad_out)};
+}
+
+// --- CumMin (differentiable) ---------------------------------------------
+auto CumMinBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CumMinBackward::forward should not be called directly");
+}
+auto CumMinBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& shape_holder = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];
+    const auto& grad_out = grad_outputs[0];
+
+    auto input_shape = std::vector<int64_t>(
+        shape_holder.shape().begin(), shape_holder.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+
+    auto zero = zeros(input_shape, grad_out.dtype(), grad_out.device());
+    return {scatter_add(zero, dim, indices, grad_out)};
+}
+
 } // namespace tenzor

@@ -4531,4 +4531,250 @@ public:
     auto op_id() const -> OpId override { return OpId::Unique; }
 };
 
+// ============================================================================
+// Audit E.7 batch 8 — order-statistic, integration, segment reductions
+// ============================================================================
+
+/**
+ * @brief aminmax(x, dim, keepdim) — simultaneous min + max along dim,
+ *        returning (min_values, max_values).
+ *
+ *        Project autograd Function instances own a single logical output
+ *        Variable, so the wrapper produces two Variables each with its own
+ *        AminmaxBackward (one configured for the "min" route, one for the
+ *        "max" route). Each backward scatters its incoming grad onto the
+ *        value-matching positions in the input (tie-normalised) and routes
+ *        zero everywhere else. The autograd engine sums the two
+ *        contributions when the same input reaches both branches.
+ *
+ *        Saves per instance: input, this branch's value tensor (min or max).
+ */
+class AminmaxBackward : public Function {
+public:
+    AminmaxBackward(std::optional<int64_t> dim, bool keepdim, bool is_max)
+        : dim_(dim), keepdim_(keepdim), is_max_(is_max) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AminmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::Aminmax; }
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+    bool is_max_;
+};
+
+/**
+ * @brief kthvalue(x, k, dim, keepdim) — k-th smallest value and its index along
+ *        dim. Gradient: scatter dL/dy at the k-th-position index (single
+ *        position per reduction row). Saves the index tensor returned by the
+ *        forward to drive scatter_add at backward time.
+ */
+class KthvalueBackward : public Function {
+public:
+    KthvalueBackward(int64_t k, int64_t dim, bool keepdim)
+        : k_(k), dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "KthvalueBackward"; }
+    auto op_id() const -> OpId override { return OpId::Kthvalue; }
+private:
+    int64_t k_;
+    int64_t dim_;
+    bool keepdim_;
+};
+
+/**
+ * @brief quantile(x, q, dim, keepdim) — interpolated q-th quantile along dim.
+ *        The backward is the linear adjoint of a two-position interpolation
+ *        between the two flanking order statistics for each reduction row,
+ *        which requires reconstructing the per-row sort permutation at
+ *        backward time. The project's order-statistic primitives don't expose
+ *        a stable per-row argsort with interpolation weights without doing
+ *        the sort twice (once in forward, once in backward); the inputs/
+ *        outputs alone are not enough to recover the two flanking positions
+ *        for every (..., dim, ...) slice.
+ *
+ *        Marking NonDifferentiable until a stable per-row argsort surface
+ *        lands — fail loudly rather than fake gradients. See policy in
+ *        DiagonalScatterBackward / repeat_interleave(Tensor) for the same
+ *        pattern.
+ */
+class QuantileBackward : public Function {
+public:
+    QuantileBackward(double q, std::optional<int64_t> dim, bool keepdim)
+        : q_(q), dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "QuantileBackward"; }
+    auto op_id() const -> OpId override { return OpId::Quantile; }
+private:
+    double q_;
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
+/**
+ * @brief nanmedian(x, dim) — median along dim with NaN entries skipped.
+ *        Backward: scatter dL/dy onto positions equal to the saved median
+ *        value, with NaN positions excluded from the tie-mask normalisation.
+ *        Equivalent to MedianBackward but the mask is multiplied by
+ *        `!isnan(x)` before tie-count normalisation.
+ */
+class NanmedianBackward : public Function {
+public:
+    explicit NanmedianBackward(std::optional<int64_t> dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NanmedianBackward"; }
+    auto op_id() const -> OpId override { return OpId::Nanmedian; }
+private:
+    std::optional<int64_t> dim_;
+};
+
+/**
+ * @brief trapezoid(y, dx | x, dim) — trapezoidal rule integration.
+ *
+ *   I = sum_{i=0..N-2} 0.5 * (y[i] + y[i+1]) * dx[i]
+ *
+ *   * Uniform spacing (constant dx):
+ *         dI/dy[i] = dx                 for interior i (0 < i < N-1)
+ *         dI/dy[0] = dI/dy[N-1] = dx/2  for the two endpoints
+ *   * Non-uniform spacing (x given):
+ *         dI/dy[i]  = 0.5 * (dx[i-1] + dx[i])  for interior
+ *         dI/dy[0]  = 0.5 * dx[0]
+ *         dI/dy[-1] = 0.5 * dx[-1]
+ *         dI/dx[i]  is 0 at the endpoints in dx-space; we only differentiate
+ *                   wrt y (matching PyTorch's `torch.trapezoid` backward).
+ *
+ *   has_x_=false ⇒ uniform-dx overload. dim_ is normalised to non-negative
+ *   inside the backward.
+ */
+class TrapezoidBackward : public Function {
+public:
+    TrapezoidBackward(int64_t dim, double dx, bool has_x)
+        : dim_(dim), dx_(dx), has_x_(has_x) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "TrapezoidBackward"; }
+    auto op_id() const -> OpId override { return OpId::Trapezoid; }
+private:
+    int64_t dim_;
+    double dx_;
+    bool has_x_;
+};
+
+/**
+ * @brief cumulative_trapezoid(y, dx | x, dim) — cumulative trapezoidal
+ *        integration. Output has dim's extent reduced by 1.
+ *
+ *   For uniform dx, out[k] = sum_{i=0..k-1} 0.5*(y[i] + y[i+1])*dx, so
+ *   d out[k] / d y[i] is dx if 1 <= i <= k-1 (interior) or dx/2 at edge i=0
+ *   or i=k. Equivalently, grad_y[i] = dx/2 * (G_i + G_{i-1}) where
+ *   G_j = sum_{k>=j} grad_out[k] is the *reverse cumsum* of grad_out, with
+ *   G_N = 0. We compute this by reverse-cumsum, pad-shift, and average.
+ *
+ *   Non-uniform x case uses dx[i] = x[i+1] - x[i] in place of constant dx
+ *   (dx[i-1] + dx[i] etc.). Only grad wrt y is produced.
+ */
+class CumulativeTrapezoidBackward : public Function {
+public:
+    CumulativeTrapezoidBackward(int64_t dim, double dx, bool has_x)
+        : dim_(dim), dx_(dx), has_x_(has_x) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CumulativeTrapezoidBackward"; }
+    auto op_id() const -> OpId override { return OpId::CumulativeTrapezoid; }
+private:
+    int64_t dim_;
+    double dx_;
+    bool has_x_;
+};
+
+/**
+ * @brief segment_reduce(data, offsets, reduce, axis) — segmented reduction.
+ *        Backward is well-defined for "sum" and "mean" (route grad to each
+ *        segment uniformly, optionally divided by segment length) but for
+ *        "max"/"min" it requires argmax/argmin per segment, which the kernel
+ *        does not currently expose, and for "prod" it requires the per-
+ *        segment product chain which suffers numerically when any element is
+ *        zero. Implementing only sum/mean would silently break callers using
+ *        the other modes (no signal that no gradient flows).
+ *
+ *        Project policy: NonDifferentiable until the kernel returns per-
+ *        segment argmax/argmin indices and a numerically-safe prod backward
+ *        is added. Matches the policy used for Nonzero/Unique/DiagonalScatter.
+ */
+class SegmentReduceBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SegmentReduceBackward"; }
+    auto op_id() const -> OpId override { return OpId::SegmentReduce; }
+};
+
+/**
+ * @brief gumbel_softmax(logits, tau, hard, dim) — Gumbel-Softmax with optional
+ *        straight-through estimator. The standard "soft" backward is the
+ *        SoftmaxBackward of the noise-perturbed logits, and the hard=true
+ *        variant uses a straight-through estimator that re-routes the
+ *        backward through the soft sample. Implementing this correctly
+ *        requires saving the *exact* Gumbel noise drawn in the forward (so
+ *        the backward is reproducible across calls and the soft surrogate
+ *        matches what was sampled) — the current forward does not return or
+ *        save that noise, so any backward we add here would either re-sample
+ *        and silently produce wrong gradients, or fall back to a STE that
+ *        ignores the temperature `tau` scaling.
+ *
+ *        Project policy: NonDifferentiable until the forward saves the
+ *        Gumbel noise and the STE variant is wired through SoftmaxBackward.
+ *        Users that need the gradient should compose softmax(logits / tau)
+ *        directly and apply their own STE wrapper.
+ */
+class GumbelSoftmaxBackward : public Function {
+public:
+    GumbelSoftmaxBackward(double tau, bool hard, int64_t dim)
+        : tau_(tau), hard_(hard), dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GumbelSoftmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::GumbelSoftmax; }
+private:
+    double tau_;
+    bool hard_;
+    int64_t dim_;
+};
+
+/**
+ * @brief cummax(x, dim) — cumulative maximum along dim, returning (values,
+ *        indices). Forward: out[k] = max(x[0..k]); indices[k] = argmax(x[0..k]).
+ *        Backward: scatter_add of grad_values along dim using the saved
+ *        indices. Equivalent to gather's adjoint. Only grad wrt x (values
+ *        slot) is produced; indices are non-differentiable.
+ */
+class CumMaxBackward : public Function {
+public:
+    explicit CumMaxBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CumMaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::CumMax; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief cummin(x, dim) — cumulative minimum, returning (values, indices).
+ *        Backward symmetric to CumMaxBackward.
+ */
+class CumMinBackward : public Function {
+public:
+    explicit CumMinBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CumMinBackward"; }
+    auto op_id() const -> OpId override { return OpId::CumMin; }
+private:
+    int64_t dim_;
+};
+
 } // namespace tenzor

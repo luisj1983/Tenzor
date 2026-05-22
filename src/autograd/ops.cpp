@@ -4084,4 +4084,235 @@ auto unique(const Variable& input, bool sorted, bool return_inverse,
     return output;
 }
 
+// =========================================================================
+// Audit E.7 batch 8 — order stats, integration, segment ops
+// =========================================================================
+
+// aminmax — returns (min, max). Each output Variable owns its own
+// AminmaxBackward, configured to scatter its incoming grad onto positions
+// equal to its saved value (tie-normalised). The autograd engine sums when
+// both branches share an upstream input.
+auto aminmax(const Variable& input, std::optional<int64_t> dim, bool keepdim)
+    -> std::pair<Variable, Variable> {
+    auto [min_vals, max_vals] =
+        tenzor::aminmax(input.tensor(), dim, keepdim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(min_vals, false), Variable(max_vals, false)};
+    }
+
+    auto make_branch = [&](const Tensor& vals, bool is_max) {
+        auto grad_fn = std::make_shared<AminmaxBackward>(dim, keepdim, is_max);
+        grad_fn->save_for_backward({input.tensor(), vals});
+        grad_fn->set_next_functions({input.grad_fn()});
+        grad_fn->set_input_variables({input});
+        Variable out(vals, true);
+        out.set_grad_fn(grad_fn);
+        return out;
+    };
+    return {make_branch(min_vals, /*is_max=*/false),
+            make_branch(max_vals, /*is_max=*/true)};
+}
+
+// kthvalue — returns value only at the autograd surface (index is non-diff).
+auto kthvalue(const Variable& input, int64_t k, int64_t dim, bool keepdim)
+    -> Variable {
+    auto [values, indices] =
+        tenzor::kthvalue(input.tensor(), k, dim, keepdim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(values, false);
+    }
+    auto grad_fn = std::make_shared<KthvalueBackward>(k, dim, keepdim);
+    grad_fn->save_for_backward({input.tensor(), values});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(values, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// quantile — non-differentiable.
+auto quantile(const Variable& input, double q, std::optional<int64_t> dim,
+              bool keepdim) -> Variable {
+    auto values = tenzor::quantile(input.tensor(), q, dim, keepdim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(values, false);
+    }
+    auto grad_fn = std::make_shared<QuantileBackward>(q, dim, keepdim);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(values, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// nanmedian — differentiable (median backward with NaN positions excluded).
+auto nanmedian(const Variable& input, std::optional<int64_t> dim) -> Variable {
+    auto values = tenzor::nanmedian(input.tensor(), dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(values, false);
+    }
+    auto grad_fn = std::make_shared<NanmedianBackward>(dim);
+    grad_fn->save_for_backward({input.tensor(), values});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(values, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// trapezoid — uniform-dx overload (only y is differentiable).
+auto trapezoid(const Variable& y, double dx, int64_t dim) -> Variable {
+    auto result = tenzor::trapezoid(y.tensor(), dx, dim);
+    if (!y.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<TrapezoidBackward>(dim, dx, /*has_x=*/false);
+    grad_fn->save_for_backward({y.tensor()});
+    grad_fn->set_next_functions({y.grad_fn()});
+    grad_fn->set_input_variables({y});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// trapezoid — non-uniform x overload. x is treated as non-diff (matches
+// PyTorch). We still attach it as a saved tensor so the backward can read
+// dx_i = x_{i+1} - x_i. The next_functions slot for x is nullptr (no grad
+// routed back); the backward returns a zero of x.shape for that slot.
+auto trapezoid(const Variable& y, const Variable& x, int64_t dim) -> Variable {
+    auto result = tenzor::trapezoid(y.tensor(), x.tensor(), dim);
+    const bool y_needs = y.requires_grad() && is_grad_enabled();
+    if (!y_needs) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<TrapezoidBackward>(dim, /*dx=*/0.0, /*has_x=*/true);
+    grad_fn->save_for_backward({y.tensor(), x.tensor()});
+    // We don't route a gradient through x, but the next_functions vector
+    // must align with the input_variables vector for the engine. Provide
+    // nullptr for x's slot.
+    grad_fn->set_next_functions({y.grad_fn(), nullptr});
+    grad_fn->set_input_variables({y, x});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// cumulative_trapezoid — uniform-dx overload.
+auto cumulative_trapezoid(const Variable& y, double dx, int64_t dim) -> Variable {
+    auto result = tenzor::cumulative_trapezoid(y.tensor(), dx, dim);
+    if (!y.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<CumulativeTrapezoidBackward>(
+        dim, dx, /*has_x=*/false);
+    grad_fn->save_for_backward({y.tensor()});
+    grad_fn->set_next_functions({y.grad_fn()});
+    grad_fn->set_input_variables({y});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// cumulative_trapezoid — non-uniform x overload (only y is diff).
+auto cumulative_trapezoid(const Variable& y, const Variable& x, int64_t dim)
+    -> Variable {
+    auto result = tenzor::cumulative_trapezoid(y.tensor(), x.tensor(), dim);
+    const bool y_needs = y.requires_grad() && is_grad_enabled();
+    if (!y_needs) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<CumulativeTrapezoidBackward>(
+        dim, /*dx=*/0.0, /*has_x=*/true);
+    grad_fn->save_for_backward({y.tensor(), x.tensor()});
+    grad_fn->set_next_functions({y.grad_fn(), nullptr});
+    grad_fn->set_input_variables({y, x});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// segment_reduce — non-differentiable (per project policy; see
+// SegmentReduceBackward).
+auto segment_reduce(const Variable& data, const Tensor& offsets,
+                    const std::string& reduce, int64_t axis) -> Variable {
+    auto result = tenzor::segment_reduce(data.tensor(), offsets, reduce, axis);
+    if (!data.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<SegmentReduceBackward>();
+    grad_fn->set_next_functions({data.grad_fn()});
+    grad_fn->set_input_variables({data});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// gumbel_softmax — non-differentiable (forward doesn't save the Gumbel
+// noise; see GumbelSoftmaxBackward).
+auto gumbel_softmax(const Variable& logits, double tau, bool hard, int64_t dim)
+    -> Variable {
+    auto result = tenzor::gumbel_softmax(logits.tensor(), tau, hard, dim);
+    if (!logits.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<GumbelSoftmaxBackward>(tau, hard, dim);
+    grad_fn->set_next_functions({logits.grad_fn()});
+    grad_fn->set_input_variables({logits});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// cummax — returns (values_var, indices_var). values is differentiable
+// (scatter_add of grad onto saved indices); indices is non-diff (Int64).
+// Saves an input-shape placeholder + indices so the backward can rebuild
+// a zeros tensor of the right shape.
+namespace {
+auto make_shape_placeholder(const std::vector<int64_t>& shape,
+                            DType dtype, Device device) -> Tensor {
+    // Zero tensor of the requested shape; the backward only reads
+    // `.shape()`. Use the input's dtype/device for parity in saved storage.
+    return zeros(shape, dtype, device);
+}
+}  // namespace
+
+auto cummax(const Variable& input, int64_t dim)
+    -> std::pair<Variable, Variable> {
+    auto [values, indices] = tenzor::cummax(input.tensor(), dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(values, false), Variable(indices, false)};
+    }
+    auto grad_fn = std::make_shared<CumMaxBackward>(dim);
+    auto input_shape =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto shape_holder =
+        make_shape_placeholder(input_shape, values.dtype(), values.device());
+    grad_fn->save_for_backward({shape_holder, indices});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable values_var(values, true);
+    values_var.set_grad_fn(grad_fn);
+    // Indices: not differentiable. Return as a no-grad Variable.
+    return {values_var, Variable(indices, false)};
+}
+
+auto cummin(const Variable& input, int64_t dim)
+    -> std::pair<Variable, Variable> {
+    auto [values, indices] = tenzor::cummin(input.tensor(), dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(values, false), Variable(indices, false)};
+    }
+    auto grad_fn = std::make_shared<CumMinBackward>(dim);
+    auto input_shape =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto shape_holder =
+        make_shape_placeholder(input_shape, values.dtype(), values.device());
+    grad_fn->save_for_backward({shape_holder, indices});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable values_var(values, true);
+    values_var.set_grad_fn(grad_fn);
+    return {values_var, Variable(indices, false)};
+}
+
 } // namespace tenzor
