@@ -17,6 +17,7 @@
 #include <atomic>
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
+#include "../backend/op_attributes.hpp"
 #include "../sparse/sparse_tensor.hpp"
 #include "variable.hpp"
 
@@ -360,6 +361,27 @@ public:
      *         `OpId::Unknown` if the subclass hasn't opted in.
      */
     virtual auto op_id() const -> OpId { return OpId::Unknown; }
+
+    /**
+     * @brief Reconstruct an `OpAttributes` snapshot of this Function's
+     *        attribute-bearing fields, for forward-mode (JVP) dispatch.
+     *
+     * Audit A.4 (multi-op JVP graph traversal): the JVP dispatch table is
+     * keyed by `OpId` and parametrised by `OpAttributes`. The autograd
+     * `Function` graph stores attributes in Function-specific fields
+     * (`dim_`, `dims_`, `dim0_/dim1_`, `min_/max_`, scalar params kept in
+     * `saved_tensors_[1]`, etc.), not in an `OpAttributes` object. The
+     * `functional::jvp` graph walker calls this method on each node to
+     * recover the attributes needed by `dispatch_jvp` without having to
+     * know the concrete subclass.
+     *
+     * Default returns an empty `OpAttributes`, which is appropriate for
+     * ops whose JVP rules take no attributes (e.g. Add, Mul, ReLU, MatMul).
+     * Subclasses with attribute-bearing JVP rules override to populate
+     * the relevant `AttrKey` entries from their saved fields. See
+     * `src/autograd/jvp_rules.cpp` for the per-op attribute contract.
+     */
+    virtual auto saved_attributes() const -> OpAttributes { return {}; }
 
     /**
      * @brief Set next functions in computation graph.
@@ -709,10 +731,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Sum; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
-};
+};;
 
 /**
  * @brief Mean reduction gradient function.
@@ -732,10 +760,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Mean; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
-};
+};;
 
 /**
  * @brief Natural logarithm gradient function.
@@ -858,9 +892,14 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::LogSoftmax; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
-};
+};;
 
 /**
  * @brief Softmax gradient function.
@@ -880,9 +919,14 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Softmax; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
-};
+};;
 
 /**
  * @brief Absolute value gradient function.
@@ -922,10 +966,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Clamp; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Min, static_cast<double>(min_));
+        attrs.set(AttrKey::Max, static_cast<double>(max_));
+        return attrs;
+    }
 private:
     float min_;
     float max_;
-};
+};;
 
 /**
  * @brief Max reduction gradient function.
@@ -944,10 +994,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Max; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
-};
+};;
 
 /**
  * @brief Median reduction gradient function.
@@ -1003,15 +1059,42 @@ private:
  */
 class ReshapeBackward : public Function {
 public:
-    ReshapeBackward(std::vector<int64_t> input_shape) : input_shape_(std::move(input_shape)) {}
+    /**
+     * @param input_shape The forward input's shape (used by `backward` to
+     *                    reshape the incoming gradient back to the original
+     *                    shape).
+     * @param output_shape The forward output's shape. Optional for
+     *                     backward-mode AD (which doesn't need it), but
+     *                     required by `saved_attributes()` so the
+     *                     forward-mode (JVP) dispatch rule can be invoked
+     *                     through this grad_fn (A.4 multi-op JVP traversal).
+     *                     Falls back to empty if omitted.
+     */
+    ReshapeBackward(std::vector<int64_t> input_shape,
+                    std::vector<int64_t> output_shape = {})
+        : input_shape_(std::move(input_shape)),
+          output_shape_(std::move(output_shape)) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Reshape; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (!output_shape_.empty()) {
+            std::string s;
+            for (size_t i = 0; i < output_shape_.size(); ++i) {
+                if (i) s += ',';
+                s += std::to_string(output_shape_[i]);
+            }
+            attrs.set(AttrKey::Shape, s);
+        }
+        return attrs;
+    }
 private:
     std::vector<int64_t> input_shape_;
-};
+    std::vector<int64_t> output_shape_;
+};;
 
 /**
  * @brief Permute gradient function.
@@ -1041,10 +1124,20 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Permute; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        std::string s;
+        for (size_t i = 0; i < dims_.size(); ++i) {
+            if (i) s += ',';
+            s += std::to_string(dims_[i]);
+        }
+        attrs.set(AttrKey::Dims, s);
+        return attrs;
+    }
 private:
     std::vector<int64_t> dims_;
     std::vector<int64_t> inv_dims_;
-};
+};;
 
 /**
  * @brief Transpose gradient function.
@@ -1062,10 +1155,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Transpose; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim0, dim0_);
+        attrs.set(AttrKey::Dim1, dim1_);
+        return attrs;
+    }
 private:
     int64_t dim0_;
     int64_t dim1_;
-};
+};;
 
 /**
  * @brief Roll gradient function.
@@ -1104,9 +1203,14 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Squeeze; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
-};
+};;
 
 /**
  * @brief Batch matrix multiplication gradient function.
@@ -1162,10 +1266,15 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Cat; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     std::vector<int64_t> split_sizes_;  ///< Size of each input along concat dimension
     int64_t dim_;                        ///< Concatenation dimension
-};
+};;
 
 /**
  * @brief Slice gradient function.
@@ -1192,13 +1301,21 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Slice; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Start, start_);
+        attrs.set(AttrKey::End, end_);
+        attrs.set(AttrKey::Step, step_);
+        return attrs;
+    }
 private:
     std::vector<int64_t> input_shape_;  ///< Original input shape
     int64_t dim_;                        ///< Slice dimension
     int64_t start_;                      ///< Start index
     int64_t end_;                        ///< End index (exclusive)
     int64_t step_;                       ///< Step size
-};
+};;
 
 /**
  * @brief Bilinear upsample gradient function.
@@ -1305,7 +1422,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Elu; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 class SeluBackward : public Function {
 public:
@@ -1331,7 +1449,9 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-};
+    auto op_id() const -> OpId override { return OpId::LeakyReLU; }
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 class SoftplusBackward : public Function {
 public:
@@ -1340,7 +1460,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Softplus; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 // =========================================================================
 // Element-wise Math Backward Functions
@@ -1362,7 +1483,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Pow; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 class ReciprocalBackward : public Function {
 public:
@@ -1601,7 +1723,13 @@ public:
     std::optional<int64_t> dim_;
     bool keepdim_;
     auto op_id() const -> OpId override { return OpId::Min; }
-};
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
+};;
 
 class StdBackward : public Function {
 public:
@@ -1613,7 +1741,14 @@ public:
     std::optional<int64_t> dim_;
     bool keepdim_;
     auto op_id() const -> OpId override { return OpId::Std; }
-};
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        // Unbiased flag is not stored on the Function; JVP rule defaults to true.
+        return attrs;
+    }
+};;
 
 class VarBackward : public Function {
 public:
@@ -1625,7 +1760,14 @@ public:
     std::optional<int64_t> dim_;
     bool keepdim_;
     auto op_id() const -> OpId override { return OpId::Var; }
-};
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        // Unbiased flag is not stored on the Function; JVP rule defaults to true.
+        return attrs;
+    }
+};;
 
 class ProdBackward : public Function {
 public:
@@ -1637,7 +1779,13 @@ public:
     std::optional<int64_t> dim_;
     bool keepdim_;
     auto op_id() const -> OpId override { return OpId::Prod; }
-};
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
+};;
 
 class LogSumExpBackward : public Function {
 public:
@@ -1649,7 +1797,13 @@ public:
     int64_t dim_;
     bool keepdim_;
     auto op_id() const -> OpId override { return OpId::LogSumExp; }
-};
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Keepdim, keepdim_);
+        return attrs;
+    }
+};;
 
 // =========================================================================
 // Shape/Indexing Backward Functions
@@ -1662,7 +1816,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Unsqueeze; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 class ExpandBackward : public Function {
 public:
@@ -1707,7 +1862,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Gather; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 class ScatterBackward : public Function {
 public:
@@ -1716,7 +1872,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Scatter; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 /**
  * @brief Backward for scatter_add: output[dim][index[i]] += src[i]
@@ -1744,7 +1901,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::IndexSelect; }
-};
+    auto saved_attributes() const -> OpAttributes override;
+};;
 
 /**
  * @brief Backward for advanced (fancy) indexing.
@@ -1817,9 +1975,14 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumSumBackward"; }
     auto op_id() const -> OpId override { return OpId::CumSum; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
-};
+};;
 
 /**
  * @brief Cumulative product gradient function.
@@ -1839,9 +2002,14 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumProdBackward"; }
     auto op_id() const -> OpId override { return OpId::CumProd; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
-};
+};;
 
 /**
  * @brief TopK gradient function.

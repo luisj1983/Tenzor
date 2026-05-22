@@ -511,7 +511,16 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 
     // Save original input shape for backward pass
     std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
-    auto grad_fn = std::make_shared<ReshapeBackward>(input_shape);
+
+    // Compute result first so we can record the resolved output shape on the
+    // grad_fn — A.4 multi-op JVP traversal needs the post-reshape shape to
+    // dispatch the forward-mode rule.
+    auto result_tensor = compute();
+    record(result_tensor);
+    std::vector<int64_t> output_shape(result_tensor.shape().begin(),
+                                      result_tensor.shape().end());
+
+    auto grad_fn = std::make_shared<ReshapeBackward>(input_shape, output_shape);
 
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;
@@ -528,9 +537,6 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 
     grad_fn->set_input_variables(input_vars);
 
-    // Compute result
-    auto result_tensor = compute();
-    record(result_tensor);
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 

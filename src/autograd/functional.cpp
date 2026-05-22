@@ -13,11 +13,142 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <mutex>
+#include <optional>
+#include <span>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace tenzor {
+
+namespace {
+
+// A.4 multi-op JVP traversal: walk the autograd graph rooted at `out_grad_fn`
+// in reverse-topological (i.e. forward-execution) order and chain
+// `dispatch_jvp` calls.
+//
+// Returns `std::nullopt` if any node in the graph has no registered
+// forward-mode rule (or its rule rejects the call); the caller then falls
+// back to finite differences for the whole chain. This is the
+// "no-workaround" contract: we either run the exact JVP for every op or
+// admit defeat and switch to FD.
+//
+// `user_input_ptr` is the data pointer of the user-supplied input tensor.
+// Any input_variable seen during the walk whose data pointer matches is
+// treated as the user input (carries `seed_tangent`); any other leaf input
+// (next_functions entry is nullptr and data_ptr differs) is treated as a
+// constant and carries a zero tangent.
+auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
+                      const void* user_input_ptr,
+                      const Tensor& seed_tangent) -> std::optional<Tensor> {
+    if (!out_grad_fn) return std::nullopt;
+
+    // 1. Collect every Function reachable from the output in DFS post-order.
+    //    Post-order gives us a topological ordering with producers before
+    //    consumers (because each Function's `next_functions` are its
+    //    predecessors / producers).
+    std::vector<std::shared_ptr<Function>> topo;
+    std::unordered_set<Function*> visited;
+
+    std::function<bool(const std::shared_ptr<Function>&)> dfs =
+        [&](const std::shared_ptr<Function>& node) -> bool {
+            if (!node) return true;                       // leaf edge
+            if (!visited.insert(node.get()).second) return true;
+            for (const auto& next : node->next_functions()) {
+                if (!dfs(next)) return false;
+            }
+            // Early-reject any node we can't dispatch through: stops the
+            // walk before we spend effort on an unreachable fast path.
+            OpId op = node->op_id();
+            if (op == OpId::Unknown || !has_jvp_rule(op)) return false;
+            topo.push_back(node);
+            return true;
+        };
+
+    if (!dfs(out_grad_fn)) return std::nullopt;
+    if (topo.empty()) return std::nullopt;
+
+    // 2. Tangent table.
+    //    - Indexed by the producer Function pointer for non-leaf inputs.
+    //    - The user-input leaf carries the seed tangent (looked up by
+    //      tensor data pointer).
+    //    - Other leaves (constants, e.g. index tensors) carry a zero
+    //      tangent matching their primal shape/dtype/device.
+    std::unordered_map<Function*, Tensor> node_tangents;
+
+    auto resolve_input_tangent = [&](const std::shared_ptr<Function>& prod,
+                                     const Tensor& primal) -> Tensor {
+        if (prod) {
+            auto it = node_tangents.find(prod.get());
+            if (it != node_tangents.end()) return it->second;
+            // Producer exists in the graph but we haven't computed its
+            // tangent — topo order is broken or the graph contains a
+            // cycle we don't support. Fall back.
+            return Tensor();
+        }
+        // Leaf: either the user input or a constant.
+        if (primal.data_ptr() != nullptr && primal.data_ptr() == user_input_ptr) {
+            return seed_tangent;
+        }
+        // Constant input: zero tangent with matching dtype/device/shape.
+        auto shape_vec = std::vector<int64_t>(primal.shape().begin(),
+                                              primal.shape().end());
+        return zeros(shape_vec, primal.dtype(), primal.device());
+    };
+
+    // 3. Forward-walk the topological order, dispatching each op's JVP.
+    for (const auto& node : topo) {
+        const auto& ivars = node->input_variables();
+        const auto& nexts = node->next_functions();
+
+        std::vector<Tensor> primals;
+        std::vector<Tensor> tangents;
+        primals.reserve(ivars.size());
+        tangents.reserve(ivars.size());
+
+        for (size_t i = 0; i < ivars.size(); ++i) {
+            const auto& primal = ivars[i].tensor();
+            std::shared_ptr<Function> prod;
+            if (i < nexts.size()) prod = nexts[i];
+            auto tang = resolve_input_tangent(prod, primal);
+            if (!tang.is_valid()) {
+                // Producer's tangent missing — bail.
+                return std::nullopt;
+            }
+            primals.push_back(primal);
+            tangents.push_back(std::move(tang));
+        }
+
+        // Some Functions carry constant non-Variable inputs (e.g. masks,
+        // indices) that aren't in `input_variables` but are required by
+        // the JVP rule arity (see jvp_adapter_gather: arity 2 for
+        // (input, index)). The dispatch will throw on arity mismatch; we
+        // catch that below and fall back to FD for the whole chain.
+
+        OpId op = node->op_id();
+        OpAttributes attrs = node->saved_attributes();
+
+        try {
+            auto result = dispatch_jvp(op,
+                                       std::span<const Tensor>(primals),
+                                       std::span<const Tensor>(tangents),
+                                       attrs);
+            node_tangents.emplace(node.get(), std::move(result.tangent));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    // 4. The output tangent is the tangent computed for the root Function.
+    auto it = node_tangents.find(out_grad_fn.get());
+    if (it == node_tangents.end()) return std::nullopt;
+    return it->second;
+}
+
+}  // anonymous namespace
 
 auto jvp(std::function<Variable(const Variable&)> func,
          const Variable& input,
@@ -25,73 +156,32 @@ auto jvp(std::function<Variable(const Variable&)> func,
     // Forward-mode AD via the registered dispatch_jvp rules when possible,
     // with a finite-difference fallback for ops/compositions not yet covered.
     //
-    // Strategy (A.4 audit item, partial implementation):
+    // Strategy (A.4 audit item, multi-op graph traversal):
     //
     //   1. Evaluate primal output: `output = func(input)`. This builds the
     //      backward graph as a side effect, giving us `output.grad_fn()`.
     //
-    //   2. Fast path — single-op function. If `output.grad_fn()` is a single
-    //      Function whose `input_variables()` consists solely of references
-    //      to `input` (by shared VariableImpl identity), and whose OpId has a
-    //      registered JVP rule, dispatch through `dispatch_jvp` to compute
-    //      the exact tangent in one pass. This avoids any numerical error
-    //      and is O(1) extra forward work.
+    //   2. Fast path — walk the grad_fn graph in reverse-topological order
+    //      (producers before consumers). For each node, look up its OpId,
+    //      reconstruct its OpAttributes via `Function::saved_attributes()`,
+    //      resolve input tangents from previously-computed node tangents
+    //      (or the seed tangent / a zero tangent for leaf inputs), and
+    //      call `dispatch_jvp`. The output tangent of the chain's root
+    //      Function is the tangent of `func`'s output.
     //
-    //   3. Fallback — central finite differences. For multi-op functions or
-    //      unregistered OpIds, fall back to the previous central-difference
-    //      implementation. Emit a one-shot diagnostic so callers know they
-    //      are on the slow/imprecise path.
-    //
-    // Future work: extend the fast path to multi-op chains by walking the
-    // backward graph in forward (reverse-topological) order and chaining
-    // dispatch_jvp calls. See A.4 in the audit plan.
+    //   3. Fallback — central finite differences. If *any* node in the
+    //      chain has no registered JVP rule or its rule rejects the call,
+    //      the entire walk aborts and we fall back to FD for the whole
+    //      function. No partial / "stitched" walks (per project no-
+    //      workaround policy).
 
     auto output = func(input);
 
-    // ---- Fast path: single registered op ---------------------------------
+    // ---- Fast path: walk the autograd graph -------------------------------
     if (auto grad_fn = output.grad_fn()) {
-        OpId op = grad_fn->op_id();
-        if (op != OpId::Unknown && has_jvp_rule(op)) {
-            const auto& inputs = grad_fn->input_variables();
-            // Identity check via shared storage data pointer. The
-            // input_variables stored on `grad_fn` are copies that share
-            // VariableImpl (and therefore Tensor storage) with the
-            // user's `input`. A matching data pointer is sufficient for
-            // the single-op fast path; multi-op chains take the fallback.
-            const void* user_ptr = input.tensor().data_ptr();
-            bool all_match_user_input = !inputs.empty() && user_ptr != nullptr;
-            for (const auto& iv : inputs) {
-                if (iv.tensor().data_ptr() != user_ptr) {
-                    all_match_user_input = false;
-                    break;
-                }
-            }
-            if (all_match_user_input) {
-                std::vector<Tensor> primals;
-                std::vector<Tensor> tangents;
-                primals.reserve(inputs.size());
-                tangents.reserve(inputs.size());
-                for (size_t i = 0; i < inputs.size(); ++i) {
-                    primals.push_back(input.tensor());
-                    tangents.push_back(tangent);
-                }
-                // Op attributes are not currently threaded through
-                // grad_fn nodes for forward-mode dispatch; pass an empty
-                // attrs object. JVP rules tolerate missing attrs by
-                // falling back to sensible defaults (e.g. dim=-1 for
-                // Softmax, full-tensor reduction for Sum/Mean, identity
-                // dim pair for Transpose). Ops whose JVP depends on
-                // non-default attributes still take the finite-difference
-                // path below.
-                OpAttributes attrs;
-                try {
-                    auto result = dispatch_jvp(op, primals, tangents, attrs);
-                    return {output, std::move(result.tangent)};
-                } catch (const std::exception&) {
-                    // Rule rejected the call (e.g. arity mismatch). Drop to
-                    // finite-difference fallback.
-                }
-            }
+        const void* user_ptr = input.tensor().data_ptr();
+        if (auto tangent_opt = try_traverse_jvp(grad_fn, user_ptr, tangent)) {
+            return {output, std::move(*tangent_opt)};
         }
     }
 

@@ -666,4 +666,15 @@ auto Atan2Backward::backward_with_variables(std::vector<Variable> grad_outputs) 
     return {grad_y, grad_x};
 }
 
+// A.4 multi-op JVP traversal: expose the scalar exponent stored in
+// saved_tensors_[1] as the `Exponent` attribute consumed by
+// jvp_adapter_pow.
+auto PowBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (saved_tensors_.size() >= 2) {
+        attrs.set(AttrKey::Exponent, extract_scalar_param(saved_tensors_[1]));
+    }
+    return attrs;
+}
+
 } // namespace tenzor

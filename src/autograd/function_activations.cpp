@@ -408,4 +408,38 @@ auto SoftplusBackward::backward_with_variables(std::vector<Variable> grad_output
     return {grad_outputs[0] * sig};
 }
 
+// ---------------------------------------------------------------------------
+// saved_attributes() — A.4 multi-op JVP traversal
+//
+// These activations save the scalar shape parameter as a single-element
+// tensor in saved_tensors_[1] (see ops.cpp::unary_autograd_with_param).
+// Re-expose it as an OpAttributes entry under the AttrKey the corresponding
+// JVP rule reads, so the forward-mode dispatch table can be invoked through
+// an autograd grad_fn graph.
+// ---------------------------------------------------------------------------
+
+auto EluBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (saved_tensors_.size() >= 2) {
+        attrs.set(AttrKey::Alpha, extract_scalar_param(saved_tensors_[1]));
+    }
+    return attrs;
+}
+
+auto LeakyReluBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (saved_tensors_.size() >= 2) {
+        attrs.set(AttrKey::Negative_slope, extract_scalar_param(saved_tensors_[1]));
+    }
+    return attrs;
+}
+
+auto SoftplusBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (saved_tensors_.size() >= 2) {
+        attrs.set(AttrKey::Beta, extract_scalar_param(saved_tensors_[1]));
+    }
+    return attrs;
+}
+
 } // namespace tenzor

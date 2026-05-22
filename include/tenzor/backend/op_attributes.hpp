@@ -531,6 +531,14 @@ private:
     size_t size_ = 0;
 };
 
+// Forward-declare-compatible alias of the canonical attribute container.
+// The real `OpAttributes` alias lives in `backend/backend.hpp`, which pulls in
+// the full dispatch table machinery. Headers that only need to mention the
+// attribute container type (e.g. `autograd/function.hpp`'s
+// `saved_attributes()` virtual) include this file instead so they don't drag
+// in the backend dispatch headers and create circular includes.
+using OpAttributes = NewOpAttributes;
+
 /**
  * @brief Get human-readable name for an AttrKey (for error messages).
  */

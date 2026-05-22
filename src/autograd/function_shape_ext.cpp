@@ -605,4 +605,43 @@ auto RepeatBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     return {result};
 }
 
+// ---------------------------------------------------------------------------
+// saved_attributes() — A.4 multi-op JVP traversal.
+// These Functions encode `dim` as the first saved tensor (Int64 scalar)
+// because the constructor doesn't take it as a field. Re-expose it as
+// AttrKey::Dim for the JVP dispatch table.
+// ---------------------------------------------------------------------------
+
+auto UnsqueezeBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (!saved_tensors_.empty()) {
+        attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+    }
+    return attrs;
+}
+
+auto GatherBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (!saved_tensors_.empty()) {
+        attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+    }
+    return attrs;
+}
+
+auto ScatterBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (!saved_tensors_.empty()) {
+        attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+    }
+    return attrs;
+}
+
+auto IndexSelectBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    if (!saved_tensors_.empty()) {
+        attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+    }
+    return attrs;
+}
+
 } // namespace tenzor
