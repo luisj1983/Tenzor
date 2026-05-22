@@ -25,6 +25,7 @@
 
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
@@ -45,6 +46,20 @@ struct JvpResult {
 };
 
 /**
+ * @brief Multi-output JVP rule result.
+ *
+ * For ops that return multiple tensors (e.g. BatchNorm2dForwardAffine returns
+ * {output, mean, rstd}; LinalgEigh returns {eigenvalues, eigenvectors};
+ * LayerNorm returns {output, mean, rstd}). `primals[i]` is f_i(primal) and
+ * `tangents[i]` is J_{f_i}(primal) * tangent_in. The two vectors must have
+ * identical length matching the op's output arity.
+ */
+struct JvpMultiResult {
+    std::vector<Tensor> primals;
+    std::vector<Tensor> tangents;
+};
+
+/**
  * @brief JVP rule function pointer.
  *
  * Takes parallel spans of primal and tangent input tensors plus the op's
@@ -58,6 +73,17 @@ using JvpRuleFn = JvpResult (*)(std::span<const Tensor> primals,
                                 const OpAttributes& attrs);
 
 /**
+ * @brief Multi-output JVP rule function pointer.
+ *
+ * Same input contract as `JvpRuleFn` but returns `JvpMultiResult` carrying
+ * one (primal, tangent) pair per op output. Use this for ops whose forward
+ * kernel returns multiple tensors (e.g. LayerNorm → {y, mean, rstd}).
+ */
+using JvpRuleFnMulti = JvpMultiResult (*)(std::span<const Tensor> primals,
+                                          std::span<const Tensor> tangents,
+                                          const OpAttributes& attrs);
+
+/**
  * @brief Register a JVP rule for an OpId.
  *
  * Must be called during library/program startup, before any concurrent
@@ -66,15 +92,40 @@ using JvpRuleFn = JvpResult (*)(std::span<const Tensor> primals,
 void register_jvp_rule(OpId op, JvpRuleFn fn);
 
 /**
+ * @brief Register a multi-output JVP rule for an OpId.
+ *
+ * Separate table from single-output rules. An OpId may have at most one
+ * single-output rule and/or at most one multi-output rule registered; the
+ * tables are independent so a single-output adapter does not displace a
+ * multi-output rule for the same OpId (callers pick the entry point that
+ * matches the op's output arity).
+ */
+void register_jvp_rule_multi(OpId op, JvpRuleFnMulti fn);
+
+/**
  * @brief Check whether a JVP rule is registered for the given OpId.
+ *
+ * Returns true if a single-output rule is registered. For multi-output
+ * coverage use `has_jvp_rule_multi`.
  */
 [[nodiscard]] bool has_jvp_rule(OpId op) noexcept;
+
+/**
+ * @brief Check whether a multi-output JVP rule is registered for the OpId.
+ */
+[[nodiscard]] bool has_jvp_rule_multi(OpId op) noexcept;
 
 /**
  * @brief Look up the registered JVP rule for an OpId.
  * @return Function pointer or nullptr if none registered.
  */
 [[nodiscard]] JvpRuleFn get_jvp_rule(OpId op) noexcept;
+
+/**
+ * @brief Look up the registered multi-output JVP rule for an OpId.
+ * @return Function pointer or nullptr if none registered.
+ */
+[[nodiscard]] JvpRuleFnMulti get_jvp_rule_multi(OpId op) noexcept;
 
 /**
  * @brief Dispatch forward-mode AD for a single op.
@@ -93,6 +144,17 @@ void register_jvp_rule(OpId op, JvpRuleFn fn);
                                      std::span<const Tensor> primals,
                                      std::span<const Tensor> tangents,
                                      const OpAttributes& attrs = {});
+
+/**
+ * @brief Dispatch multi-output forward-mode AD for a single op.
+ *
+ * Looks up the multi-output JVP rule for `op` and invokes it. Throws
+ * std::runtime_error if no multi-output rule is registered for the OpId.
+ */
+[[nodiscard]] JvpMultiResult dispatch_jvp_multi(OpId op,
+                                                std::span<const Tensor> primals,
+                                                std::span<const Tensor> tangents,
+                                                const OpAttributes& attrs = {});
 
 /**
  * @brief Trigger registration of all built-in JVP rules.

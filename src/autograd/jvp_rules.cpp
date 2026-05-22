@@ -9,6 +9,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/vision.hpp"
+#include "tenzor/ops/fft.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <climits>
 #include <cmath>
@@ -408,6 +409,29 @@ auto jvp_mish(const DualTensor& x) -> DualTensor {
     auto sig_x = tenzor::sigmoid(p);
     auto deriv = tenzor::add(tanh_sp, tenzor::mul(tenzor::mul(p, sech2), sig_x));
     auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_hardswish(const DualTensor& x) -> DualTensor {
+    // hardswish(x) = x * clamp(x + 3, 0, 6) / 6
+    // derivative is piecewise:
+    //   0          if x <= -3
+    //   (2x + 3)/6 if -3 < x < 3
+    //   1          if x >= 3
+    auto p = x.primal();
+    auto primal = tenzor::div(tenzor::mul(p, tenzor::clamp(tenzor::add(p, 3.0), 0.0, 6.0)), 6.0);
+
+    auto shape_vec = std::vector<int64_t>(p.shape().begin(), p.shape().end());
+    auto zero        = tenzor::zeros(shape_vec, p.dtype(), p.device());
+    auto one_tensor  = tenzor::ones(shape_vec, p.dtype(), p.device());
+    auto neg3        = tenzor::full(shape_vec, -3.0, p.dtype(), p.device());
+    auto pos3        = tenzor::full(shape_vec,  3.0, p.dtype(), p.device());
+    auto middle      = tenzor::div(tenzor::add(tenzor::mul(p, 2.0), 3.0), 6.0);
+    auto cond_low    = tenzor::gt(p, neg3);
+    auto cond_high   = tenzor::gt(p, pos3);
+    auto deriv       = tenzor::where(cond_low, middle, zero);
+    deriv            = tenzor::where(cond_high, one_tensor, deriv);
+    auto tangent     = tenzor::mul(x.tangent(), deriv);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -2301,6 +2325,354 @@ JvpResult jvp_adapter_unfold(std::span<const Tensor> primals,
     return dual_to_result(jvp_unfold(input, kernel_size, stride, padding, dilation));
 }
 
+// ---- Audit A.4 (extension): Hardswish single-output adapter -------------
+
+JvpResult jvp_adapter_hardswish(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_hardswish: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_hardswish(x));
+}
+
+// ---- Audit A.4 (extension): FFT single-output adapters -------------------
+//
+// FFT/IFFT/RFFT/IRFFT are linear in their input, so the tangent is the same
+// op applied to the input tangent. We use OpAttributes (Dim, N, Norm) the
+// dispatcher carries and forward to the tenzor::fft::* tensor-level ops so
+// the right backend is selected.
+
+namespace {
+
+template <typename FFTOp>
+JvpResult fft_jvp_impl(const char* name,
+                       std::span<const Tensor> primals,
+                       std::span<const Tensor> tangents,
+                       const OpAttributes& attrs,
+                       FFTOp&& op) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error(std::string(name) + ": expected 1 input");
+    }
+    const Tensor& x  = primals[0];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0 && x.numel() != 0) {
+        auto shape_vec = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+        dx = tenzor::zeros(shape_vec, x.dtype(), x.device());
+    }
+    // Pull op-specific attributes. Defaults match tenzor::fft::* defaults.
+    std::optional<int64_t> n;
+    if (attrs.has(AttrKey::N)) n = attrs.get_int(AttrKey::N);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+
+    Tensor primal_out  = op(x,  n, dim, norm);
+    Tensor tangent_out = op(dx, n, dim, norm);
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
+}
+
+} // anonymous (nested)
+
+JvpResult jvp_adapter_fft(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    return fft_jvp_impl("jvp_adapter_fft", primals, tangents, attrs,
+        [](const Tensor& t, std::optional<int64_t> n, int64_t dim,
+           const std::string& norm) {
+            return tenzor::fft::fft(t, n, dim, norm);
+        });
+}
+
+JvpResult jvp_adapter_ifft(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    return fft_jvp_impl("jvp_adapter_ifft", primals, tangents, attrs,
+        [](const Tensor& t, std::optional<int64_t> n, int64_t dim,
+           const std::string& norm) {
+            return tenzor::fft::ifft(t, n, dim, norm);
+        });
+}
+
+JvpResult jvp_adapter_rfft(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& attrs) {
+    return fft_jvp_impl("jvp_adapter_rfft", primals, tangents, attrs,
+        [](const Tensor& t, std::optional<int64_t> n, int64_t dim,
+           const std::string& norm) {
+            return tenzor::fft::rfft(t, n, dim, norm);
+        });
+}
+
+JvpResult jvp_adapter_irfft(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    return fft_jvp_impl("jvp_adapter_irfft", primals, tangents, attrs,
+        [](const Tensor& t, std::optional<int64_t> n, int64_t dim,
+           const std::string& norm) {
+            return tenzor::fft::irfft(t, n, dim, norm);
+        });
+}
+
+// ---- Audit A.4 (extension): Multi-output JVP rules -----------------------
+//
+// These ops return multiple tensors (e.g. BatchNorm2dForwardAffine returns
+// {output, mean, rstd}). Each rule emits (primals, tangents) of matching
+// arity. Registered via register_jvp_rule_multi (separate table).
+
+namespace {
+
+// BatchNorm2dForwardAffine kernel contract:
+//   inputs : (x, batch_mean, batch_var, gamma, beta)
+//   outputs: {y[, mean, rstd]}  — some backends may only return {y}; we
+//            recompute mean/rstd from the supplied batch_mean/batch_var so
+//            the JVP rule's output arity is fixed at 3.
+//
+// y = (x - mean) * rstd * gamma + beta,  rstd = 1/sqrt(var + eps)
+// Linearise treating (x, mean, var, gamma, beta) as independent primals:
+//   dmean_t = dmean
+//   drstd_t = -0.5 * rstd^3 * dvar
+//   dy = (dx - dmean) * gamma * rstd
+//      + (x - mean) * gamma * drstd_t
+//      + (x - mean) * rstd * dgamma
+//      + dbeta
+// Channel-broadcast: mean/var/gamma/beta are per-channel (shape [C]); we
+// reshape to [1, C, 1, 1] for NCHW broadcasting.
+JvpMultiResult jvp_adapter_batchnorm2d_forward_affine(
+        std::span<const Tensor> primals,
+        std::span<const Tensor> tangents,
+        const OpAttributes& attrs) {
+    if (primals.size() != 5 || tangents.size() != 5) {
+        throw std::runtime_error(
+            "jvp_adapter_batchnorm2d_forward_affine: expected 5 inputs "
+            "(x, mean, var, gamma, beta)");
+    }
+    const Tensor& x     = primals[0];
+    const Tensor& mean  = primals[1];
+    const Tensor& var   = primals[2];
+    const Tensor& gamma = primals[3];
+    const Tensor& beta  = primals[4];
+
+    auto zeros_like_or = [](const Tensor& t, const Tensor& tan) -> Tensor {
+        if (tan.numel() != 0) return tan;
+        auto sh = std::vector<int64_t>(t.shape().begin(), t.shape().end());
+        return tenzor::zeros(sh, t.dtype(), t.device());
+    };
+    Tensor dx     = zeros_like_or(x,     tangents[0]);
+    Tensor dmean  = zeros_like_or(mean,  tangents[1]);
+    Tensor dvar   = zeros_like_or(var,   tangents[2]);
+    Tensor dgamma = zeros_like_or(gamma, tangents[3]);
+    Tensor dbeta  = zeros_like_or(beta,  tangents[4]);
+
+    double eps = attrs.get_float(AttrKey::Eps, 1e-5);
+
+    // rstd = 1/sqrt(var + eps)
+    auto rstd = tenzor::rsqrt(tenzor::add(var, eps));
+
+    // Reshape per-channel quantities to [1, C, 1, 1] for NCHW broadcast.
+    int64_t C = var.shape()[0];
+    std::vector<int64_t> c_shape = {1, C, 1, 1};
+    std::vector<int64_t> var_shape_vec(var.shape().begin(), var.shape().end());
+    auto rstd_b   = tenzor::reshape(rstd,   c_shape);
+    auto mean_b   = tenzor::reshape(mean,   c_shape);
+    auto gamma_b  = tenzor::reshape(gamma,  c_shape);
+    auto beta_b   = tenzor::reshape(beta,   c_shape);
+    auto dmean_b  = tenzor::reshape(dmean,  c_shape);
+    auto dvar_b   = tenzor::reshape(dvar,   c_shape);
+    auto dgamma_b = tenzor::reshape(dgamma, c_shape);
+    auto dbeta_b  = tenzor::reshape(dbeta,  c_shape);
+
+    // Primal: y = (x - mean) * gamma * rstd + beta
+    auto x_minus_mean = tenzor::sub(x, mean_b);
+    auto y_pre_beta   = tenzor::mul(tenzor::mul(x_minus_mean, gamma_b), rstd_b);
+    auto y            = tenzor::add(y_pre_beta, beta_b);
+
+    // drstd = -0.5 * rstd^3 * dvar  (still in [1,C,1,1] layout)
+    auto rstd_cubed = tenzor::mul(tenzor::mul(rstd_b, rstd_b), rstd_b);
+    auto drstd_b    = tenzor::mul(tenzor::mul(rstd_cubed, dvar_b), -0.5);
+
+    // dy = (dx - dmean)*gamma*rstd + (x-mean)*gamma*drstd + (x-mean)*rstd*dgamma + dbeta
+    auto term1 = tenzor::mul(tenzor::mul(tenzor::sub(dx, dmean_b), gamma_b), rstd_b);
+    auto term2 = tenzor::mul(tenzor::mul(x_minus_mean, gamma_b), drstd_b);
+    auto term3 = tenzor::mul(tenzor::mul(x_minus_mean, rstd_b), dgamma_b);
+    auto dy    = tenzor::add(tenzor::add(tenzor::add(term1, term2), term3), dbeta_b);
+
+    // Reshape drstd back to (C,) to match the kernel's mean/rstd shape.
+    auto drstd = tenzor::reshape(drstd_b, var_shape_vec);
+
+    JvpMultiResult result;
+    result.primals  = { std::move(y),  mean,  rstd  };
+    result.tangents = { std::move(dy), dmean, std::move(drstd) };
+    return result;
+}
+
+// LayerNorm kernel contract:
+//   inputs : (x, gamma, beta)
+//   outputs: {y, mean, rstd}
+// Normalisation runs over the last `normalized_shape_.size()` dims, so we
+// reduce over those axes and broadcast back.
+//
+// Internally:
+//   mean  = mean(x, dims=norm_dims, keepdim=true)
+//   var   = mean((x - mean)^2, dims=norm_dims, keepdim=true)
+//   rstd  = 1/sqrt(var + eps)
+//   y     = (x - mean) * rstd * gamma + beta
+// JVP (treat x, gamma, beta as inputs; mean/var derived from x):
+//   dmean = mean(dx, dims)
+//   dvar  = mean(2 * (x-mean) * (dx - dmean), dims)
+//   drstd = -0.5 * rstd^3 * dvar
+//   dy    = (dx - dmean) * rstd * gamma
+//         + (x - mean) * drstd * gamma
+//         + (x - mean) * rstd * dgamma
+//         + dbeta
+JvpMultiResult jvp_adapter_layer_norm(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_layer_norm: expected 3 inputs (x, gamma, beta)");
+    }
+    const Tensor& x     = primals[0];
+    const Tensor& gamma = primals[1];
+    const Tensor& beta  = primals[2];
+
+    auto zeros_like_or = [](const Tensor& t, const Tensor& tan) -> Tensor {
+        if (tan.numel() != 0) return tan;
+        auto sh = std::vector<int64_t>(t.shape().begin(), t.shape().end());
+        return tenzor::zeros(sh, t.dtype(), t.device());
+    };
+    Tensor dx     = zeros_like_or(x,     tangents[0]);
+    Tensor dgamma = zeros_like_or(gamma, tangents[1]);
+    Tensor dbeta  = zeros_like_or(beta,  tangents[2]);
+
+    double eps = attrs.get_float(AttrKey::Eps, 1e-5);
+
+    // normalized_shape is stored as comma-separated string; the last K dims
+    // of x are the normalisation axes. We don't strictly need the values,
+    // only K (the number of trailing axes to reduce over).
+    auto norm_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+    int64_t K = static_cast<int64_t>(norm_shape.size());
+    if (K <= 0) {
+        // Fall back to gamma's rank (norm dims == gamma's shape rank).
+        K = gamma.ndim();
+    }
+    int64_t xnd = x.ndim();
+    if (K > xnd) {
+        throw std::runtime_error(
+            "jvp_adapter_layer_norm: normalized_shape larger than input rank");
+    }
+
+    // Build helper that reduces over the last K dims with keepdim=true.
+    auto reduce_mean_trailing = [&](const Tensor& t) -> Tensor {
+        Tensor acc = t;
+        // mean accepts a single int64_t dim; apply iteratively. Always
+        // reduce the highest-numbered axis first so the index sequence
+        // stays valid.
+        for (int64_t i = 0; i < K; ++i) {
+            int64_t dim = xnd - 1 - i;
+            acc = tenzor::mean(acc, dim, /*keepdim=*/true);
+        }
+        return acc;
+    };
+
+    auto mean = reduce_mean_trailing(x);
+    auto x_minus_mean = tenzor::sub(x, mean);
+    auto var = reduce_mean_trailing(tenzor::mul(x_minus_mean, x_minus_mean));
+    auto rstd = tenzor::rsqrt(tenzor::add(var, eps));
+
+    // Primal y. gamma/beta broadcast over the leading dims; layer_norm
+    // expects them shaped like normalized_shape — broadcasting handles it
+    // via standard rules.
+    auto y_pre_beta = tenzor::mul(tenzor::mul(x_minus_mean, rstd), gamma);
+    auto y = tenzor::add(y_pre_beta, beta);
+
+    // Tangents.
+    auto dmean = reduce_mean_trailing(dx);
+    auto two_xmm = tenzor::mul(x_minus_mean, 2.0);
+    auto dvar = reduce_mean_trailing(tenzor::mul(two_xmm, tenzor::sub(dx, dmean)));
+    auto drstd = tenzor::mul(tenzor::mul(tenzor::mul(rstd, rstd), rstd),
+                             tenzor::mul(dvar, -0.5));
+
+    auto term1 = tenzor::mul(tenzor::mul(tenzor::sub(dx, dmean), rstd), gamma);
+    auto term2 = tenzor::mul(tenzor::mul(x_minus_mean, drstd), gamma);
+    auto term3 = tenzor::mul(tenzor::mul(x_minus_mean, rstd), dgamma);
+    auto dy = tenzor::add(tenzor::add(tenzor::add(term1, term2), term3), dbeta);
+
+    // Reshape mean/rstd to drop the trailing-1 dims that the LayerNorm
+    // kernel does not include in its returned stats. The shape of mean
+    // returned by the backend matches x with the last K dims collapsed
+    // to size 1 (and *not* squeezed), per the existing contract; keep
+    // keepdim=true layout for compatibility with both styles.
+    JvpMultiResult result;
+    result.primals  = { std::move(y), mean,  rstd  };
+    result.tangents = { std::move(dy), dmean, std::move(drstd) };
+    return result;
+}
+
+// LinalgEigh kernel contract (symmetric eigendecomposition):
+//   inputs : (A) — A symmetric (..., N, N)
+//   outputs: {W, V}  — W eigenvalues (..., N), V eigenvectors (..., N, N)
+//
+// JVP (Magnus & Neudecker; see Giles, "An extended collection of matrix
+// derivative results"):
+//   E   = V^T dA V
+//   dW  = diag(E)
+//   F   = 1/(W_j - W_i)  for i ≠ j; 0 on diagonal
+//   dV  = V (F * E)        (Hadamard with the F mask)
+// Degenerate eigenvalues produce non-finite F entries; the standard
+// approach is to clip / mask, but for symmetric matrices with distinct
+// spectra this formula is exact.
+JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
+                                       std::span<const Tensor> tangents,
+                                       const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_linalg_eigh: expected 1 input");
+    }
+    const Tensor& A = primals[0];
+    if (A.ndim() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_linalg_eigh: batched (>2D) eigh JVP not supported; "
+            "got ndim=" + std::to_string(A.ndim()));
+    }
+    Tensor dA = tangents[0];
+    if (dA.numel() == 0) {
+        auto sh = std::vector<int64_t>(A.shape().begin(), A.shape().end());
+        dA = tenzor::zeros(sh, A.dtype(), A.device());
+    }
+
+    auto [W, V] = tenzor::linalg::eigh(A);
+
+    // E = V^T @ dA @ V
+    auto Vt = tenzor::transpose(V, -2, -1);
+    auto E  = tenzor::matmul(Vt, tenzor::matmul(dA, V));
+
+    // dW = diag(E) — extract main diagonal of the 2D matrix E.
+    auto dW = tenzor::diag(E, /*diagonal=*/0);
+
+    // Build F mask: F_{ij} = 1/(W_j - W_i) for i ≠ j, 0 on diagonal.
+    auto W_col = tenzor::unsqueeze(W, -1);  // (N, 1)
+    auto W_row = tenzor::unsqueeze(W, -2);  // (1, N)
+    auto denom = tenzor::sub(W_row, W_col);
+    // Avoid divide-by-zero on the diagonal; replace zeros with 1, then zero
+    // the diagonal of F afterwards via masking.
+    auto zero_tensor  = tenzor::zeros_like(denom);
+    auto one_tensor   = tenzor::ones_like(denom);
+    auto is_zero_mask = tenzor::eq(denom, zero_tensor);
+    auto safe_denom   = tenzor::where(is_zero_mask, one_tensor, denom);
+    auto F            = tenzor::div(one_tensor, safe_denom);
+    F                 = tenzor::where(is_zero_mask, zero_tensor, F);
+
+    // dV = V @ (F * E)
+    auto dV = tenzor::matmul(V, tenzor::mul(F, E));
+
+    JvpMultiResult result;
+    result.primals  = { std::move(W),  std::move(V)  };
+    result.tangents = { std::move(dW), std::move(dV) };
+    return result;
+}
+
+} // anonymous (nested)
+
 } // anonymous namespace
 
 namespace detail {
@@ -2475,6 +2847,32 @@ void register_builtin_jvp_rules() {
 
     // Linear shape long-tail
     register_jvp_rule(OpId::Unfold,         &jvp_adapter_unfold);
+
+    // ---------------- Audit A.4 (extension) ---------------------------------
+    //
+    // Single-output additions:
+    //   - Hardswish (piecewise linear approx of swish; HardswishBackward in
+    //     nn/activations/activations.cpp uses OpId::Unknown, so this rule
+    //     is reachable only via direct dispatch_jvp() — registered for
+    //     completeness / external callers).
+    //   - FFT / IFFT / RFFT / IRFFT: complex Fourier transforms are linear,
+    //     so the tangent is the same op applied to the input tangent.
+    register_jvp_rule(OpId::Hardswish, &jvp_adapter_hardswish);
+    register_jvp_rule(OpId::FFT,       &jvp_adapter_fft);
+    register_jvp_rule(OpId::IFFT,      &jvp_adapter_ifft);
+    register_jvp_rule(OpId::RFFT,      &jvp_adapter_rfft);
+    register_jvp_rule(OpId::IRFFT,     &jvp_adapter_irfft);
+
+    // Multi-output rules (separate dispatch table; see
+    // register_jvp_rule_multi). These ops return multiple tensors and the
+    // walker in try_traverse_jvp does not currently follow multi-output
+    // Function nodes — the rules are exposed for direct dispatch via
+    // dispatch_jvp_multi() so that higher-level callers (and future
+    // walker extensions) can drive forward-mode AD through BN/LN/Eigh.
+    register_jvp_rule_multi(OpId::BatchNorm2dForwardAffine,
+                            &jvp_adapter_batchnorm2d_forward_affine);
+    register_jvp_rule_multi(OpId::LayerNorm,   &jvp_adapter_layer_norm);
+    register_jvp_rule_multi(OpId::LinalgEigh,  &jvp_adapter_linalg_eigh);
 }
 
 } // namespace detail

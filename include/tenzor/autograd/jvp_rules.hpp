@@ -44,6 +44,7 @@ auto jvp_elu(const DualTensor& x, float alpha = 1.0f) -> DualTensor;
 auto jvp_selu(const DualTensor& x) -> DualTensor;
 auto jvp_softplus(const DualTensor& x, float beta = 1.0f) -> DualTensor;
 auto jvp_mish(const DualTensor& x) -> DualTensor;
+auto jvp_hardswish(const DualTensor& x) -> DualTensor;
 /// @}
 
 /// @name Math JVP Rules

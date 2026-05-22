@@ -26,6 +26,7 @@ namespace {
 /// One-shot registry of JVP rules indexed by OpId.
 struct JvpDispatchTable {
     std::array<JvpRuleFn, OP_COUNT> rules{};
+    std::array<JvpRuleFnMulti, OP_COUNT> rules_multi{};
 };
 
 JvpDispatchTable& jvp_table() noexcept {
@@ -73,6 +74,39 @@ JvpRuleFn get_jvp_rule(OpId op) noexcept {
     return jvp_table().rules[idx];
 }
 
+void register_jvp_rule_multi(OpId op, JvpRuleFnMulti fn) {
+    auto idx = static_cast<size_t>(op);
+    if (idx >= OP_COUNT) {
+        throw std::out_of_range("register_jvp_rule_multi: OpId out of range");
+    }
+    auto& slot = jvp_table().rules_multi[idx];
+    if (slot != nullptr && slot != fn) {
+        std::fprintf(stderr,
+                     "[jvp_dispatch] WARNING: overwriting multi-output JVP "
+                     "rule for OpId %zu\n",
+                     idx);
+    }
+    slot = fn;
+}
+
+bool has_jvp_rule_multi(OpId op) noexcept {
+    ensure_jvp_rules_registered();
+    auto idx = static_cast<size_t>(op);
+    if (idx >= OP_COUNT) {
+        return false;
+    }
+    return jvp_table().rules_multi[idx] != nullptr;
+}
+
+JvpRuleFnMulti get_jvp_rule_multi(OpId op) noexcept {
+    ensure_jvp_rules_registered();
+    auto idx = static_cast<size_t>(op);
+    if (idx >= OP_COUNT) {
+        return nullptr;
+    }
+    return jvp_table().rules_multi[idx];
+}
+
 JvpResult dispatch_jvp(OpId op,
                        std::span<const Tensor> primals,
                        std::span<const Tensor> tangents,
@@ -89,6 +123,27 @@ JvpResult dispatch_jvp(OpId op,
         msg += op_id_to_name(op);
         msg += "). Forward-mode AD is not implemented for this op; "
                "fall back to backward-mode AD or finite differences.";
+        throw std::runtime_error(std::move(msg));
+    }
+    return fn(primals, tangents, attrs);
+}
+
+JvpMultiResult dispatch_jvp_multi(OpId op,
+                                  std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "dispatch_jvp_multi: primals and tangents must have the same length");
+    }
+    auto fn = get_jvp_rule_multi(op);
+    if (fn == nullptr) {
+        std::string msg = "dispatch_jvp_multi: no multi-output JVP rule "
+                          "registered for OpId ";
+        msg += std::to_string(static_cast<int>(op));
+        msg += " (";
+        msg += op_id_to_name(op);
+        msg += "). Forward-mode AD is not implemented for this op.";
         throw std::runtime_error(std::move(msg));
     }
     return fn(primals, tangents, attrs);
