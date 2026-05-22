@@ -33,6 +33,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/vision.cu
     kernels/grid_sample.cu
     kernels/fused_ops.cu
+    kernels/flash_attention_f64.cu
     kernels/pooling.cu
     kernels/rnn_sequence.cu
     kernels/advanced.cu

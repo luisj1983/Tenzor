@@ -609,10 +609,21 @@ auto flash_attention(const Variable& Q,
     // therefore go through the fused kernel + FlashAttentionBackward like
     // Float32, gaining the cache-tiled / SIMD speedup and exercising the
     // real kernel under test rather than the composed-ops scaffold.
-    const bool cpu_native_f64 =
-        (Q.tensor().device().type == Device::Type::CPU);
+    //
+    // audit A.11 (CUDA): CUDA now also has native Float64 forward+backward
+    // kernels (src/backends/cuda/kernels/flash_attention_f64.cu) for
+    // head_dim ∈ {16, 32, 48, 64, 80, 96, 128}. For other head_dims the CUDA
+    // backend's FlashAttentionBackward registry falls back to a composed-ops
+    // backward — that composed path already runs in double on CUDA via the
+    // standard op dispatch, so the Variable-level bypass is no longer needed
+    // for CUDA either. Keep it only for backends still missing FP64 (ROCm,
+    // Vulkan, OneAPI) until their A.11 work lands.
+    const Device::Type dev_type = Q.tensor().device().type;
+    const bool backend_native_f64 =
+        (dev_type == Device::Type::CPU) ||
+        (dev_type == Device::Type::CUDA);
     if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f
-        && !cpu_native_f64) {
+        && !backend_native_f64) {
         auto Kt = transpose(K, -1, -2);
         auto S = matmul(Q, Kt);
         auto S_shape = S.shape();

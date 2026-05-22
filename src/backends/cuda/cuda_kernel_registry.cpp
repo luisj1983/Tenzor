@@ -444,6 +444,29 @@ namespace cuda {
         const Tensor& philox_offset
     ) -> std::vector<Tensor>;
 
+    // Audit A.11 — native Float64 FlashAttention forward / backward.
+    // Lives in kernels/flash_attention_f64.cu. The mainline `fused_attention_cuda`
+    // upcasts FP16/BF16 → FP32 internally; FP64 cannot share that path without
+    // destroying precision, so a dedicated `double`-typed kernel set runs here.
+    // Dropout is intentionally unsupported in the FP64 path (gradcheck-only use).
+    auto fused_attention_cuda_f64(
+        const Tensor& Q,
+        const Tensor& K,
+        const Tensor& V,
+        double scale,
+        bool causal
+    ) -> std::pair<Tensor, Tensor>;
+
+    auto flash_attention_backward_cuda_f64(
+        const Tensor& dO,
+        const Tensor& Q,
+        const Tensor& K,
+        const Tensor& V,
+        const Tensor& O,
+        double scale,
+        bool causal
+    ) -> std::vector<Tensor>;
+
     // Fused optimizer operations
     auto fused_sgd_step_cuda(
         Tensor& param,
@@ -1847,9 +1870,70 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             Vi = tenzor::reshape(inputs[2], std::vector<int64_t>{b * h, sk, dv});
         }
 
-        auto [output, lse] = cuda::fused_attention_cuda(
-            Qi, Ki, Vi, scale, causal,
-            apply_dropout ? dropout_p : 0.0f, rng_seed);
+        // Audit A.11 — Float64 path: route to the native FP64 CUDA kernel
+        // (no FP32 upcast). Dropout is unsupported in FP64 mode; the
+        // autograd-level dispatcher already routes Float64 only when
+        // dropout_p == 0.0 (see src/autograd/function_attention.cpp).
+        Tensor output, lse;
+        if (Qi.dtype() == DType::Float64) {
+            int64_t f64_head_dim = Qi.shape().back();
+            bool f64_native_supported = (f64_head_dim == 16 || f64_head_dim == 32 ||
+                                          f64_head_dim == 48 || f64_head_dim == 64 ||
+                                          f64_head_dim == 80 || f64_head_dim == 96 ||
+                                          f64_head_dim == 128);
+            if (apply_dropout) {
+                throw std::runtime_error(
+                    "FlashAttention CUDA: dropout is not supported with Float64 inputs.");
+            }
+            if (f64_native_supported) {
+                auto [o64, lse64] = cuda::fused_attention_cuda_f64(
+                    Qi, Ki, Vi, static_cast<double>(scale), causal);
+                output = o64;
+                lse    = lse64;
+            } else {
+                // FP64 fallback for unsupported head_dim: composed-ops on GPU
+                // via tenzor:: dispatch, which calls native FP64 BMM/softmax
+                // kernels on CUDA. No FP32 round-trip — preserves precision
+                // for gradcheck. This is NOT a CPU fallback; every op below
+                // dispatches to CUDA double-precision kernels.
+                Tensor Kt = tenzor::transpose(Ki, -1, -2);
+                Tensor scores = tenzor::bmm(Qi, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(),
+                                                         scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                              scores.dtype(), scores.device());
+                scores = tenzor::mul(scores, scale_t);
+                if (causal) {
+                    int64_t S_q = scores_shape[scores_shape.size() - 2];
+                    int64_t S_k = scores_shape[scores_shape.size() - 1];
+                    Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Qi.device());
+                    Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Qi.device());
+                    rows = tenzor::reshape(rows, {S_q, 1});
+                    cols = tenzor::reshape(cols, {1, S_k});
+                    Tensor mask = tenzor::gt(cols.to(DType::Float64),
+                                              rows.to(DType::Float64));
+                    Tensor neg_inf = tenzor::full(scores_shape,
+                        -std::numeric_limits<double>::infinity(),
+                        scores.dtype(), scores.device());
+                    scores = tenzor::add(scores,
+                                          tenzor::mul(mask.to(scores.dtype()), neg_inf));
+                }
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                output = tenzor::bmm(probs, Vi);
+                // LSE is Float32 per the contract; build it for consistency.
+                lse = tenzor::zeros({Qi.shape()[0], Qi.shape()[1]},
+                                     DType::Float32, Qi.device());
+            }
+        } else {
+            auto [o, l] = cuda::fused_attention_cuda(
+                Qi, Ki, Vi, scale, causal,
+                apply_dropout ? dropout_p : 0.0f, rng_seed);
+            output = o;
+            lse    = l;
+        }
 
         if (is_4d) {
             int64_t b = orig_q_shape[0], h = orig_q_shape[1];
@@ -1897,6 +1981,41 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
                 const Tensor& L = inputs[5];
                 return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, L, scale, causal);
+            }
+
+            // Audit A.11 — native Float64 backward. Supports head_dim
+            // {16, 32, 48, 64, 80, 96, 128}; falls through to composed-ops for
+            // other head_dims (which is fine in FP64 because every op below
+            // dispatches natively in `double` on CUDA).
+            bool f64_supported = (head_dim == 16 || head_dim == 32 || head_dim == 48 ||
+                                   head_dim == 64 || head_dim == 80 || head_dim == 96 ||
+                                   head_dim == 128);
+            if (Q.dtype() == DType::Float64 && f64_supported) {
+                // Forward saves Q/K/V/O in their original (possibly 4D) layout.
+                // The FP64 kernel below expects 3D (BH, S, D); collapse and
+                // restore around the call.
+                bool is_4d = (Q.shape().size() == 4);
+                Tensor Qi = Q, Ki = K, Vi = V, Oi = O, dOi = dO;
+                int64_t b = 0, h = 0;
+                if (is_4d) {
+                    b = Q.shape()[0]; h = Q.shape()[1];
+                    int64_t sq = Q.shape()[2], d = Q.shape()[3];
+                    int64_t sk = K.shape()[2], dv = V.shape()[3];
+                    Qi  = tenzor::reshape(Q,  std::vector<int64_t>{b * h, sq, d});
+                    Ki  = tenzor::reshape(K,  std::vector<int64_t>{b * h, sk, d});
+                    Vi  = tenzor::reshape(V,  std::vector<int64_t>{b * h, sk, dv});
+                    Oi  = tenzor::reshape(O,  std::vector<int64_t>{b * h, sq, dv});
+                    dOi = tenzor::reshape(dO, std::vector<int64_t>{b * h, sq, dv});
+                }
+                auto grads = cuda::flash_attention_backward_cuda_f64(
+                    dOi, Qi, Ki, Vi, Oi, static_cast<double>(scale), causal);
+                if (is_4d) {
+                    int64_t sq = Q.shape()[2], d = Q.shape()[3], sk = K.shape()[2], dv = V.shape()[3];
+                    grads[0] = tenzor::reshape(grads[0], std::vector<int64_t>{b, h, sq, d});
+                    grads[1] = tenzor::reshape(grads[1], std::vector<int64_t>{b, h, sk, d});
+                    grads[2] = tenzor::reshape(grads[2], std::vector<int64_t>{b, h, sk, dv});
+                }
+                return grads;
             }
 
             // Composed-ops fallback for unsupported head_dim or missing L
