@@ -149,6 +149,63 @@ auto jvp_take(const DualTensor& x, const Tensor& index) -> DualTensor;
 auto jvp_take_along_dim(const DualTensor& x, const Tensor& indices, int64_t dim) -> DualTensor;
 auto jvp_diagonal_scatter(const DualTensor& input, const DualTensor& src,
                           int64_t offset = 0, int64_t dim1 = 0, int64_t dim2 = 1) -> DualTensor;
+
+/// @}
+
+/// @name Element-wise math long-tail (Audit A.4 batch 5)
+/// @{
+/// Non-differentiable step/round functions: derivative is 0 almost everywhere.
+auto jvp_floor(const DualTensor& x) -> DualTensor;
+auto jvp_ceil(const DualTensor& x) -> DualTensor;
+auto jvp_round(const DualTensor& x) -> DualTensor;
+auto jvp_trunc(const DualTensor& x) -> DualTensor;
+auto jvp_frac(const DualTensor& x) -> DualTensor;
+auto jvp_heaviside(const DualTensor& x, const DualTensor& values) -> DualTensor;
+
+/// d/dx atan2(y, x) = (x*dy - y*dx) / (x^2 + y^2)
+auto jvp_atan2(const DualTensor& y, const DualTensor& x) -> DualTensor;
+/// d/dx hypot(a, b) = (a*da + b*db) / hypot(a, b)
+auto jvp_hypot(const DualTensor& a, const DualTensor& b) -> DualTensor;
+/// d/d{a,b} logaddexp(a, b) = softmax_weighted(da, db) along {a,b}
+auto jvp_logaddexp(const DualTensor& a, const DualTensor& b) -> DualTensor;
+
+/// nan_to_num: derivative is 1 where x is finite, 0 at NaN/Inf positions.
+auto jvp_nan_to_num(const DualTensor& x, double nan, double posinf, double neginf) -> DualTensor;
+/// @}
+
+/// @name Reductions long-tail (Audit A.4 batch 5)
+/// @{
+/// p-norm: tangent = sum(sign(x) * |x|^(p-1) * dx, dim) * norm^(1-p)
+auto jvp_norm(const DualTensor& x, float p, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
+/// argmax/argmin/argsort produce integer indices: tangent is zero (not differentiable).
+auto jvp_argmax(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
+auto jvp_argmin(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
+auto jvp_argsort(const DualTensor& x, int64_t dim, bool descending) -> DualTensor;
+/// bucketize is non-differentiable (integer output).
+auto jvp_bucketize(const DualTensor& x, const Tensor& boundaries, bool right) -> DualTensor;
+/// @}
+
+/// @name Index / scatter long-tail (Audit A.4 batch 5)
+/// @{
+/// index_add: y[index[i]] += source[i]; linear in both input and source.
+auto jvp_index_add(const DualTensor& input, int64_t dim, const Tensor& index,
+                   const DualTensor& source) -> DualTensor;
+/// index_copy: y[index[i]] = source[i]; linear in source; passthrough for input (with
+/// the indexed slots overwritten by the source tangent).
+auto jvp_index_copy(const DualTensor& input, int64_t dim, const Tensor& index,
+                    const DualTensor& source) -> DualTensor;
+/// index_fill: y[index[i]] = constant; linear in input with the indexed slots zeroed.
+auto jvp_index_fill(const DualTensor& input, int64_t dim, const Tensor& index,
+                    float value) -> DualTensor;
+/// select_scatter: linear in input and src.
+auto jvp_select_scatter(const DualTensor& input, const DualTensor& src,
+                        int64_t dim, int64_t index) -> DualTensor;
+/// slice_scatter: linear in input and src.
+auto jvp_slice_scatter(const DualTensor& input, const DualTensor& src,
+                       int64_t dim, int64_t start, int64_t end, int64_t step) -> DualTensor;
+/// unfold: linear shape operation.
+auto jvp_unfold(const DualTensor& input, int64_t kernel_size, int64_t stride,
+                int64_t padding, int64_t dilation) -> DualTensor;
 /// @}
 
 } // namespace tenzor
