@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 

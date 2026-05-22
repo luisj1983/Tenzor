@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <memory>
 
@@ -26,17 +27,14 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
         throw std::invalid_argument("conv2d_forward requires 4D weight (out_channels, in_channels, kH, kW)");
     }
 
-    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
-    int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-    int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-    int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-    int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-    int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
+    TENZOR_READ_CONV2D_ATTRS();
+    const int64_t stride_h = stride[0];
+    const int64_t stride_w = stride[1];
+    const int64_t pad_h    = padding[0];
+    const int64_t pad_w    = padding[1];
+    const int64_t dil_h    = dilation[0];
+    const int64_t dil_w    = dilation[1];
     bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
@@ -471,20 +469,16 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
         throw std::invalid_argument("conv_transpose2d_forward requires 4D weight (in_channels, out_channels/groups, kH, kW)");
     }
 
-    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-    int64_t pad_h = attrs.get_int(AttrKey::PaddingH, padding);
-    int64_t pad_w = attrs.get_int(AttrKey::PaddingW, padding);
-    int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
-    int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
-    int64_t dil_h = attrs.get_int(AttrKey::DilationH, dilation);
-    int64_t dil_w = attrs.get_int(AttrKey::DilationW, dilation);
-    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis stride/padding/output_padding/dilation via attr_macros helpers.
+    TENZOR_READ_CONVT2D_ATTRS();
+    const int64_t stride_h = stride[0];
+    const int64_t stride_w = stride[1];
+    const int64_t pad_h = padding[0];
+    const int64_t pad_w = padding[1];
+    const int64_t output_padding_h = output_padding[0];
+    const int64_t output_padding_w = output_padding[1];
+    const int64_t dil_h = dilation[0];
+    const int64_t dil_w = dilation[1];
     bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
@@ -647,20 +641,17 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
         throw std::invalid_argument("conv3d_forward requires 5D weight (out_channels, in_channels/groups, kD, kH, kW)");
     }
 
-    // Extract attributes — per-axis with scalar fallback (Wave B1/B2).
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-    int64_t stride_d = attrs.get_int(AttrKey::StrideD, stride);
-    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, padding);
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
-    int64_t dilation_d = attrs.get_int(AttrKey::DilationD, dilation);
-    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, dilation);
-    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, dilation);
-    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
+    TENZOR_READ_CONV3D_ATTRS();
+    const int64_t stride_d = stride[0];
+    const int64_t stride_h = stride[1];
+    const int64_t stride_w = stride[2];
+    const int64_t padding_d = padding[0];
+    const int64_t padding_h = padding[1];
+    const int64_t padding_w = padding[2];
+    const int64_t dilation_d = dilation[0];
+    const int64_t dilation_h = dilation[1];
+    const int64_t dilation_w = dilation[2];
     bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
@@ -1203,24 +1194,20 @@ auto VulkanBackend::dispatchConvTranspose3dForward(
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
-    // Per-axis attrs with scalar fallback (Wave B1/B2).
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-    int64_t stride_d = attrs.get_int(AttrKey::StrideD, stride);
-    int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-    int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, padding);
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
-    int64_t output_padding_d = attrs.get_int(AttrKey::OutputPaddingD, output_padding);
-    int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
-    int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
-    int64_t dilation_d = attrs.get_int(AttrKey::DilationD, dilation);
-    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, dilation);
-    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, dilation);
-    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis stride/padding/output_padding/dilation via attr_macros helpers.
+    TENZOR_READ_CONVT3D_ATTRS();
+    const int64_t stride_d = stride[0];
+    const int64_t stride_h = stride[1];
+    const int64_t stride_w = stride[2];
+    const int64_t padding_d = padding[0];
+    const int64_t padding_h = padding[1];
+    const int64_t padding_w = padding[2];
+    const int64_t output_padding_d = output_padding[0];
+    const int64_t output_padding_h = output_padding[1];
+    const int64_t output_padding_w = output_padding[2];
+    const int64_t dilation_d = dilation[0];
+    const int64_t dilation_h = dilation[1];
+    const int64_t dilation_w = dilation[2];
 
     int64_t batch = input_shape[0];
     int64_t in_depth = input_shape[2];
@@ -1271,18 +1258,16 @@ auto VulkanBackend::dispatchConvTranspose3dBackwardWeight(
     const Tensor& grad_output, const Tensor& input,
     const std::vector<int64_t>& weight_shape, const OpAttributes& attrs) -> Tensor {
 
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-    int64_t sD = attrs.get_int(AttrKey::StrideD, stride), sH = attrs.get_int(AttrKey::StrideH, stride), sW = attrs.get_int(AttrKey::StrideW, stride);
-    int64_t pD = attrs.get_int(AttrKey::PaddingD, padding), pH = attrs.get_int(AttrKey::PaddingH, padding), pW = attrs.get_int(AttrKey::PaddingW, padding);
-    int64_t dD = attrs.get_int(AttrKey::DilationD, dilation), dH = attrs.get_int(AttrKey::DilationH, dilation), dW = attrs.get_int(AttrKey::DilationW, dilation);
-    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
+    TENZOR_READ_CONV3D_ATTRS();
 
     // For ConvTranspose3d backward weight, roles are swapped:
     // input plays the role of grad_output, grad_output plays the role of input
     return dispatchConv3dBackwardWeight(input, grad_output,
-        sD, sH, sW, pD, pH, pW, dD, dH, dW, weight_shape, groups);
+        stride[0], stride[1], stride[2],
+        padding[0], padding[1], padding[2],
+        dilation[0], dilation[1], dilation[2],
+        weight_shape, groups);
 }
 
 // ConvTranspose3d Backward Bias (same as conv3d backward bias)

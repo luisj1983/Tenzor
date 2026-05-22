@@ -13,6 +13,7 @@
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/vision.hpp"
@@ -620,15 +621,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Extract scalar attrs (from nn::MaxPool2d) or per-dimension attrs
-        int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : attrs.get_int(AttrKey::KernelSize, 2);
-        int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
-        int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : attrs.get_int(AttrKey::Stride, kernel_h);
-        int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
-        int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
-        int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+        // F.11: per-axis kernel/stride/padding via attr_macros helpers.
+        // Note: dispatchMaxPool2d (with-indices overload) does not take dilation;
+        // nn::MaxPool2d layer does not expose dilation, so this is intentional.
+        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
+        const auto stride      = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         auto [output, indices] = get_vulkan_backend()->dispatchMaxPool2d(
-            inputs[0], kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+            inputs[0], kernel_size[0], kernel_size[1], stride[0], stride[1], padding[0], padding[1]);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -788,39 +788,25 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // Conv2dBackwardInput: inputs = {grad_output, input, weight}
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        TENZOR_READ_CONV2D_ATTRS();
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardInput(
             inputs[0], inputs[2],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             attrs.get_int_list(AttrKey::InputShape),
-            attrs.get_int(AttrKey::Groups, 1))};
+            groups)};
     });
 
     // Conv2dBackwardWeight: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-        int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-        int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-        int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-        int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
+        TENZOR_READ_CONV2D_ATTRS();
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardWeight(
             inputs[0], inputs[1],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             attrs.get_int_list(AttrKey::WeightShape),
-            attrs.get_int(AttrKey::Groups, 1))};
+            groups)};
     });
 
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -877,33 +863,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // Conv3dBackwardInput: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sD = attrs.get_int(AttrKey::StrideD, s), sH = attrs.get_int(AttrKey::StrideH, s), sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
+        TENZOR_READ_CONV3D_ATTRS();
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardInput(
             inputs[0], inputs[2],
-            sD, sH, sW, pD, pH, pW, dD, dH, dW,
+            stride[0], stride[1], stride[2],
+            padding[0], padding[1], padding[2],
+            dilation[0], dilation[1], dilation[2],
             attrs.get_int_list(AttrKey::InputShape),
-            attrs.get_int(AttrKey::Groups, 1))};
+            groups)};
     });
 
     // Conv3dBackwardWeight: inputs = {grad_output, input, weight} — per-axis (Wave B1/B2).
+    // F.11: per-axis stride/padding/dilation via attr_macros helpers.
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t s = attrs.get_int(AttrKey::Stride, 1);
-        int64_t p = attrs.get_int(AttrKey::Padding, 0);
-        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t sD = attrs.get_int(AttrKey::StrideD, s), sH = attrs.get_int(AttrKey::StrideH, s), sW = attrs.get_int(AttrKey::StrideW, s);
-        int64_t pD = attrs.get_int(AttrKey::PaddingD, p), pH = attrs.get_int(AttrKey::PaddingH, p), pW = attrs.get_int(AttrKey::PaddingW, p);
-        int64_t dD = attrs.get_int(AttrKey::DilationD, d), dH = attrs.get_int(AttrKey::DilationH, d), dW = attrs.get_int(AttrKey::DilationW, d);
+        TENZOR_READ_CONV3D_ATTRS();
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardWeight(
             inputs[0], inputs[1],
-            sD, sH, sW, pD, pH, pW, dD, dH, dW,
+            stride[0], stride[1], stride[2],
+            padding[0], padding[1], padding[2],
+            dilation[0], dilation[1], dilation[2],
             attrs.get_int_list(AttrKey::WeightShape),
-            attrs.get_int(AttrKey::Groups, 1))};
+            groups)};
     });
 
     table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -1585,63 +1567,56 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // F.11: per-axis read with scalar fallback; Vulkan depthwise shader
+        // takes scalar stride/padding/dilation — fail loudly on asymmetric
+        // rather than silently collapse StrideW/PaddingW/DilationW.
+        TENZOR_READ_CONV2D_ATTRS();
+        (void)groups;
+        if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+            throw std::invalid_argument(
+                "DepthwiseConv2d (Vulkan): backend shader only supports symmetric "
+                "stride/padding/dilation; got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]) + ".");
+        }
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return get_vulkan_backend()->dispatchDepthwiseConv2d(inputs[0], inputs[1], bias, stride, padding, dilation);
+        return get_vulkan_backend()->dispatchDepthwiseConv2d(inputs[0], inputs[1], bias, stride[0], padding[0], dilation[0]);
     });
 
     // DeformableConv2d (DCNv2) — inputs: {input, offset, weight, bias, mask}
+    // F.11: per-axis read with scalar fallback via attr_macros helpers.
+    // Previously read raw StrideH/W etc. without scalar fallback.
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, use_mask)};
     });
 
     // DeformableConv2dBackwardInput — inputs: {grad_output, input, offset, weight, mask}
     // Returns: {grad_input, grad_offset[, grad_mask]}
     table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         return get_vulkan_backend()->dispatchDeformableConv2dBackwardInput(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, use_mask);
     });
 
     // DeformableConv2dBackwardWeight — inputs: {grad_output, input, offset, mask}
     table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dBackwardWeight(
             inputs[0], inputs[1], inputs[2], inputs[3],
-            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, use_mask, weight_shape)};
     });
 
@@ -2320,15 +2295,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 ? inputs[2]
                 : Tensor({weight_shape[0]}, DType::Float32, input.device());
 
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            // F.11: per-axis read with scalar fallback; Vulkan quantized conv
+            // shader takes scalar stride/padding — fail loudly on asymmetric
+            // rather than silently squash StrideW/PaddingW.
+            const auto stride_arr  = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding_arr = ::tenzor::backend::attrs::padding_2d(attrs);
+            if (stride_arr[0] != stride_arr[1] || padding_arr[0] != padding_arr[1]) {
+                throw std::invalid_argument(
+                    "QuantizedConv2d (Vulkan): backend shader only supports symmetric "
+                    "stride/padding; got stride=" + std::to_string(stride_arr[0]) + "x" + std::to_string(stride_arr[1]) +
+                    ", padding=" + std::to_string(padding_arr[0]) + "x" + std::to_string(padding_arr[1]) + ".");
+            }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
 
             return get_vulkan_backend()->dispatchQuantizedConv2d(
-                input, weight, bias, stride, padding,
+                input, weight, bias, stride_arr[0], padding_arr[0],
                 input_scale, weight_scale, input_zp, weight_zp);
         });
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs)
