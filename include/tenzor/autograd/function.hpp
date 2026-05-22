@@ -5261,4 +5261,176 @@ private:
     std::string norm_;
 };
 
+// ============================================================================
+// Audit E.7 batch 11 — final residual OpIds: nested-tensor conversion /
+// log-softmax / linear OpId-level routes + integer-style binary mod ops +
+// fused quantized inference ops.
+// ============================================================================
+
+/**
+ * @brief remainder(a, b) — Python-style modulo: a - floor(a/b) * b. The
+ *        output is piecewise-linear with discrete jumps of size `b` at every
+ *        multiple of `b`, so the Jacobian is the constant {1, -floor(a/b)}
+ *        between those jumps and undefined at them. We mark this
+ *        NonDifferentiable to fail loudly: the "piecewise-constant per
+ *        segment" gradient that PyTorch returns silently composes into a
+ *        wrong gradient any time `a/b` crosses an integer during training,
+ *        and the project policy is to refuse rather than return a deceptive
+ *        adjoint at the discontinuity. Users who need a smooth surrogate
+ *        should compose `a - b * floor(a / b)` explicitly with their own
+ *        STE.
+ */
+class RemainderBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "RemainderBackward"; }
+    auto op_id() const -> OpId override { return OpId::Remainder; }
+};
+
+/**
+ * @brief fmod(a, b) — C-style modulo: a - trunc(a/b) * b. Same rationale
+ *        as RemainderBackward but with `trunc` instead of `floor`; the
+ *        jumps now straddle zero, so the discontinuity set is the same
+ *        measure-zero lattice of `a/b` integer crossings. NonDifferentiable.
+ */
+class FmodBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "FmodBackward"; }
+    auto op_id() const -> OpId override { return OpId::Fmod; }
+};
+
+/**
+ * @brief nested_log_softmax(values, offsets, dim) — segmented log-softmax
+ *        along the ragged dim of a packed nested tensor. The autograd path
+ *        in this project is the explicit `tenzor::log(nested_softmax(...))`
+ *        composition (NestedSoftmaxBackward + LogBackward), which carries
+ *        gradients via the existing per-segment dot-correction adjoint of
+ *        NestedSoftmax. A direct Function-layer adjoint for the fused
+ *        log-softmax would have to (a) reconstruct the per-segment grad
+ *        sum across the same offsets and (b) widen Float16/BFloat16 inputs
+ *        through the segment reduction the same way NestedSoftmaxBackward
+ *        does. That wiring is not present here. NonDifferentiable until the
+ *        per-segment adjoint is implemented; use
+ *        `tenzor::log(autograd::nested_softmax(values, offsets, dim))` if
+ *        you need gradients through nested log-softmax.
+ */
+class NestedLogSoftmaxBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NestedLogSoftmaxBackward"; }
+    auto op_id() const -> OpId override { return OpId::NestedLogSoftmax; }
+};
+
+/**
+ * @brief nested_to_padded(values, offsets, padding_value) — densify a
+ *        packed nested tensor into a padded [B, max_len, ...] dense tensor.
+ *        The forward is a per-segment scatter into padded slots. The
+ *        adjoint is the inverse scatter (gather the unpadded slots back
+ *        into packed values), which requires both the offsets and the
+ *        per-batch lengths the forward saw — the forward currently does
+ *        not expose those as saved tensors, and the autograd-aware path
+ *        for nested ↔ padded round-trips is to use the Variable-level
+ *        scatter/gather composition in nn::NestedSequence (or to keep
+ *        the computation in packed-values form and use the per-op nested
+ *        autograd Functions). NonDifferentiable until the forward saves
+ *        the {offsets, max_len, batch_lengths} triple needed for the
+ *        gather adjoint.
+ */
+class NestedToPaddedBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NestedToPaddedBackward"; }
+    auto op_id() const -> OpId override { return OpId::NestedToPadded; }
+};
+
+/**
+ * @brief nested_from_padded(padded, offsets) — inverse of nested_to_padded:
+ *        gather the unpadded slots of a [B, max_len, ...] dense tensor
+ *        into packed nested values. The adjoint is the scatter (the same
+ *        kernel as nested_to_padded), but routing the gradient back
+ *        requires the per-batch lengths and pad slots the forward saw,
+ *        which are not saved here. NonDifferentiable until the forward
+ *        saves the {offsets, max_len, batch_lengths} triple; same
+ *        rationale as NestedToPaddedBackward.
+ */
+class NestedFromPaddedBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NestedFromPaddedBackward"; }
+    auto op_id() const -> OpId override { return OpId::NestedFromPadded; }
+};
+
+/**
+ * @brief nested_linear(values, weight, bias) — Linear projection on the
+ *        packed values of a nested tensor. The autograd-aware path is the
+ *        Variable-level matmul + add composition in
+ *        autograd::nested_linear (see src/autograd/nested_autograd_ops.cpp)
+ *        which builds the graph from existing MatMul / Add Function nodes
+ *        and therefore carries gradients to `weight` and `bias` through
+ *        the standard linear adjoint. A Function-layer adjoint for the
+ *        fused OpId::NestedLinear is redundant when the values are
+ *        layout-equivalent to a dense [N, in_features] matrix (which is
+ *        the only layout the fused kernel supports), so direct OpId
+ *        dispatch routed through autograd raises NonDifferentiable; use
+ *        autograd::nested_linear for autograd-aware nested linear.
+ */
+class NestedLinearBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NestedLinearBackward"; }
+    auto op_id() const -> OpId override { return OpId::NestedLinear; }
+};
+
+/**
+ * @brief quantized_linear(input, packed_weight, bias, scale, zero_point)
+ *        — fused INT8/INT4 quantized inference linear kernel. The forward
+ *        dequantizes the packed weight, performs the matmul in the
+ *        accumulator dtype, requantizes, and clamps to the output dtype's
+ *        representable range. Quantized inference operates on a frozen
+ *        weight (and frozen scale / zero_point), so the standard PyTorch
+ *        convention is that this op is not differentiable in any input:
+ *        the weight is integer-packed (no gradient w.r.t. an integer
+ *        lattice), and the activation Jacobian goes through the
+ *        clamp-round step which is piecewise-constant a.e. The
+ *        quantization-aware-training (QAT) path in this project is the
+ *        Variable-level fake-quant composition in nn::FakeQuantize
+ *        (`x + StopGradient(quantize_dequantize(x) - x)` STE), which
+ *        threads gradients through the activation only. Direct OpId
+ *        dispatch routed through autograd raises NonDifferentiable; use
+ *        nn::FakeQuantize + nn::Linear for QAT-aware quantized linear.
+ */
+class QuantizedLinearBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "QuantizedLinearBackward"; }
+    auto op_id() const -> OpId override { return OpId::QuantizedLinear; }
+};
+
+/**
+ * @brief quantized_conv2d(input, packed_weight, bias, scale, zero_point,
+ *        stride, padding, dilation, groups) — fused INT8/INT4 quantized
+ *        inference 2-D convolution. Same rationale as
+ *        QuantizedLinearBackward: integer-packed frozen weight + clamp/
+ *        round requantization step => not differentiable through the
+ *        fused kernel. The QAT path is nn::FakeQuantize +
+ *        nn::Conv2d (with weight fake-quant applied at the parameter,
+ *        not the input). NonDifferentiable; use the Variable-level
+ *        composition for QAT-aware quantized conv.
+ */
+class QuantizedConv2dBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "QuantizedConv2dBackward"; }
+    auto op_id() const -> OpId override { return OpId::QuantizedConv2d; }
+};
+
 } // namespace tenzor
