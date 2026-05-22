@@ -3239,4 +3239,213 @@ auto logical_and(const Variable& a, const Variable& b) -> Variable {
     return output;
 }
 
+// ===========================================================================
+// Audit E.7 continuation (batch 3): autograd wrappers for the third set of
+// 10 OpIds. Differentiable wrappers save the inputs they need for backward;
+// non-differentiable wrappers still attach a Function with the correct
+// next_functions / input_variables wiring so calling backward() through them
+// raises tenzor::NonDifferentiable instead of silently dropping the edge.
+// ===========================================================================
+
+// addmm(input, mat1, mat2, beta, alpha): saves mat1 + mat2 plus the two
+// scalar coefficients. The "input" bias slot is only used for shape /
+// broadcast-reduction (its values are not needed because the local Jacobian
+// w.r.t. input is just the scalar beta).
+auto addmm(const Variable& input, const Variable& mat1, const Variable& mat2,
+           double beta, double alpha) -> Variable {
+    bool needs_grad = (input.requires_grad() || mat1.requires_grad()
+                       || mat2.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(
+            tenzor::addmm(input.tensor(), mat1.tensor(), mat2.tensor(),
+                          beta, alpha),
+            false);
+    }
+    auto grad_fn = std::make_shared<AddmmBackward>();
+    grad_fn->beta_ = beta;
+    grad_fn->alpha_ = alpha;
+    grad_fn->input_shape_input_ =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    grad_fn->input_shape_mat1_ =
+        std::vector<int64_t>(mat1.shape().begin(), mat1.shape().end());
+    grad_fn->input_shape_mat2_ =
+        std::vector<int64_t>(mat2.shape().begin(), mat2.shape().end());
+    grad_fn->save_for_backward({mat1.tensor(), mat2.tensor()});
+    grad_fn->set_next_functions({input.grad_fn(), mat1.grad_fn(), mat2.grad_fn()});
+    grad_fn->set_input_variables({input, mat1, mat2});
+    auto result = tenzor::addmm(input.tensor(), mat1.tensor(), mat2.tensor(),
+                                beta, alpha);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// addmv(input, mat, vec, beta, alpha): matrix-vector version of addmm.
+auto addmv(const Variable& input, const Variable& mat, const Variable& vec,
+           double beta, double alpha) -> Variable {
+    bool needs_grad = (input.requires_grad() || mat.requires_grad()
+                       || vec.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(
+            tenzor::addmv(input.tensor(), mat.tensor(), vec.tensor(),
+                          beta, alpha),
+            false);
+    }
+    auto grad_fn = std::make_shared<AddmvBackward>();
+    grad_fn->beta_ = beta;
+    grad_fn->alpha_ = alpha;
+    grad_fn->input_shape_input_ =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    grad_fn->input_shape_mat_ =
+        std::vector<int64_t>(mat.shape().begin(), mat.shape().end());
+    grad_fn->input_shape_vec_ =
+        std::vector<int64_t>(vec.shape().begin(), vec.shape().end());
+    grad_fn->save_for_backward({mat.tensor(), vec.tensor()});
+    grad_fn->set_next_functions({input.grad_fn(), mat.grad_fn(), vec.grad_fn()});
+    grad_fn->set_input_variables({input, mat, vec});
+    auto result = tenzor::addmv(input.tensor(), mat.tensor(), vec.tensor(),
+                                beta, alpha);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// baddbmm(input, batch1, batch2, beta, alpha): batched addmm.
+auto baddbmm(const Variable& input, const Variable& batch1, const Variable& batch2,
+             double beta, double alpha) -> Variable {
+    bool needs_grad = (input.requires_grad() || batch1.requires_grad()
+                       || batch2.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(
+            tenzor::baddbmm(input.tensor(), batch1.tensor(), batch2.tensor(),
+                            beta, alpha),
+            false);
+    }
+    auto grad_fn = std::make_shared<BaddbmmBackward>();
+    grad_fn->beta_ = beta;
+    grad_fn->alpha_ = alpha;
+    grad_fn->input_shape_input_ =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    grad_fn->input_shape_batch1_ =
+        std::vector<int64_t>(batch1.shape().begin(), batch1.shape().end());
+    grad_fn->input_shape_batch2_ =
+        std::vector<int64_t>(batch2.shape().begin(), batch2.shape().end());
+    grad_fn->save_for_backward({batch1.tensor(), batch2.tensor()});
+    grad_fn->set_next_functions(
+        {input.grad_fn(), batch1.grad_fn(), batch2.grad_fn()});
+    grad_fn->set_input_variables({input, batch1, batch2});
+    auto result = tenzor::baddbmm(input.tensor(), batch1.tensor(),
+                                  batch2.tensor(), beta, alpha);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// nansum(x, dim, keepdim): saves the input so backward can recompute the
+// NaN mask (the synthetic-zero positions contribute no gradient).
+auto nansum(const Variable& input, std::optional<int64_t> dim, bool keepdim)
+    -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::nansum(input.tensor(), dim, keepdim), false);
+    }
+    auto grad_fn = std::make_shared<NansumBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tenzor::nansum(input.tensor(), dim, keepdim);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// tile(input, reps): saves the original shape and the reps for backward.
+auto tile(const Variable& input, std::vector<int64_t> reps) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::tile(input.tensor(), reps), false);
+    }
+    auto grad_fn = std::make_shared<TileBackward>();
+    grad_fn->original_shape_ =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    grad_fn->reps_ = reps;
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tenzor::tile(input.tensor(), reps);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// --- non-differentiable wrappers ----------------------------------------
+
+auto count_nonzero(const Variable& input, std::optional<int64_t> dim) -> Variable {
+    auto result = tenzor::count_nonzero(input.tensor(), dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<CountNonzeroBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto isinf(const Variable& input) -> Variable {
+    auto result = tenzor::isinf(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IsInfBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto bitwise_and(const Variable& a, const Variable& b) -> Variable {
+    auto result = tenzor::bitwise_and(a.tensor(), b.tensor());
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<BitwiseAndBackward>();
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto round(const Variable& input) -> Variable {
+    auto result = tenzor::round(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<RoundBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto eq(const Variable& a, const Variable& b) -> Variable {
+    auto result = tenzor::eq(a.tensor(), b.tensor());
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<EqBackward>();
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

@@ -3660,4 +3660,171 @@ public:
     auto op_id() const -> OpId override { return OpId::LogicalAnd; }
 };
 
+// ============================================================================
+// Audit E.7 continuation (batch 3): another 10 OpIds.
+// Pattern matches the first two batches. Differentiable Functions have
+// closed-form backward; non-differentiable Functions throw
+// tenzor::NonDifferentiable from backward() with a message that names the
+// op and explains why it is not differentiable.
+// ============================================================================
+
+/**
+ * @brief addmm(input, mat1, mat2, beta, alpha) = beta*input + alpha*(mat1 @ mat2).
+ *        d/d(input) = beta * grad  (reduced for broadcast)
+ *        d/d(mat1)  = alpha * grad @ mat2^T
+ *        d/d(mat2)  = alpha * mat1^T @ grad
+ *        Saves mat1, mat2 plus the scalar coefficients.
+ */
+class AddmmBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AddmmBackward"; }
+    auto op_id() const -> OpId override { return OpId::Addmm; }
+
+    double beta_ = 1.0;
+    double alpha_ = 1.0;
+    std::vector<int64_t> input_shape_input_;
+    std::vector<int64_t> input_shape_mat1_;
+    std::vector<int64_t> input_shape_mat2_;
+};
+
+/**
+ * @brief addmv(input, mat, vec, beta, alpha) = beta*input + alpha*(mat @ vec).
+ *        d/d(input) = beta * grad  (reduced for broadcast)
+ *        d/d(mat)   = alpha * outer(grad, vec)
+ *        d/d(vec)   = alpha * mat^T @ grad
+ *        Saves mat, vec plus the scalar coefficients.
+ */
+class AddmvBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AddmvBackward"; }
+    auto op_id() const -> OpId override { return OpId::Addmv; }
+
+    double beta_ = 1.0;
+    double alpha_ = 1.0;
+    std::vector<int64_t> input_shape_input_;
+    std::vector<int64_t> input_shape_mat_;
+    std::vector<int64_t> input_shape_vec_;
+};
+
+/**
+ * @brief baddbmm(input, batch1, batch2, beta, alpha)
+ *          = beta*input + alpha*(batch1 @ batch2)  (batched).
+ *        d/d(input)  = beta * grad  (reduced for broadcast)
+ *        d/d(batch1) = alpha * grad @ batch2^T   (per-batch transpose)
+ *        d/d(batch2) = alpha * batch1^T @ grad
+ *        Saves batch1, batch2 plus the scalar coefficients.
+ */
+class BaddbmmBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BaddbmmBackward"; }
+    auto op_id() const -> OpId override { return OpId::Baddbmm; }
+
+    double beta_ = 1.0;
+    double alpha_ = 1.0;
+    std::vector<int64_t> input_shape_input_;
+    std::vector<int64_t> input_shape_batch1_;
+    std::vector<int64_t> input_shape_batch2_;
+};
+
+/**
+ * @brief nansum(x, dim, keepdim): sum treating NaN as zero. Backward is
+ *        the standard sum backward (broadcast grad back to input shape)
+ *        with NaN positions masked to zero so the synthetic zero
+ *        contribution does not produce a non-zero local Jacobian. Saves
+ *        the input to recompute the NaN mask without storing it.
+ */
+class NansumBackward : public Function {
+public:
+    NansumBackward(std::optional<int64_t> dim, bool keepdim)
+        : dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NansumBackward"; }
+    auto op_id() const -> OpId override { return OpId::Nansum; }
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
+/**
+ * @brief tile(input, reps): tile input along each dim (right-aligned reps,
+ *        padded with 1s on the left). Backward splits the output's tiled
+ *        dims into (reps[i], orig_shape[i]) interleaved pairs and sums
+ *        over the reps[i] axes, mirroring repeat's backward. Saves the
+ *        input's original (unpadded) shape and the user-supplied reps.
+ */
+class TileBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "TileBackward"; }
+    auto op_id() const -> OpId override { return OpId::Tile; }
+
+    std::vector<int64_t> original_shape_;
+    std::vector<int64_t> reps_;
+};
+
+/**
+ * @brief count_nonzero(x). Integer output (a count) — non-differentiable.
+ */
+class CountNonzeroBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CountNonzeroBackward"; }
+    auto op_id() const -> OpId override { return OpId::CountNonzero; }
+};
+
+/**
+ * @brief isinf(x). Bool output — metadata, non-differentiable.
+ */
+class IsInfBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IsInfBackward"; }
+    auto op_id() const -> OpId override { return OpId::IsInf; }
+};
+
+/**
+ * @brief bitwise_and(a, b). Integer/bool inputs and output — discrete.
+ *        Non-differentiable.
+ */
+class BitwiseAndBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BitwiseAndBackward"; }
+    auto op_id() const -> OpId override { return OpId::BitwiseAnd; }
+};
+
+/**
+ * @brief round(x). Piecewise-constant — gradient is zero almost everywhere
+ *        with Dirac jumps at half-integers. Non-differentiable.
+ */
+class RoundBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "RoundBackward"; }
+    auto op_id() const -> OpId override { return OpId::Round; }
+};
+
+/**
+ * @brief eq(a, b). Bool output (a == b) — discrete, non-differentiable.
+ */
+class EqBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "EqBackward"; }
+    auto op_id() const -> OpId override { return OpId::Eq; }
+};
+
 } // namespace tenzor

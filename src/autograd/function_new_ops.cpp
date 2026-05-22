@@ -2165,4 +2165,251 @@ auto LogicalAndBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::
         "min(a, b) on [0, 1]) if you need a differentiable surrogate.");
 }
 
+// ============================================================================
+// Audit E.7 continuation (batch 3): forward/backward impls for the third set
+// of 10 OpIds. See function.hpp for one-line summaries.
+// ============================================================================
+
+// addmm(input, mat1, mat2, beta, alpha) = beta*input + alpha*(mat1 @ mat2).
+// d/d(input) = beta * grad   (broadcast-reduced to input's shape)
+// d/d(mat1)  = alpha * grad @ mat2^T
+// d/d(mat2)  = alpha * mat1^T @ grad
+auto AddmmBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AddmmBackward::forward should not be called directly");
+}
+auto AddmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& mat1 = saved_tensors_[0];
+    const auto& mat2 = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    // grad w.r.t. input: beta * grad, reduced back across any broadcast dims.
+    auto grad_input_unreduced = mul(grad, beta_);
+    auto grad_input = reduce_grad_for_broadcasting(grad_input_unreduced, input_shape_input_);
+
+    // grad w.r.t. mat1: alpha * grad @ mat2^T
+    auto mat2_ndim = mat2.shape().size();
+    auto mat2_t = transpose(mat2, mat2_ndim - 2, mat2_ndim - 1);
+    auto grad_mat1 = mul(matmul(grad, mat2_t), alpha_);
+
+    // grad w.r.t. mat2: alpha * mat1^T @ grad
+    auto mat1_ndim = mat1.shape().size();
+    auto mat1_t = transpose(mat1, mat1_ndim - 2, mat1_ndim - 1);
+    auto grad_mat2 = mul(matmul(mat1_t, grad), alpha_);
+
+    return {grad_input, grad_mat1, grad_mat2};
+}
+
+// addmv(input, mat, vec, beta, alpha) = beta*input + alpha*(mat @ vec).
+// mat is (M, K), vec is (K,), grad is (M,).
+// d/d(input) = beta * grad     (broadcast-reduced to input's shape)
+// d/d(mat)   = alpha * outer(grad, vec)
+// d/d(vec)   = alpha * mat^T @ grad
+auto AddmvBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AddmvBackward::forward should not be called directly");
+}
+auto AddmvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& mat = saved_tensors_[0];
+    const auto& vec = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto grad_input_unreduced = mul(grad, beta_);
+    auto grad_input = reduce_grad_for_broadcasting(grad_input_unreduced, input_shape_input_);
+
+    // outer(grad, vec): (M,) ⊗ (K,) → (M, K)
+    auto grad_col = unsqueeze(grad, 1);          // (M, 1)
+    auto vec_row = unsqueeze(vec, 0);            // (1, K)
+    auto grad_mat = mul(matmul(grad_col, vec_row), alpha_);
+
+    // mat^T @ grad: (K, M) @ (M,) → (K,)
+    auto mat_ndim = mat.shape().size();
+    auto mat_t = transpose(mat, mat_ndim - 2, mat_ndim - 1);
+    auto grad_vec = mul(matmul(mat_t, grad), alpha_);
+
+    return {grad_input, grad_mat, grad_vec};
+}
+
+// baddbmm(input, batch1, batch2, beta, alpha):
+//   = beta*input + alpha*(batch1 @ batch2), batched on dim 0.
+// d/d(input)  = beta * grad           (broadcast-reduced)
+// d/d(batch1) = alpha * grad @ batch2^T     (transpose last two dims)
+// d/d(batch2) = alpha * batch1^T @ grad
+auto BaddbmmBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BaddbmmBackward::forward should not be called directly");
+}
+auto BaddbmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& batch1 = saved_tensors_[0];
+    const auto& batch2 = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto grad_input_unreduced = mul(grad, beta_);
+    auto grad_input = reduce_grad_for_broadcasting(grad_input_unreduced, input_shape_input_);
+
+    auto b1_ndim = batch1.shape().size();
+    auto b2_ndim = batch2.shape().size();
+    auto batch2_t = transpose(batch2, b2_ndim - 2, b2_ndim - 1);
+    auto batch1_t = transpose(batch1, b1_ndim - 2, b1_ndim - 1);
+
+    auto grad_batch1 = mul(matmul(grad, batch2_t), alpha_);
+    auto grad_batch2 = mul(matmul(batch1_t, grad), alpha_);
+
+    return {grad_input, grad_batch1, grad_batch2};
+}
+
+// nansum(x, dim, keepdim) — sum with NaN treated as 0. Backward is the
+// standard sum backward (broadcast grad back to input shape) with the NaN
+// mask zeroed out, since NaN positions contributed 0 to the forward and
+// therefore have no local Jacobian. We recompute the mask from the saved
+// input rather than storing it as a separate tensor.
+auto NansumBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("NansumBackward::forward should not be called directly");
+}
+auto NansumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& input = saved_tensors_[0];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "NansumBackward: cannot compute gradient of nansum over empty tensor");
+
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    Tensor expanded;
+    if (!dim_.has_value()) {
+        auto grad = grad_output;
+        if (grad.ndim() > 0) {
+            grad = reshape(grad, {});
+        }
+        expanded = expand(grad, input_shape_vec);
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+        auto grad = grad_output;
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+        }
+        expanded = expand(grad, input_shape_vec);
+    }
+
+    // Mask NaN positions in the input to zero in the gradient — their
+    // forward contribution was treated as zero, so the partial derivative
+    // there is zero (independent of the input value, in the convention
+    // PyTorch uses for nansum).
+    auto nan_mask = tenzor::isnan(input);
+    auto zero = zeros(input_shape_vec, expanded.dtype(), expanded.device());
+    auto result = where(nan_mask, zero, expanded);
+    return {result};
+}
+
+// tile(input, reps) — backward mirrors RepeatBackward. tile() right-aligns
+// reps against the input shape, padding with 1s on the left, so the output
+// can have more dims than the input. We split each output dim back into
+// (reps[i], orig_shape[i]) and sum over the reps axis.
+auto TileBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("TileBackward::forward should not be called directly");
+}
+auto TileBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+
+    // Pad original_shape and reps to the same length (the output ndim),
+    // right-aligned with 1s on the left — matching tile()'s own padding.
+    int64_t in_ndim = static_cast<int64_t>(original_shape_.size());
+    int64_t reps_ndim = static_cast<int64_t>(reps_.size());
+    int64_t out_ndim = std::max(in_ndim, reps_ndim);
+
+    std::vector<int64_t> padded_shape(out_ndim, 1);
+    std::vector<int64_t> padded_reps(out_ndim, 1);
+    int64_t shape_offset = out_ndim - in_ndim;
+    for (int64_t i = 0; i < in_ndim; ++i) {
+        padded_shape[shape_offset + i] = original_shape_[i];
+    }
+    int64_t reps_offset = out_ndim - reps_ndim;
+    for (int64_t i = 0; i < reps_ndim; ++i) {
+        padded_reps[reps_offset + i] = reps_[i];
+    }
+
+    // Build interleaved reshape: [reps[0], orig[0], reps[1], orig[1], ...].
+    std::vector<int64_t> expanded_shape;
+    expanded_shape.reserve(2 * out_ndim);
+    for (int64_t i = 0; i < out_ndim; ++i) {
+        expanded_shape.push_back(padded_reps[i]);
+        expanded_shape.push_back(padded_shape[i]);
+    }
+    auto grad_reshaped = reshape(grad, expanded_shape);
+
+    // Sum over the repeat dims (0, 2, 4, ...) from the highest down so the
+    // remaining indices do not shift after each reduction.
+    auto result = grad_reshaped;
+    for (int64_t i = out_ndim - 1; i >= 0; --i) {
+        int64_t repeat_dim = 2 * i;
+        result = tenzor::sum(result, repeat_dim, false);
+    }
+
+    // If the user supplied fewer reps than input dims, the result above
+    // already has the correct input rank because we used original_shape_'s
+    // length when padding (the left-padded 1s collapsed to 1s in the sum).
+    // Otherwise, when reps had MORE dims than the input, the result still
+    // has out_ndim dims of which the leading (out_ndim - in_ndim) are 1s;
+    // reshape back to the original input shape.
+    if (out_ndim != in_ndim) {
+        result = reshape(result, original_shape_);
+    }
+    return {result};
+}
+
+// --- non-differentiable wrappers ---------------------------------------
+
+auto CountNonzeroBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("CountNonzeroBackward::forward should not be called directly");
+}
+auto CountNonzeroBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "count_nonzero: output is an integer count of non-zero elements — "
+        "a discrete quantity, not a smooth function of the input. No "
+        "well-defined gradient exists.");
+}
+
+auto IsInfBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("IsInfBackward::forward should not be called directly");
+}
+auto IsInfBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "isinf: output is a Bool tensor (discrete) classifying the input "
+        "as ±inf or finite. The inf-pattern is metadata, not a smooth "
+        "function of the input values.");
+}
+
+auto BitwiseAndBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("BitwiseAndBackward::forward should not be called directly");
+}
+auto BitwiseAndBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "bitwise_and: integer/bool inputs and output — operates on the "
+        "discrete bit representation. The operation is not differentiable.");
+}
+
+auto RoundBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("RoundBackward::forward should not be called directly");
+}
+auto RoundBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "round: piecewise-constant — gradient is zero almost everywhere "
+        "with Dirac jumps at half-integer boundaries. Use a custom STE "
+        "(straight-through estimator) Function if a surrogate gradient is "
+        "needed.");
+}
+
+auto EqBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("EqBackward::forward should not be called directly");
+}
+auto EqBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "eq: output is a Bool tensor (a == b) — discrete comparison, not "
+        "a smooth function of the inputs. The comparison family "
+        "(eq/ne/lt/le/gt/ge) is all non-differentiable.");
+}
+
 } // namespace tenzor

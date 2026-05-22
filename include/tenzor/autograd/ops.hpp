@@ -1277,6 +1277,56 @@ auto isnan(const Variable& input) -> Variable;
 /** @brief logical_and(a, b). NON-DIFFERENTIABLE — backward() throws. */
 auto logical_and(const Variable& a, const Variable& b) -> Variable;
 
+// ============================================================================
+// Audit E.7 continuation (batch 3): autograd wrappers for another 10 OpIds.
+// Differentiable wrappers build a real grad_fn chain; non-differentiable
+// ones still attach a Function whose backward() throws
+// tenzor::NonDifferentiable.
+// ============================================================================
+
+/** @brief addmm(input, mat1, mat2, beta, alpha) = beta*input + alpha*(mat1 @ mat2).
+ *         d/d(input)=beta*grad, d/d(mat1)=alpha*grad@mat2^T,
+ *         d/d(mat2)=alpha*mat1^T@grad. Broadcast-reduced as needed. */
+auto addmm(const Variable& input, const Variable& mat1, const Variable& mat2,
+           double beta = 1.0, double alpha = 1.0) -> Variable;
+
+/** @brief addmv(input, mat, vec, beta, alpha) = beta*input + alpha*(mat @ vec).
+ *         d/d(input)=beta*grad, d/d(mat)=alpha*outer(grad, vec),
+ *         d/d(vec)=alpha*mat^T@grad. */
+auto addmv(const Variable& input, const Variable& mat, const Variable& vec,
+           double beta = 1.0, double alpha = 1.0) -> Variable;
+
+/** @brief baddbmm(input, batch1, batch2, beta, alpha)
+ *         = beta*input + alpha*(batch1 @ batch2). Batched analogue of addmm. */
+auto baddbmm(const Variable& input, const Variable& batch1, const Variable& batch2,
+             double beta = 1.0, double alpha = 1.0) -> Variable;
+
+/** @brief nansum(x, dim, keepdim): sum with NaN treated as 0. Backward
+ *         broadcasts grad back to input shape with NaN positions zeroed. */
+auto nansum(const Variable& input,
+            std::optional<int64_t> dim = std::nullopt,
+            bool keepdim = false) -> Variable;
+
+/** @brief tile(input, reps): tile input along each dim. Backward splits
+ *         tiled dims and sums over the repetition axes. */
+auto tile(const Variable& input, std::vector<int64_t> reps) -> Variable;
+
+/** @brief count_nonzero(x, dim). NON-DIFFERENTIABLE — backward() throws. */
+auto count_nonzero(const Variable& input,
+                   std::optional<int64_t> dim = std::nullopt) -> Variable;
+
+/** @brief isinf(x). NON-DIFFERENTIABLE — backward() throws. */
+auto isinf(const Variable& input) -> Variable;
+
+/** @brief bitwise_and(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto bitwise_and(const Variable& a, const Variable& b) -> Variable;
+
+/** @brief round(x). NON-DIFFERENTIABLE — backward() throws. */
+auto round(const Variable& input) -> Variable;
+
+/** @brief eq(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto eq(const Variable& a, const Variable& b) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {
