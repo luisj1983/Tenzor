@@ -628,14 +628,23 @@ auto flash_attention(const Variable& Q,
     // kernels (src/backends/oneapi/kernels/flash_attention_f64.cpp) for the
     // same head_dim set; the registry routes Float64 inputs at supported
     // head_dims to those SYCL kernels and falls back to the composed FP64 op
-    // dispatch otherwise. Keep this list only for backends still missing FP64
-    // (Vulkan) until their A.11 work lands.
+    // dispatch otherwise.
+    //
+    // audit A.11 (Vulkan): Vulkan now also has a native Float64 fused fast
+    // path (src/backends/vulkan/kernels/flash_attention_f64.comp) for
+    // head_dim/head_v <= 128, gated at runtime on
+    // VkPhysicalDeviceFeatures::shaderFloat64. Devices without FP64 throw
+    // a clear error (project rule: no CPU fallback, no Float32 upcast).
+    // Outside the fast-path constraints the composed FP64 op dispatch
+    // already runs in double on Vulkan, so the Variable-level bypass is
+    // no longer needed for Vulkan either.
     const Device::Type dev_type = Q.tensor().device().type;
     const bool backend_native_f64 =
         (dev_type == Device::Type::CPU) ||
         (dev_type == Device::Type::CUDA) ||
         (dev_type == Device::Type::ROCm) ||
-        (dev_type == Device::Type::OneAPI);
+        (dev_type == Device::Type::OneAPI) ||
+        (dev_type == Device::Type::Vulkan);
     if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f
         && !backend_native_f64) {
         auto Kt = transpose(K, -1, -2);

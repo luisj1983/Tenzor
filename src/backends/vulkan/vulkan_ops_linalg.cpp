@@ -2480,6 +2480,111 @@ auto VulkanBackend::dispatchFlashAttention(
     // softmax. Falls through to the composed path on any dtype/shape mismatch.
     int64_t head_v = v_flat.shape()[2];
     const int64_t kMaxHeadDimTiled = 128;
+
+    // audit A.11 (Vulkan): native Float64 fused fast path. Uses the
+    // dedicated `flash_attention_f64.comp` shader (double-precision
+    // throughout, FP32 LSE narrowed at write per attention contract).
+    // Buffer sizes are 8 bytes/elem for Q/K/V/O and 4 bytes/elem for LSE.
+    //
+    // Device gating: the Vulkan FP64 SPIR-V capability requires
+    // VkPhysicalDeviceFeatures::shaderFloat64 = VK_TRUE. We bind it
+    // unconditionally at logical-device creation, so if the host GPU
+    // doesn't advertise it, device init already failed before reaching
+    // this dispatch. We still query `supports_fp64` here to throw a clean
+    // user-facing error (project rule: no CPU fallback, no Float32
+    // upcast — devices without FP64 simply cannot run this op).
+    if (Q.dtype() == DType::Float64
+        && K.dtype() == DType::Float64
+        && V.dtype() == DType::Float64
+        && d_k <= kMaxHeadDimTiled
+        && head_v <= kMaxHeadDimTiled
+        && seq_len_q > 0 && seq_len_k > 0)
+    {
+        int32_t device_id = Q.device().index;
+        DeviceInfo dev_info = get_device_info(device_id);
+        if (!dev_info.supports_fp64) {
+            throw std::runtime_error(
+                "Vulkan FlashAttention: Float64 requested but the active "
+                "Vulkan device does not advertise VkPhysicalDeviceFeatures::"
+                "shaderFloat64. FP64 compute shaders are not supported on "
+                "this GPU (common on mobile/integrated parts). The project "
+                "rule forbids CPU fallback or Float32 upcast — either run "
+                "on a discrete GPU with FP64 support or use a different "
+                "backend (CPU / CUDA / ROCm / OneAPI all have native FP64 "
+                "FlashAttention kernels).");
+        }
+
+        Tensor q_contig = q_flat.is_contiguous() ? q_flat : dispatchContiguous(q_flat);
+        Tensor k_contig = k_flat.is_contiguous() ? k_flat : dispatchContiguous(k_flat);
+        Tensor v_contig = v_flat.is_contiguous() ? v_flat : dispatchContiguous(v_flat);
+
+        Tensor output_flat({batch_heads, seq_len_q, head_v},
+                           DType::Float64, Q.device());
+
+        // LSE buffer is ALWAYS Float32 per attention_contract.hpp kLseDType.
+        // The FP64 shader narrows at the final store so this stays correct.
+        Tensor lse_flat({batch_heads, seq_len_q},
+                       DType::Float32, Q.device());
+
+        auto* pipeline = getPipeline("flash_attention_f64", device_id);
+
+        struct PushConstants {
+            int32_t seq_q;
+            int32_t seq_k;
+            int32_t head_dim;
+            int32_t head_v;
+            float scale;        // shader widens to double internally
+            int32_t causal;
+        } pc;
+        pc.seq_q    = static_cast<int32_t>(seq_len_q);
+        pc.seq_k    = static_cast<int32_t>(seq_len_k);
+        pc.head_dim = static_cast<int32_t>(d_k);
+        pc.head_v   = static_cast<int32_t>(head_v);
+        pc.scale    = scale;
+        pc.causal   = causal ? 1 : 0;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, q_contig.data_ptr()},
+            {1, k_contig.data_ptr()},
+            {2, v_contig.data_ptr()},
+            {3, output_flat.data_ptr()},
+            {4, lse_flat.data_ptr()},
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(q_contig.numel()) * sizeof(double),
+            static_cast<size_t>(k_contig.numel()) * sizeof(double),
+            static_cast<size_t>(v_contig.numel()) * sizeof(double),
+            static_cast<size_t>(output_flat.numel()) * sizeof(double),
+            static_cast<size_t>(lse_flat.numel()) * sizeof(float),
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &pc);
+
+        const uint32_t Br = 16;
+        uint32_t num_q_tiles = static_cast<uint32_t>((seq_len_q + Br - 1) / Br);
+        vkCmdDispatch(cmd,
+                      num_q_tiles,
+                      static_cast<uint32_t>(batch_heads),
+                      1);
+
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        synchronize(device_id);
+
+        if (has_head_dim) {
+            Tensor output = output_flat.reshape({q_shape[0], q_shape[1], seq_len_q, head_v});
+            Tensor lse = lse_flat.reshape({q_shape[0], q_shape[1], seq_len_q});
+            return {output, lse};
+        }
+        return {output_flat, lse_flat};
+    }
+
     if (Q.dtype() == DType::Float32
         && K.dtype() == DType::Float32
         && V.dtype() == DType::Float32

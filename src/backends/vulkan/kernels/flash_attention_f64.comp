@@ -1,0 +1,255 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// ============================================================================
+// FlashAttention-2 tiled kernel (Vulkan, Float64) — audit A.11 (Vulkan)
+// ============================================================================
+//
+// Native Float64 (double-precision) variant of `flash_attention.comp`.
+// Same online-softmax tiling algorithm, but every accumulator, register,
+// and shared-memory entry is `double` so the math never silently rounds to
+// Float32 (which would defeat Float64 gradcheck).
+//
+// The LSE binding stays Float32 per `attention_contract.hpp` `kLseDType`
+// (cross-backend invariant — backward casts as needed). The shader writes
+// the FP32 LSE at the very end after computing `row_max + log(row_sum)` in
+// FP64, so precision is preserved up to the contractual cast.
+//
+// Device requirement: VkPhysicalDeviceFeatures::shaderFloat64 = VK_TRUE.
+// The host dispatch (see `dispatchFlashAttention` Float64 branch in
+// vulkan_ops_linalg.cpp) gates on this and throws if the device lacks FP64
+// support — no CPU fallback, no Float32 upcast (project rule).
+//
+// Dispatch geometry, push constants, buffer layout, causal-mask sentinel,
+// and fully-masked-row handling all match `flash_attention.comp` exactly so
+// the host wrapper is dtype-agnostic apart from buffer sizing.
+
+#define Br 16
+#define Bc 32
+#define MAX_HEAD_DIM 128
+
+layout(local_size_x = Br, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer QBuf { double q_data[]; };
+layout(set = 0, binding = 1) buffer KBuf { double k_data[]; };
+layout(set = 0, binding = 2) buffer VBuf { double v_data[]; };
+layout(set = 0, binding = 3) buffer OBuf { double o_data[]; };
+// LSE output (binding 4) — always Float32 per `attention_contract.hpp`'s
+// kLseDType. Shape (B, H, S_q) flattened to (batch_heads, seq_q). The
+// FP64 shader does all reductions in `double` then narrows to `float` at
+// the final write to honour the cross-backend contract.
+layout(set = 0, binding = 4) buffer LBuf { float lse_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    int seq_q;      // S_q
+    int seq_k;      // S_k
+    int head_dim;   // D  (<= MAX_HEAD_DIM)
+    int head_v;     // Dv (<= MAX_HEAD_DIM)
+    float scale;    // host always passes 1/sqrt(D); widened to double below
+    int causal;     // 0 = no mask, non-zero = causal lower-triangular mask
+                    //     applied before softmax with -INFINITY sentinel
+};
+
+// Shared memory for one K block and one V block (FP64). Per-thread reuse
+// across Q rows within a workgroup, reloaded each iteration of the K/V loop.
+shared double Ks[Bc][MAX_HEAD_DIM];
+shared double Vs[Bc][MAX_HEAD_DIM];
+
+// ---------------------------------------------------------------------------
+// Software exp/log for double — GLSL's built-in `exp`/`log` have no `double`
+// overload (only `float`). Implementations match logsumexp_f64.comp /
+// softmax_f64.comp so numerical behaviour is consistent across F64 attention
+// paths (range-reduced Taylor for exp, IEEE-754 bit-extract + atanh series
+// for log). Inlining avoids cross-shader linkage and keeps SPIR-V hermetic.
+// ---------------------------------------------------------------------------
+double exp_d(double x) {
+    if (x != x) return x;  // NaN propagation
+    if (x > 709.0LF) return 1.0e308LF;
+    if (x < -745.0LF) return 0.0LF;
+    double ln2 = 0.6931471805599453LF;
+    double k_dbl = floor(x / ln2 + 0.5LF);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0LF, 1100.0LF));
+    // exp(r) via degree-13 Taylor (|r| <= ln(2)/2, error < r^14/14! < 1e-19)
+    double exp_r = 1.0LF + r * (1.0LF + r * (0.5LF + r * (1.0LF/6.0LF + r * (1.0LF/24.0LF + r * (1.0LF/120.0LF +
+        r * (1.0LF/720.0LF + r * (1.0LF/5040.0LF + r * (1.0LF/40320.0LF + r * (1.0LF/362880.0LF +
+        r * (1.0LF/3628800.0LF + r * (1.0LF/39916800.0LF + r * (1.0LF/479001600.0LF +
+        r * (1.0LF/6227020800.0LF)))))))))))));
+    double pow2 = 1.0LF;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0LF;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+double log_d(double x) {
+    if (x != x) return x;
+    if (x < 0.0LF) return 0.0LF / 0.0LF;
+    if (x == 0.0LF) return -1.0LF / 0.0LF;
+    if (x == 1.0LF) return 0.0LF;
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+    if (m > 1.4142135623730950488LF) { m *= 0.5LF; exp_val += 1; }
+    double f = m - 1.0LF;
+    double s = f / (2.0LF + f);
+    double s2 = s * s;
+    double c1 = 0.6666666666666735130LF;
+    double c2 = 0.3999999999940941908LF;
+    double c3 = 0.2857142874366239149LF;
+    double c4 = 0.2222219843214978396LF;
+    double c5 = 0.1818357216161805012LF;
+    double c6 = 0.1531383769920937332LF;
+    double c7 = 0.1479819860511658591LF;
+    double s4 = s2 * s2;
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
+    double log_m = 2.0LF * s + s * s2 * R;
+    double ln2_hi = 0.69314718055994530942LF;
+    double ln2_lo = 2.3190468138462995584e-17LF;
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
+}
+
+void main() {
+    int tid    = int(gl_LocalInvocationID.x);   // 0..Br-1
+    int q_tile = int(gl_WorkGroupID.x);          // which Br-tile of queries
+    int batch  = int(gl_WorkGroupID.y);          // which batch_head
+
+    int q_row = q_tile * Br + tid;
+    bool valid = (q_row < seq_q);
+
+    // Widen the FP32 push-constant scale to FP64 once — every dot-product
+    // uses the FP64 value so there's no FP32 round-trip in the hot path.
+    double scale_d = double(scale);
+
+    // Per-thread Q register copy (double).
+    double q_vec[MAX_HEAD_DIM];
+    for (int d = 0; d < MAX_HEAD_DIM; ++d) q_vec[d] = 0.0LF;
+    if (valid) {
+        for (int d = 0; d < head_dim; ++d) {
+            q_vec[d] = q_data[(batch * seq_q + q_row) * head_dim + d];
+        }
+    }
+
+    // Per-thread output accumulator and running softmax stats. Uses
+    // -1.0/0.0 = -INFINITY for the row_max sentinel (matches contract).
+    double o_vec[MAX_HEAD_DIM];
+    for (int d = 0; d < MAX_HEAD_DIM; ++d) o_vec[d] = 0.0LF;
+    double row_max = -1.0LF / 0.0LF;  // -INFINITY (double)
+    double row_sum = 0.0LF;
+
+    int num_k_blocks = (seq_k + Bc - 1) / Bc;
+    for (int kb = 0; kb < num_k_blocks; ++kb) {
+        int k_start = kb * Bc;
+
+        // Collaborative load. Br=16 threads load Bc=32 rows, so each
+        // thread handles rows_per_thread = Bc/Br = 2 rows of K and V.
+        const int rows_per_thread = 2;  // = Bc / Br
+        for (int r = 0; r < rows_per_thread; ++r) {
+            int kk = tid * rows_per_thread + r;  // 0..Bc-1
+            int k_row = k_start + kk;
+            if (k_row < seq_k) {
+                for (int d = 0; d < head_dim; ++d) {
+                    Ks[kk][d] = k_data[(batch * seq_k + k_row) * head_dim + d];
+                }
+                for (int d = 0; d < head_v; ++d) {
+                    Vs[kk][d] = v_data[(batch * seq_k + k_row) * head_v + d];
+                }
+                // Zero the tail so head_dim/head_v < MAX_HEAD_DIM don't read
+                // stale shared memory left by a previous iteration.
+                for (int d = head_dim; d < MAX_HEAD_DIM; ++d) Ks[kk][d] = 0.0LF;
+                for (int d = head_v;   d < MAX_HEAD_DIM; ++d) Vs[kk][d] = 0.0LF;
+            } else {
+                for (int d = 0; d < MAX_HEAD_DIM; ++d) Ks[kk][d] = 0.0LF;
+                for (int d = 0; d < MAX_HEAD_DIM; ++d) Vs[kk][d] = 0.0LF;
+            }
+        }
+        barrier();
+
+        // S_ij = Q_i · K_j · scale (all double). Out-of-range / causally
+        // masked positions get -INFINITY (contract sentinel — never -1e9
+        // / -1e30 / -DBL_MAX, those don't cleanly produce exp = 0).
+        double S[Bc];
+        for (int j = 0; j < Bc; ++j) {
+            int k_row = k_start + j;
+            bool causally_masked = (causal != 0) && (k_row > q_row);
+            if (k_row < seq_k && !causally_masked) {
+                double s = 0.0LF;
+                for (int d = 0; d < head_dim; ++d) {
+                    s += q_vec[d] * Ks[j][d];
+                }
+                S[j] = s * scale_d;
+            } else {
+                S[j] = -1.0LF / 0.0LF;  // -INFINITY (double)
+            }
+        }
+
+        // Tile max for this block.
+        double tile_max = S[0];
+        for (int j = 1; j < Bc; ++j) tile_max = max(tile_max, S[j]);
+
+        double new_max = max(row_max, tile_max);
+        // Early-out for fully-masked history+tile — exp(-INF - (-INF)) = NaN.
+        bool prev_was_inf = isinf(row_max) && row_max < 0.0LF;
+        bool all_masked = isinf(new_max) && new_max < 0.0LF;
+        double correction = prev_was_inf ? 0.0LF : exp_d(row_max - new_max);
+
+        // P_ij and tile sum.
+        double P[Bc];
+        double tile_sum = 0.0LF;
+        if (!all_masked) {
+            for (int j = 0; j < Bc; ++j) {
+                P[j] = exp_d(S[j] - new_max);
+                tile_sum += P[j];
+            }
+        } else {
+            for (int j = 0; j < Bc; ++j) P[j] = 0.0LF;
+        }
+
+        // Running sum update.
+        row_sum = correction * row_sum + tile_sum;
+
+        // Output accumulator update: O = corr * O + P · V (all double).
+        for (int d = 0; d < head_v; ++d) {
+            double acc = correction * o_vec[d];
+            for (int j = 0; j < Bc; ++j) {
+                acc += P[j] * Vs[j][d];
+            }
+            o_vec[d] = acc;
+        }
+
+        row_max = new_max;
+        barrier();  // next iteration will overwrite Ks/Vs
+    }
+
+    // Final normalization + write-back + per-row LSE emission. LSE is
+    // ALWAYS Float32 per the contract — narrow once at the end.
+    if (valid) {
+        int lse_idx = batch * seq_q + q_row;
+        if (row_sum > 0.0LF) {
+            double inv_sum = 1.0LF / row_sum;
+            for (int d = 0; d < head_v; ++d) {
+                o_data[(batch * seq_q + q_row) * head_v + d] = o_vec[d] * inv_sum;
+            }
+            lse_data[lse_idx] = float(row_max + log_d(row_sum));
+        } else {
+            // Fully-masked row: explicitly zero the output and emit the
+            // -INFINITY sentinel LSE so backward sees P = exp(S - L) = 0.
+            for (int d = 0; d < head_v; ++d) {
+                o_data[(batch * seq_q + q_row) * head_v + d] = 0.0LF;
+            }
+            lse_data[lse_idx] = -1.0f / 0.0f;  // -INFINITY (float)
+        }
+    }
+}
