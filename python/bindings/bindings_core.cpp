@@ -3529,9 +3529,15 @@ Returns:
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"),
          py::arg("reduce"), py::arg("include_self") = true,
          py::call_guard<py::gil_scoped_release>());
-    m.def("masked_select", &tenzor::masked_select, "Select elements where mask is true",
+    m.def("masked_select",
+         static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&)>(
+             &tenzor::masked_select),
+         "Select elements where mask is true",
          py::arg("input"), py::arg("mask"));
-    m.def("masked_fill", &tenzor::masked_fill, "Fill elements with value where mask is true",
+    m.def("masked_fill",
+         static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&, float)>(
+             &tenzor::masked_fill),
+         "Fill elements with value where mask is true",
          py::arg("input"), py::arg("mask"), py::arg("value"));
     m.def("where", [](const tenzor::Tensor& condition, const tenzor::Tensor& x, const tenzor::Tensor& y) {
          return tenzor::where(condition, x, y);
@@ -3541,7 +3547,10 @@ Returns:
          py::arg("input"), py::arg("index"));
     m.def("put", &tenzor::put, "Put elements into flattened tensor",
          py::arg("input"), py::arg("index"), py::arg("source"));
-    m.def("one_hot", &tenzor::one_hot, "One-hot encode class indices",
+    m.def("one_hot",
+         static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, int64_t)>(
+             &tenzor::one_hot),
+         "One-hot encode class indices",
          py::arg("input"), py::arg("num_classes") = -1,
          py::call_guard<py::gil_scoped_release>());
 

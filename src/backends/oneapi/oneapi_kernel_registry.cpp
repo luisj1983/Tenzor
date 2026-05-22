@@ -2044,18 +2044,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Conv2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
             auto result = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                                           stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                           stride[0], stride[1], padding[0], padding[1],
+                                           dilation[0], dilation[1],
                                            groups, get_q(inputs));
             oneapi::fp16_saturate_if_needed(result, get_q(inputs));
             return {result};
@@ -2065,18 +2057,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Conv2dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
             return {oneapi::conv2d_backward_input(inputs[0], inputs[2], input_shape,
-                                                   stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                                   stride[0], stride[1], padding[0], padding[1],
+                                                   dilation[0], dilation[1],
                                                    groups, get_q(inputs))};
         });
 
@@ -2084,18 +2068,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Conv2dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
-            int64_t pad_h    = attrs.get_int(AttrKey::PaddingH, padding);
-            int64_t pad_w    = attrs.get_int(AttrKey::PaddingW, padding);
-            int64_t dil_h    = attrs.get_int(AttrKey::DilationH, dilation);
-            int64_t dil_w    = attrs.get_int(AttrKey::DilationW, dilation);
-            int64_t groups   = attrs.get_int(AttrKey::Groups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
             return {oneapi::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
-                                                    stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                                    stride[0], stride[1], padding[0], padding[1],
+                                                    dilation[0], dilation[1],
                                                     groups, get_q(inputs))};
         });
 
@@ -2144,51 +2120,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {result[0]};
         });
 
-    // Audit I5-followup: ConvT2d on OneAPI is scalar-only. Honest contract:
+    // Audit I5-followup / F.11: ConvT2d on OneAPI is scalar-only. Honest contract:
     // read per-axis with scalar fallback; throw on asymmetric.
     table.register_kernel(OpId::ConvTranspose2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t stride         = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding        = attrs.get_int(AttrKey::Padding, 0);
-            int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
-            int64_t dilation       = attrs.get_int(AttrKey::Dilation, 1);
-            int64_t sH = attrs.get_int(AttrKey::StrideH,        stride);
-            int64_t sW = attrs.get_int(AttrKey::StrideW,        stride);
-            int64_t pH = attrs.get_int(AttrKey::PaddingH,       padding);
-            int64_t pW = attrs.get_int(AttrKey::PaddingW,       padding);
-            int64_t opH= attrs.get_int(AttrKey::OutputPaddingH, output_padding);
-            int64_t opW= attrs.get_int(AttrKey::OutputPaddingW, output_padding);
-            int64_t dH = attrs.get_int(AttrKey::DilationH,      dilation);
-            int64_t dW = attrs.get_int(AttrKey::DilationW,      dilation);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            if (sH != sW || pH != pW || opH != opW || dH != dW) {
+            TENZOR_READ_CONVT2D_ATTRS();
+            if (stride[0] != stride[1] || padding[0] != padding[1] ||
+                output_padding[0] != output_padding[1] || dilation[0] != dilation[1]) {
                 throw std::runtime_error(
                     "OneAPI ConvTranspose2d: asymmetric stride/padding/"
                     "output_padding/dilation is not yet supported (I5-followup).");
             }
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias,
-                                                      stride, padding, output_padding,
-                                                      dilation, groups, get_q(inputs))};
+                                                      stride[0], padding[0], output_padding[0],
+                                                      dilation[0], groups, get_q(inputs))};
         });
 
-    // Audit I5-followup: Conv3d on OneAPI takes std::vector<int64_t> per axis,
-    // so we natively pass the per-axis values through (no isotropic throw).
-    // Helper macro for reading a per-axis triple (raw function-pointer kernel
-    // registration here disallows capturing lambdas).
-#   define TENZOR_ONEAPI_READ_TRIPLE(scalar_key, kD, kH, kW, default_val, out) \
-        std::vector<int64_t> out; \
-        { \
-            int64_t _s = attrs.get_int(scalar_key, default_val); \
-            out = { attrs.get_int(kD, _s), attrs.get_int(kH, _s), attrs.get_int(kW, _s) }; \
-        }
+    // F.11: Conv3d/ConvT3d on OneAPI take std::vector<int64_t> per axis.
+    // Use the canonical per-axis vector helpers from attr_macros.hpp.
 
     table.register_kernel(OpId::Conv3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv3d_forward(inputs[0], inputs[1], bias,
                                             stride, padding, dilation, groups, get_q(inputs))};
@@ -2196,10 +2153,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Conv3dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
             return {oneapi::conv3d_backward_input(inputs[0], inputs[2], input_shape,
                                                     stride, padding, dilation, groups, get_q(inputs))};
@@ -2207,10 +2164,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Conv3dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
             return {oneapi::conv3d_backward_weight(inputs[0], inputs[1], weight_shape,
                                                      stride, padding, dilation, groups, get_q(inputs))};
@@ -2221,14 +2178,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::conv3d_backward_bias(inputs[0], get_q(inputs))};
         });
 
-    // Audit I5-followup: ConvT3d on OneAPI uses the same READ_TRIPLE macro.
+    // F.11: ConvT3d on OneAPI also takes vectors per axis.
     table.register_kernel(OpId::ConvTranspose3dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,        AttrKey::StrideD,        AttrKey::StrideH,        AttrKey::StrideW,        1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,       AttrKey::PaddingD,       AttrKey::PaddingH,       AttrKey::PaddingW,       0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::OutputPadding, AttrKey::OutputPaddingD, AttrKey::OutputPaddingH, AttrKey::OutputPaddingW, 0, output_padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation,      AttrKey::DilationD,      AttrKey::DilationH,      AttrKey::DilationW,      1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride         = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding        = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto output_padding = ::tenzor::backend::attrs::output_padding_3d_vec(attrs);
+            const auto dilation       = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv_transpose3d_forward(inputs[0], inputs[1], bias,
                                                        stride, padding, output_padding,
@@ -2237,10 +2194,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ConvTranspose3dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
             return {oneapi::conv_transpose3d_backward_input(inputs[0], inputs[2], input_shape,
                                                              stride, padding, dilation,
@@ -2249,10 +2206,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Stride,   AttrKey::StrideD,   AttrKey::StrideH,   AttrKey::StrideW,   1, stride)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Padding,  AttrKey::PaddingD,  AttrKey::PaddingH,  AttrKey::PaddingW,  0, padding)
-            TENZOR_ONEAPI_READ_TRIPLE(AttrKey::Dilation, AttrKey::DilationD, AttrKey::DilationH, AttrKey::DilationW, 1, dilation)
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const auto stride   = ::tenzor::backend::attrs::stride_3d_vec(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_3d_vec(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_3d_vec(attrs);
+            const int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
             return {oneapi::conv_transpose3d_backward_weight(inputs[0], inputs[1], weight_shape,
                                                               stride, padding, dilation,
@@ -2338,10 +2295,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool1dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            return oneapi::maxpool1d_forward(inputs[0], kernel_size, stride, padding, get_q(inputs));
+            // F.11: per-axis with scalar fallback via attr_macros helpers.
+            const auto k = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
+            const auto s = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
+            return oneapi::maxpool1d_forward(inputs[0], k[0], s[0], p[0], get_q(inputs));
         });
 
     table.register_kernel(OpId::MaxPool1dBackward,
@@ -2352,19 +2312,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AvgPool1dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            return {oneapi::avgpool1d_forward(inputs[0], kernel_size, stride, padding, get_q(inputs))};
+            const auto k = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
+            const auto s = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
+            return {oneapi::avgpool1d_forward(inputs[0], k[0], s[0], p[0], get_q(inputs))};
         });
 
     table.register_kernel(OpId::AvgPool1dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
-            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            const auto k = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
+            const auto s = ::tenzor::backend::attrs::read_1d(attrs,
+                AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
+            const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return {oneapi::avgpool1d_backward(inputs[0], kernel_size, stride, padding, input_shape, get_q(inputs))};
+            return {oneapi::avgpool1d_backward(inputs[0], k[0], s[0], p[0], input_shape, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d,
@@ -4164,64 +4128,55 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::DepthwiseConv2d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            // F.11: per-axis read; depthwise OneAPI kernel is scalar-only, so
+            // reject asymmetric instead of silently squashing.
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+            if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+                throw std::runtime_error(
+                    "OneAPI DepthwiseConv2d: asymmetric stride/padding/dilation "
+                    "is not yet supported.");
+            }
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::depthwise_conv2d_kernel(inputs[0], inputs[1], bias,
-                                                     stride, padding, dilation, get_q(inputs))};
+                                                     stride[0], padding[0], dilation[0],
+                                                     get_q(inputs))};
         });
 
-    // DeformableConv2d (DCNv2)
+    // DeformableConv2d (DCNv2) — F.11: per-axis with scalar fallback so callers
+    // passing only AttrKey::Stride/Padding/Dilation aren't silently squashed.
     table.register_kernel(OpId::DeformableConv2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             // inputs: {input, offset, weight, bias, mask}
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
+            const int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
             return std::vector<Tensor>{oneapi::deformable_conv2d_forward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
                 groups, offset_groups, get_q(inputs))};
         });
 
     table.register_kernel(OpId::DeformableConv2dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             // inputs: {grad_output, input, offset, weight, mask}
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
+            const int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
             return oneapi::deformable_conv2d_backward_input_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
                 groups, offset_groups, get_q(inputs));
         });
 
     table.register_kernel(OpId::DeformableConv2dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             // inputs: {grad_output, input, offset, mask}
-            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
-            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
-            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
-            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            TENZOR_READ_CONV2D_ATTRS();
+            const int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
             auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
             return std::vector<Tensor>{oneapi::deformable_conv2d_backward_weight_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3],
-                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
                 groups, offset_groups, weight_shape, get_q(inputs))};
         });
 
