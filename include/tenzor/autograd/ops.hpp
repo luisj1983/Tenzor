@@ -1459,6 +1459,73 @@ auto masked_select(const Variable& input, const Tensor& mask) -> Variable;
 auto masked_scatter(const Variable& input, const Tensor& mask,
                     const Variable& source) -> Variable;
 
+// ---- Audit E.7 batch 7 — index/scatter/view ops --------------------------
+
+/** @brief index_add(input, dim, index, source): self with source[i] added at
+ *         index[i] along dim. Backward: grad_input=grad_y;
+ *         grad_source=index_select(grad_y, dim, index). `index` is non-diff. */
+auto index_add(const Variable& input, int64_t dim, const Tensor& index,
+               const Variable& source) -> Variable;
+
+/** @brief index_copy(input, dim, index, source): self with source[i] copied at
+ *         index[i] along dim. Backward: grad_input=index_fill(grad_y, dim, index, 0);
+ *         grad_source=index_select(grad_y, dim, index). */
+auto index_copy(const Variable& input, int64_t dim, const Tensor& index,
+                const Variable& source) -> Variable;
+
+/** @brief index_fill(input, dim, index, value): self with scalar value placed at
+ *         index positions along dim. Backward: grad_input=index_fill(grad_y, dim, index, 0). */
+auto index_fill(const Variable& input, int64_t dim, const Tensor& index,
+                float value) -> Variable;
+
+/** @brief select_scatter(input, src, dim, index): copy of input with src placed at
+ *         input.select(dim, index). Backward routes grad to input (slice zeroed)
+ *         and to src (the gathered slice). */
+auto select_scatter(const Variable& input, const Variable& src,
+                    int64_t dim, int64_t index) -> Variable;
+
+/** @brief slice_scatter(input, src, dim, start, end, step): copy of input with src
+ *         placed in the slice region. Backward routes grad to input (slice zeroed)
+ *         and to src (= slice of grad_y). */
+auto slice_scatter(const Variable& input, const Variable& src, int64_t dim,
+                   int64_t start = 0, int64_t end = -1, int64_t step = 1) -> Variable;
+
+/** @brief diagonal_scatter(input, src, offset, dim1, dim2): copy of input with src
+ *         placed on a diagonal. NON-DIFFERENTIABLE — needs a general N-D
+ *         `diagonal(offset, dim1, dim2)` extractor that the project does not yet
+ *         ship; see DiagonalScatterBackward. */
+auto diagonal_scatter(const Variable& input, const Variable& src,
+                      int64_t offset = 0, int64_t dim1 = 0, int64_t dim2 = 1) -> Variable;
+
+/** @brief repeat_interleave(input, repeats, dim) — uniform integer repeats overload.
+ *         Backward: split repeated axis as (orig, repeats), sum over repeats axis,
+ *         reshape to input shape. */
+auto repeat_interleave(const Variable& input, int64_t repeats,
+                       std::optional<int64_t> dim = std::nullopt) -> Variable;
+
+/** @brief repeat_interleave(input, repeats: Tensor, dim) — per-element repeats.
+ *         NON-DIFFERENTIABLE: variable-length expansion requires an accumulating
+ *         scatter that we don't have a clean closed form for at Variable level. */
+auto repeat_interleave(const Variable& input, const Tensor& repeats,
+                       std::optional<int64_t> dim = std::nullopt) -> Variable;
+
+/** @brief unfold(input, kernel_size, stride, padding, dilation) — im2col patch
+ *         extraction. Backward = fold(grad_y, (H, W), kernel, stride, padding, dilation). */
+auto unfold(const Variable& input, int64_t kernel_size, int64_t stride = 1,
+            int64_t padding = 0, int64_t dilation = 1) -> Variable;
+
+/** @brief nonzero(x): Int64 indices of nonzero entries. NON-DIFFERENTIABLE. */
+auto nonzero(const Variable& input) -> Variable;
+
+/** @brief unique(x, sorted, return_inverse, return_counts): sorted unique values
+ *         plus optional inverse / counts. NON-DIFFERENTIABLE (discontinuous in x).
+ *         Returns only the unique-values Variable; inverse/counts are integer-typed
+ *         and discarded here for the autograd surface. */
+auto unique(const Variable& input,
+            bool sorted = true,
+            bool return_inverse = false,
+            bool return_counts = false) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

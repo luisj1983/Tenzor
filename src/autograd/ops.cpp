@@ -3873,4 +3873,215 @@ auto cross(const Variable& a, const Variable& b, int64_t dim) -> Variable {
     return output;
 }
 
+// ---- Audit E.7 batch 7 — index/scatter/view ops --------------------------
+
+// index_add(input, dim, index, source). `index` is integer tensor (non-diff).
+auto index_add(const Variable& input, int64_t dim, const Tensor& index,
+               const Variable& source) -> Variable {
+    auto result = tenzor::index_add(input.tensor(), dim, index, source.tensor());
+    bool needs_grad =
+        (input.requires_grad() || source.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IndexAddBackward>(dim);
+    grad_fn->save_for_backward({index});
+    grad_fn->set_next_functions({input.grad_fn(), source.grad_fn()});
+    grad_fn->set_input_variables({input, source});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// index_copy(input, dim, index, source).
+auto index_copy(const Variable& input, int64_t dim, const Tensor& index,
+                const Variable& source) -> Variable {
+    auto result = tenzor::index_copy(input.tensor(), dim, index, source.tensor());
+    bool needs_grad =
+        (input.requires_grad() || source.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IndexCopyBackward>(dim);
+    grad_fn->save_for_backward({index});
+    grad_fn->set_next_functions({input.grad_fn(), source.grad_fn()});
+    grad_fn->set_input_variables({input, source});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// index_fill(input, dim, index, value). value scalar non-diff.
+auto index_fill(const Variable& input, int64_t dim, const Tensor& index,
+                float value) -> Variable {
+    auto result = tenzor::index_fill(input.tensor(), dim, index, value);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IndexFillBackward>(dim);
+    grad_fn->save_for_backward({index});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// select_scatter(input, src, dim, index).
+auto select_scatter(const Variable& input, const Variable& src,
+                    int64_t dim, int64_t index) -> Variable {
+    auto result = tenzor::select_scatter(input.tensor(), src.tensor(), dim, index);
+    bool needs_grad =
+        (input.requires_grad() || src.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<SelectScatterBackward>(dim, index);
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// slice_scatter(input, src, dim, start, end, step).
+auto slice_scatter(const Variable& input, const Variable& src, int64_t dim,
+                   int64_t start, int64_t end, int64_t step) -> Variable {
+    auto result = tenzor::slice_scatter(input.tensor(), src.tensor(), dim,
+                                        start, end, step);
+    bool needs_grad =
+        (input.requires_grad() || src.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<SliceScatterBackward>(dim, start, end, step);
+    grad_fn->src_shape_ =
+        std::vector<int64_t>(src.shape().begin(), src.shape().end());
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// diagonal_scatter(input, src, offset, dim1, dim2). Non-differentiable
+// (see DiagonalScatterBackward docs for the missing N-D diagonal extractor).
+auto diagonal_scatter(const Variable& input, const Variable& src,
+                      int64_t offset, int64_t dim1, int64_t dim2) -> Variable {
+    auto result = tenzor::diagonal_scatter(input.tensor(), src.tensor(),
+                                           offset, dim1, dim2);
+    bool needs_grad =
+        (input.requires_grad() || src.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<DiagonalScatterBackward>(offset, dim1, dim2);
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// repeat_interleave(input, repeats: int, dim).
+auto repeat_interleave(const Variable& input, int64_t repeats,
+                       std::optional<int64_t> dim) -> Variable {
+    auto result = tenzor::repeat_interleave(input.tensor(), repeats, dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto grad_fn = std::make_shared<RepeatInterleaveBackward>(
+        repeats, dim, std::move(input_shape));
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// repeat_interleave(input, repeats: Tensor, dim) — non-differentiable
+// (per-element variable-length expansion; see RepeatInterleaveBackward docs).
+// We still attach a Function so the graph fails *loudly* at backward time
+// rather than silently producing wrong gradients. Reuses the
+// `RepeatInterleaveBackward` op_id via a typed wrapper that throws.
+auto repeat_interleave(const Variable& input, const Tensor& repeats,
+                       std::optional<int64_t> dim) -> Variable {
+    auto result = tenzor::repeat_interleave(input.tensor(), repeats, dim);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    // Attach a uniform-repeats backward configured to throw NonDifferentiable
+    // at use time — by using repeats=-1 we sentinel that the per-element
+    // overload was used; the class detects this and throws.
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto grad_fn = std::make_shared<RepeatInterleaveBackward>(
+        /*repeats=*/-1, dim, std::move(input_shape));
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// unfold(input, kernel_size, stride, padding, dilation) — im2col.
+auto unfold(const Variable& input, int64_t kernel_size, int64_t stride,
+            int64_t padding, int64_t dilation) -> Variable {
+    auto result = tenzor::ops::unfold(input.tensor(), kernel_size, stride,
+                                      padding, dilation);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    // Pull H, W from the input shape (N, C, H, W).
+    auto in_shape = input.shape();
+    if (in_shape.size() != 4) {
+        throw std::runtime_error(
+            "unfold (autograd wrapper) expects 4D input (N, C, H, W); got rank "
+            + std::to_string(in_shape.size()));
+    }
+    int64_t H = in_shape[2];
+    int64_t W = in_shape[3];
+    auto grad_fn = std::make_shared<UnfoldBackward>(
+        kernel_size, stride, padding, dilation, H, W);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// nonzero — non-differentiable.
+auto nonzero(const Variable& input) -> Variable {
+    auto result = tenzor::nonzero(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<NonzeroBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// unique — non-differentiable. Returns only the unique-values tensor; the
+// optional inverse/counts outputs are integer-typed and don't participate in
+// the autograd surface.
+auto unique(const Variable& input, bool sorted, bool return_inverse,
+            bool return_counts) -> Variable {
+    auto [values, inverse, counts] =
+        tenzor::unique(input.tensor(), sorted, return_inverse, return_counts);
+    (void)inverse;
+    (void)counts;
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(values, false);
+    }
+    auto grad_fn = std::make_shared<UniqueBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(values, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

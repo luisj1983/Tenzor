@@ -9,6 +9,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -3039,6 +3040,253 @@ auto CrossBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     auto grad_a = tenzor::cross(b, grad, dim_);
     auto grad_b = tenzor::cross(grad, a, dim_);
     return {grad_a, grad_b};
+}
+
+// ============================================================================
+// Audit E.7 batch 7 — index/scatter/view ops
+// ============================================================================
+
+// --- IndexAdd ------------------------------------------------------------
+// y = index_add(x, dim, index, source): y[..., index[i], ...] += source[..., i, ...].
+//   dy/dx_pos = 1 for every pos       (the add leaves x untouched in dim-stride
+//                                       slots that source doesn't hit, and adds
+//                                       1*src into the slots it does)
+//   dy/dsource_i = 1 at output row index[i] along dim
+// Therefore grad_x = grad_y; grad_source = index_select(grad_y, dim, index).
+// index is an integer tensor and is not differentiable.
+auto IndexAddBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IndexAddBackward::forward should not be called directly");
+}
+auto IndexAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& index = saved_tensors_[0];
+    const auto& grad_y = grad_outputs[0];
+
+    auto grad_x = grad_y;
+    auto grad_source = tenzor::index_select(grad_y, dim_, index);
+    return {grad_x, grad_source};
+}
+
+// --- IndexCopy -----------------------------------------------------------
+// y = index_copy(x, dim, index, source): y[..., index[i], ...] = source[..., i, ...]
+// for each i; other positions equal the original x.
+//   dy/dx_pos = 0 if pos is among the indexed slots, else 1
+//   dy/dsource_i = 1 at output row index[i] along dim
+// grad_x       = index_fill(grad_y, dim, index, 0)   (zero out overwritten slots)
+// grad_source  = index_select(grad_y, dim, index)
+auto IndexCopyBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IndexCopyBackward::forward should not be called directly");
+}
+auto IndexCopyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& index = saved_tensors_[0];
+    const auto& grad_y = grad_outputs[0];
+
+    auto grad_x = tenzor::index_fill(grad_y, dim_, index, /*value=*/0.0f);
+    auto grad_source = tenzor::index_select(grad_y, dim_, index);
+    return {grad_x, grad_source};
+}
+
+// --- IndexFill -----------------------------------------------------------
+// y = index_fill(x, dim, index, value): indexed slots overwritten with a
+// scalar; non-indexed slots equal x. value is a non-diff scalar.
+//   dy/dx_pos = 0 if pos is indexed, else 1
+// grad_x = index_fill(grad_y, dim, index, 0)
+auto IndexFillBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IndexFillBackward::forward should not be called directly");
+}
+auto IndexFillBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& index = saved_tensors_[0];
+    const auto& grad_y = grad_outputs[0];
+
+    auto grad_x = tenzor::index_fill(grad_y, dim_, index, /*value=*/0.0f);
+    return {grad_x};
+}
+
+// --- SelectScatter -------------------------------------------------------
+// y = select_scatter(x, src, dim, index): copy of x with src written at
+// x.select(dim, index). src has shape == x with dim removed.
+//   grad_x   = select_scatter(grad_y, zeros_like(src_slice), dim, index)
+//   grad_src = select(grad_y, dim, index)
+auto SelectScatterBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("SelectScatterBackward::forward should not be called directly");
+}
+auto SelectScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad_y = grad_outputs[0];
+
+    // grad_src is exactly the slice of grad_y at (dim, index). It already has
+    // the right shape (dim removed), so a single select() is sufficient.
+    auto grad_src = tenzor::select(grad_y, dim_, index_);
+
+    // grad_x = grad_y with the (dim, index) slot zeroed out. Build a zero
+    // tensor with the shape of the slice and scatter back in.
+    std::vector<int64_t> slice_shape;
+    auto y_shape = grad_y.shape();
+    int64_t nd = static_cast<int64_t>(y_shape.size());
+    int64_t dim_norm = dim_ < 0 ? dim_ + nd : dim_;
+    slice_shape.reserve(static_cast<size_t>(nd - 1));
+    for (int64_t d = 0; d < nd; ++d) {
+        if (d != dim_norm) slice_shape.push_back(y_shape[d]);
+    }
+    auto zero_slice = zeros(slice_shape, grad_y.dtype(), grad_y.device());
+    auto grad_x = tenzor::select_scatter(grad_y, zero_slice, dim_, index_);
+
+    // grad_src needs to be contiguous since `select` returns a view.
+    if (!grad_src.is_contiguous()) grad_src = grad_src.contiguous();
+    return {grad_x, grad_src};
+}
+
+// --- SliceScatter --------------------------------------------------------
+// y = slice_scatter(x, src, dim, start, end, step): copy of x with src
+// written into the slice region. src shape matches the slice.
+//   grad_x   = slice_scatter(grad_y, zeros_like(slice), dim, start, end, step)
+//   grad_src = slice(grad_y, dim, start, end, step).contiguous()
+auto SliceScatterBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("SliceScatterBackward::forward should not be called directly");
+}
+auto SliceScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad_y = grad_outputs[0];
+
+    auto zero_slice = zeros(src_shape_, grad_y.dtype(), grad_y.device());
+    auto grad_x = tenzor::slice_scatter(grad_y, zero_slice, dim_, start_, end_, step_);
+
+    // The forward op resolves end=-1 against the actual extent. We don't have
+    // that resolved value here, but `slice` accepts the same conventions, so
+    // the slice we extract has the same shape as src_shape_ by construction.
+    int64_t end_resolved = end_;
+    if (end_resolved < 0) {
+        auto y_shape = grad_y.shape();
+        int64_t nd = static_cast<int64_t>(y_shape.size());
+        int64_t dim_norm = dim_ < 0 ? dim_ + nd : dim_;
+        end_resolved = y_shape[dim_norm];
+    }
+    auto grad_src_view = tenzor::slice(grad_y, dim_, start_, end_resolved, step_);
+    auto grad_src = grad_src_view.is_contiguous() ? grad_src_view
+                                                  : grad_src_view.contiguous();
+    return {grad_x, grad_src};
+}
+
+// --- DiagonalScatter (non-diff: missing general diagonal extractor) ------
+auto DiagonalScatterBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("DiagonalScatterBackward::forward should not be called directly");
+}
+auto DiagonalScatterBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "diagonal_scatter: closed-form backward is `diagonal_scatter(grad_y, "
+        "zeros_like(src), ...)` for grad_input plus `diagonal(grad_y, offset, "
+        "dim1, dim2)` for grad_src. The project currently only ships the 2D "
+        "shortcut `diag(...)` and no general N-D `diagonal(offset, dim1, dim2)` "
+        "extractor, so grad_src cannot be computed for arbitrary (dim1, dim2). "
+        "Marked non-differentiable until a general `diagonal` view is added "
+        "to the public tensor API.");
+}
+
+// --- RepeatInterleave (uniform integer repeats) --------------------------
+// y = repeat_interleave(x, repeats: int, dim). Each element along dim is
+// repeated `repeats` times consecutively. Backward: reshape the repeated
+// axis as (orig, repeats), sum over the repeats axis, reshape to input shape.
+//
+// When dim is nullopt the forward flattens x first and the output is 1D,
+// so the backward sums in 1D and reshapes back to input_shape_.
+auto RepeatInterleaveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("RepeatInterleaveBackward::forward should not be called directly");
+}
+auto RepeatInterleaveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Sentinel: repeats_ == -1 means the wrapper saw a tensor-valued repeats
+    // overload (per-element variable-length expansion). That case has no
+    // closed-form Variable-level backward without an accumulating scatter
+    // keyed by the per-element repeat counts. Fail loudly here.
+    if (repeats_ < 0) {
+        throw NonDifferentiable(
+            "repeat_interleave with a tensor `repeats`: per-element variable-"
+            "length expansion has no closed-form Variable-level backward "
+            "without an accumulating scatter keyed by the per-element repeat "
+            "counts. The uniform integer-`repeats` overload is differentiable; "
+            "use it if you need autograd. A follow-up should add a dedicated "
+            "backward that consumes the per-element counts and scatter-adds "
+            "across the expansion.");
+    }
+    const auto& grad_y = grad_outputs[0];
+
+    // Degenerate repeats=1: identity, with a possible flatten for nullopt dim.
+    // Handle by going through the same reshape-sum-reshape path which collapses
+    // to a no-op sum when the repeats axis has length 1.
+    int64_t r = repeats_;
+
+    if (dim_.has_value()) {
+        // grad_y has shape == input with dim*r at axis `dim`.
+        int64_t nd = static_cast<int64_t>(input_shape_.size());
+        int64_t dim_norm = *dim_ < 0 ? *dim_ + nd : *dim_;
+
+        std::vector<int64_t> split_shape;
+        split_shape.reserve(static_cast<size_t>(nd) + 1);
+        for (int64_t d = 0; d < nd; ++d) {
+            if (d == dim_norm) {
+                split_shape.push_back(input_shape_[d]); // orig
+                split_shape.push_back(r);               // repeats inserted after
+            } else {
+                split_shape.push_back(input_shape_[d]);
+            }
+        }
+        auto reshaped = reshape(grad_y, split_shape);
+        // Sum over the inserted repeats axis (= dim_norm + 1).
+        auto summed = tenzor::sum(reshaped, /*dim=*/dim_norm + 1, /*keepdim=*/false);
+        // summed.shape now equals input_shape_.
+        return {summed};
+    }
+
+    // dim is nullopt -> forward flattened x to 1D and repeated.
+    // grad_y is 1D of length (numel(x) * r); reshape to (numel(x), r), sum
+    // along axis 1, then reshape to input_shape_.
+    int64_t numel = 1;
+    for (auto d : input_shape_) numel *= d;
+    auto reshaped = reshape(grad_y, {numel, r});
+    auto summed_1d = tenzor::sum(reshaped, /*dim=*/1, /*keepdim=*/false);
+    auto grad_x = reshape(summed_1d, input_shape_);
+    return {grad_x};
+}
+
+// --- Unfold (im2col) -----------------------------------------------------
+// y = unfold(x, k, s, p, d): patches of x as a (N, C*K*K, L) tensor.
+// The linear adjoint of unfold (scatter-add overlapping patches back into the
+// original spatial grid) is exactly `fold`. So grad_x = fold(grad_y, (H, W),
+// k, s, p, d). Saves (H, W) from the input shape.
+auto UnfoldBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("UnfoldBackward::forward should not be called directly");
+}
+auto UnfoldBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad_y = grad_outputs[0];
+    auto grad_x = tenzor::ops::fold(grad_y, /*output_size=*/{H_, W_}, kernel_size_,
+                                    stride_, padding_, dilation_);
+    return {grad_x};
+}
+
+// --- Nonzero (non-diff: integer indices output) --------------------------
+auto NonzeroBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("NonzeroBackward::forward should not be called directly");
+}
+auto NonzeroBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "nonzero: output is an Int64 index tensor and is not a smooth function "
+        "of the input (the count and ordering of nonzero positions changes "
+        "discretely under perturbations). No meaningful gradient exists. Use "
+        "a soft surrogate (e.g. `where(x != 0, 1, 0).sum()`) if you need a "
+        "differentiable count of nonzero entries.");
+}
+
+// --- Unique (non-diff: discontinuous sorting/dedup) ----------------------
+auto UniqueBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("UniqueBackward::forward should not be called directly");
+}
+auto UniqueBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "unique: forward performs sorting and deduplication, both of which "
+        "are discontinuous in the input under ties — the set of selected "
+        "positions jumps under arbitrarily small perturbations. No "
+        "well-defined gradient exists (strict policy, matching Sign). If "
+        "you need a differentiable selection, replace with a soft top-k "
+        "or a learned attention/clustering relaxation.");
 }
 
 } // namespace tenzor

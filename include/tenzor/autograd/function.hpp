@@ -4305,4 +4305,230 @@ private:
     int64_t dim_;
 };
 
+
+// ============================================================================
+// Audit E.7 batch 7 — index/scatter/view ops
+// ============================================================================
+
+/**
+ * @brief index_add(input, dim, index, source) — self[index[i]] += source[i]
+ *        along dim. (Note: the project's underlying tensor op has no `alpha`
+ *        argument; alpha is implicitly 1.0.)
+ *
+ *        Backward:
+ *            grad_input  = grad_y   (the +=source step leaves input gradient
+ *                                    untouched along non-indexed positions,
+ *                                    and the indexed positions also pass
+ *                                    grad through 1:1)
+ *            grad_source = index_select(grad_y, dim, index)
+ *        index is integer, non-differentiable.
+ */
+class IndexAddBackward : public Function {
+public:
+    explicit IndexAddBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IndexAddBackward"; }
+    auto op_id() const -> OpId override { return OpId::IndexAdd; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief index_copy(input, dim, index, source) — self[index[i]] = source[i]
+ *        along dim. Backward:
+ *            grad_input  = index_fill(grad_y, dim, index, 0)
+ *                          (indexed positions of input were overwritten)
+ *            grad_source = index_select(grad_y, dim, index)
+ *        Behaviour assumes indices are unique along dim; the underlying op
+ *        is overwrite (not accumulate), so duplicate indices would already
+ *        be undefined at the forward level.
+ */
+class IndexCopyBackward : public Function {
+public:
+    explicit IndexCopyBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IndexCopyBackward"; }
+    auto op_id() const -> OpId override { return OpId::IndexCopy; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief index_fill(input, dim, index, value) — self[index[i]] = value along
+ *        dim. `value` is a non-differentiable scalar.
+ *        Backward:
+ *            grad_input = index_fill(grad_y, dim, index, 0)
+ */
+class IndexFillBackward : public Function {
+public:
+    explicit IndexFillBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IndexFillBackward"; }
+    auto op_id() const -> OpId override { return OpId::IndexFill; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief select_scatter(input, src, dim, index) — copy of input with src
+ *        written into the select(dim, index) slice. Backward:
+ *            grad_input = select_scatter(grad_y, zeros_like(slice), dim, index)
+ *            grad_src   = select(grad_y, dim, index)
+ */
+class SelectScatterBackward : public Function {
+public:
+    SelectScatterBackward(int64_t dim, int64_t index) : dim_(dim), index_(index) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SelectScatterBackward"; }
+    auto op_id() const -> OpId override { return OpId::SelectScatter; }
+private:
+    int64_t dim_;
+    int64_t index_;
+};
+
+/**
+ * @brief slice_scatter(input, src, dim, start, end, step) — copy of input
+ *        with src written into the slice(dim, start, end, step) region.
+ *        Backward:
+ *            grad_input = slice_scatter(grad_y, zeros_like(slice), ...)
+ *            grad_src   = slice(grad_y, dim, start, end, step).contiguous()
+ *        Saves src.shape so the zero-slice can be built without `slice` on
+ *        the gradient first.
+ */
+class SliceScatterBackward : public Function {
+public:
+    SliceScatterBackward(int64_t dim, int64_t start, int64_t end, int64_t step)
+        : dim_(dim), start_(start), end_(end), step_(step) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SliceScatterBackward"; }
+    auto op_id() const -> OpId override { return OpId::SliceScatter; }
+    std::vector<int64_t> src_shape_;
+private:
+    int64_t dim_;
+    int64_t start_;
+    int64_t end_;
+    int64_t step_;
+};
+
+/**
+ * @brief diagonal_scatter(input, src, offset, dim1, dim2) — copy of input
+ *        with src placed on the specified diagonal. The mathematically
+ *        correct backward is:
+ *            grad_input = diagonal_scatter(grad_y, zeros_like(src), ...)
+ *            grad_src   = diagonal(grad_y, offset, dim1, dim2)
+ *        The project ships `diag(...)` (1D <-> 2D shortcut) but not a
+ *        general N-D `diagonal(offset, dim1, dim2)` extractor needed to
+ *        gather grad_src for arbitrary (dim1, dim2). Without it, only the
+ *        2D-on-the-main-axes special case is implementable, and silently
+ *        restricting the backward to that case would surprise callers.
+ *
+ *        Mark NonDifferentiable until a general `diagonal(...)` extractor
+ *        lands; this matches the project policy of failing loudly rather
+ *        than faking gradients.
+ */
+class DiagonalScatterBackward : public Function {
+public:
+    DiagonalScatterBackward(int64_t offset, int64_t dim1, int64_t dim2)
+        : offset_(offset), dim1_(dim1), dim2_(dim2) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "DiagonalScatterBackward"; }
+    auto op_id() const -> OpId override { return OpId::DiagonalScatter; }
+private:
+    int64_t offset_;
+    int64_t dim1_;
+    int64_t dim2_;
+};
+
+/**
+ * @brief repeat_interleave(input, repeats: int, dim) — uniform integer-
+ *        repeats overload. Each element along `dim` is repeated `repeats`
+ *        times consecutively. Output shape multiplies `dim`'s extent by
+ *        `repeats`. When dim is nullopt the input is flattened first and
+ *        the output is 1D.
+ *
+ *        Backward: reshape the output gradient so the repeated axis is
+ *        split into (orig_size, repeats), sum along the repeats axis, then
+ *        reshape back to the input shape.
+ *
+ *        The tensor-valued repeats overload (`Tensor repeats`) is *not*
+ *        handled here — it requires a scatter-add against a variable-
+ *        length expansion which has no closed form without the per-element
+ *        repeat counts and an accumulating scatter; we route it through a
+ *        separate non-differentiable wrapper.
+ */
+class RepeatInterleaveBackward : public Function {
+public:
+    RepeatInterleaveBackward(int64_t repeats, std::optional<int64_t> dim,
+                             std::vector<int64_t> input_shape)
+        : repeats_(repeats), dim_(dim), input_shape_(std::move(input_shape)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "RepeatInterleaveBackward"; }
+    auto op_id() const -> OpId override { return OpId::RepeatInterleave; }
+private:
+    int64_t repeats_;
+    std::optional<int64_t> dim_;
+    std::vector<int64_t> input_shape_;
+};
+
+/**
+ * @brief unfold(input, kernel_size, stride, padding, dilation) — image-style
+ *        sliding-window patch extraction (im2col). Input (N, C, H, W), output
+ *        (N, C*K*K, L). Backward is the linear adjoint, which is exactly the
+ *        scatter-add `fold(grad_y, (H, W), kernel, stride, padding, dilation)`.
+ *        Saves the input spatial size to reconstruct the output_size arg.
+ */
+class UnfoldBackward : public Function {
+public:
+    UnfoldBackward(int64_t kernel_size, int64_t stride, int64_t padding,
+                   int64_t dilation, int64_t H, int64_t W)
+        : kernel_size_(kernel_size), stride_(stride), padding_(padding),
+          dilation_(dilation), H_(H), W_(W) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "UnfoldBackward"; }
+    auto op_id() const -> OpId override { return OpId::Unfold; }
+private:
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t H_;
+    int64_t W_;
+};
+
+/**
+ * @brief nonzero(x) — returns Int64 indices of nonzero entries.
+ *        NON-DIFFERENTIABLE: the output is an integer index tensor and is
+ *        not a smooth function of the input.
+ */
+class NonzeroBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NonzeroBackward"; }
+    auto op_id() const -> OpId override { return OpId::Nonzero; }
+};
+
+/**
+ * @brief unique(x) — returns sorted unique values (plus optional inverse and
+ *        counts). Forward is a sorting/deduplication step whose dependence
+ *        on x is discontinuous (the set of selected positions jumps under
+ *        small perturbations when ties exist). No well-defined gradient.
+ *        NON-DIFFERENTIABLE (strict; matches Sign-family policy).
+ */
+class UniqueBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "UniqueBackward"; }
+    auto op_id() const -> OpId override { return OpId::Unique; }
+};
+
 } // namespace tenzor
