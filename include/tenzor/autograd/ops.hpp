@@ -1235,6 +1235,48 @@ auto histogram(const Variable& input, int64_t bins = 10,
                double min = 0.0, double max = 0.0)
     -> std::pair<Variable, Variable>;
 
+// ============================================================================
+// Audit E.7 continuation (batch 2): autograd wrappers for another 10 OpIds.
+// Differentiable ones build a real grad_fn chain; non-differentiable ones
+// still attach a Function whose backward() throws tenzor::NonDifferentiable.
+// ============================================================================
+
+/** @brief sign(x). Gradient is zero almost everywhere — backward returns a
+ *         zero tensor of the input's shape/dtype (PyTorch/JAX convention). */
+auto sign(const Variable& input) -> Variable;
+
+/** @brief hypot(x, y) = sqrt(x*x + y*y). d/dx = x/h, d/dy = y/h. */
+auto hypot(const Variable& x, const Variable& y) -> Variable;
+
+/** @brief copysign(magnitude, sign_src). d/d(mag) = sign(sign_src), d/d(sign_src) = 0. */
+auto copysign(const Variable& magnitude, const Variable& sign_src) -> Variable;
+
+/** @brief xlog1py(x, y) = x * log1p(y), 0*log1p(y)=0.
+ *         d/dx = log1p(y), d/dy = x/(1+y). */
+auto xlog1py(const Variable& x, const Variable& y) -> Variable;
+
+/** @brief addcmul(a, b, c, value) = a + value*b*c.
+ *         d/da = 1, d/db = value*c, d/dc = value*b. */
+auto addcmul(const Variable& a, const Variable& b, const Variable& c,
+             double value = 1.0) -> Variable;
+
+/** @brief addcdiv(a, b, c, value) = a + value*b/c.
+ *         d/da = 1, d/db = value/c, d/dc = -value*b/c^2. */
+auto addcdiv(const Variable& a, const Variable& b, const Variable& c,
+             double value = 1.0) -> Variable;
+
+/** @brief floor(x). NON-DIFFERENTIABLE — backward() throws. */
+auto floor(const Variable& input) -> Variable;
+
+/** @brief ceil(x). NON-DIFFERENTIABLE — backward() throws. */
+auto ceil(const Variable& input) -> Variable;
+
+/** @brief isnan(x). NON-DIFFERENTIABLE — backward() throws. */
+auto isnan(const Variable& input) -> Variable;
+
+/** @brief logical_and(a, b). NON-DIFFERENTIABLE — backward() throws. */
+auto logical_and(const Variable& a, const Variable& b) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

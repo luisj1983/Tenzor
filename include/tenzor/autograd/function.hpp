@@ -3500,4 +3500,164 @@ public:
     auto op_id() const -> OpId override { return OpId::Histogram; }
 };
 
+// ============================================================================
+// Audit E.7 continuation (batch 2): another 10 OpIds.
+// Pattern matches the first batch (SquareBackward / LogitBackward /
+// HeavisideBackward). Differentiable Functions have closed-form backward;
+// non-differentiable Functions throw tenzor::NonDifferentiable from
+// backward() with a message that names the op and explains the reason.
+// ============================================================================
+
+/**
+ * @brief sign(x). Gradient is zero almost everywhere (delta at the origin
+ *        is ignored). We return a zero tensor of the same shape/dtype as
+ *        the input, matching the standard treatment used by PyTorch / JAX
+ *        so that downstream graph traversal still receives a well-typed
+ *        gradient buffer instead of an exception.
+ */
+class SignBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SignBackward"; }
+    auto op_id() const -> OpId override { return OpId::Sign; }
+};
+
+/**
+ * @brief hypot(x, y) = sqrt(x*x + y*y). Backward:
+ *        d/dx = x / hypot(x, y) * grad
+ *        d/dy = y / hypot(x, y) * grad
+ *        Saves both inputs and the output to avoid recomputing the norm.
+ */
+class HypotBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "HypotBackward"; }
+    auto op_id() const -> OpId override { return OpId::Hypot; }
+
+    std::vector<int64_t> input_shape_x_;
+    std::vector<int64_t> input_shape_y_;
+};
+
+/**
+ * @brief copysign(magnitude, sign_src) returns |magnitude| * sign(sign_src).
+ *        d/d(magnitude) = sign(sign_src). d/d(sign_src) = 0 almost
+ *        everywhere. Saves the sign source for backward.
+ */
+class CopysignBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CopysignBackward"; }
+    auto op_id() const -> OpId override { return OpId::Copysign; }
+
+    std::vector<int64_t> input_shape_mag_;
+    std::vector<int64_t> input_shape_sign_;
+};
+
+/**
+ * @brief xlog1py(x, y) = x * log1p(y), with x*log1p(y)=0 when x=0
+ *        regardless of y. Backward:
+ *        d/dx = log1p(y) * grad
+ *        d/dy = x / (1 + y) * grad
+ *        Saves both inputs.
+ */
+class Xlog1pyBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "Xlog1pyBackward"; }
+    auto op_id() const -> OpId override { return OpId::Xlog1py; }
+
+    std::vector<int64_t> input_shape_x_;
+    std::vector<int64_t> input_shape_y_;
+};
+
+/**
+ * @brief addcmul(a, b, c, value) = a + value * b * c. Backward:
+ *        d/da = grad
+ *        d/db = value * c * grad
+ *        d/dc = value * b * grad
+ *        Saves b, c and the scalar value.
+ */
+class AddcmulBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AddcmulBackward"; }
+    auto op_id() const -> OpId override { return OpId::Addcmul; }
+
+    double value_ = 1.0;
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+    std::vector<int64_t> input_shape_c_;
+};
+
+/**
+ * @brief addcdiv(a, b, c, value) = a + value * b / c. Backward:
+ *        d/da = grad
+ *        d/db = (value / c) * grad
+ *        d/dc = -(value * b / (c * c)) * grad
+ *        Saves b, c and the scalar value.
+ */
+class AddcdivBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AddcdivBackward"; }
+    auto op_id() const -> OpId override { return OpId::Addcdiv; }
+
+    double value_ = 1.0;
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+    std::vector<int64_t> input_shape_c_;
+};
+
+/**
+ * @brief floor(x). Piecewise-constant ⇒ derivative is zero except at the
+ *        integer jumps where it is a Dirac comb. Non-differentiable.
+ */
+class FloorBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "FloorBackward"; }
+    auto op_id() const -> OpId override { return OpId::Floor; }
+};
+
+/**
+ * @brief ceil(x). Piecewise-constant ⇒ derivative is zero except at the
+ *        integer jumps where it is a Dirac comb. Non-differentiable.
+ */
+class CeilBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CeilBackward"; }
+    auto op_id() const -> OpId override { return OpId::Ceil; }
+};
+
+/**
+ * @brief isnan(x). Returns a Bool tensor — discrete output. Non-differentiable.
+ */
+class IsNanBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IsNanBackward"; }
+    auto op_id() const -> OpId override { return OpId::IsNan; }
+};
+
+/**
+ * @brief logical_and(a, b). Bool inputs, Bool output ⇒ non-differentiable.
+ */
+class LogicalAndBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LogicalAndBackward"; }
+    auto op_id() const -> OpId override { return OpId::LogicalAnd; }
+};
+
 } // namespace tenzor

@@ -3058,4 +3058,185 @@ auto histogram(const Variable& input, int64_t bins, double min, double max)
     return {counts, edges};
 }
 
+// ===========================================================================
+// Audit E.7 continuation (batch 2): autograd wrappers for the second set of
+// 10 OpIds. Differentiable wrappers save the inputs they need for backward;
+// non-differentiable wrappers still attach a Function with the correct
+// next_functions / input_variables wiring so calling backward() through them
+// raises tenzor::NonDifferentiable instead of silently dropping the edge.
+// ===========================================================================
+
+// sign(x) — gradient is zero almost everywhere. Save the input so backward
+// can produce a zero buffer of the right shape/dtype; reuse the unary
+// helper which already handles the no-grad fast path.
+auto sign(const Variable& input) -> Variable {
+    return unary_autograd<SignBackward>(input,
+        [](const Tensor& t) { return tenzor::sign(t); });
+}
+
+// hypot(x, y) — binary; saves both inputs and the broadcast input shapes.
+auto hypot(const Variable& x, const Variable& y) -> Variable {
+    bool needs_grad = (x.requires_grad() || y.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::hypot(x.tensor(), y.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<HypotBackward>();
+    grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    grad_fn->save_for_backward({x.tensor(), y.tensor()});
+    grad_fn->set_next_functions({x.grad_fn(), y.grad_fn()});
+    grad_fn->set_input_variables({x, y});
+    auto result = tenzor::hypot(x.tensor(), y.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// copysign(magnitude, sign_src) — saves only sign_src (we need its sign);
+// the magnitude's gradient is sign(sign_src) which is purely derived from
+// the saved tensor.
+auto copysign(const Variable& magnitude, const Variable& sign_src) -> Variable {
+    bool needs_grad = (magnitude.requires_grad() || sign_src.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::copysign(magnitude.tensor(), sign_src.tensor()),
+                        false);
+    }
+    auto grad_fn = std::make_shared<CopysignBackward>();
+    grad_fn->input_shape_mag_ =
+        std::vector<int64_t>(magnitude.shape().begin(), magnitude.shape().end());
+    grad_fn->input_shape_sign_ =
+        std::vector<int64_t>(sign_src.shape().begin(), sign_src.shape().end());
+    grad_fn->save_for_backward({sign_src.tensor()});
+    grad_fn->set_next_functions({magnitude.grad_fn(), sign_src.grad_fn()});
+    grad_fn->set_input_variables({magnitude, sign_src});
+    auto result = tenzor::copysign(magnitude.tensor(), sign_src.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// xlog1py(x, y) — binary; saves both inputs and shapes for broadcast.
+auto xlog1py(const Variable& x, const Variable& y) -> Variable {
+    bool needs_grad = (x.requires_grad() || y.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::xlog1py(x.tensor(), y.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<Xlog1pyBackward>();
+    grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    grad_fn->save_for_backward({x.tensor(), y.tensor()});
+    grad_fn->set_next_functions({x.grad_fn(), y.grad_fn()});
+    grad_fn->set_input_variables({x, y});
+    auto result = tenzor::xlog1py(x.tensor(), y.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// addcmul(a, b, c, value) — ternary; saves b, c and the scalar value.
+auto addcmul(const Variable& a, const Variable& b, const Variable& c,
+             double value) -> Variable {
+    bool needs_grad = (a.requires_grad() || b.requires_grad() || c.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(
+            tenzor::addcmul(a.tensor(), b.tensor(), c.tensor(), value),
+            false);
+    }
+    auto grad_fn = std::make_shared<AddcmulBackward>();
+    grad_fn->value_ = value;
+    grad_fn->input_shape_a_ = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(b.shape().begin(), b.shape().end());
+    grad_fn->input_shape_c_ = std::vector<int64_t>(c.shape().begin(), c.shape().end());
+    grad_fn->save_for_backward({b.tensor(), c.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn(), c.grad_fn()});
+    grad_fn->set_input_variables({a, b, c});
+    auto result = tenzor::addcmul(a.tensor(), b.tensor(), c.tensor(), value);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// addcdiv(a, b, c, value) — ternary; saves b, c and the scalar value.
+auto addcdiv(const Variable& a, const Variable& b, const Variable& c,
+             double value) -> Variable {
+    bool needs_grad = (a.requires_grad() || b.requires_grad() || c.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(
+            tenzor::addcdiv(a.tensor(), b.tensor(), c.tensor(), value),
+            false);
+    }
+    auto grad_fn = std::make_shared<AddcdivBackward>();
+    grad_fn->value_ = value;
+    grad_fn->input_shape_a_ = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(b.shape().begin(), b.shape().end());
+    grad_fn->input_shape_c_ = std::vector<int64_t>(c.shape().begin(), c.shape().end());
+    grad_fn->save_for_backward({b.tensor(), c.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn(), c.grad_fn()});
+    grad_fn->set_input_variables({a, b, c});
+    auto result = tenzor::addcdiv(a.tensor(), b.tensor(), c.tensor(), value);
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// --- non-differentiable wrappers ----------------------------------------
+
+auto floor(const Variable& input) -> Variable {
+    auto result = tenzor::floor(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<FloorBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto ceil(const Variable& input) -> Variable {
+    auto result = tenzor::ceil(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<CeilBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto isnan(const Variable& input) -> Variable {
+    auto result = tenzor::isnan(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IsNanBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto logical_and(const Variable& a, const Variable& b) -> Variable {
+    auto result = tenzor::logical_and(a.tensor(), b.tensor());
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<LogicalAndBackward>();
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
+    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

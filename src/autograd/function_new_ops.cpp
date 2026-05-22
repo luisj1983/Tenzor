@@ -1964,4 +1964,205 @@ auto HistogramBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::v
         "binning step.");
 }
 
+// ============================================================================
+// Audit E.7 continuation (batch 2): forward/backward impls for the second
+// set of 10 OpIds. See function.hpp for one-line summaries.
+// ============================================================================
+
+// sign(x): zero gradient almost everywhere. Return a zero tensor of the
+// same shape/dtype as the input so the graph traversal still has a
+// well-typed buffer (PyTorch / JAX behaviour). This keeps callers from
+// having to wrap sign() in a stop_gradient guard.
+auto SignBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SignBackward::forward should not be called directly");
+}
+auto SignBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& x = saved_tensors_[0];
+    // grad w.r.t. x is identically zero — emit a zero buffer matching the
+    // input's shape and dtype so the gradient typing stays consistent.
+    (void)grad_outputs;
+    return {zeros_like(x)};
+}
+
+// hypot(x, y) = sqrt(x*x + y*y).
+// grad_x = (x / hypot(x, y)) * grad
+// grad_y = (y / hypot(x, y)) * grad
+// At (0, 0) the derivative is undefined; we let division produce NaN so
+// the caller sees the degenerate point rather than a fabricated zero.
+auto HypotBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("HypotBackward::forward should not be called directly");
+}
+auto HypotBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& x = saved_tensors_[0];
+    const auto& y = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto h = tenzor::hypot(x, y);
+    auto grad_x_unreduced = mul(grad, div(x, h));
+    auto grad_y_unreduced = mul(grad, div(y, h));
+
+    auto grad_x = reduce_grad_for_broadcasting(grad_x_unreduced, input_shape_x_);
+    auto grad_y = reduce_grad_for_broadcasting(grad_y_unreduced, input_shape_y_);
+    return {grad_x, grad_y};
+}
+
+// copysign(magnitude, sign_src) returns |magnitude| * sign(sign_src).
+// d/d(magnitude) = sign(sign_src) (treating |.| as having sign-of-mag local
+//                  Jacobian; the product simplifies to sign(sign_src))
+// d/d(sign_src)  = 0 almost everywhere.
+auto CopysignBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("CopysignBackward::forward should not be called directly");
+}
+auto CopysignBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(1);
+    const auto& sign_src = saved_tensors_[0];
+    const auto& grad = grad_outputs[0];
+
+    // grad_mag = grad * sign(sign_src)
+    auto grad_mag_unreduced = mul(grad, tenzor::sign(sign_src));
+    auto grad_mag = reduce_grad_for_broadcasting(grad_mag_unreduced, input_shape_mag_);
+
+    // grad_sign_src = 0 a.e.; emit a zero buffer of the sign source's
+    // (broadcast-reduced) shape so the gradient typing stays consistent.
+    auto grad_sign_zero_full =
+        zeros_like(grad);  // same shape/dtype as the unreduced gradient
+    auto grad_sign = reduce_grad_for_broadcasting(grad_sign_zero_full, input_shape_sign_);
+    return {grad_mag, grad_sign};
+}
+
+// xlog1py(x, y) = x * log1p(y), with 0 * log1p(y) = 0 regardless of y.
+// grad_x = grad * log1p(y), zeroed where x == 0
+// grad_y = grad * (x / (1 + y)), zeroed where x == 0
+auto Xlog1pyBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("Xlog1pyBackward::forward should not be called directly");
+}
+auto Xlog1pyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& x = saved_tensors_[0];
+    const auto& y = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto x_shape = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    auto zero_x = zeros(x_shape, x.dtype(), x.device());
+    auto x_is_zero = eq(x, zero_x);
+
+    // grad_x = grad * log1p(y), zeroed where x == 0
+    auto log1p_y = tenzor::log1p(y);
+    auto grad_x_raw = mul(grad, log1p_y);
+    auto grad_x_unreduced = where(x_is_zero, zeros_like(grad_x_raw), grad_x_raw);
+
+    // grad_y = grad * x / (1 + y), zeroed where x == 0. Guard against
+    // (1 + y) == 0 by substituting epsilon to keep the masked-out result
+    // finite; the where() then zeroes those entries when x == 0.
+    auto y_shape = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    auto one_plus_y = add(y, 1.0);
+    auto eps = full(y_shape, detail::dtype_epsilon(y.dtype()), y.dtype(), y.device());
+    auto safe_denom = where(
+        eq(one_plus_y, zeros(y_shape, y.dtype(), y.device())),
+        eps,
+        one_plus_y);
+    auto grad_y_raw = mul(grad, div(x, safe_denom));
+    auto grad_y_unreduced = where(x_is_zero, zeros_like(grad_y_raw), grad_y_raw);
+
+    auto grad_x = reduce_grad_for_broadcasting(grad_x_unreduced, input_shape_x_);
+    auto grad_y = reduce_grad_for_broadcasting(grad_y_unreduced, input_shape_y_);
+    return {grad_x, grad_y};
+}
+
+// addcmul(a, b, c, value) = a + value * b * c.
+// d/da = 1                ⇒ grad
+// d/db = value * c        ⇒ grad * value * c
+// d/dc = value * b        ⇒ grad * value * b
+auto AddcmulBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AddcmulBackward::forward should not be called directly");
+}
+auto AddcmulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& b = saved_tensors_[0];
+    const auto& c = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto grad_a = reduce_grad_for_broadcasting(grad, input_shape_a_);
+    auto grad_b_unreduced = mul(mul(grad, c), value_);
+    auto grad_c_unreduced = mul(mul(grad, b), value_);
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
+    auto grad_c = reduce_grad_for_broadcasting(grad_c_unreduced, input_shape_c_);
+    return {grad_a, grad_b, grad_c};
+}
+
+// addcdiv(a, b, c, value) = a + value * b / c.
+// d/da = 1                            ⇒ grad
+// d/db = value / c                    ⇒ grad * value / c
+// d/dc = -(value * b) / (c * c)       ⇒ -grad * value * b / (c * c)
+auto AddcdivBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("AddcdivBackward::forward should not be called directly");
+}
+auto AddcdivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& b = saved_tensors_[0];
+    const auto& c = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto grad_a = reduce_grad_for_broadcasting(grad, input_shape_a_);
+
+    // grad_b = (value / c) * grad
+    auto inv_c = tenzor::reciprocal(c);
+    auto scale_b = mul(inv_c, value_);
+    auto grad_b_unreduced = mul(grad, scale_b);
+
+    // grad_c = -(value * b / (c * c)) * grad = -value * b * (1/c^2) * grad
+    auto c_sq = mul(c, c);
+    auto inv_c_sq = tenzor::reciprocal(c_sq);
+    auto scale_c = mul(mul(b, inv_c_sq), -value_);
+    auto grad_c_unreduced = mul(grad, scale_c);
+
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
+    auto grad_c = reduce_grad_for_broadcasting(grad_c_unreduced, input_shape_c_);
+    return {grad_a, grad_b, grad_c};
+}
+
+// --- non-differentiable wrappers ---------------------------------------
+
+auto FloorBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("FloorBackward::forward should not be called directly");
+}
+auto FloorBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "floor: piecewise-constant — gradient is zero almost everywhere and "
+        "a Dirac comb at integer jumps. Use a custom STE Function "
+        "(straight-through estimator) if a surrogate gradient is needed.");
+}
+
+auto CeilBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("CeilBackward::forward should not be called directly");
+}
+auto CeilBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "ceil: piecewise-constant — gradient is zero almost everywhere and "
+        "a Dirac comb at integer jumps. Use a custom STE Function "
+        "(straight-through estimator) if a surrogate gradient is needed.");
+}
+
+auto IsNanBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("IsNanBackward::forward should not be called directly");
+}
+auto IsNanBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "isnan: output is a Bool tensor (discrete), so it is not "
+        "differentiable in the input. The NaN-pattern of a tensor is "
+        "metadata, not a smooth function of the input values.");
+}
+
+auto LogicalAndBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("LogicalAndBackward::forward should not be called directly");
+}
+auto LogicalAndBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "logical_and: Bool inputs and Bool output, both discrete; the "
+        "operation is not differentiable. Use a smooth t-norm (e.g. "
+        "min(a, b) on [0, 1]) if you need a differentiable surrogate.");
+}
+
 } // namespace tenzor
