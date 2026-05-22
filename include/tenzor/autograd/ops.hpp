@@ -1598,6 +1598,28 @@ auto cummax(const Variable& input, int64_t dim) -> std::pair<Variable, Variable>
 /** @brief cummin(x, dim): cumulative min returning (values, indices). */
 auto cummin(const Variable& input, int64_t dim) -> std::pair<Variable, Variable>;
 
+// ---- Audit E.7 batch 9 — indexing reductions ----------------------------
+
+/** @brief scatter_reduce(input, dim, index, src, reduce, include_self):
+ *         scatter src into input at index positions along `dim`, combining
+ *         colliding writes by `reduce` ("sum" | "mean" | "amax" | "amin" |
+ *         "prod"). Differentiable for "sum" / "mean" (grad_src is
+ *         gather(grad_out) optionally divided by per-position write count;
+ *         grad_input is grad_out itself or zero depending on include_self).
+ *         NonDifferentiable for "amax" / "amin" / "prod" — see
+ *         ScatterReduceBackward. */
+auto scatter_reduce(const Variable& input, int64_t dim, const Tensor& index,
+                    const Variable& src, const std::string& reduce,
+                    bool include_self = true) -> Variable;
+
+/** @brief index_reduce(input, dim, index, src, reduce, include_self):
+ *         1-D-index sibling of scatter_reduce. Differentiable for "sum" /
+ *         "mean"; NonDifferentiable for "amax" / "amin" / "prod" — see
+ *         IndexReduceBackward. */
+auto index_reduce(const Variable& input, int64_t dim, const Tensor& index,
+                  const Variable& src, const std::string& reduce,
+                  bool include_self = true) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

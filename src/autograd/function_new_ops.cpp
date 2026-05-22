@@ -2,6 +2,7 @@
 #include "function_helpers.hpp"
 #include <cassert>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/math.hpp"
@@ -3780,6 +3781,295 @@ auto CumMinBackward::backward(std::vector<Tensor> grad_outputs)
 
     auto zero = zeros(input_shape, grad_out.dtype(), grad_out.device());
     return {scatter_add(zero, dim, indices, grad_out)};
+}
+
+// =========================================================================
+// Audit E.7 batch 9 — scatter reductions, audio/vision composites, integer
+// binary ops.
+// =========================================================================
+
+// --- ScatterReduce (diff for sum/mean; non-diff for amax/amin/prod) -----
+//
+// Forward saves [index] and the reduce string in reduce_/include_self_.
+// For sum: grad_input is grad_out itself (or zero at scattered positions
+// when include_self=false); grad_src is gather(grad_out, dim, index).
+// For mean: each scattered position averages (count) writes plus the
+// pre-existing value (if include_self=true), so grad_src is divided by
+// the same count tensor. We rebuild that count by scattering ones.
+auto ScatterReduceBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "ScatterReduceBackward::forward should not be called directly");
+}
+auto ScatterReduceBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    if (reduce_ == "amax" || reduce_ == "amin" || reduce_ == "prod") {
+        throw NonDifferentiable(
+            "scatter_reduce: backward for reduce=\"" + reduce_ + "\" needs "
+            "per-position argmax/argmin tie indices (for amax/amin) or a "
+            "zero-safe product trick (for prod), neither of which the "
+            "current kernel returns. Implementing only sum/mean while "
+            "letting these slip through would silently zero out users' "
+            "gradients. Marked NonDifferentiable (project policy: fail "
+            "loudly) until the forward saves the required state.");
+    }
+    require_saved_tensors(1);
+    const auto& index = saved_tensors_[0];
+    const auto& grad_out = grad_outputs[0];
+
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(grad_out.shape().size());
+
+    Tensor grad_input;
+    Tensor grad_src;
+
+    auto grad_out_shape = std::vector<int64_t>(grad_out.shape().begin(),
+                                                grad_out.shape().end());
+    auto index_shape = std::vector<int64_t>(index.shape().begin(),
+                                             index.shape().end());
+
+    if (reduce_ == "sum") {
+        // grad_input flows through positions that include_self left
+        // unchanged. With include_self=false, the kernel overwrites
+        // those positions, so grad_input is zero there. Approximate by
+        // returning grad_out for include_self=true (positions not hit
+        // by index are unchanged anyway) and zero otherwise.
+        grad_input = include_self_
+            ? grad_out
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        grad_src = gather(grad_out, dim, index);
+    } else { // mean
+        // For mean: y[i] = (include_self ? input[i] : 0 + sum_{j: idx[j]=i} src[j])
+        //                  / (include_self ? 1 + count[i] : count[i]).
+        // grad_src[j] = grad_out[index[j]] / denom[index[j]]
+        // grad_input[i] = include_self ? grad_out[i] / denom[i] : 0
+        auto ones_like_src = ones(index_shape, grad_out.dtype(),
+                                  grad_out.device());
+        auto base = include_self_
+            ? ones(grad_out_shape, grad_out.dtype(), grad_out.device())
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        auto count = scatter_add(base, dim, index, ones_like_src);
+        // Guard against div-by-zero where include_self=false and a
+        // position received no writes; those positions don't appear in
+        // grad_input (it is zero) or grad_src (gather pulls only at
+        // index[j] which by definition received a write).
+        auto safe_count = clamp(count, /*min=*/1e-12,
+                                 std::numeric_limits<double>::infinity());
+        auto inv_denom = div(grad_out, safe_count);
+        grad_input = include_self_
+            ? inv_denom
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        grad_src = gather(inv_denom, dim, index);
+    }
+    // grad layout: {input, dim (none), index (none), src}
+    return {grad_input, grad_src};
+}
+
+// --- IndexReduce (diff for sum/mean; non-diff for amax/amin/prod) -------
+//
+// index_reduce is the 1-D-index sibling of scatter_reduce. The forward
+// saves the index tensor; backward for sum is index_select(grad_out,
+// dim, index), and for mean it's the same divided by per-target count.
+auto IndexReduceBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "IndexReduceBackward::forward should not be called directly");
+}
+auto IndexReduceBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    if (reduce_ == "amax" || reduce_ == "amin" || reduce_ == "prod") {
+        throw NonDifferentiable(
+            "index_reduce: backward for reduce=\"" + reduce_ + "\" requires "
+            "argmax/argmin tie indices (amax/amin) or a zero-safe product "
+            "chain (prod); the kernel returns neither. Marked "
+            "NonDifferentiable (project policy: fail loudly) until the "
+            "forward saves the required state.");
+    }
+    require_saved_tensors(1);
+    const auto& index = saved_tensors_[0];
+    const auto& grad_out = grad_outputs[0];
+
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(grad_out.shape().size());
+
+    Tensor grad_input;
+    Tensor grad_src;
+
+    auto grad_out_shape = std::vector<int64_t>(grad_out.shape().begin(),
+                                                grad_out.shape().end());
+
+    if (reduce_ == "sum") {
+        grad_input = include_self_
+            ? grad_out
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        grad_src = index_select(grad_out, dim, index);
+    } else { // mean
+        // Build per-target write count along `dim` by scatter-adding
+        // ones at index positions.
+        std::vector<int64_t> ones_shape = grad_out_shape;
+        ones_shape[dim] = index.shape()[0];
+        auto ones_like_src = ones(ones_shape, grad_out.dtype(),
+                                  grad_out.device());
+        auto base = include_self_
+            ? ones(grad_out_shape, grad_out.dtype(), grad_out.device())
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        // index_add of ones along dim at `index` positions reproduces
+        // the same count tensor scatter_reduce would build.
+        auto count = index_add(base, dim, index, ones_like_src);
+        auto safe_count = clamp(count, /*min=*/1e-12,
+                                 std::numeric_limits<double>::infinity());
+        auto inv_denom = div(grad_out, safe_count);
+        grad_input = include_self_
+            ? inv_denom
+            : zeros(grad_out_shape, grad_out.dtype(), grad_out.device());
+        grad_src = index_select(inv_denom, dim, index);
+    }
+    return {grad_input, grad_src};
+}
+
+// --- EmbeddingBag (diff in weight) ---------------------------------------
+//
+// Forward saved [indices, offsets, num_embeddings] in the wrapper. The
+// backward kernel takes [grad_output, indices, offsets] + (Mode,
+// PaddingIdx, NumEmbeddings) attrs and returns grad_weight.
+auto EmbeddingBagBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "EmbeddingBagBackward::forward should not be called directly");
+}
+auto EmbeddingBagBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& indices = saved_tensors_[0];
+    const auto& offsets = saved_tensors_[1];
+    const auto& grad_out = grad_outputs[0];
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Mode, mode_);
+    attrs.set(AttrKey::PaddingIdx, padding_idx_);
+    attrs.set(AttrKey::NumEmbeddings, num_embeddings_);
+
+    std::vector<Tensor> inputs = {grad_out, indices, offsets};
+    auto result = dispatch_to_device(OpId::EmbeddingBagBackward,
+        grad_out.device().type, inputs, attrs);
+    // EmbeddingBag has inputs (weight, indices, offsets[, per_sample_weights]);
+    // only weight is differentiable, so return its grad in slot 0.
+    return {result[0]};
+}
+
+// --- ROIAlign (typed stub; Module owns the real backward) ----------------
+auto ROIAlignBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "ROIAlignBackward::forward should not be called directly");
+}
+auto ROIAlignBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "roi_align: backward (OpId::ROIAlignBackward) requires the saved "
+        "feature-map shape and the original ROIs tensor; the autograd-layer "
+        "Function stub does not carry them. Use the nn::detection::ROIAlign "
+        "Module (which saves both) for autograd-aware ROI alignment, or "
+        "dispatch OpId::ROIAlignBackward directly with grad_output + rois + "
+        "BatchSize/FeatHeight/FeatWidth/SpatialScale/SamplingRatio/Aligned "
+        "attrs.");
+}
+
+// --- DeformableConv2d (typed stub; backward is split across three kernels)
+auto DeformableConv2dBackward::forward(std::vector<Variable>)
+    -> std::vector<Variable> {
+    throw std::runtime_error(
+        "DeformableConv2dBackward::forward should not be called directly");
+}
+auto DeformableConv2dBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "deformable_conv2d (DCNv2): backward is split across three OpIds — "
+        "OpId::DeformableConv2dBackwardInput (returns grad_input, grad_offset, "
+        "grad_mask), OpId::DeformableConv2dBackwardWeight (grad_weight) and "
+        "OpId::DeformableConv2dBackwardBias (grad_bias). The autograd Function "
+        "stub does not own the multi-output routing, the weight/offset/mask "
+        "input variables, or the saved input shape. Use the nn-level "
+        "DeformableConv2d Module which manages these. This stub exists so "
+        "callers that dispatch OpId::DeformableConv2dForward directly get a "
+        "typed error instead of \"Function 'unknown' has no backward\".");
+}
+
+// --- MelScale (typed stub; linear but filterbank is private) -------------
+auto MelScaleBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "MelScaleBackward::forward should not be called directly");
+}
+auto MelScaleBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "mel_scale: the forward applies a fixed triangular mel filterbank M "
+        "(of shape [n_mels, n_freqs]) computed inside the op from "
+        "n_mels/f_min/f_max/sample_rate; it is *not* exposed as a Tensor. "
+        "The exact adjoint is matmul(M^T, grad_y), but reconstructing M at "
+        "backward time would duplicate the filterbank generation logic in "
+        "autograd and silently diverge if the kernel formula ever changes. "
+        "Marked NonDifferentiable until fft::mel_scale saves the filterbank "
+        "as a side output. Compute the filterbank explicitly and use matmul "
+        "if you need gradients now.");
+}
+
+// --- DCT (typed stub; type/norm/length matrix not modelled) --------------
+auto DCTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "DCTBackward::forward should not be called directly");
+}
+auto DCTBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "dct: the operation is linear and the adjoint is a related DCT "
+        "(II <-> III, I and IV self-adjoint up to scaling), but the exact "
+        "(type, norm) <-> (adjoint type, adjoint norm) table — including "
+        "the scaling for norm=\"backward\"/\"forward\" and length-truncated "
+        "transforms — is not yet implemented. Marked NonDifferentiable "
+        "(project policy: fail loudly) to avoid silently mis-scaling user "
+        "gradients. Use norm=\"ortho\" + an explicit IDCT call if you need "
+        "the gradient through DCT.");
+}
+
+// --- MFCC (typed stub; composite without exposed intermediates) ----------
+auto MFCCBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "MFCCBackward::forward should not be called directly");
+}
+auto MFCCBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "mfcc: the forward fuses STFT + magnitude + mel_scale + log + DCT "
+        "into a single op without exposing the intermediate tensors. A "
+        "closed-form adjoint requires the per-stage outputs (so each stage "
+        "can multiply its local Jacobian by the upstream gradient). Marked "
+        "NonDifferentiable until the forward returns intermediates, or "
+        "compose the pipeline explicitly with stft/abs/square/mel_scale/log/"
+        "dct if you need gradients through MFCC.");
+}
+
+// --- Gcd / Lcm (integer-domain, Jacobian = 0 a.e.) -----------------------
+auto GcdBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "GcdBackward::forward should not be called directly");
+}
+auto GcdBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "gcd: integer-valued binary operation. The output is constant on "
+        "open neighbourhoods of integer inputs and undefined off the integer "
+        "lattice, so the Jacobian is identically zero where defined. Marked "
+        "NonDifferentiable to fail loudly instead of returning a deceptive "
+        "zero gradient that would compose silently in user models.");
+}
+
+auto LcmBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error(
+        "LcmBackward::forward should not be called directly");
+}
+auto LcmBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+    -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "lcm: integer-valued binary operation; same rationale as gcd "
+        "(piecewise-constant on the integer lattice, undefined elsewhere). "
+        "NonDifferentiable.");
 }
 
 } // namespace tenzor

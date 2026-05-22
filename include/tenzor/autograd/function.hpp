@@ -4777,4 +4777,233 @@ private:
     int64_t dim_;
 };
 
+// ============================================================================
+// Audit E.7 batch 9 — indexing/scatter reductions, audio/vision composites,
+// integer-only binary ops.
+//
+// Differentiable: ScatterReduce / IndexReduce (sum, mean), EmbeddingBag.
+// Non-differentiable (typed): ROIAlign (kernel needs features for adjoint;
+// modelled at Module layer instead — keeping a typed stub for direct OpId
+// users), DeformableConv2d (split per-input kernels), MelScale / DCT / MFCC
+// (linear in principle; adjoint requires recomputing fixed transforms with
+// matching norm conventions which the kernels do not export), Gcd / Lcm
+// (integer-domain operations whose Jacobian is zero a.e.).
+// ============================================================================
+
+/**
+ * @brief scatter_reduce(input, dim, index, src, reduce, include_self)
+ *        — scatter src into input at positions in index along `dim`,
+ *        combining colliding writes with `reduce`.
+ *
+ *        Differentiable for `reduce = "sum"` and `reduce = "mean"`:
+ *          grad_src   = gather(grad_out, dim, index) / (cnt if mean else 1)
+ *          grad_input = grad_out * (include_self ? 1 : 0)  (mean dilutes too)
+ *
+ *        For "amax" / "amin" the backward needs an argmax/argmin tie mask
+ *        which scatter_reduce does not return; for "prod" the backward
+ *        divides by zero when any contributing element is zero. Both raise
+ *        NonDifferentiable to fail loudly.
+ */
+class ScatterReduceBackward : public Function {
+public:
+    ScatterReduceBackward(int64_t dim, std::string reduce, bool include_self)
+        : dim_(dim), reduce_(std::move(reduce)), include_self_(include_self) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ScatterReduceBackward"; }
+    auto op_id() const -> OpId override { return OpId::ScatterReduce; }
+private:
+    int64_t dim_;
+    std::string reduce_;
+    bool include_self_;
+};
+
+/**
+ * @brief index_reduce(input, dim, index, src, reduce, include_self)
+ *        — like scatter_reduce but `index` is 1-D over `dim`.
+ *
+ *        Differentiable for "sum" / "mean" via index_select of grad_out
+ *        along `dim`. NonDifferentiable for "amax" / "amin" / "prod"
+ *        for the same reasons as ScatterReduceBackward.
+ */
+class IndexReduceBackward : public Function {
+public:
+    IndexReduceBackward(int64_t dim, std::string reduce, bool include_self)
+        : dim_(dim), reduce_(std::move(reduce)), include_self_(include_self) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IndexReduceBackward"; }
+    // index_reduce is a thin wrapper around scatter_reduce (see
+    // src/ops/indexing.cpp); reuse its OpId for graph identity.
+    auto op_id() const -> OpId override { return OpId::ScatterReduce; }
+private:
+    int64_t dim_;
+    std::string reduce_;
+    bool include_self_;
+};
+
+/**
+ * @brief embedding_bag — reduces an embedding lookup per bag (sum / mean /
+ *        max). Differentiable in `weight` only (indices/offsets are integer-
+ *        typed). Backward dispatches to OpId::EmbeddingBagBackward which
+ *        applies the mode-specific scatter (sum: scatter-add; mean: scatter-
+ *        add divided by bag size; max: scatter at argmax indices).
+ *
+ *        Wired here so any caller that bypasses nn::EmbeddingBag (e.g. a
+ *        direct OpId::EmbeddingBagForward dispatch) still gets a typed
+ *        Function instead of "Function 'unknown' has no backward".
+ */
+class EmbeddingBagBackward : public Function {
+public:
+    EmbeddingBagBackward(std::string mode, int64_t padding_idx,
+                         int64_t num_embeddings)
+        : mode_(std::move(mode)),
+          padding_idx_(padding_idx),
+          num_embeddings_(num_embeddings) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "EmbeddingBagBackward"; }
+    auto op_id() const -> OpId override { return OpId::EmbeddingBagForward; }
+private:
+    std::string mode_;
+    int64_t padding_idx_;
+    int64_t num_embeddings_;
+};
+
+/**
+ * @brief ROIAlign forward. Differentiable in `features` via
+ *        OpId::ROIAlignBackward, but the project routes ROI Align through
+ *        the nn::detection::ROIAlign Module which manages the saved
+ *        feature shape and ROI tensor explicitly.
+ *
+ *        This stub exists for graph hygiene when a caller wires
+ *        OpId::ROIAlignForward directly without the Module — backward
+ *        in that path is undefined without a saved features tensor, so
+ *        we fail loudly. Use nn::detection::ROIAlign for autograd-
+ *        aware ROI alignment.
+ */
+class ROIAlignBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "ROIAlignBackward"; }
+    auto op_id() const -> OpId override { return OpId::ROIAlignForward; }
+};
+
+/**
+ * @brief DeformableConv2d (DCNv2) forward. Backward is split across three
+ *        kernels — OpId::DeformableConv2dBackwardInput,
+ *        OpId::DeformableConv2dBackwardWeight, and
+ *        OpId::DeformableConv2dBackwardBias — each returning a different
+ *        gradient. A unified Function-level adjoint that re-dispatches all
+ *        three and threads them back to the right input Variables is not
+ *        currently wired, so we fail loudly.
+ *
+ *        For autograd-aware deformable conv use the nn::DeformableConv2d
+ *        Module which owns weights/bias and constructs the right gradient
+ *        routing per input.
+ */
+class DeformableConv2dBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "DeformableConv2dBackward"; }
+    auto op_id() const -> OpId override { return OpId::DeformableConv2dForward; }
+};
+
+/**
+ * @brief mel_scale — applies a fixed triangular mel filterbank to a
+ *        magnitude/power spectrogram. In principle differentiable
+ *        (linear matmul against a constant matrix), but the filterbank
+ *        is built inside the op and not exposed as a Tensor; reconstructing
+ *        it at backward time would duplicate the (sample_rate, n_mels,
+ *        f_min, f_max)-dependent generation logic in autograd. Marked
+ *        NonDifferentiable until the filterbank is hoisted into a saved
+ *        tensor on the forward path.
+ */
+class MelScaleBackward : public Function {
+public:
+    MelScaleBackward(int64_t n_mels, double f_min, double f_max,
+                     int64_t sample_rate)
+        : n_mels_(n_mels), f_min_(f_min), f_max_(f_max),
+          sample_rate_(sample_rate) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MelScaleBackward"; }
+    auto op_id() const -> OpId override { return OpId::MelScale; }
+private:
+    int64_t n_mels_;
+    double f_min_;
+    double f_max_;
+    int64_t sample_rate_;
+};
+
+/**
+ * @brief dct(input, type, n, dim, norm) — Discrete Cosine Transform.
+ *        Linear and therefore differentiable (the adjoint of DCT-II is
+ *        DCT-III with matching norm and vice versa). The exact adjoint
+ *        depends on the (`type`, `norm`) pair and on whether `n` truncated
+ *        or padded the signal; getting this wrong silently distorts the
+ *        gradient, so we mark it NonDifferentiable until the
+ *        type/norm/length matrix is implemented.
+ */
+class DCTBackward : public Function {
+public:
+    DCTBackward(int type, int64_t n, int64_t dim, std::string norm)
+        : type_(type), n_(n), dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "DCTBackward"; }
+    auto op_id() const -> OpId override { return OpId::DCT; }
+private:
+    int type_;
+    int64_t n_;
+    int64_t dim_;
+    std::string norm_;
+};
+
+/**
+ * @brief mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length,
+ *        f_min, f_max) — Mel-Frequency Cepstral Coefficients.
+ *
+ *        MFCC = DCT( log( MelScale( |STFT(x)|^2 ) ) ). The composition is
+ *        differentiable in principle but the forward op fuses STFT, mel,
+ *        log and DCT into one kernel without exposing intermediates, so
+ *        no closed-form adjoint is reachable from the autograd layer.
+ *        Use the explicit pipeline (stft → abs → square → mel_scale → log
+ *        → dct) if you need gradients through MFCC.
+ */
+class MFCCBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "MFCCBackward"; }
+    auto op_id() const -> OpId override { return OpId::MFCC; }
+};
+
+/**
+ * @brief gcd(a, b) — greatest common divisor. Integer-typed inputs; the
+ *        Jacobian is zero a.e. (and the operation isn't well-defined for
+ *        non-integer reals). NonDifferentiable.
+ */
+class GcdBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GcdBackward"; }
+    auto op_id() const -> OpId override { return OpId::Gcd; }
+};
+
+/**
+ * @brief lcm(a, b) — least common multiple. Integer-typed inputs; same
+ *        rationale as GcdBackward. NonDifferentiable.
+ */
+class LcmBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LcmBackward"; }
+    auto op_id() const -> OpId override { return OpId::Lcm; }
+};
+
 } // namespace tenzor

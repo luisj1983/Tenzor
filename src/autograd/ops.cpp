@@ -4315,4 +4315,52 @@ auto cummin(const Variable& input, int64_t dim)
     return {values_var, Variable(indices, false)};
 }
 
+// ---- Audit E.7 batch 9 — indexing reductions ---------------------------
+
+// scatter_reduce(input, dim, index, src, reduce, include_self)
+// Differentiable for "sum"/"mean" — see ScatterReduceBackward for the
+// closed form (gather / scatter-add of grad_out divided by per-position
+// count for mean). For other reductions the wrapper still attaches the
+// grad_fn so backward() throws a typed NonDifferentiable.
+auto scatter_reduce(const Variable& input, int64_t dim, const Tensor& index,
+                    const Variable& src, const std::string& reduce,
+                    bool include_self) -> Variable {
+    auto result = tenzor::scatter_reduce(input.tensor(), dim, index,
+                                          src.tensor(), reduce, include_self);
+    bool needs_grad = (input.requires_grad() || src.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<ScatterReduceBackward>(dim, reduce,
+                                                            include_self);
+    grad_fn->save_for_backward({index});
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// index_reduce(input, dim, index, src, reduce, include_self)
+auto index_reduce(const Variable& input, int64_t dim, const Tensor& index,
+                  const Variable& src, const std::string& reduce,
+                  bool include_self) -> Variable {
+    auto result = tenzor::index_reduce(input.tensor(), dim, index,
+                                        src.tensor(), reduce, include_self);
+    bool needs_grad = (input.requires_grad() || src.requires_grad())
+                      && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<IndexReduceBackward>(dim, reduce,
+                                                          include_self);
+    grad_fn->save_for_backward({index});
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor
