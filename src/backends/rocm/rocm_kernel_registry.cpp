@@ -746,6 +746,13 @@ namespace rocm {
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
         const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
 
+    // Audit A.11 — native Float64 FlashAttention (flash_attention_f64.hip.cpp).
+    auto fused_attention_hip_f64(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                 double scale, bool causal) -> std::pair<Tensor, Tensor>;
+    auto flash_attention_backward_hip_f64(
+        const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
+        const Tensor& O, double scale, bool causal) -> std::vector<Tensor>;
+
     // Fused RMSNorm
     auto fused_rms_norm_hip(const Tensor& input, const Tensor& weight,
                             float eps) -> std::pair<Tensor, Tensor>;
@@ -1987,9 +1994,75 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Vi = tenzor::reshape(inputs[2].contiguous(), std::vector<int64_t>{b * h, sk, dv});
         }
 
-        auto [output, lse] = rocm::fused_attention_hip(
-            Qi, Ki, Vi, scale, causal,
-            apply_dropout ? dropout_p : 0.0f, rng_seed);
+        // Audit A.11 — native Float64 path. The mainline kernel upcasts to
+        // Float32, which is fatal for Float64 gradcheck (forward halves
+        // precision; analytical-vs-numerical diverges beyond 1e-7 tol). Route
+        // to the native FP64 kernel for supported head_dims; for other
+        // head_dims fall through to a composed-ops path that stays in FP64
+        // via the standard op dispatch (every op dispatches to a ROCm double-
+        // precision kernel — no FP32 round-trip, no CPU fallback). Dropout is
+        // rejected for Float64 (gradcheck-only; dropout breaks determinism).
+        Tensor output, lse;
+        int64_t head_dim_q = Qi.shape().back();
+        bool f64_native_supported = (head_dim_q == 16 || head_dim_q == 32 ||
+                                     head_dim_q == 48 || head_dim_q == 64 ||
+                                     head_dim_q == 80 || head_dim_q == 96 ||
+                                     head_dim_q == 128);
+        if (Qi.dtype() == DType::Float64) {
+            if (apply_dropout) {
+                throw std::runtime_error(
+                    "FlashAttention ROCm: dropout not supported for Float64 "
+                    "(gradcheck-only path; dropout is incompatible with "
+                    "deterministic gradcheck).");
+            }
+            if (f64_native_supported) {
+                auto pair = rocm::fused_attention_hip_f64(
+                    Qi, Ki, Vi, static_cast<double>(scale), causal);
+                output = pair.first;
+                lse    = pair.second;
+            } else {
+                // FP64 composed-ops fallback for unsupported head_dim.
+                // Mirrors the CUDA path (cuda_kernel_registry.cpp A.11):
+                // bmm + softmax dispatch to native ROCm FP64 kernels.
+                Tensor Kt = tenzor::transpose(Ki, -1, -2);
+                Tensor scores = tenzor::bmm(Qi, Kt);
+                auto scores_shape = std::vector<int64_t>(scores.shape().begin(),
+                                                         scores.shape().end());
+                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                              scores.dtype(), scores.device());
+                scores = tenzor::mul(scores, scale_t);
+                if (causal) {
+                    int64_t S_q = scores_shape[scores_shape.size() - 2];
+                    int64_t S_k = scores_shape[scores_shape.size() - 1];
+                    Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Qi.device());
+                    Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Qi.device());
+                    rows = tenzor::reshape(rows, {S_q, 1});
+                    cols = tenzor::reshape(cols, {1, S_k});
+                    Tensor mask = tenzor::gt(cols.to(DType::Float64),
+                                              rows.to(DType::Float64));
+                    Tensor neg_inf = tenzor::full(scores_shape,
+                        -std::numeric_limits<double>::infinity(),
+                        scores.dtype(), scores.device());
+                    scores = tenzor::add(scores,
+                                          tenzor::mul(mask.to(scores.dtype()), neg_inf));
+                }
+                NewOpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                output = tenzor::bmm(probs, Vi);
+                // LSE is Float32 per the contract; build a zero stub for
+                // consistency with the contract (backward uses composed path).
+                lse = tenzor::zeros({Qi.shape()[0], Qi.shape()[1]},
+                                     DType::Float32, Qi.device());
+            }
+        } else {
+            auto pair = rocm::fused_attention_hip(
+                Qi, Ki, Vi, scale, causal,
+                apply_dropout ? dropout_p : 0.0f, rng_seed);
+            output = pair.first;
+            lse    = pair.second;
+        }
 
         if (is_4d) {
             int64_t b = orig_q_shape[0], h = orig_q_shape[1];
@@ -2038,6 +2111,42 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
                 const Tensor& L = inputs[5];
                 return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal);
+            }
+
+            // Audit A.11 — native Float64 backward. Recomputes per-row LSE
+            // in double from Q/K, so it does NOT depend on the saved L (which
+            // is Float32 anyway per the attention contract). Kernel expects
+            // 3D [BH, S, D] inputs; collapse leading B,H dims if 4D.
+            bool f64_native_supported = (head_dim == 16 || head_dim == 32 ||
+                                         head_dim == 48 || head_dim == 64 ||
+                                         head_dim == 80 || head_dim == 96 ||
+                                         head_dim == 128);
+            if (Q.dtype() == DType::Float64 && f64_native_supported) {
+                bool is_4d_f64 = (Q.shape().size() == 4);
+                std::vector<int64_t> q_shape_4d, k_shape_4d, v_shape_4d;
+                Tensor Q3 = Q, K3 = K, V3 = V, O3 = O, dO3 = dO;
+                if (is_4d_f64) {
+                    q_shape_4d.assign(Q.shape().begin(), Q.shape().end());
+                    k_shape_4d.assign(K.shape().begin(), K.shape().end());
+                    v_shape_4d.assign(V.shape().begin(), V.shape().end());
+                    int64_t b = q_shape_4d[0], h = q_shape_4d[1];
+                    int64_t sq = q_shape_4d[2], dq = q_shape_4d[3];
+                    int64_t sk = k_shape_4d[2], dk = k_shape_4d[3];
+                    int64_t dv = v_shape_4d[3];
+                    Q3  = tenzor::reshape(Q.contiguous(),  std::vector<int64_t>{b * h, sq, dq});
+                    K3  = tenzor::reshape(K.contiguous(),  std::vector<int64_t>{b * h, sk, dk});
+                    V3  = tenzor::reshape(V.contiguous(),  std::vector<int64_t>{b * h, sk, dv});
+                    O3  = tenzor::reshape(O.contiguous(),  std::vector<int64_t>{b * h, sq, dv});
+                    dO3 = tenzor::reshape(dO.contiguous(), std::vector<int64_t>{b * h, sq, dv});
+                }
+                auto grads = rocm::flash_attention_backward_hip_f64(
+                    dO3, Q3, K3, V3, O3, static_cast<double>(scale), causal);
+                if (is_4d_f64) {
+                    grads[0] = tenzor::reshape(grads[0], q_shape_4d);
+                    grads[1] = tenzor::reshape(grads[1], k_shape_4d);
+                    grads[2] = tenzor::reshape(grads[2], v_shape_4d);
+                }
+                return grads;
             }
 
             // Composed-ops fallback for unsupported head_dim or missing L.

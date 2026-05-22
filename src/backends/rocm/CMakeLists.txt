@@ -53,6 +53,7 @@ set(ROCM_HIP_SOURCES
     kernels/indexing.hip.cpp
     kernels/transform.hip.cpp
     kernels/fused_ops.hip.cpp
+    kernels/flash_attention_f64.hip.cpp
     kernels/reduction.hip.cpp
     kernels/matmul.hip.cpp
     kernels/normalization.hip.cpp
