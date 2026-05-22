@@ -3690,4 +3690,187 @@ auto masked_scatter(const Variable& input, const Tensor& mask,
     return output;
 }
 
+// =========================================================================
+// Audit E.7 batch 6 — special-math closed forms + view/index ops
+// =========================================================================
+
+// igamma(a, x) — only x gets a non-trivial gradient.
+auto igamma(const Variable& a, const Variable& x) -> Variable {
+    if ((!a.requires_grad() && !x.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::igamma(a.tensor(), x.tensor()), false);
+    }
+    auto result = tenzor::igamma(a.tensor(), x.tensor());
+    auto grad_fn = std::make_shared<IgammaBackward>();
+    grad_fn->save_for_backward({a.tensor(), x.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), x.grad_fn()});
+    grad_fn->set_input_variables({a, x});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// igammac(a, x) — only x gets a non-trivial gradient.
+auto igammac(const Variable& a, const Variable& x) -> Variable {
+    if ((!a.requires_grad() && !x.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::igammac(a.tensor(), x.tensor()), false);
+    }
+    auto result = tenzor::igammac(a.tensor(), x.tensor());
+    auto grad_fn = std::make_shared<IgammacBackward>();
+    grad_fn->save_for_backward({a.tensor(), x.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), x.grad_fn()});
+    grad_fn->set_input_variables({a, x});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// beta(a, b) — both inputs differentiable via digamma.
+auto beta(const Variable& a, const Variable& b) -> Variable {
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::beta(a.tensor(), b.tensor()), false);
+    }
+    auto result = tenzor::beta(a.tensor(), b.tensor());
+    auto grad_fn = std::make_shared<BetaBackward>();
+    // Save a, b, and the realised output y (used in dB/da = y*(psi(a) - psi(a+b))).
+    grad_fn->save_for_backward({a.tensor(), b.tensor(), result});
+    grad_fn->input_shape_a_ = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(b.shape().begin(), b.shape().end());
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// pairwise_distance(x1, x2, p) — per-row L_p distance.
+auto pairwise_distance(const Variable& x1, const Variable& x2, double p) -> Variable {
+    if ((!x1.requires_grad() && !x2.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::pairwise_distance(x1.tensor(), x2.tensor(), p), false);
+    }
+    auto result = tenzor::pairwise_distance(x1.tensor(), x2.tensor(), p);
+    auto grad_fn = std::make_shared<PairwiseDistanceBackward>(p);
+    grad_fn->save_for_backward({x1.tensor(), x2.tensor(), result});
+    grad_fn->set_next_functions({x1.grad_fn(), x2.grad_fn()});
+    grad_fn->set_input_variables({x1, x2});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// pdist(input, p) — non-differentiable (kernel gap; see PdistBackward).
+auto pdist(const Variable& input, double p) -> Variable {
+    auto result = tenzor::pdist(input.tensor(), p);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<PdistBackward>(p);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// cdist(x1, x2, p) — non-differentiable (kernel gap; see CDistBackward).
+auto cdist(const Variable& x1, const Variable& x2, double p) -> Variable {
+    auto result = tenzor::cdist(x1.tensor(), x2.tensor(), p);
+    bool needs_grad = (x1.requires_grad() || x2.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<CDistBackward>(p);
+    grad_fn->set_next_functions({x1.grad_fn(), x2.grad_fn()});
+    grad_fn->set_input_variables({x1, x2});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// index(input, indices) — advanced indexing.
+// Marked non-differentiable until an accumulating multi-dim scatter
+// kernel lands (see AdvancedIndexBackward docs).
+auto index(const Variable& input,
+           const std::vector<std::optional<Tensor>>& indices) -> Variable {
+    auto result = tenzor::index(input.tensor(), indices);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<AdvancedIndexBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// one_hot — non-differentiable (integer index input).
+auto one_hot(const Variable& input, int64_t num_classes) -> Variable {
+    auto result = tenzor::one_hot(input.tensor(), num_classes);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<OneHotBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// lerp(start, end, weight) — tensor-weight overload.
+auto lerp(const Variable& start, const Variable& end, const Variable& weight) -> Variable {
+    bool needs_grad =
+        (start.requires_grad() || end.requires_grad() || weight.requires_grad()) &&
+        is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::lerp(start.tensor(), end.tensor(), weight.tensor()), false);
+    }
+    auto result = tenzor::lerp(start.tensor(), end.tensor(), weight.tensor());
+    auto grad_fn = std::make_shared<LerpBackward>();
+    grad_fn->save_for_backward({start.tensor(), end.tensor(), weight.tensor()});
+    grad_fn->input_shape_start_  = std::vector<int64_t>(start.shape().begin(),  start.shape().end());
+    grad_fn->input_shape_end_    = std::vector<int64_t>(end.shape().begin(),    end.shape().end());
+    grad_fn->input_shape_weight_ = std::vector<int64_t>(weight.shape().begin(), weight.shape().end());
+    grad_fn->set_next_functions({start.grad_fn(), end.grad_fn(), weight.grad_fn()});
+    grad_fn->set_input_variables({start, end, weight});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// lerp(start, end, weight) — scalar-weight overload.
+auto lerp(const Variable& start, const Variable& end, double weight) -> Variable {
+    bool needs_grad =
+        (start.requires_grad() || end.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::lerp(start.tensor(), end.tensor(), weight), false);
+    }
+    auto result = tenzor::lerp(start.tensor(), end.tensor(), weight);
+    auto grad_fn = std::make_shared<LerpBackward>(weight);
+    grad_fn->save_for_backward({start.tensor(), end.tensor()});
+    grad_fn->input_shape_start_ = std::vector<int64_t>(start.shape().begin(), start.shape().end());
+    grad_fn->input_shape_end_   = std::vector<int64_t>(end.shape().begin(),   end.shape().end());
+    grad_fn->set_next_functions({start.grad_fn(), end.grad_fn()});
+    grad_fn->set_input_variables({start, end});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// cross(a, b, dim) — 3-vector cross product.
+auto cross(const Variable& a, const Variable& b, int64_t dim) -> Variable {
+    bool needs_grad = (a.requires_grad() || b.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::cross(a.tensor(), b.tensor(), dim), false);
+    }
+    auto result = tenzor::cross(a.tensor(), b.tensor(), dim);
+    auto grad_fn = std::make_shared<CrossBackward>(dim);
+    grad_fn->save_for_backward({a.tensor(), b.tensor()});
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
+    grad_fn->set_input_variables({a, b});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

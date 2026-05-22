@@ -4103,4 +4103,206 @@ public:
     std::vector<int64_t> source_shape_;
 };
 
+// ============================================================================
+// Audit E.7 batch 6 — special-math closed forms + view/index ops
+// ============================================================================
+
+/**
+ * @brief igamma(a, x) = P(a, x) = gamma_lower(a, x) / Gamma(a), the
+ *        regularised lower incomplete gamma function. Differentiable wrt
+ *        x with closed form:
+ *            dP/dx = x^(a-1) * exp(-x) / Gamma(a)
+ *                  = exp((a-1) * log(x) - x - lgamma(a))
+ *        The derivative wrt a involves the derivative of the regularised
+ *        series and has no elementary closed form. PyTorch mirrors this:
+ *        d/dx is implemented, d/da raises NotImplemented. We follow suit
+ *        and return a zero gradient for `a` (which is typically a fixed
+ *        shape parameter rather than an optimisable Variable).
+ */
+class IgammaBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IgammaBackward"; }
+    auto op_id() const -> OpId override { return OpId::Igamma; }
+};
+
+/**
+ * @brief igammac(a, x) = Q(a, x) = Gamma_upper(a, x) / Gamma(a), the
+ *        regularised upper incomplete gamma function. Same structure as
+ *        IgammaBackward but with the opposite sign on x:
+ *            dQ/dx = -x^(a-1) * exp(-x) / Gamma(a)
+ *        d/da is non-implemented (no elementary closed form); a receives
+ *        a zero gradient.
+ */
+class IgammacBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "IgammacBackward"; }
+    auto op_id() const -> OpId override { return OpId::Igammac; }
+};
+
+/**
+ * @brief beta(a, b) = Gamma(a) * Gamma(b) / Gamma(a + b). Closed-form
+ *        gradients via digamma psi:
+ *            dB/da = B(a, b) * (psi(a) - psi(a + b))
+ *            dB/db = B(a, b) * (psi(b) - psi(a + b))
+ *        Both inputs are differentiable. Broadcasting handled by the
+ *        saved input shapes + reduce_grad_for_broadcasting.
+ */
+class BetaBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "BetaBackward"; }
+    auto op_id() const -> OpId override { return OpId::Beta; }
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+};
+
+/**
+ * @brief pairwise_distance(x1, x2, p) — per-row L_p distance for x1, x2
+ *        of shape (B, D); output shape (B,). Closed-form backward:
+ *            d := x1 - x2
+ *            y[b] = (sum_d |d[b,d]|^p)^(1/p)
+ *            dy[b]/dx1[b,d] = sign(d[b,d]) * |d[b,d]|^(p-1) * y[b]^(1-p)
+ *            dy[b]/dx2[b,d] = -dy[b]/dx1[b,d]
+ *        For p=2 the form simplifies to d / y. The y=0 degenerate case
+ *        is regularised with a small epsilon so 0^(1-p) does not blow up.
+ */
+class PairwiseDistanceBackward : public Function {
+public:
+    explicit PairwiseDistanceBackward(double p) : p_(p) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "PairwiseDistanceBackward"; }
+    auto op_id() const -> OpId override { return OpId::PairwiseDistance; }
+private:
+    double p_;
+};
+
+/**
+ * @brief pdist(input, p) — pairwise L_p distances within a single batch.
+ *        Input shape (N, D), output shape (N*(N-1)/2,) in row-major
+ *        upper-triangular order. The per-pair closed-form derivative
+ *        exists, but mapping it back into the (N, D) input in pure
+ *        Variable ops requires materialising a dense (N, N, D)
+ *        intermediate and scatter-summing pair gradients across pairs.
+ *        That is O(N^2 * D) memory and needs a dedicated backward kernel
+ *        for correctness/perf; the project does not yet provide one
+ *        (PyTorch ships a custom `pdist_backward` op for this reason).
+ *        Throw NonDifferentiable until such a kernel lands.
+ */
+class PdistBackward : public Function {
+public:
+    explicit PdistBackward(double p) : p_(p) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "PdistBackward"; }
+    auto op_id() const -> OpId override { return OpId::Pdist; }
+private:
+    double p_;
+};
+
+/**
+ * @brief cdist(x1, x2, p) — pairwise L_p distance between two sets,
+ *        x1: (N, D), x2: (M, D); output (N, M). Same situation as
+ *        PdistBackward: per-pair derivative is closed-form, but the
+ *        scatter step needs a dedicated backward kernel which is not
+ *        yet present in the project. Throw NonDifferentiable until one
+ *        exists.
+ */
+class CDistBackward : public Function {
+public:
+    explicit CDistBackward(double p) : p_(p) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CDistBackward"; }
+    auto op_id() const -> OpId override { return OpId::CDist; }
+private:
+    double p_;
+};
+
+/**
+ * @brief Advanced indexing: y = x[indices] (NumPy-style multi-tensor
+ *        index). The mathematically correct backward is scatter-add of
+ *        grad_y into a zero-filled source-shaped tensor at the indexed
+ *        positions (duplicate indices must accumulate). The project's
+ *        current AdvancedIndexPut kernels do not plumb an `accumulate`
+ *        flag and `tenzor::index_put` is overwrite-only, so an
+ *        autograd-level implementation today would silently drop
+ *        duplicate-index gradient contributions.
+ *
+ *        We mark this NON-DIFFERENTIABLE with a pointer to that gap so
+ *        callers fail loudly. A follow-up should land an accumulating
+ *        multi-dim scatter kernel and then turn this into a real
+ *        gradient.
+ */
+class AdvancedIndexBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AdvancedIndexBackward"; }
+    auto op_id() const -> OpId override { return OpId::AdvancedIndex; }
+};
+
+/**
+ * @brief One-hot encoding: integer indices -> one-hot tensor.
+ *        NON-DIFFERENTIABLE — the input is an integer index tensor and
+ *        has no meaningful gradient (the output is a discrete encoding,
+ *        not a smooth function of the indices).
+ */
+class OneHotBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "OneHotBackward"; }
+    auto op_id() const -> OpId override { return OpId::OneHot; }
+};
+
+/**
+ * @brief lerp(start, end, weight) = start + weight * (end - start).
+ *        Tensor-weight overload: all three inputs are differentiable.
+ *            d/dstart  = (1 - weight) * grad
+ *            d/dend    = weight * grad
+ *            d/dweight = (end - start) * grad
+ *        Scalar-weight overload (`weight: double`): only start, end are
+ *        differentiable; weight is constant.
+ */
+class LerpBackward : public Function {
+public:
+    LerpBackward() : has_weight_tensor_(true), weight_scalar_(0.0) {}
+    explicit LerpBackward(double w) : has_weight_tensor_(false), weight_scalar_(w) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "LerpBackward"; }
+    auto op_id() const -> OpId override { return OpId::Lerp; }
+    bool has_weight_tensor_;
+    double weight_scalar_;
+    std::vector<int64_t> input_shape_start_;
+    std::vector<int64_t> input_shape_end_;
+    std::vector<int64_t> input_shape_weight_;
+};
+
+/**
+ * @brief cross(a, b, dim) = a x b along the given dim (length 3).
+ *        Closed-form backward using the antisymmetry of the cross
+ *        product:
+ *            grad_a = cross(b, grad, dim) = b x grad
+ *            grad_b = cross(grad, a, dim) = grad x a
+ *        Both inputs differentiable. No saved scalar state besides the
+ *        dim used by the forward.
+ */
+class CrossBackward : public Function {
+public:
+    explicit CrossBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CrossBackward"; }
+    auto op_id() const -> OpId override { return OpId::Cross; }
+private:
+    int64_t dim_;
+};
+
 } // namespace tenzor

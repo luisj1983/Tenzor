@@ -50,8 +50,14 @@ auto cosine_similarity_matrix(const Variable& a, const Variable& b) -> Variable 
     return matmul(a_norm, b_t);
 }
 
-// Pairwise distance (Lp norm)
-auto pairwise_distance(const Variable& a, const Variable& b, double p) -> Variable {
+// Pairwise distance (Lp norm).
+// Renamed from `pairwise_distance` to avoid ambiguity with the public
+// tenzor::pairwise_distance(Variable, Variable, double) introduced in
+// audit E.7 batch 6. The two implementations differ slightly in
+// epsilon handling and shape (1-D vector vs. (B,)); existing TripletLoss
+// callers want this exact behaviour, so we keep the local helper but
+// give it an unambiguous name.
+auto local_pairwise_distance(const Variable& a, const Variable& b, double p) -> Variable {
     // ||a - b||_p per sample
     auto diff = a - b;
 
@@ -209,12 +215,12 @@ auto TripletLoss::forward(const Variable& anchor,
                           const Variable& positive,
                           const Variable& negative) -> Variable {
     // Compute distances
-    auto dist_ap = pairwise_distance(anchor, positive, p_);  // (N,)
-    auto dist_an = pairwise_distance(anchor, negative, p_);  // (N,)
+    auto dist_ap = local_pairwise_distance(anchor, positive, p_);  // (N,)
+    auto dist_an = local_pairwise_distance(anchor, negative, p_);  // (N,)
 
     if (swap_) {
         // Distance-swapped variant: use min(d(a,n), d(p,n))
-        auto dist_pn = pairwise_distance(positive, negative, p_);
+        auto dist_pn = local_pairwise_distance(positive, negative, p_);
         // Element-wise min: min(dist_an, dist_pn) = (dist_an + dist_pn - |dist_an - dist_pn|) / 2
         auto diff = dist_an - dist_pn;
         auto abs_diff = abs(diff);

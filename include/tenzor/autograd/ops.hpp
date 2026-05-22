@@ -1042,6 +1042,55 @@ auto zeta(const Variable& s, const Variable& q) -> Variable;
 
 auto betainc(const Variable& a, const Variable& b, const Variable& x) -> Variable;
 
+/// Regularised lower incomplete gamma P(a, x). Differentiable wrt x via
+/// dP/dx = x^(a-1) exp(-x) / Gamma(a); a receives zero grad (no
+/// elementary closed form for dP/da; PyTorch parity).
+auto igamma(const Variable& a, const Variable& x) -> Variable;
+
+/// Regularised upper incomplete gamma Q(a, x). Differentiable wrt x via
+/// dQ/dx = -x^(a-1) exp(-x) / Gamma(a); a receives zero grad.
+auto igammac(const Variable& a, const Variable& x) -> Variable;
+
+/// Beta function B(a, b) = Gamma(a) Gamma(b) / Gamma(a+b). Closed-form
+/// gradient via digamma: dB/da = B*(psi(a) - psi(a+b)).
+auto beta(const Variable& a, const Variable& b) -> Variable;
+
+/// Per-row L_p distance between x1 and x2, both shape (B, D). Output (B,).
+/// Closed-form backward via sign/|d|^(p-1) and y^(1-p) scaling.
+auto pairwise_distance(const Variable& x1, const Variable& x2, double p = 2.0) -> Variable;
+
+/// All pairwise L_p distances within a single batch; shape (N, D) -> (N*(N-1)/2,).
+/// NON-DIFFERENTIABLE — backward() throws NonDifferentiable until a
+/// dedicated `pdist_backward` kernel lands; see PdistBackward docs.
+auto pdist(const Variable& input, double p = 2.0) -> Variable;
+
+/// Cross-pairwise L_p distance between two sets x1: (N, D), x2: (M, D).
+/// Output (N, M). NON-DIFFERENTIABLE — same kernel-gap caveat as pdist.
+auto cdist(const Variable& x1, const Variable& x2, double p = 2.0) -> Variable;
+
+/// NumPy-style multi-tensor advanced indexing: y = x[indices].
+/// NON-DIFFERENTIABLE — the scatter-add backward needs an accumulating
+/// multi-dim scatter kernel that the project does not yet expose;
+/// backward() throws NonDifferentiable. Use gather/index_select for the
+/// single-dim case if you need autograd today.
+auto index(const Variable& input,
+           const std::vector<std::optional<Tensor>>& indices) -> Variable;
+
+/// One-hot encoding of integer index tensor.
+/// NON-DIFFERENTIABLE — the input is integer indices.
+auto one_hot(const Variable& input, int64_t num_classes = -1) -> Variable;
+
+/// Linear interpolation: lerp(start, end, weight) = start + weight*(end - start).
+/// All three inputs differentiable in the tensor-weight overload.
+auto lerp(const Variable& start, const Variable& end, const Variable& weight) -> Variable;
+
+/// Linear interpolation with scalar weight. Only start, end are differentiable.
+auto lerp(const Variable& start, const Variable& end, double weight) -> Variable;
+
+/// 3-vector cross product along dim (length 3). grad_a = cross(b, grad),
+/// grad_b = cross(grad, a).
+auto cross(const Variable& a, const Variable& b, int64_t dim = -1) -> Variable;
+
 /// Normal CDF. Grad: standard normal PDF
 auto ndtr(const Variable& input) -> Variable;
 

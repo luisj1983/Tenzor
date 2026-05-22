@@ -2783,4 +2783,262 @@ auto MaskedScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     return {grad_x, grad_source};
 }
 
+// ============================================================================
+// Audit E.7 batch 6 — special-math closed forms + view/index ops
+// ============================================================================
+
+// --- Igamma --------------------------------------------------------------
+// y = igamma(a, x) = P(a, x). dP/dx = x^(a-1) * exp(-x) / Gamma(a).
+// d/da has no elementary closed form -> zero grad for `a`.
+auto IgammaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IgammaBackward::forward should not be called directly");
+}
+auto IgammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& a = saved_tensors_[0];
+    const auto& x = saved_tensors_[1];
+
+    auto a_shape = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    auto x_shape = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    auto one_a = ones(a_shape, a.dtype(), a.device());
+
+    // log dP/dx = (a-1)*log(x) - x - lgamma(a)
+    auto am1 = sub(a, one_a);
+    auto log_x = tenzor::log(x);
+    auto lg_a = tenzor::lgamma(a);
+    auto log_deriv = sub(sub(mul(am1, log_x), x), lg_a);
+    auto deriv = tenzor::exp(log_deriv);
+
+    auto grad_a = zeros(a_shape, a.dtype(), a.device());
+    auto grad_x = mul(grad_outputs[0], deriv);
+    return {grad_a, grad_x};
+}
+
+// --- Igammac -------------------------------------------------------------
+// y = igammac(a, x) = Q(a, x). dQ/dx = -x^(a-1) * exp(-x) / Gamma(a).
+auto IgammacBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IgammacBackward::forward should not be called directly");
+}
+auto IgammacBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& a = saved_tensors_[0];
+    const auto& x = saved_tensors_[1];
+
+    auto a_shape = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    auto one_a = ones(a_shape, a.dtype(), a.device());
+
+    auto am1 = sub(a, one_a);
+    auto log_x = tenzor::log(x);
+    auto lg_a = tenzor::lgamma(a);
+    auto log_pos = sub(sub(mul(am1, log_x), x), lg_a);
+    auto deriv = neg(tenzor::exp(log_pos));
+
+    auto grad_a = zeros(a_shape, a.dtype(), a.device());
+    auto grad_x = mul(grad_outputs[0], deriv);
+    return {grad_a, grad_x};
+}
+
+// --- Beta ----------------------------------------------------------------
+// y = B(a, b) = Gamma(a) Gamma(b) / Gamma(a+b).
+// dB/da = B * (psi(a) - psi(a+b)), dB/db = B * (psi(b) - psi(a+b)).
+auto BetaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BetaBackward::forward should not be called directly");
+}
+auto BetaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(3);
+    const auto& a = saved_tensors_[0];
+    const auto& b = saved_tensors_[1];
+    const auto& y = saved_tensors_[2]; // beta(a, b)
+
+    auto sum_ab = add(a, b);
+    auto psi_ab = tenzor::digamma(sum_ab);
+    auto psi_a = tenzor::digamma(a);
+    auto psi_b = tenzor::digamma(b);
+
+    auto factor_a = sub(psi_a, psi_ab);
+    auto factor_b = sub(psi_b, psi_ab);
+    auto dB_da = mul(y, factor_a);
+    auto dB_db = mul(y, factor_b);
+
+    auto grad_a_full = mul(grad_outputs[0], dB_da);
+    auto grad_b_full = mul(grad_outputs[0], dB_db);
+
+    auto grad_a = reduce_grad_for_broadcasting(grad_a_full, input_shape_a_);
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_full, input_shape_b_);
+    return {grad_a, grad_b};
+}
+
+// --- PairwiseDistance ----------------------------------------------------
+// y[b] = (Sum_d |x1[b,d] - x2[b,d]|^p)^(1/p), input (B, D), output (B,).
+// dy[b]/dx1[b,d] = sign(d[b,d]) * |d[b,d]|^(p-1) * y[b]^(1-p),
+// dy[b]/dx2[b,d] = -dy[b]/dx1[b,d].
+auto PairwiseDistanceBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("PairwiseDistanceBackward::forward should not be called directly");
+}
+auto PairwiseDistanceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(3);
+    const auto& x1 = saved_tensors_[0];
+    const auto& x2 = saved_tensors_[1];
+    const auto& y  = saved_tensors_[2]; // shape (B,)
+
+    auto diff = sub(x1, x2); // (B, D)
+
+    auto sign_d = tenzor::sign(diff);
+    auto abs_d = tenzor::abs(diff);
+    auto abs_pow = tenzor::pow(abs_d, p_ - 1.0);  // (B, D)
+
+    // Regularise y to avoid 0^(1-p) on degenerate zero-distance rows.
+    // We add a tiny constant to y purely for the division step; the
+    // gradient at exactly zero distance is mathematically undefined for
+    // p != 2 anyway (the subgradient set contains 0). Using a small
+    // epsilon keeps the gradient finite and follows the PyTorch
+    // convention of regularising via the input difference.
+    auto eps_t = full_like(y, 1e-30);
+    auto y_safe = add(y, eps_t);
+    auto y_factor = tenzor::pow(y_safe, 1.0 - p_); // (B,)
+    auto y_factor_exp = unsqueeze(y_factor, 1);    // (B, 1)
+
+    auto grad_y = grad_outputs[0];                 // (B,)
+    auto grad_y_exp = unsqueeze(grad_y, 1);        // (B, 1)
+    auto scale = mul(grad_y_exp, y_factor_exp);    // (B, 1)
+    auto per_elem = mul(mul(sign_d, abs_pow), scale);  // (B, D)
+
+    auto grad_x1 = per_elem;
+    auto grad_x2 = neg(per_elem);
+    return {grad_x1, grad_x2};
+}
+
+// --- Pdist (non-diff, pending dedicated kernel) --------------------------
+auto PdistBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("PdistBackward::forward should not be called directly");
+}
+auto PdistBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "pdist: closed-form per-pair backward exists, but mapping it back into "
+        "the (N, D) input requires materialising a dense (N, N, D) intermediate "
+        "and scatter-summing pair gradients across pairs. That needs a "
+        "dedicated backward kernel (PyTorch ships `_pdist_backward` for this "
+        "reason). Until a kernel lands, pdist is marked non-differentiable. "
+        "Wrap in a custom autograd::Function with the explicit pair-difference "
+        "computation if you need gradients now.");
+}
+
+// --- CDist (non-diff, pending dedicated kernel) --------------------------
+auto CDistBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CDistBackward::forward should not be called directly");
+}
+auto CDistBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "cdist: closed-form per-pair backward exists, but the scatter step "
+        "into x1 (N, D) and x2 (M, D) requires a dedicated backward kernel "
+        "(PyTorch ships `_cdist_backward` for this reason). Until a kernel "
+        "lands, cdist is marked non-differentiable. Wrap in a custom "
+        "autograd::Function with the explicit pair-difference computation "
+        "if you need gradients now.");
+}
+
+// --- AdvancedIndex -------------------------------------------------------
+// y = x[indices]; correct backward is scatter-add of grad_y into
+// zeros_like(x) at the indexed positions (accumulating because duplicate
+// indices may appear). The project's current AdvancedIndexPut kernels are
+// pure overwrite (no `accumulate` flag plumbed through across CPU / CUDA /
+// ROCm / OneAPI / Vulkan), and `tenzor::index_put` is in-place
+// overwrite-only. Implementing the multi-dim accumulate scatter purely
+// at the Variable level (flatten -> compute 1D index -> index_add ->
+// reshape) is feasible but requires care for full-slice sentinel dims and
+// broadcasting; it belongs in a follow-up that also adds the missing
+// `accumulate` path to the AdvancedIndexPut kernels for parity. Until
+// then, mark non-differentiable with a clear pointer.
+auto AdvancedIndexBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("AdvancedIndexBackward::forward should not be called directly");
+}
+auto AdvancedIndexBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "advanced_index (x[indices]): closed-form backward is scatter-add of "
+        "the output gradient back into a zero-filled source-shaped tensor "
+        "(duplicate indices must accumulate). The project's current "
+        "AdvancedIndexPut kernels do not expose an `accumulate` mode, and "
+        "`tenzor::index_put` is overwrite-only — that path would silently "
+        "drop duplicate-index contributions. A follow-up should add an "
+        "accumulating scatter kernel; until then this op is marked "
+        "non-differentiable so callers fail loudly instead of getting wrong "
+        "gradients. Use `gather`/`index_select` for the single-dim case if "
+        "you need autograd today.");
+}
+
+// --- OneHot --------------------------------------------------------------
+// One-hot of integer indices: non-differentiable input.
+auto OneHotBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("OneHotBackward::forward should not be called directly");
+}
+auto OneHotBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    throw NonDifferentiable(
+        "one_hot: input is an integer index tensor and the output is a "
+        "discrete encoding (not a smooth function of the indices). No "
+        "well-defined gradient exists. Use a soft relaxation "
+        "(e.g. softmax of logits, Gumbel-softmax) if you need a "
+        "differentiable approximation.");
+}
+
+// --- Lerp ----------------------------------------------------------------
+// y = start + weight * (end - start) = (1 - weight) * start + weight * end
+//   d/dstart  = 1 - weight
+//   d/dend    = weight
+//   d/dweight = end - start    (tensor-weight overload only)
+auto LerpBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("LerpBackward::forward should not be called directly");
+}
+auto LerpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+
+    if (has_weight_tensor_) {
+        require_saved_tensors(3);
+        const auto& start  = saved_tensors_[0];
+        const auto& end    = saved_tensors_[1];
+        const auto& weight = saved_tensors_[2];
+
+        auto one_w = ones(
+            std::vector<int64_t>(weight.shape().begin(), weight.shape().end()),
+            weight.dtype(), weight.device());
+        auto one_minus_w = sub(one_w, weight);
+
+        auto grad_start_full  = mul(grad, one_minus_w);
+        auto grad_end_full    = mul(grad, weight);
+        auto grad_weight_full = mul(grad, sub(end, start));
+
+        auto grad_start  = reduce_grad_for_broadcasting(grad_start_full,  input_shape_start_);
+        auto grad_end    = reduce_grad_for_broadcasting(grad_end_full,    input_shape_end_);
+        auto grad_weight = reduce_grad_for_broadcasting(grad_weight_full, input_shape_weight_);
+
+        return {grad_start, grad_end, grad_weight};
+    }
+
+    // Scalar-weight overload: only start, end are saved.
+    require_saved_tensors(2);
+    auto one_minus_w_scalar = 1.0 - weight_scalar_;
+    auto grad_start_full = mul(grad, one_minus_w_scalar);
+    auto grad_end_full   = mul(grad, weight_scalar_);
+    auto grad_start = reduce_grad_for_broadcasting(grad_start_full, input_shape_start_);
+    auto grad_end   = reduce_grad_for_broadcasting(grad_end_full,   input_shape_end_);
+    return {grad_start, grad_end};
+}
+
+// --- Cross ---------------------------------------------------------------
+// y = cross(a, b, dim). Using a x b = -(b x a) and bilinearity:
+//   grad_a = cross(b, grad, dim)
+//   grad_b = cross(grad, a, dim)
+auto CrossBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CrossBackward::forward should not be called directly");
+}
+auto CrossBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
+    const auto& a = saved_tensors_[0];
+    const auto& b = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    auto grad_a = tenzor::cross(b, grad, dim_);
+    auto grad_b = tenzor::cross(grad, a, dim_);
+    return {grad_a, grad_b};
+}
+
 } // namespace tenzor
