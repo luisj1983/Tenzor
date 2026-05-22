@@ -721,6 +721,19 @@ namespace oneapi {
         const Tensor& O, const Tensor& L, float scale, bool causal,
         sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
 
+    // Audit A.11: native Float64 FlashAttention forward/backward
+    // (head_dim ∈ {16, 32, 48, 64, 80, 96, 128}). Forward emits Float32 LSE
+    // per the FlashAttention contract; backward recomputes softmax in double
+    // from Q/K so the saved LSE is not consumed.
+    auto fused_attention_oneapi_f64(
+        const Tensor& Q, const Tensor& K, const Tensor& V,
+        double scale, bool causal,
+        sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto flash_attention_backward_oneapi_f64(
+        const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
+        const Tensor& O, double scale, bool causal,
+        sycl::queue& queue) -> std::vector<Tensor>;
+
     // ---- Fused optimizer steps (kernels/fused_ops.cpp) ----
     auto fused_adam_step_kernel(
         Tensor& param, const Tensor& grad, Tensor& exp_avg, Tensor& exp_avg_sq,
@@ -3215,15 +3228,110 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 return {output_comp, lse_comp, philox.seed, philox.offset};
             }
 
-            // Phase 8.2: compute LSE alongside the forward pass for the fused
-            // backward kernel. Allocation happens inside _with_lse if Q/K/V are
-            // 3D and dtype is supported. For dropout-enabled paths we still
-            // emit placeholders for seed/offset (kernel-level Philox refit
-            // arrives separately).
-            Tensor lse;
-            Tensor output = oneapi::flash_attention_kernel_with_lse(
-                inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue, &lse);
-            oneapi::fp16_saturate_if_needed(output, queue);
+            // Both the templated FP32/FP16/BF16 kernel and the dedicated FP64
+            // kernel expect 3D `(batch_heads, seq_len, head_dim)` inputs. The
+            // autograd-side `flash_attention` Variable wrapper passes Q/K/V
+            // 4D `(B, H, S, D)`, so collapse the leading two dims for the
+            // kernel call and restore on output (mirrors the CUDA registry).
+            bool is_4d = (inputs[0].shape().size() == 4);
+            Tensor Qi = inputs[0], Ki = inputs[1], Vi = inputs[2];
+            std::vector<int64_t> orig_q_shape;
+            if (is_4d) {
+                orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
+                int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+                int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+                int64_t sk = inputs[1].shape()[2];
+                int64_t dv = inputs[2].shape()[3];
+                Qi = tenzor::reshape(inputs[0], std::vector<int64_t>{b * h, sq, d}).contiguous();
+                Ki = tenzor::reshape(inputs[1], std::vector<int64_t>{b * h, sk, d}).contiguous();
+                Vi = tenzor::reshape(inputs[2], std::vector<int64_t>{b * h, sk, dv}).contiguous();
+            }
+
+            // Audit A.11: native Float64 FlashAttention path. Dispatches to a
+            // dedicated FP64 kernel (`flash_attention_f64.cpp`) that
+            // accumulates everything in `double`. The mainline templated
+            // kernel already specialises ComputeT=double for Float64, but the
+            // A.11 contract requires the same dedicated kernel layout as the
+            // CUDA / ROCm FP64 implementations (separate compile unit, native
+            // FP64 backward) so forward and backward share the algorithm
+            // exactly. Mask / dropout are not supported in the FP64 fast path
+            // (gradcheck-only); fall through to a GPU-side composed-ops
+            // implementation in FP64 for unsupported head_dims.
+            Tensor output, lse;
+            if (Qi.dtype() == DType::Float64) {
+                int64_t f64_head_dim = Qi.shape().back();
+                bool f64_native_supported = (f64_head_dim == 16 || f64_head_dim == 32 ||
+                                              f64_head_dim == 48 || f64_head_dim == 64 ||
+                                              f64_head_dim == 80 || f64_head_dim == 96 ||
+                                              f64_head_dim == 128);
+                if (f64_native_supported && mask == nullptr) {
+                    auto [o64, lse64] = oneapi::fused_attention_oneapi_f64(
+                        Qi, Ki, Vi, static_cast<double>(scale), is_causal, queue);
+                    output = o64;
+                    lse    = lse64;
+                } else {
+                    // FP64 fallback for unsupported head_dim / masked attention:
+                    // composed-ops on the SYCL device via tenzor:: dispatch,
+                    // which calls native FP64 BMM/softmax OneAPI kernels. No
+                    // FP32 round-trip — preserves precision for gradcheck.
+                    // This is NOT a CPU fallback; every op below dispatches
+                    // to OneAPI double-precision kernels.
+                    Tensor Kt = tenzor::transpose(Ki, -1, -2);
+                    Tensor scores = tenzor::bmm(Qi, Kt);
+                    auto scores_shape = std::vector<int64_t>(scores.shape().begin(),
+                                                              scores.shape().end());
+                    Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                                   scores.dtype(), scores.device());
+                    scores = tenzor::mul(scores, scale_t);
+                    if (mask != nullptr && mask->is_valid() && mask->numel() > 0) {
+                        scores = tenzor::add(scores, mask->to(scores.dtype()));
+                    }
+                    if (is_causal) {
+                        int64_t S_q = scores_shape[scores_shape.size() - 2];
+                        int64_t S_k = scores_shape[scores_shape.size() - 1];
+                        Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Qi.device());
+                        Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Qi.device());
+                        rows = tenzor::reshape(rows, {S_q, 1});
+                        cols = tenzor::reshape(cols, {1, S_k});
+                        Tensor causal_mask = tenzor::gt(cols.to(DType::Float64),
+                                                         rows.to(DType::Float64));
+                        Tensor neg_inf = tenzor::full(scores_shape,
+                            -std::numeric_limits<double>::infinity(),
+                            scores.dtype(), scores.device());
+                        scores = tenzor::add(scores,
+                                              tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+                    }
+                    NewOpAttributes sm_attrs;
+                    sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                    std::vector<Tensor> sm_in = {scores};
+                    Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+                    output = tenzor::bmm(probs, Vi);
+                    // LSE is Float32 per the contract; build it from `scores`
+                    // (logsumexp over the last dim). Used by the backward
+                    // composed-ops path only — the FP64 backward kernels
+                    // recompute LSE in `double` from Q/K.
+                    lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false).to(DType::Float32);
+                }
+            } else {
+                // Phase 8.2: compute LSE alongside the forward pass for the
+                // fused backward kernel. Allocation happens inside _with_lse
+                // if Q/K/V are 3D and dtype is supported. For dropout-enabled
+                // paths we still emit placeholders for seed/offset
+                // (kernel-level Philox refit arrives separately).
+                output = oneapi::flash_attention_kernel_with_lse(
+                    Qi, Ki, Vi, mask, scale, is_causal, queue, &lse);
+                oneapi::fp16_saturate_if_needed(output, queue);
+            }
+
+            if (is_4d) {
+                int64_t b = orig_q_shape[0], h = orig_q_shape[1];
+                int64_t sq = orig_q_shape[2], dv = inputs[2].shape()[3];
+                output = tenzor::reshape(output,
+                    std::vector<int64_t>{b, h, sq, dv});
+                if (lse.is_valid() && lse.numel() > 0) {
+                    lse = tenzor::reshape(lse, std::vector<int64_t>{b, h, sq});
+                }
+            }
             return {output, lse, Tensor{}, Tensor{}};
         });
 
@@ -3256,6 +3364,36 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const bool has_lse = inputs.size() >= 6 && inputs[5].is_valid()
                                   && inputs[5].numel() > 0;
             const int64_t head_dim = Q.shape().back();
+
+            // Audit A.11: native Float64 backward via the dedicated FP64
+            // kernel (`flash_attention_f64.cpp`). Skips the saved LSE entirely
+            // — the kernel recomputes softmax in double from Q/K, matching
+            // the CUDA/ROCm FP64 backward layout. Supported head_dims mirror
+            // the FP64 forward.
+            if (Q.dtype() == DType::Float64 && Q.ndim() == 4 &&
+                (head_dim == 16 || head_dim == 32 || head_dim == 48 ||
+                 head_dim == 64 || head_dim == 80 || head_dim == 96 ||
+                 head_dim == 128)) {
+                auto flatten_bh = [](const Tensor& t) -> Tensor {
+                    auto s = t.shape();
+                    return tenzor::reshape(t, {s[0] * s[1], s[2], s[3]});
+                };
+                Tensor dO_flat = flatten_bh(dO).contiguous();
+                Tensor Q_flat  = flatten_bh(Q).contiguous();
+                Tensor K_flat  = flatten_bh(K).contiguous();
+                Tensor V_flat  = flatten_bh(V).contiguous();
+                Tensor O_flat  = flatten_bh(O).contiguous();
+
+                auto& queue = get_q(inputs);
+                auto grads = oneapi::flash_attention_backward_oneapi_f64(
+                    dO_flat, Q_flat, K_flat, V_flat, O_flat,
+                    static_cast<double>(scale), causal, queue);
+                auto orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
+                return {tenzor::reshape(grads[0], orig),
+                        tenzor::reshape(grads[1], orig),
+                        tenzor::reshape(grads[2], orig)};
+            }
+
             const bool fused_supported =
                 (Q.dtype() == DType::Float32) &&
                 (head_dim == 32 || head_dim == 64 || head_dim == 128) &&

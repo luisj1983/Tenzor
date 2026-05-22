@@ -622,13 +622,20 @@ auto flash_attention(const Variable& Q,
     // kernels (src/backends/rocm/kernels/flash_attention_f64.hip.cpp) for the
     // same head_dim set. The ROCm registry falls back to a composed-ops
     // backward for other head_dims (still native FP64 via the standard op
-    // dispatch). Keep this list only for backends still missing FP64
-    // (Vulkan, OneAPI) until their A.11 work lands.
+    // dispatch).
+    //
+    // audit A.11 (OneAPI): OneAPI now also has native Float64 forward+backward
+    // kernels (src/backends/oneapi/kernels/flash_attention_f64.cpp) for the
+    // same head_dim set; the registry routes Float64 inputs at supported
+    // head_dims to those SYCL kernels and falls back to the composed FP64 op
+    // dispatch otherwise. Keep this list only for backends still missing FP64
+    // (Vulkan) until their A.11 work lands.
     const Device::Type dev_type = Q.tensor().device().type;
     const bool backend_native_f64 =
         (dev_type == Device::Type::CPU) ||
         (dev_type == Device::Type::CUDA) ||
-        (dev_type == Device::Type::ROCm);
+        (dev_type == Device::Type::ROCm) ||
+        (dev_type == Device::Type::OneAPI);
     if (Q.tensor().dtype() == DType::Float64 && dropout_p == 0.0f
         && !backend_native_f64) {
         auto Kt = transpose(K, -1, -2);

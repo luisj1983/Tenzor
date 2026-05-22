@@ -189,6 +189,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/expand.cpp
     kernels/statistical.cpp
     kernels/fused_ops.cpp
+    kernels/flash_attention_f64.cpp
     kernels/lstm.cpp
     kernels/gru.cpp
     kernels/vision.cpp
