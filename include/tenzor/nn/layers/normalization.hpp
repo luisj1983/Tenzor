@@ -234,6 +234,9 @@ public:
 
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Get the epsilon value used for numerical stability.
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+
 private:
     int64_t num_features_;
     double eps_;
@@ -278,6 +281,9 @@ public:
 
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Get the epsilon value used for numerical stability.
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+
 private:
     int64_t num_features_;
     double eps_;
@@ -309,6 +315,10 @@ public:
                    bool affine = true);
 
     auto forward_impl(const Variable& input) -> Variable override;
+
+    /// @brief Get the epsilon value used for numerical stability (forwarded from the
+    /// internal InstanceNorm2d delegate).
+    [[nodiscard]] auto eps() const -> double { return in2d_.eps(); }
 
 private:
     int64_t num_features_;

@@ -112,6 +112,57 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             break;
         }
 
+        // C.3 audit batch 2: ConvTranspose 2d/3d.
+        // ConvTranspose2d: extra_i layout matches Conv2d plus 2 trailing
+        // output_padding slots:
+        //   [sH, sW, pH, pW, dH, dW, groups, kH, kW, opH, opW]
+        // ConvTranspose3d:
+        //   [sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, kD, kH, kW,
+        //    opD, opH, opW]
+        case OpId::ConvTranspose2dForward: {
+            oa.set(AttrKey::Stride,   la.i[0]);
+            oa.set(AttrKey::Padding,  la.i[1]);
+            oa.set(AttrKey::Dilation, la.i[2]);
+            oa.set(AttrKey::Groups,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1)  oa.set(AttrKey::StrideH,        ei[0]);
+            if (ei.size() >= 2)  oa.set(AttrKey::StrideW,        ei[1]);
+            if (ei.size() >= 3)  oa.set(AttrKey::PaddingH,       ei[2]);
+            if (ei.size() >= 4)  oa.set(AttrKey::PaddingW,       ei[3]);
+            if (ei.size() >= 5)  oa.set(AttrKey::DilationH,      ei[4]);
+            if (ei.size() >= 6)  oa.set(AttrKey::DilationW,      ei[5]);
+            if (ei.size() >= 7)  oa.set(AttrKey::Groups,         ei[6]);
+            if (ei.size() >= 8)  oa.set(AttrKey::KernelSizeH,    ei[7]);
+            if (ei.size() >= 9)  oa.set(AttrKey::KernelSizeW,    ei[8]);
+            if (ei.size() >= 10) oa.set(AttrKey::OutputPaddingH, ei[9]);
+            if (ei.size() >= 11) oa.set(AttrKey::OutputPaddingW, ei[10]);
+            break;
+        }
+        case OpId::ConvTranspose3dForward: {
+            oa.set(AttrKey::Stride,   la.i[0]);
+            oa.set(AttrKey::Padding,  la.i[1]);
+            oa.set(AttrKey::Dilation, la.i[2]);
+            oa.set(AttrKey::Groups,   la.i[3]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1)  oa.set(AttrKey::StrideD,        ei[0]);
+            if (ei.size() >= 2)  oa.set(AttrKey::StrideH,        ei[1]);
+            if (ei.size() >= 3)  oa.set(AttrKey::StrideW,        ei[2]);
+            if (ei.size() >= 4)  oa.set(AttrKey::PaddingD,       ei[3]);
+            if (ei.size() >= 5)  oa.set(AttrKey::PaddingH,       ei[4]);
+            if (ei.size() >= 6)  oa.set(AttrKey::PaddingW,       ei[5]);
+            if (ei.size() >= 7)  oa.set(AttrKey::DilationD,      ei[6]);
+            if (ei.size() >= 8)  oa.set(AttrKey::DilationH,      ei[7]);
+            if (ei.size() >= 9)  oa.set(AttrKey::DilationW,      ei[8]);
+            if (ei.size() >= 10) oa.set(AttrKey::Groups,         ei[9]);
+            if (ei.size() >= 11) oa.set(AttrKey::KernelSizeD,    ei[10]);
+            if (ei.size() >= 12) oa.set(AttrKey::KernelSizeH,    ei[11]);
+            if (ei.size() >= 13) oa.set(AttrKey::KernelSizeW,    ei[12]);
+            if (ei.size() >= 14) oa.set(AttrKey::OutputPaddingD, ei[13]);
+            if (ei.size() >= 15) oa.set(AttrKey::OutputPaddingH, ei[14]);
+            if (ei.size() >= 16) oa.set(AttrKey::OutputPaddingW, ei[15]);
+            break;
+        }
+
         // Inf-E5: Norms — f[0]=eps, i[0]=num_groups (GroupNorm only).
         case OpId::InstanceNorm:
             oa.set(AttrKey::Eps, la.f[0]);
@@ -175,12 +226,30 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             if (ei.size() >= 9) oa.set(AttrKey::CeilMode,    ei[8] != 0);
             break;
         }
-        case OpId::MaxPool3dForward:
+        case OpId::MaxPool3dForward: {
             oa.set(AttrKey::KernelSize, la.i[0]);
             oa.set(AttrKey::Stride,     la.i[1]);
             oa.set(AttrKey::Padding,    la.i[2]);
             oa.set(AttrKey::Dilation,   la.i[3]);
+            // Per-axis extras (C.3 audit batch 2):
+            //   extra_i = [kD, kH, kW, sD, sH, sW, pD, pH, pW,
+            //              dD, dH, dW, ceil_mode (0/1)]
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1)  oa.set(AttrKey::KernelSizeD, ei[0]);
+            if (ei.size() >= 2)  oa.set(AttrKey::KernelSizeH, ei[1]);
+            if (ei.size() >= 3)  oa.set(AttrKey::KernelSizeW, ei[2]);
+            if (ei.size() >= 4)  oa.set(AttrKey::StrideD,     ei[3]);
+            if (ei.size() >= 5)  oa.set(AttrKey::StrideH,     ei[4]);
+            if (ei.size() >= 6)  oa.set(AttrKey::StrideW,     ei[5]);
+            if (ei.size() >= 7)  oa.set(AttrKey::PaddingD,    ei[6]);
+            if (ei.size() >= 8)  oa.set(AttrKey::PaddingH,    ei[7]);
+            if (ei.size() >= 9)  oa.set(AttrKey::PaddingW,    ei[8]);
+            if (ei.size() >= 10) oa.set(AttrKey::DilationD,   ei[9]);
+            if (ei.size() >= 11) oa.set(AttrKey::DilationH,   ei[10]);
+            if (ei.size() >= 12) oa.set(AttrKey::DilationW,   ei[11]);
+            if (ei.size() >= 13) oa.set(AttrKey::CeilMode,    ei[12] != 0);
             break;
+        }
         case OpId::AvgPool1dForward:
             oa.set(AttrKey::KernelSize, la.i[0]);
             oa.set(AttrKey::Stride,     la.i[1]);
@@ -201,19 +270,58 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             if (ei.size() >= 8) oa.set(AttrKey::CountIncludePad, ei[7] != 0);
             break;
         }
-        case OpId::AvgPool3dForward:
+        case OpId::AvgPool3dForward: {
             oa.set(AttrKey::KernelSize, la.i[0]);
             oa.set(AttrKey::Stride,     la.i[1]);
             oa.set(AttrKey::Padding,    la.i[2]);
+            // Per-axis extras (C.3 audit batch 2):
+            //   extra_i = [kD, kH, kW, sD, sH, sW, pD, pH, pW,
+            //              ceil_mode (0/1), count_include_pad (0/1)]
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1)  oa.set(AttrKey::KernelSizeD, ei[0]);
+            if (ei.size() >= 2)  oa.set(AttrKey::KernelSizeH, ei[1]);
+            if (ei.size() >= 3)  oa.set(AttrKey::KernelSizeW, ei[2]);
+            if (ei.size() >= 4)  oa.set(AttrKey::StrideD,     ei[3]);
+            if (ei.size() >= 5)  oa.set(AttrKey::StrideH,     ei[4]);
+            if (ei.size() >= 6)  oa.set(AttrKey::StrideW,     ei[5]);
+            if (ei.size() >= 7)  oa.set(AttrKey::PaddingD,    ei[6]);
+            if (ei.size() >= 8)  oa.set(AttrKey::PaddingH,    ei[7]);
+            if (ei.size() >= 9)  oa.set(AttrKey::PaddingW,    ei[8]);
+            if (ei.size() >= 10) oa.set(AttrKey::CeilMode,        ei[9]  != 0);
+            if (ei.size() >= 11) oa.set(AttrKey::CountIncludePad, ei[10] != 0);
             break;
+        }
+        // C.3 audit batch 2: Adaptive pooling.
+        // 1d kernels read AttrKey::OutputSize (scalar).
+        // 2d kernels read AttrKey::OutputSizeH + OutputSizeW.
+        // 3d kernels read AttrKey::OutputSizeD + OutputSizeH + OutputSizeW.
+        // The exporter packs the per-axis values into `extra_i`:
+        //   1d: extra_i = [output] (also i[0] as scalar fallback)
+        //   2d: extra_i = [output_h, output_w]
+        //   3d: extra_i = [output_d, output_h, output_w]
         case OpId::AdaptiveAvgPool1d:
-        case OpId::AdaptiveAvgPool2d:
-        case OpId::AdaptiveAvgPool3d:
         case OpId::AdaptiveMaxPool1d:
-        case OpId::AdaptiveMaxPool2d:
-        case OpId::AdaptiveMaxPool3d:
             oa.set(AttrKey::OutputSize, la.i[0]);
             break;
+        case OpId::AdaptiveAvgPool2d:
+        case OpId::AdaptiveMaxPool2d: {
+            // Backward-compatible default: also emit the legacy scalar key
+            // so any consumer keyed on AttrKey::OutputSize still resolves.
+            oa.set(AttrKey::OutputSize, la.i[0]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::OutputSizeH, ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::OutputSizeW, ei[1]);
+            break;
+        }
+        case OpId::AdaptiveAvgPool3d:
+        case OpId::AdaptiveMaxPool3d: {
+            oa.set(AttrKey::OutputSize, la.i[0]);
+            const auto& ei = la.extra_i;
+            if (ei.size() >= 1) oa.set(AttrKey::OutputSizeD, ei[0]);
+            if (ei.size() >= 2) oa.set(AttrKey::OutputSizeH, ei[1]);
+            if (ei.size() >= 3) oa.set(AttrKey::OutputSizeW, ei[2]);
+            break;
+        }
 
         // C.3 audit fix: the CPU Dropout kernel reads AttrKey::P (not
         // DropoutP) and AttrKey::Training. Inference-only Lite runtime

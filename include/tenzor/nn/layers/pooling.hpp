@@ -241,6 +241,8 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto get_output_size() const -> std::array<int64_t, 2> { return {output_h_, output_w_}; }
+
 private:
     int64_t output_h_;  ///< Target output height
     int64_t output_w_;  ///< Target output width
@@ -330,6 +332,10 @@ public:
     auto get_ceil_mode() const -> bool { return ceil_mode_; }
     auto get_return_indices() const -> bool { return return_indices_; }
 
+    auto get_kernel_size() const -> int64_t { return kernel_size_; }
+    auto get_stride()      const -> int64_t { return stride_; }
+    auto get_padding()     const -> int64_t { return padding_; }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -348,6 +354,10 @@ public:
     AvgPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0);
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto get_kernel_size() const -> int64_t { return kernel_size_; }
+    auto get_stride()      const -> int64_t { return stride_; }
+    auto get_padding()     const -> int64_t { return padding_; }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -363,6 +373,8 @@ class AdaptiveAvgPool1d : public Module {
 public:
     explicit AdaptiveAvgPool1d(int64_t output_size);
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_output_size() const -> int64_t { return output_size_; }
 
 private:
     int64_t output_size_;
@@ -380,6 +392,8 @@ public:
         : AdaptiveMaxPool2d(output_size, output_size) {}
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto get_output_size() const -> std::array<int64_t, 2> { return {output_h_, output_w_}; }
+
 private:
     int64_t output_h_;
     int64_t output_w_;
@@ -394,6 +408,8 @@ class AdaptiveMaxPool1d : public Module {
 public:
     explicit AdaptiveMaxPool1d(int64_t output_size);
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_output_size() const -> int64_t { return output_size_; }
 
 private:
     int64_t output_size_;
@@ -410,6 +426,8 @@ public:
     explicit AdaptiveMaxPool3d(int64_t output_size)
         : AdaptiveMaxPool3d(output_size, output_size, output_size) {}
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_output_size() const -> std::array<int64_t, 3> { return {output_d_, output_h_, output_w_}; }
 
 private:
     int64_t output_d_;
@@ -428,6 +446,8 @@ public:
     explicit AdaptiveAvgPool3d(int64_t output_size)
         : AdaptiveAvgPool3d(output_size, output_size, output_size) {}
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_output_size() const -> std::array<int64_t, 3> { return {output_d_, output_h_, output_w_}; }
 
 private:
     int64_t output_d_;
