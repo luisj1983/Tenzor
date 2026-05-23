@@ -423,6 +423,21 @@ std::string ModelHub::download_pretrained(
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = impl_->registry.find(model_name);
         if (it == impl_->registry.end()) {
+            // Audit C.7: if this name was deliberately removed from the
+            // default registry (no verifiable safetensors mirror), surface
+            // a precise diagnostic rather than the generic "not registered"
+            // message.  Callers must either register a working mirror via
+            // `ModelHub::register_model()` or pick a different model.
+            std::string reason = registry::removed_pretrained_reason(model_name);
+            if (!reason.empty()) {
+                throw std::runtime_error(
+                    "Pretrained weights for '" + model_name +
+                    "' were removed from the default Tenzor model zoo: " +
+                    reason +
+                    ". To re-enable, call ModelHub::register_model() with a "
+                    "verified safetensors URL + SHA256 checksum, or use a "
+                    "different model. See audit item C.7 in src/models/hub.cpp.");
+            }
             throw std::runtime_error("Model not registered: " + model_name);
         }
         info = it->second;
@@ -444,6 +459,21 @@ std::string ModelHub::download_pretrained_safetensors(
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = impl_->registry.find(model_name);
         if (it == impl_->registry.end()) {
+            // Audit C.7: same removal-aware diagnostic as
+            // `download_pretrained()`.  This path is what users hit when
+            // calling `MaskRCNN::load_pretrained()`, `VGG::load_pretrained()`,
+            // etc., since those wrappers always go through the safetensors
+            // entrypoint.
+            std::string reason = registry::removed_pretrained_reason(model_name);
+            if (!reason.empty()) {
+                throw std::runtime_error(
+                    "Pretrained weights for '" + model_name +
+                    "' were removed from the default Tenzor model zoo: " +
+                    reason +
+                    ". To re-enable, call ModelHub::register_model() with a "
+                    "verified safetensors URL + SHA256 checksum, or use a "
+                    "different model. See audit item C.7 in src/models/hub.cpp.");
+            }
             throw std::runtime_error("Model not registered: " + model_name);
         }
         info = it->second;
@@ -852,24 +882,102 @@ std::string get_timm_safetensors_url(const std::string& timm_model_id) {
            "/resolve/main/model.safetensors";
 }
 
+// Audit C.7: known-removed model names.  These names used to be registered
+// in `initialize_default_registry` but had neither a verifiable safetensors
+// mirror nor a checksum, so every `download_pretrained()` call would either
+// silently download an unverifiable .pth (and then fail in the pickle parser)
+// or, in the safetensors path, hit an empty URL.  Per the "no entry that
+// fails by default" rule, the entries were removed; this map records *why*
+// so that `download_pretrained(name)` can throw an actionable error rather
+// than the generic "Model not registered" message.
+//
+// When a real safetensors mirror becomes available (timm publishes one, or
+// the Tenzor model-hub starts self-hosting), drop the name from this map
+// and re-add it to `initialize_default_registry` with the new URL.
+const std::unordered_map<std::string, std::string>& removed_pretrained_reasons() {
+    static const std::unordered_map<std::string, std::string> table = {
+        // VGG (plain + batch-norm) — torchvision-canonical only, no timm mirror.
+        {"vgg11",     "no safetensors mirror published by timm"},
+        {"vgg13",     "no safetensors mirror published by timm"},
+        {"vgg16",     "no safetensors mirror published by timm"},
+        {"vgg19",     "no safetensors mirror published by timm"},
+        {"vgg11_bn",  "no safetensors mirror published by timm"},
+        {"vgg13_bn",  "no safetensors mirror published by timm"},
+        {"vgg16_bn",  "no safetensors mirror published by timm"},
+        {"vgg19_bn",  "no safetensors mirror published by timm"},
+        // Single-file CNNs without a working safetensors mirror.
+        {"alexnet",        "no safetensors mirror published by timm"},
+        {"googlenet",      "no safetensors mirror published by timm"},
+        {"inception_v3",   "no safetensors mirror published by timm"},
+        // Detection — full-model COCO checkpoints, .pth-only.
+        {"mask_rcnn_resnet50_fpn",
+         "torchvision detection checkpoint — no safetensors mirror"},
+        {"faster_rcnn_resnet50_fpn",
+         "torchvision detection checkpoint — no safetensors mirror"},
+        {"retinanet_resnet50_fpn",
+         "torchvision detection checkpoint — no safetensors mirror"},
+        // Segmentation — torchvision .pth-only.
+        {"deeplabv3_resnet50",
+         "torchvision segmentation checkpoint — no safetensors mirror"},
+        {"deeplabv3_resnet101",
+         "torchvision segmentation checkpoint — no safetensors mirror"},
+        {"fcn_resnet50",
+         "torchvision segmentation checkpoint — no safetensors mirror"},
+        {"fcn_resnet101",
+         "torchvision segmentation checkpoint — no safetensors mirror"},
+        // YOLO — Ultralytics .pt only (PyTorch pickle archive).
+        {"yolov3",  "Ultralytics .pt pickle archive — no safetensors mirror"},
+        {"yolov5n", "Ultralytics .pt pickle archive — no safetensors mirror"},
+        {"yolov5s", "Ultralytics .pt pickle archive — no safetensors mirror"},
+        {"yolov5m", "Ultralytics .pt pickle archive — no safetensors mirror"},
+        {"yolov5l", "Ultralytics .pt pickle archive — no safetensors mirror"},
+        {"yolov5x", "Ultralytics .pt pickle archive — no safetensors mirror"},
+    };
+    return table;
+}
+
+// Returns a non-empty diagnostic message if `model_name` was removed from
+// the default registry per audit C.7; returns empty string otherwise.
+std::string removed_pretrained_reason(const std::string& model_name) {
+    const auto& table = removed_pretrained_reasons();
+    auto it = table.find(model_name);
+    if (it == table.end()) {
+        return std::string();
+    }
+    return it->second;
+}
+
 void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry) {
     std::vector<ModelWeightInfo> models;
 
-    // ResNet models. The .pth URL is the legacy torchvision path; the
-    // safetensors URL points at timm's HuggingFace mirror of the same weights.
-    // Note: the timm parameter names differ from torchvision's — full weight
-    // load requires the H3-followup-keyremap step (tracked separately). The
-    // mirror is still useful today because the file format parses cleanly
-    // through H2's safetensors loader; key-mapping is the remaining piece.
-    // Audit item C.7: the SHA256 strings here were 39-character truncated
-    // hex (the first 8 chars match the PyTorch hub URL filename prefix;
-    // the rest was filler), and verify_sha256 requires an exact 64-char
-    // match, so every download with checksum verification enabled would
-    // fail.  Until real SHA256s are computed at build time against the
-    // canonical .pth files, leave the SHA empty so verify_sha256 returns
-    // true and the download proceeds.  The safetensors path is the
-    // recommended route (signature-verified by Hugging Face's hub
-    // tooling); the .pth fallback is a legacy compatibility path only.
+    // ============================================================================
+    // Audit item C.7 — pretrained checksums + "no entry that fails by default"
+    // ============================================================================
+    //
+    // Every entry below has a non-empty `safetensors_url` pointing at a real,
+    // currently-resolvable HuggingFace/timm mirror.  The `sha256` field is
+    // intentionally left empty: the canonical safetensors checksum for each
+    // file will be filled in at build/release time by
+    // `tools/check_pretrained_weights.py`, which downloads each entry and
+    // records the observed SHA256.  Until the build pipeline ships those
+    // checksums, `download_weights` skips checksum verification for any
+    // entry whose `sha256` is empty (this is existing behaviour, see the
+    // `expected_sha256.empty()` short-circuits in `download_weights`).
+    //
+    // Entries that previously had neither a working safetensors mirror nor a
+    // verifiable .pth (vgg*, deeplab*, fcn_*, faster_rcnn, mask_rcnn,
+    // retinanet, yolo*, alexnet, googlenet, inception_v3) have been
+    // removed entirely — they are listed in `removed_pretrained_reason()`
+    // below so that `download_pretrained("vgg16")` and similar calls fail
+    // with a clear, actionable error explaining why the entry was dropped.
+    //
+    // Anything not in the removal table and not in the kept set below will
+    // throw the generic "Model not registered" error — that's by design.
+
+    // ----- ResNet ------------------------------------------------------------
+    // Legacy .pth URLs kept as a fallback diagnostic (download_pretrained still
+    // tries them when the caller doesn't ask for safetensors).  Real users
+    // should call `download_pretrained_safetensors`.
     models.push_back({std::string("resnet18"), get_pytorch_model_url("resnet18-5c106cde"),
                      std::string(""), 0, std::string("ResNet-18"),
                      get_timm_safetensors_url("resnet18.a1_in1k")});
@@ -886,30 +994,12 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                      std::string(""), 0, std::string("ResNet-152"),
                      get_timm_safetensors_url("resnet152.a1h_in1k")});
 
-    // VGG models — torchvision-canonical VGG isn't mirrored in safetensors,
-    // so leave the safetensors_url empty. download_pretrained_safetensors
-    // falls back to the legacy .pth URL (which will throw H2's actionable
-    // error until H2-followup ships the pickle parser).
-    models.push_back({std::string("vgg11"), get_pytorch_model_url("vgg11-bbd30ac9"),
-                     std::string(""), 0, std::string("VGG-11"),
-                     std::string("")});
-    models.push_back({std::string("vgg13"), get_pytorch_model_url("vgg13-c768596a"),
-                     std::string(""), 0, std::string("VGG-13"),
-                     std::string("")});
-    models.push_back({std::string("vgg16"), get_pytorch_model_url("vgg16-397923af"),
-                     std::string(""), 0, std::string("VGG-16"),
-                     std::string("")});
-    models.push_back({std::string("vgg19"), get_pytorch_model_url("vgg19-dcbb9e9d"),
-                     std::string(""), 0, std::string("VGG-19"),
-                     std::string("")});
-
-    // MobileNet — timm mirrors mobilenetv2_100 as the canonical 1.0-width
-    // weights. mobilenet_v2 -> timm/mobilenetv2_100.ra_in1k
+    // ----- MobileNet V2 ------------------------------------------------------
     models.push_back({std::string("mobilenet_v2"), get_pytorch_model_url("mobilenet_v2-b0353104"),
                      std::string(""), 0, std::string("MobileNet V2"),
                      get_timm_safetensors_url("mobilenetv2_100.ra_in1k")});
 
-    // EfficientNet — timm mirrors as `tf_efficientnet_b{0..7}.in1k`.
+    // ----- EfficientNet (B0..B7, all timm-mirrored) --------------------------
     for (int i = 0; i <= 7; i++) {
         std::string name = "efficientnet_b" + std::to_string(i);
         std::string timm_id = "tf_efficientnet_b" + std::to_string(i) + ".in1k";
@@ -918,7 +1008,7 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                           get_timm_safetensors_url(timm_id)});
     }
 
-    // ResNeXt / Wide ResNet — torchvision URLs + timm safetensors mirrors.
+    // ----- ResNeXt / Wide ResNet --------------------------------------------
     models.push_back({std::string("resnext50_32x4d"),
                       get_pytorch_model_url("resnext50_32x4d-7cdf4587"),
                       std::string(""), 0, std::string("ResNeXt-50 32x4d"),
@@ -936,7 +1026,7 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                       std::string(""), 0, std::string("Wide ResNet 101-2"),
                       get_timm_safetensors_url("wide_resnet101_2.tv2_in1k")});
 
-    // MobileNet V3 — torchvision URLs + timm safetensors mirrors.
+    // ----- MobileNet V3 ------------------------------------------------------
     models.push_back({std::string("mobilenet_v3_large"),
                       get_pytorch_model_url("mobilenet_v3_large-8738ca79"),
                       std::string(""), 0, std::string("MobileNet V3 Large"),
@@ -946,7 +1036,7 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                       std::string(""), 0, std::string("MobileNet V3 Small"),
                       get_timm_safetensors_url("mobilenetv3_small_100.lamb_in1k")});
 
-    // ConvNeXt — torchvision URLs + timm safetensors mirrors.
+    // ----- ConvNeXt ----------------------------------------------------------
     models.push_back({std::string("convnext_tiny"),
                       get_pytorch_model_url("convnext_tiny-983f1562"),
                       std::string(""), 0, std::string("ConvNeXt-Tiny"),
@@ -964,32 +1054,7 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                       std::string(""), 0, std::string("ConvNeXt-Large"),
                       get_timm_safetensors_url("convnext_large.fb_in1k")});
 
-    // VGG batch-norm variants — torchvision URLs.
-    models.push_back({std::string("vgg11_bn"),
-                      get_pytorch_model_url("vgg11_bn-6002323d"),
-                      std::string(""), 0, std::string("VGG-11 (BN)"), std::string("")});
-    models.push_back({std::string("vgg13_bn"),
-                      get_pytorch_model_url("vgg13_bn-abd245e5"),
-                      std::string(""), 0, std::string("VGG-13 (BN)"), std::string("")});
-    models.push_back({std::string("vgg16_bn"),
-                      get_pytorch_model_url("vgg16_bn-6c64b313"),
-                      std::string(""), 0, std::string("VGG-16 (BN)"), std::string("")});
-    models.push_back({std::string("vgg19_bn"),
-                      get_pytorch_model_url("vgg19_bn-c79401a0"),
-                      std::string(""), 0, std::string("VGG-19 (BN)"), std::string("")});
-
-    // AlexNet / GoogLeNet / Inception V3 — torchvision URLs.
-    models.push_back({std::string("alexnet"),
-                      get_pytorch_model_url("alexnet-owt-7be5be79"),
-                      std::string(""), 0, std::string("AlexNet"), std::string("")});
-    models.push_back({std::string("googlenet"),
-                      get_pytorch_model_url("googlenet-1378be20"),
-                      std::string(""), 0, std::string("GoogLeNet"), std::string("")});
-    models.push_back({std::string("inception_v3"),
-                      get_pytorch_model_url("inception_v3_google-0cc3c7bd"),
-                      std::string(""), 0, std::string("Inception V3"), std::string("")});
-
-    // Swin Transformer V1 — torchvision URLs.
+    // ----- Swin Transformer V1 ----------------------------------------------
     models.push_back({std::string("swin_t"),
                       get_pytorch_model_url("swin_t-704ceda3"),
                       std::string(""), 0, std::string("Swin Transformer Tiny"),
@@ -1007,59 +1072,22 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
                       std::string("Swin Transformer Large"),
                       get_timm_safetensors_url("swin_large_patch4_window7_224.ms_in22k_ft_in1k")});
 
-    // Detection & segmentation — full-model COCO weights (RPN + ROI head + backbone).
-    models.push_back({std::string("mask_rcnn_resnet50_fpn"),
-                      get_pytorch_model_url("maskrcnn_resnet50_fpn_coco-bf2d0c1e"),
-                      std::string(""), 0, std::string("Mask R-CNN (ResNet-50 FPN, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("faster_rcnn_resnet50_fpn"),
-                      get_pytorch_model_url("fasterrcnn_resnet50_fpn_coco-258fb6c6"),
-                      std::string(""), 0, std::string("Faster R-CNN (ResNet-50 FPN, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("retinanet_resnet50_fpn"),
-                      get_pytorch_model_url("retinanet_resnet50_fpn_coco-eeacb38b"),
-                      std::string(""), 0, std::string("RetinaNet (ResNet-50 FPN, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("deeplabv3_resnet50"),
-                      get_pytorch_model_url("deeplabv3_resnet50_coco-cd0a2569"),
-                      std::string(""), 0, std::string("DeepLabV3 (ResNet-50, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("deeplabv3_resnet101"),
-                      get_pytorch_model_url("deeplabv3_resnet101_coco-586e9e4e"),
-                      std::string(""), 0, std::string("DeepLabV3 (ResNet-101, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("fcn_resnet50"),
-                      get_pytorch_model_url("fcn_resnet50_coco-1167a1af"),
-                      std::string(""), 0, std::string("FCN (ResNet-50, COCO)"),
-                      std::string("")});
-    models.push_back({std::string("fcn_resnet101"),
-                      get_pytorch_model_url("fcn_resnet101_coco-7ecb50ca"),
-                      std::string(""), 0, std::string("FCN (ResNet-101, COCO)"),
-                      std::string("")});
-
-    // YOLO — Ultralytics release URLs (.pt PyTorch pickle archives).
-    auto ultralytics_url = [](const char* repo, const char* version, const char* fname) {
-        return std::string("https://github.com/ultralytics/") + repo +
-               "/releases/download/" + version + "/" + fname;
-    };
-    models.push_back({std::string("yolov3"),
-                      ultralytics_url("yolov3", "v9.6.0", "yolov3.pt"),
-                      std::string(""), 0, std::string("YOLOv3 (Ultralytics)"), std::string("")});
-    models.push_back({std::string("yolov5n"),
-                      ultralytics_url("yolov5", "v7.0", "yolov5n.pt"),
-                      std::string(""), 0, std::string("YOLOv5n (Ultralytics)"), std::string("")});
-    models.push_back({std::string("yolov5s"),
-                      ultralytics_url("yolov5", "v7.0", "yolov5s.pt"),
-                      std::string(""), 0, std::string("YOLOv5s (Ultralytics)"), std::string("")});
-    models.push_back({std::string("yolov5m"),
-                      ultralytics_url("yolov5", "v7.0", "yolov5m.pt"),
-                      std::string(""), 0, std::string("YOLOv5m (Ultralytics)"), std::string("")});
-    models.push_back({std::string("yolov5l"),
-                      ultralytics_url("yolov5", "v7.0", "yolov5l.pt"),
-                      std::string(""), 0, std::string("YOLOv5l (Ultralytics)"), std::string("")});
-    models.push_back({std::string("yolov5x"),
-                      ultralytics_url("yolov5", "v7.0", "yolov5x.pt"),
-                      std::string(""), 0, std::string("YOLOv5x (Ultralytics)"), std::string("")});
+    // ============================================================================
+    // REMOVED — kept only as a comment manifest so future grep finds it:
+    //
+    //   vgg11, vgg13, vgg16, vgg19                          (no safetensors mirror)
+    //   vgg11_bn, vgg13_bn, vgg16_bn, vgg19_bn              (no safetensors mirror)
+    //   alexnet, googlenet, inception_v3                    (no safetensors mirror)
+    //   mask_rcnn_resnet50_fpn, faster_rcnn_resnet50_fpn,
+    //   retinanet_resnet50_fpn                              (detection — no safetensors)
+    //   deeplabv3_resnet50, deeplabv3_resnet101,
+    //   fcn_resnet50, fcn_resnet101                         (segmentation — no safetensors)
+    //   yolov3, yolov5n, yolov5s, yolov5m, yolov5l, yolov5x (Ultralytics .pt only)
+    //
+    // These names route through `removed_pretrained_reason()` so callers get
+    // an actionable error explaining why the entry was dropped rather than
+    // silently downloading a file the loader will reject.
+    // ============================================================================
 
     // Directly add to registry without locking (already locked by caller)
     for (const auto& model : models) {

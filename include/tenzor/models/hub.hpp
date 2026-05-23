@@ -314,6 +314,23 @@ void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo
  */
 std::string get_pytorch_model_url(const std::string& model_name);
 
+/**
+ * @brief Look up the reason a previously-registered model was removed.
+ *
+ * Audit C.7: certain pretrained entries (vgg*, alexnet, googlenet,
+ * inception_v3, fcn/deeplab/faster_rcnn/mask_rcnn/retinanet/yolo*) were
+ * dropped from the default registry because they had no verifiable
+ * safetensors mirror — every download would either hit a dead URL or feed
+ * a .pth file into a parser that throws.  `ModelHub::download_pretrained*`
+ * consults this function before raising the generic "not registered"
+ * error so that users get an actionable diagnostic.
+ *
+ * @param model_name name passed to `download_pretrained()`.
+ * @return Non-empty reason string if the name is on the removal list;
+ *         empty string otherwise.
+ */
+std::string removed_pretrained_reason(const std::string& model_name);
+
 } // namespace registry
 
 } // namespace models

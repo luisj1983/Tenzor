@@ -200,7 +200,10 @@ private:
             throw std::runtime_error(
                 "torch_pickle: ZIP EOCD signature not found — not a torch.save "
                 "ZIP archive (legacy pre-1.6 PyTorch checkpoints aren't "
-                "supported; see audit H2). File: " + path);
+                "supported; see audit H2).  If you have a .pth from PyTorch "
+                ">= 1.6 that Tenzor still can't load, re-export it to "
+                ".safetensors via `safetensors.torch.save_file` — Tenzor's "
+                "safetensors loader has full coverage.  File: " + path);
         }
         const uint8_t* eocd = data_.data() + eocd_pos;
         uint16_t total_entries  = read_u16(eocd + 10);

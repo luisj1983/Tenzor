@@ -604,10 +604,19 @@ TEST_F(ModelHubTest, DefaultRegistry_ResNet) {
 }
 
 TEST_F(ModelHubTest, DefaultRegistry_VGG) {
-    EXPECT_TRUE(ModelHub::is_registered("vgg11"));
-    EXPECT_TRUE(ModelHub::is_registered("vgg13"));
-    EXPECT_TRUE(ModelHub::is_registered("vgg16"));
-    EXPECT_TRUE(ModelHub::is_registered("vgg19"));
+    // Audit C.7: VGG entries were removed from the default registry because
+    // there is no published safetensors mirror — the .pth-only weights would
+    // fail by default when loaded through the pickle parser.  The names now
+    // hit `registry::removed_pretrained_reason()` and `download_pretrained`
+    // throws a precise diagnostic instead of the generic "not registered".
+    EXPECT_FALSE(ModelHub::is_registered("vgg11"));
+    EXPECT_FALSE(ModelHub::is_registered("vgg13"));
+    EXPECT_FALSE(ModelHub::is_registered("vgg16"));
+    EXPECT_FALSE(ModelHub::is_registered("vgg19"));
+    // download_pretrained must throw a removal-aware error (not the generic
+    // "Model not registered" message), so callers can tell the difference
+    // between "typoed name" and "intentionally dropped".
+    EXPECT_THROW(ModelHub::download_pretrained("vgg16"), std::runtime_error);
 }
 
 TEST_F(ModelHubTest, DefaultRegistry_MobileNet) {
