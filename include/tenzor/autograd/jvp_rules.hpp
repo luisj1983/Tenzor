@@ -209,4 +209,89 @@ auto jvp_unfold(const DualTensor& input, int64_t kernel_size, int64_t stride,
                 int64_t padding, int64_t dilation) -> DualTensor;
 /// @}
 
+/// @name Sparse JVP Rules (Audit A.4 batch 7)
+/// @{
+/// SpMM: y = A_sparse @ B. Bilinear in A.values and B; sparse pattern (crow,
+/// col) is constant (integer indices, non-differentiable). JVP:
+///   dy = SpMM(crow, col, dA.values, B) + SpMM(crow, col, A.values, dB)
+auto jvp_sparse_spmm(const Tensor& crow, const Tensor& col,
+                     const DualTensor& values, const DualTensor& dense,
+                     int64_t M, int64_t K) -> DualTensor;
+/// SpMV: same as SpMM but B is a vector.
+auto jvp_sparse_spmv(const Tensor& crow, const Tensor& col,
+                     const DualTensor& values, const DualTensor& dense,
+                     int64_t M, int64_t K) -> DualTensor;
+/// SparseAdd: y = sparse(crow, col, values) + dense. Linear in values+dense.
+///   dy = SparseAdd(crow, col, dvalues, ddense)  (== scatter-add+ddense)
+auto jvp_sparse_add(const Tensor& crow, const Tensor& col,
+                    const DualTensor& values, const DualTensor& dense,
+                    int64_t M, int64_t K) -> DualTensor;
+/// @}
+
+/// @name RNN cell JVP Rules (Audit A.4 batch 7)
+/// @{
+/// GRU cell single-step forward. Re-derives the three gates in dual form:
+///   gi = x@W_ih^T + b_ih   (split into [g_ir, g_iz, g_in])
+///   gh = h@W_hh^T + b_hh   (split into [g_hr, g_hz, g_hn])
+///   r  = sigmoid(g_ir + g_hr)
+///   z  = sigmoid(g_iz + g_hz)
+///   n  = tanh(g_in + r * g_hn)
+///   hy = (1-z) * n + z * h
+/// All four ops above are sigmoid/tanh (single-arg chain rule) and elementwise
+/// mul/add; JVP follows directly from the existing jvp_sigmoid/jvp_tanh
+/// formulas applied per-gate.
+auto jvp_gru_cell_forward(const DualTensor& x, const DualTensor& h,
+                          const DualTensor& W_ih, const DualTensor& W_hh,
+                          const DualTensor& b_ih, const DualTensor& b_hh) -> DualTensor;
+/// @}
+
+/// @name Nested-tensor JVP Rules (Audit A.4 batch 7)
+/// @{
+/// NestedSum / NestedMean operate per-segment on packed values; they are
+/// linear in `values`, so the tangent is the same op applied to dvalues.
+/// Offsets are integer (non-differentiable).
+auto jvp_nested_sum(const DualTensor& values, const Tensor& offsets,
+                    int64_t dim, bool keepdim) -> DualTensor;
+auto jvp_nested_mean(const DualTensor& values, const Tensor& offsets,
+                     int64_t dim, bool keepdim) -> DualTensor;
+/// NestedLinear: y = values @ W^T + b applied per-segment. Bilinear in
+/// (values, W) + linear in b — same structure as dense Linear.
+auto jvp_nested_linear(const DualTensor& values, const Tensor& offsets,
+                       const DualTensor& weight,
+                       const std::optional<DualTensor>& bias) -> DualTensor;
+/// @}
+
+/// @name Reduction long-tail JVP Rules (Audit A.4 batch 7)
+/// @{
+/// logcumsumexp along `dim`. Output l[t] = log(sum_{k<=t} exp(x[k])); the
+/// forward-mode tangent is the softmax-weighted prefix sum:
+///   dl[t] = sum_{k<=t} softmax_cum(x)[k,t] * dx[k]
+///         = cumsum(exp(x - l_keepdim) * dx, dim) / exp(l - l_keepdim)
+/// Equivalently (numerically stable, using cum LSE shift):
+///   p[t,k] = exp(x[k] - l[t])  (for k <= t, else 0)
+///   dl[t]  = sum_k p[t,k] * dx[k]
+/// We implement the direct cumsum form: w = exp(x - l), dl = cumsum(w * dx, dim) / cumsum(w, dim).
+auto jvp_logcumsumexp(const DualTensor& x, int64_t dim) -> DualTensor;
+/// NumericalGradient (finite-difference along `dim`): linear convolution
+/// with [-1/2, 0, +1/2] (interior) and one-sided differences at the edges.
+/// Linear in input → tangent = same op applied to dx.
+auto jvp_numerical_gradient(const DualTensor& x, int64_t dim, double spacing) -> DualTensor;
+/// Trapezoid / CumulativeTrapezoid: linear in both y-values and optional
+/// x-positions. JVP: same op applied to (dy, dx_positions).
+auto jvp_trapezoid(const DualTensor& y, const std::optional<DualTensor>& x_pos,
+                   int64_t dim, double dx_uniform) -> DualTensor;
+auto jvp_cumulative_trapezoid(const DualTensor& y, const std::optional<DualTensor>& x_pos,
+                              int64_t dim, double dx_uniform) -> DualTensor;
+/// @}
+
+/// @name Adaptive pooling JVP Rules (Audit A.4 batch 7)
+/// @{
+/// AdaptiveAvgPool{1,2,3}d: each output cell is an unweighted mean over the
+/// corresponding (data-dependent but value-independent) input window. The
+/// op is therefore linear in the input → tangent = same op applied to dx.
+auto jvp_adaptive_avgpool_1d(const DualTensor& x, int64_t output_size) -> DualTensor;
+auto jvp_adaptive_avgpool_2d(const DualTensor& x, int64_t output_h, int64_t output_w) -> DualTensor;
+auto jvp_adaptive_avgpool_3d(const DualTensor& x, int64_t output_d, int64_t output_h, int64_t output_w) -> DualTensor;
+/// @}
+
 } // namespace tenzor
