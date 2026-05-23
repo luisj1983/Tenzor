@@ -59,24 +59,33 @@ void register_autograd(py::module_& m) {
             }
         }
 
-        for (auto& inp : inputs) {
-            inp.zero_grad();
-            inp.retain_grad();
-        }
-
-        for (size_t i = 0; i < outputs.size(); ++i) {
-            std::optional<tenzor::Tensor> grad_out;
-            if (!grad_outputs_obj.is_none()) {
-                auto grad_outputs = grad_outputs_obj.cast<py::sequence>();
+        // R.22: pre-extract grad_outputs under the GIL, then release it across
+        // the long-running C++ backward traversal. The engine reacquires the
+        // GIL internally for any Python Function.backward callback.
+        std::vector<std::optional<tenzor::Tensor>> grad_outs_vec(outputs.size());
+        if (!grad_outputs_obj.is_none()) {
+            auto grad_outputs = grad_outputs_obj.cast<py::sequence>();
+            for (size_t i = 0; i < outputs.size(); ++i) {
                 if (i < static_cast<size_t>(py::len(grad_outputs))) {
                     auto g = grad_outputs[i];
                     if (!g.is_none()) {
-                        grad_out = g.cast<tenzor::Tensor>();
+                        grad_outs_vec[i] = g.cast<tenzor::Tensor>();
                     }
                 }
             }
-            bool retain = retain_graph || create_graph || (i < outputs.size() - 1);
-            outputs[i].backward(grad_out, retain, create_graph);
+        }
+
+        {
+            py::gil_scoped_release release;
+            for (auto& inp : inputs) {
+                inp.zero_grad();
+                inp.retain_grad();
+            }
+
+            for (size_t i = 0; i < outputs.size(); ++i) {
+                bool retain = retain_graph || create_graph || (i < outputs.size() - 1);
+                outputs[i].backward(grad_outs_vec[i], retain, create_graph);
+            }
         }
 
         py::tuple result(inputs.size());
@@ -126,11 +135,14 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("grad", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
-            py::gil_scoped_acquire gil;
             tenzor::Variable x_copy(x.tensor().clone(), true);
             py::object result = f(x_copy);
             tenzor::Variable output = result.cast<tenzor::Variable>();
-            output.backward();
+            // R.22: release the GIL across the C++ backward traversal.
+            {
+                py::gil_scoped_release release;
+                output.backward();
+            }
             auto g = x_copy.grad();
             if (!g.has_value()) {
                 throw std::runtime_error("grad: no gradient computed");
@@ -151,12 +163,13 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("vmap", [](py::function f, int64_t in_dim, [[maybe_unused]] int64_t out_dim) {
         return py::cpp_function([f, in_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
-            py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
                 py::gil_scoped_acquire inner_gil;
                 py::object result = f(x);
                 return result.cast<tenzor::Variable>();
             };
+            // R.22: outer GIL release; inner cpp_fn reacquires for the Python callback.
+            py::gil_scoped_release release;
             return tenzor::vmap(cpp_fn, batched_input, in_dim);
         });
     }, py::arg("f"), py::arg("in_dim") = 0, py::arg("out_dim") = 0,
@@ -164,13 +177,17 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("jacrev", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
-            py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
                 py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
-            tenzor::Tensor J = tenzor::jacobian(cpp_fn, x);
+            // R.22: outer GIL release across the C++ jacobian probe loop.
+            tenzor::Tensor J;
+            {
+                py::gil_scoped_release release;
+                J = tenzor::jacobian(cpp_fn, x);
+            }
             return tenzor::Variable(J, false);
         });
     }, py::arg("f"),
@@ -178,13 +195,17 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("jacfwd", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
-            py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
                 py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
-            tenzor::Tensor J = tenzor::jacobian(cpp_fn, x);
+            // R.22: outer GIL release.
+            tenzor::Tensor J;
+            {
+                py::gil_scoped_release release;
+                J = tenzor::jacobian(cpp_fn, x);
+            }
             return tenzor::Variable(J, false);
         });
     }, py::arg("f"),
@@ -192,13 +213,17 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("hessian", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
-            py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
                 py::gil_scoped_acquire inner_gil;
                 py::object result = f(input);
                 return result.cast<tenzor::Variable>();
             };
-            tenzor::Tensor H = tenzor::hessian(cpp_fn, x);
+            // R.22: outer GIL release.
+            tenzor::Tensor H;
+            {
+                py::gil_scoped_release release;
+                H = tenzor::hessian(cpp_fn, x);
+            }
             return tenzor::Variable(H, false);
         });
     }, py::arg("f"),
@@ -207,7 +232,6 @@ void register_autograd(py::module_& m) {
     func_mod.def("jvp", [](py::function f, const tenzor::Variable& x,
                            const tenzor::Tensor& tangent,
                            const std::string& mode) {
-        py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
             py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
@@ -222,7 +246,15 @@ void register_autograd(py::module_& m) {
             throw std::invalid_argument(
                 "jvp: mode must be 'walker' or 'dual', got '" + mode + "'");
         }
-        auto [out, tangent_out] = tenzor::jvp(cpp_fn, x, tangent, jvp_mode);
+        // R.22: outer GIL release; inner cpp_fn reacquires for the Python callback.
+        tenzor::Variable out;
+        tenzor::Tensor tangent_out;
+        {
+            py::gil_scoped_release release;
+            auto pair = tenzor::jvp(cpp_fn, x, tangent, jvp_mode);
+            out = std::move(pair.first);
+            tangent_out = std::move(pair.second);
+        }
         return py::make_tuple(out, tangent_out);
     }, py::arg("f"), py::arg("x"), py::arg("tangent"),
     py::arg("mode") = std::string("walker"),
@@ -233,39 +265,60 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("hvp", [](py::function f, const tenzor::Variable& x,
                            const tenzor::Tensor& v) {
-        py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
             py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
-        auto [out, hvp_result] = tenzor::hvp(cpp_fn, x, v);
+        // R.22: outer GIL release.
+        tenzor::Variable out;
+        tenzor::Tensor hvp_result;
+        {
+            py::gil_scoped_release release;
+            auto pair = tenzor::hvp(cpp_fn, x, v);
+            out = std::move(pair.first);
+            hvp_result = std::move(pair.second);
+        }
         return py::make_tuple(out, hvp_result);
     }, py::arg("f"), py::arg("x"), py::arg("v"),
     "Hessian-vector product. Returns (output, H_f(x) @ v).");
 
     func_mod.def("vhp", [](py::function f, const tenzor::Variable& x,
                            const tenzor::Tensor& v) {
-        py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
             py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
-        auto [out, vhp_result] = tenzor::vhp(cpp_fn, x, v);
+        // R.22: outer GIL release.
+        tenzor::Variable out;
+        tenzor::Tensor vhp_result;
+        {
+            py::gil_scoped_release release;
+            auto pair = tenzor::vhp(cpp_fn, x, v);
+            out = std::move(pair.first);
+            vhp_result = std::move(pair.second);
+        }
         return py::make_tuple(out, vhp_result);
     }, py::arg("f"), py::arg("x"), py::arg("v"),
     "Vector-Hessian product. Returns (output, v^T @ H_f(x)).");
 
     func_mod.def("vjp", [](py::function f, const tenzor::Variable& x,
                            const tenzor::Tensor& cotangent) {
-        py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
             py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
-        auto [out, vjp_result] = tenzor::vjp(cpp_fn, x, cotangent);
+        // R.22: outer GIL release.
+        tenzor::Variable out;
+        tenzor::Tensor vjp_result;
+        {
+            py::gil_scoped_release release;
+            auto pair = tenzor::vjp(cpp_fn, x, cotangent);
+            out = std::move(pair.first);
+            vjp_result = std::move(pair.second);
+        }
         return py::make_tuple(out, vjp_result);
     }, py::arg("f"), py::arg("x"), py::arg("cotangent"),
     "Vector-Jacobian product (reverse-mode). Returns (output, v^T @ J_f(x)).");
@@ -282,6 +335,8 @@ void register_autograd(py::module_& m) {
                 py::object result = f(x);
                 return result.cast<tenzor::Variable>();
             };
+            // R.22: outer GIL release across the FD probe loop.
+            py::gil_scoped_release release;
             return tenzor::gradcheck(cpp_fn, input, eps, atol, rtol, raise_exception);
         },
         py::arg("func"),
@@ -302,6 +357,8 @@ void register_autograd(py::module_& m) {
                 py::object result = f(x);
                 return result.cast<tenzor::Variable>();
             };
+            // R.22: outer GIL release across the FD probe loop.
+            py::gil_scoped_release release;
             return tenzor::gradgradcheck(cpp_fn, input, eps, atol, rtol, raise_exception);
         },
         py::arg("func"),

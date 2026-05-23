@@ -7,6 +7,22 @@
 
 namespace tenzor::optim {
 
+// R.16: see adam.cpp for the full rationale.
+namespace {
+inline auto optim_state_dtype(DType param_dtype) -> DType {
+    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
+        return DType::Float32;
+    }
+    return param_dtype;
+}
+inline auto make_optim_state(const Tensor& param) -> Tensor {
+    DType state_dt = optim_state_dtype(param.dtype());
+    if (state_dt == param.dtype()) return zeros_like(param);
+    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
+    return zeros(shape, state_dt, param.device());
+}
+} // namespace
+
 SparseAdam::SparseAdam(std::vector<std::shared_ptr<Variable>> params,
                        double lr, double beta1, double beta2, double eps)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2), eps_(eps) {
@@ -53,21 +69,81 @@ auto SparseAdam::step_impl() -> void {
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
-        if (!param_ptr || !param_ptr->has_grad()) continue;
+        if (!param_ptr) continue;
         auto& param = *param_ptr;
+
+        // R.20: prefer the sparse gradient when the producing op (Embedding
+        // with sparse=true, etc.) populated it. The dense `.grad()` slot is
+        // an always-on convenience that mirrors the sparse rows to a dense
+        // tensor for engine compatibility; reading from it forces the
+        // optimiser through the dense-rows scan path even when the producer
+        // already gave us the explicit nonzero indices+values.
+        if (!param.has_sparse_grad() && !param.has_grad()) continue;
 
         const SparseAdamHP hp = resolve(i);
 
-        const Tensor& grad = param.grad().value();
-
+        // R.16: scalars and the rolling state buffers live in state_dt
+        // (F32 for half-precision params); grad and param rows are upcast
+        // before the math and downcast on assignment.
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
 
         // Bias correction factors (same for sparse and dense paths)
         double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
         double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
         double step_size = hp.lr / bias_correction1;
+
+        // Fast path: producer supplied an explicit sparse gradient. Use its
+        // COO indices directly instead of scanning the dense buffer to find
+        // nonzero rows. Falls through to the dense-rows path on shape
+        // mismatch (e.g. sparse_dim != 1).
+        if (param.has_sparse_grad()) {
+            const auto& sg_opt = param.sparse_grad();
+            if (sg_opt.has_value()) {
+                const auto& sg = sg_opt.value();
+                if (sg.sparse_dim() == 1 && sg.nnz() > 0) {
+                    auto row_indices = sg.indices().reshape({sg.nnz()});
+                    Tensor grad_rows = needs_upcast ? sg.values().to(state_dt) : sg.values();
+
+                    auto m_rows = index_select(exp_avg_[i], 0, row_indices);
+                    auto v_rows = index_select(exp_avg_sq_[i], 0, row_indices);
+
+                    m_rows = m_rows * scalar(hp.beta1) + grad_rows * scalar(1.0 - hp.beta1);
+                    v_rows = v_rows * scalar(hp.beta2) +
+                             grad_rows * grad_rows * scalar(1.0 - hp.beta2);
+
+                    std::vector<int64_t> idx_shape = {row_indices.shape()[0]};
+                    for (int64_t d = 1; d < m_rows.ndim(); ++d) idx_shape.push_back(1);
+                    auto idx_expanded = row_indices.reshape(idx_shape);
+                    auto shape_span = m_rows.shape();
+                    std::vector<int64_t> expand_shape(shape_span.begin(), shape_span.end());
+                    auto idx_broadcast = idx_expanded.expand(expand_shape);
+
+                    exp_avg_[i] = scatter(exp_avg_[i], 0, idx_broadcast, m_rows);
+                    exp_avg_sq_[i] = scatter(exp_avg_sq_[i], 0, idx_broadcast, v_rows);
+
+                    auto denom = sqrt(v_rows) * scalar(1.0 / std::sqrt(bias_correction2))
+                                + scalar(hp.eps);
+                    auto update = div(m_rows, denom) * scalar(step_size);
+
+                    Tensor param_rows = needs_upcast
+                        ? index_select(param.tensor(), 0, row_indices).to(state_dt)
+                        : index_select(param.tensor(), 0, row_indices);
+                    param_rows = param_rows - update;
+                    Tensor param_rows_out = needs_upcast ? param_rows.to(param_dt) : param_rows;
+                    param.tensor() = scatter(param.tensor(), 0, idx_broadcast, param_rows_out);
+
+                    continue;
+                }
+            }
+        }
+
+        if (!param.has_grad()) continue;
+        const Tensor& grad = param.grad().value();
 
         // For 2D+ parameters (e.g., embedding tables), use the sparse path:
         // only update rows that have non-zero gradients.
@@ -91,7 +167,10 @@ auto SparseAdam::step_impl() -> void {
             auto row_indices = nz_indices.reshape({-1});
 
             // Extract corresponding rows from gradient and moment buffers
-            auto grad_rows = index_select(grad, 0, row_indices);
+            // R.16: upcast grad rows to state_dt for half-precision params.
+            Tensor grad_rows = needs_upcast
+                ? index_select(grad, 0, row_indices).to(state_dt)
+                : index_select(grad, 0, row_indices);
             auto m_rows = index_select(exp_avg_[i], 0, row_indices);
             auto v_rows = index_select(exp_avg_sq_[i], 0, row_indices);
 
@@ -120,12 +199,16 @@ auto SparseAdam::step_impl() -> void {
             auto update = div(m_rows, denom) * scalar(step_size);
 
             // Update only the affected parameter rows
-            auto param_rows = index_select(param.tensor(), 0, row_indices);
+            Tensor param_rows = needs_upcast
+                ? index_select(param.tensor(), 0, row_indices).to(state_dt)
+                : index_select(param.tensor(), 0, row_indices);
             param_rows = param_rows - update;
-            param.tensor() = scatter(param.tensor(), 0, idx_broadcast, param_rows);
+            Tensor param_rows_out = needs_upcast ? param_rows.to(param_dt) : param_rows;
+            param.tensor() = scatter(param.tensor(), 0, idx_broadcast, param_rows_out);
         } else {
             // Dense fallback: standard Adam for 1D parameters (biases, etc.)
-            auto grad_copy = grad.clone();
+            // R.16: half-precision dense fallback also runs in state_dt.
+            Tensor grad_copy = needs_upcast ? grad.to(state_dt) : grad.clone();
 
             exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
                          grad_copy * scalar(1.0 - hp.beta1);
@@ -134,8 +217,9 @@ auto SparseAdam::step_impl() -> void {
 
             auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
                         + scalar(hp.eps);
-            param.tensor() = param.tensor() -
-                            div(exp_avg_[i], denom) * scalar(step_size);
+            Tensor param_hi = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+            Tensor updated = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
+            param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
         }
     }
 }
@@ -145,8 +229,9 @@ auto SparseAdam::initialize_buffers() -> void {
     exp_avg_sq_.clear();
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -159,8 +244,9 @@ auto SparseAdam::on_parameters_appended_(size_t old_count, size_t new_count) -> 
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see SparseAdam::initialize_buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});

@@ -2478,6 +2478,12 @@ auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
             if (auto it = parameters_.find("weight"); it != parameters_.end() && it->second->requires_grad()) {
                 input_vars.push_back(*it->second);
             }
+            // R.17: backward returns {grad_input, grad_weight, grad_bias};
+            // the bias parameter must appear in input_vars (paired with the
+            // grad_bias slot) or the bias gradient is silently dropped.
+            if (auto it = parameters_.find("bias"); it != parameters_.end() && it->second->requires_grad()) {
+                input_vars.push_back(*it->second);
+            }
         }
         grad_fn->set_input_variables(input_vars);
 
@@ -2602,6 +2608,12 @@ auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
         }
         if (affine_) {
             if (auto it = parameters_.find("weight"); it != parameters_.end() && it->second->requires_grad()) {
+                input_vars.push_back(*it->second);
+            }
+            // R.17: backward returns {grad_input, grad_weight, grad_bias};
+            // the bias parameter must appear in input_vars or the bias
+            // gradient is silently dropped.
+            if (auto it = parameters_.find("bias"); it != parameters_.end() && it->second->requires_grad()) {
                 input_vars.push_back(*it->second);
             }
         }

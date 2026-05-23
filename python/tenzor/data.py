@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import multiprocessing as mp
 import os
@@ -691,6 +692,28 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
             for k in keys
         }
 
+    # R.24: dataclass instance — iterate declared fields and rebuild via the
+    # constructor kwargs. Without this branch, `type(elem)(collated)` raises
+    # TypeError on dataclass samples (the dataclass __init__ does not accept a
+    # single list of values).
+    if dataclasses.is_dataclass(elem) and not isinstance(elem, type):
+        field_names = [f.name for f in dataclasses.fields(elem)]
+        collated_fields = {
+            name: _default_collate_impl(
+                [getattr(d, name) for d in batch], _current_depth + 1)
+            for name in field_names
+        }
+        return type(elem)(**collated_fields)
+
+    # R.24: NamedTuple — detect via _fields attribute and unpack positionally.
+    # `type(elem)(collated)` would pass a single list as the only field.
+    if isinstance(elem, tuple) and hasattr(elem, '_fields'):
+        collated = [
+            _default_collate_impl([d[i] for d in batch], _current_depth + 1)
+            for i in range(len(elem))
+        ]
+        return type(elem)(*collated)
+
     # Tuple / list: collate each position independently.
     if isinstance(elem, (tuple, list)):
         collated = [
@@ -983,7 +1006,10 @@ def _pin_memory_batch(batch):
         return batch
 
     if isinstance(batch, _core.Tensor):
-        return _core.pin_memory(batch) if hasattr(_core, 'pin_memory') else batch
+        # R.25: M.8 guarantees pin_memory exists when the DataLoader was constructed
+        # with pin_memory=True. The previous hasattr ternary silently returned the
+        # batch unpinned — bypassing the constructor-time hard error.
+        return _core.pin_memory(batch)
     elif isinstance(batch, (tuple, list)):
         pinned = [_pin_memory_batch(item) for item in batch]
         return type(batch)(pinned)

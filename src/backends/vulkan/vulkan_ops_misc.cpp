@@ -36,6 +36,12 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     bool is_uint8 = (dtype == DType::UInt8);
     bool is_int64 = (dtype == DType::Int64);
     bool is_bool = (dtype == DType::Bool);
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Full");
+    }
+
     std::string shader_name;
     if (is_float64) {
         shader_name = "full_f64";
@@ -304,6 +310,9 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         Tensor output(shape, dtype, device);
         int32_t device_id = device.index;
 
+        // R.13: gate FP64 dispatch on shaderFloat64 device support.
+        vulkan::ensure_fp64_supported(device_id, "Ones");
+
         auto* pipeline = getPipeline("ones_f64", device_id);
 
         const void* buffer_out = output.data_ptr();
@@ -478,6 +487,11 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     // Use GPU Philox RNG for random number generation
     int32_t device_id = device.index;
 
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (dtype == DType::Float64) {
+        vulkan::ensure_fp64_supported(device_id, "Rand");
+    }
+
     // Select shader based on dtype
     std::string shader_name = "random";
     if (dtype == DType::Float64) {
@@ -547,6 +561,11 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
 
     // Use GPU Philox RNG with Box-Muller transform for normal distribution
     int32_t device_id = device.index;
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (dtype == DType::Float64) {
+        vulkan::ensure_fp64_supported(device_id, "Randn");
+    }
 
     // Select shader based on dtype
     std::string shader_name = "random";
@@ -735,6 +754,11 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     const int64_t numel = input.numel();
     if (numel == 0) {
         return Tensor({0}, input.dtype(), input.device());
+    }
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (input.dtype() == DType::Float64) {
+        vulkan::ensure_fp64_supported(input.device().index, "MaskedSelect");
     }
 
     // Determine gather shader based on dtype
@@ -938,6 +962,12 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     // to Float32 since their relative error falls within test tolerances.
     DType target_dtype = x.dtype();
     bool is_f64 = (target_dtype == DType::Float64);
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(x.device().index, "Where");
+    }
+
     Tensor cond_u8 = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
 
     Tensor x_work, y_work;
@@ -1018,6 +1048,11 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Interpolate");
+    }
 
     // Select shader based on mode and dtype
     std::string shader_name;
@@ -1121,6 +1156,11 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
 
     int32_t device_id = features.device().index;
 
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (features.dtype() == DType::Float64) {
+        vulkan::ensure_fp64_supported(device_id, "ROIAlignForward");
+    }
+
     // Select shader based on dtype
     std::string shader_name = "roi_align";
     if (features.dtype() == DType::Float64) {
@@ -1221,6 +1261,11 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
 
     int32_t device_id = grad_output.device().index;
 
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (grad_output.dtype() == DType::Float64) {
+        vulkan::ensure_fp64_supported(device_id, "ROIAlignBackward");
+    }
+
     // Select shader based on dtype
     std::string shader_name = "roi_align_backward";
     if (grad_output.dtype() == DType::Float64) {
@@ -1317,6 +1362,11 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     if (dim < 0) dim += ndim;
 
     const int64_t sort_size = input_shape[dim];
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support.
+    if (input.dtype() == DType::Float64) {
+        vulkan::ensure_fp64_supported(input.device().index, "ArgSort");
+    }
 
     // Determine shader based on dtype
     std::string sort_shader;
@@ -1564,6 +1614,18 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     DType src_dtype = input.dtype();
     int32_t device_id = input.device().index;
     int64_t numel = input.numel();
+
+    // R.13: gate FP64 dispatch on shaderFloat64 device support. Cast involving
+    // Float64 or Complex128 (which is stored as two doubles) routes through an
+    // FP64 SPIR-V shader; without shaderFloat64 the driver hits a validation
+    // error instead of a clean exception.
+    bool needs_fp64 = (src_dtype == DType::Float64) ||
+                       (target_dtype == DType::Float64) ||
+                       (src_dtype == DType::Complex128) ||
+                       (target_dtype == DType::Complex128);
+    if (needs_fp64) {
+        vulkan::ensure_fp64_supported(device_id, "Cast");
+    }
 
     // Complex casts: real↔complex64 and real↔complex128 use native Vulkan shaders.
     // Complex-to-complex (Complex64 ↔ Complex128) also uses native shaders.

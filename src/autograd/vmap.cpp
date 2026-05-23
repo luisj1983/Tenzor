@@ -195,13 +195,15 @@ void init_builtin_batching_rules() {
         register_batching_rule(op, passthrough_rule);
     }
 
-    // Softmax/LogSoftmax: operates on a specific dim, naturally batch-aware
-    // (dim parameter refers to within-sample dimension, batch dim is separate)
-    register_batching_rule("SoftmaxBackward", passthrough_rule);
-    register_batching_rule("LogSoftmaxBackward", passthrough_rule);
-    // Audit A.3: OpId-keyed entries for Softmax/LogSoftmax.
-    register_batching_rule(OpId::Softmax, passthrough_rule);
-    register_batching_rule(OpId::LogSoftmax, passthrough_rule);
+    // Softmax/LogSoftmax: operates on a specific dim, dispatch via the
+    // J.1 dim_shifted_passthrough so the user's `dim` shifts past the
+    // batch axis (raw passthrough would reduce/normalise across the
+    // batch dim instead — R.4).
+    auto softmax_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
+    register_batching_rule("SoftmaxBackward", softmax_dim_rule);
+    register_batching_rule("LogSoftmaxBackward", softmax_dim_rule);
+    register_batching_rule(OpId::Softmax, softmax_dim_rule);
+    register_batching_rule(OpId::LogSoftmax, softmax_dim_rule);
 
     // ====================================================================
     // MatMul: promote to BMM when batch_dim == 0
@@ -287,8 +289,22 @@ void init_builtin_batching_rules() {
     // ====================================================================
     register_batching_rule("CatBackward", passthrough_rule);
     register_batching_rule("SliceBackward", passthrough_rule);
-    register_batching_rule("GatherBackward", passthrough_rule);
-    register_batching_rule("IndexSelectBackward", passthrough_rule);
+    // R.4: Gather / IndexSelect carry a `dim` attr AND an index tensor that
+    // the user captures in the closure. The captured index is shaped for
+    // the *unbatched* input; broadcasting it across the batch axis would
+    // need extra plumbing not exposed by saved_attributes alone, so we use
+    // the loop-and-stack fallback to call func per slice — correct (each
+    // slice sees its own index) at the cost of B sequential dispatches.
+    auto multi_input_dim_loop_rule = [](
+        const std::function<Variable(const Variable&)>& func,
+        const Variable& batched_input,
+        int64_t batch_dim) -> Variable {
+        return vmap_loop_and_stack(func, batched_input, batch_dim);
+    };
+    register_batching_rule("GatherBackward",      multi_input_dim_loop_rule);
+    register_batching_rule("IndexSelectBackward", multi_input_dim_loop_rule);
+    register_batching_rule(OpId::Gather,      multi_input_dim_loop_rule);
+    register_batching_rule(OpId::IndexSelect, multi_input_dim_loop_rule);
     register_batching_rule("WhereBackward", passthrough_rule);
 
     // ====================================================================
@@ -364,10 +380,16 @@ void init_builtin_batching_rules() {
     register_batching_rule(OpId::ArgSort, reduction_dim_rule);
 
     // ====================================================================
-    // Scatter operations
+    // Scatter operations.
+    // R.4: Scatter / ScatterAdd carry a `dim` attr plus index + src tensors
+    // captured in the user's closure (and src is *not* saved on the
+    // backward, only the index). Like Gather/IndexSelect we fall back to
+    // loop-and-stack so each slice sees its own captured index/src.
     // ====================================================================
-    register_batching_rule("ScatterBackward", passthrough_rule);
-    register_batching_rule("ScatterAddBackward", passthrough_rule);
+    register_batching_rule("ScatterBackward",    multi_input_dim_loop_rule);
+    register_batching_rule("ScatterAddBackward", multi_input_dim_loop_rule);
+    register_batching_rule(OpId::Scatter,    multi_input_dim_loop_rule);
+    register_batching_rule(OpId::ScatterAdd, multi_input_dim_loop_rule);
 
     // ====================================================================
     // Pooling ops: batch dim is naturally dim 0 (NCHW)
@@ -386,10 +408,16 @@ void init_builtin_batching_rules() {
     register_batching_rule("GRUCellBackward", shape_passthrough);
 
     // ====================================================================
-    // Cumulative ops: operate along a dim, batch-independent
+    // Cumulative ops: operate along a dim. Raw passthrough cumulates across
+    // the batch axis when the user passes a positive within-sample dim; the
+    // dim_shifted_passthrough rule (J.1, R.4) reads AttrKey::Dim from
+    // saved_attributes() and shifts it past the batch axis.
     // ====================================================================
-    register_batching_rule("CumSumBackward", passthrough_rule);
-    register_batching_rule("CumProdBackward", passthrough_rule);
+    auto cumulative_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
+    register_batching_rule("CumSumBackward", cumulative_dim_rule);
+    register_batching_rule("CumProdBackward", cumulative_dim_rule);
+    register_batching_rule(OpId::CumSum, cumulative_dim_rule);
+    register_batching_rule(OpId::CumProd, cumulative_dim_rule);
 
     // ====================================================================
     // Padding ops: batch dim is naturally dim 0

@@ -1024,4 +1024,18 @@ public:
     }
 };
 
+namespace vulkan {
+
+/**
+ * @brief R.13: Throw a typed runtime_error with a uniform message if the
+ *        requested Vulkan device does not advertise shaderFloat64 support.
+ *
+ * Call this at the entry of any FP64 dispatch path in vulkan_ops_*.cpp so
+ * that unsupported devices fail fast with a readable diagnostic instead of
+ * hitting an opaque SPIR-V validation error deep inside the driver.
+ */
+void ensure_fp64_supported(int32_t device_id, const char* op_name);
+
+} // namespace vulkan
+
 } // namespace tenzor

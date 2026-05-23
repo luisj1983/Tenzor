@@ -873,6 +873,11 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // Conj is linear in its input (y = conj(z)); the second derivative is
+    // structurally zero. backward_with_variables wraps without a grad_fn,
+    // which is mathematically correct; declare it explicitly so the engine's
+    // higher-order stub counter reports it accurately.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Conj; }
 };
 
@@ -888,6 +893,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // Real-part projection is linear (grad propagates as 0.5 * grad cast to
+    // the complex dtype); second derivative is structurally zero. Declare
+    // the higher-order wrapping as a stub explicitly.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Real; }
     DType input_dtype_;
 };
@@ -904,6 +913,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // Imag-part projection is linear (grad propagates as a scaled-and-negated
+    // cast into the complex dtype); second derivative is structurally zero.
+    // Declare the higher-order wrapping as a stub explicitly.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Imag; }
     DType input_dtype_;
 };
@@ -1016,7 +1029,7 @@ public:
  */
 class ClampBackward : public Function {
 public:
-    ClampBackward(float min, float max) : min_(min), max_(max) {}
+    ClampBackward(double min, double max) : min_(min), max_(max) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -1024,13 +1037,13 @@ public:
     auto op_id() const -> OpId override { return OpId::Clamp; }
     auto saved_attributes() const -> OpAttributes override {
         OpAttributes attrs;
-        attrs.set(AttrKey::Min, static_cast<double>(min_));
-        attrs.set(AttrKey::Max, static_cast<double>(max_));
+        attrs.set(AttrKey::Min, min_);
+        attrs.set(AttrKey::Max, max_);
         return attrs;
     }
 private:
-    float min_;
-    float max_;
+    double min_;
+    double max_;
 };;
 
 /**
@@ -1789,38 +1802,46 @@ public:
 
 class StdBackward : public Function {
 public:
-    StdBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
+    StdBackward(std::optional<int64_t> dim, bool keepdim, bool unbiased = true)
+        : dim_(dim), keepdim_(keepdim), unbiased_(unbiased) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
+    bool unbiased_;  // R.3: branch denom between N (false) and N-1 (true) in backward.
     auto op_id() const -> OpId override { return OpId::Std; }
     auto saved_attributes() const -> OpAttributes override {
+        // R.8: emit Unbiased so vmap dim-shift / JVP-adapter see the real
+        // forward semantics instead of defaulting to true silently.
         OpAttributes attrs;
         if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
         attrs.set(AttrKey::Keepdim, keepdim_);
-        // Unbiased flag is not stored on the Function; JVP rule defaults to true.
+        attrs.set(AttrKey::Unbiased, unbiased_);
         return attrs;
     }
 };;
 
 class VarBackward : public Function {
 public:
-    VarBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
+    VarBackward(std::optional<int64_t> dim, bool keepdim, bool unbiased = true)
+        : dim_(dim), keepdim_(keepdim), unbiased_(unbiased) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
+    bool unbiased_;  // R.3: branch denom between N (false) and N-1 (true) in backward.
     auto op_id() const -> OpId override { return OpId::Var; }
     auto saved_attributes() const -> OpAttributes override {
+        // R.8: emit Unbiased so vmap dim-shift / JVP-adapter see the real
+        // forward semantics instead of defaulting to true silently.
         OpAttributes attrs;
         if (dim_.has_value()) attrs.set(AttrKey::Dim, *dim_);
         attrs.set(AttrKey::Keepdim, keepdim_);
-        // Unbiased flag is not stored on the Function; JVP rule defaults to true.
+        attrs.set(AttrKey::Unbiased, unbiased_);
         return attrs;
     }
 };;
@@ -1891,6 +1912,11 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // Device transfer is the identity on values (only the residency changes);
+    // it is linear and the second derivative is structurally zero. The
+    // backward_with_variables override wraps without a grad_fn — declare the
+    // higher-order wrapping as a stub explicitly.
+    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 class FlattenBackward : public Function {
@@ -1979,6 +2005,11 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // R.5: advanced (fancy) indexing backward uses `index_put` with
+    // accumulation, for which we lack a Variable-level multi-tensor overload
+    // whose backward closes the loop. Honest stub until that primitive
+    // lands — engine counter + WARN_ONCE in backward_with_variables.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "IndexBackward"; }
 
 private:
@@ -2312,8 +2343,14 @@ private:
  */
 class IRFFTBackward : public Function {
 public:
-    IRFFTBackward(int64_t dim, std::string norm)
-        : dim_(dim), norm_(std::move(norm)) {}
+    // R.7: n_orig is the frequency-bin count of the original irfft input
+    // saved at forward time (= rfft input X.shape[dim] pre-irfft). The
+    // adjoint of irfft(X, n) is rfft(grad, n_orig), and recomputing n_orig
+    // from the time-domain output length is only correct when the user did
+    // not pad/truncate (i.e. n was the default). Use -1 to mean "unset":
+    // the backward then passes nullopt so rfft picks the natural default.
+    IRFFTBackward(int64_t dim, std::string norm, int64_t n_orig = -1)
+        : dim_(dim), norm_(std::move(norm)), n_orig_(n_orig) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -2324,11 +2361,14 @@ public:
         OpAttributes attrs;
         attrs.set(AttrKey::Dim, dim_);
         attrs.set(AttrKey::Norm, std::string_view(norm_));
+        if (n_orig_ >= 0) attrs.set(AttrKey::N, n_orig_);
         return attrs;
     }
+    int64_t n_orig() const { return n_orig_; }
 private:
     int64_t dim_;
     std::string norm_;
+    int64_t n_orig_;  // R.7: original frequency-bin count of the rfft input.
 };;
 
 
@@ -2813,6 +2853,11 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // sparse_to_dense is linear in the sparse values; the backward formula
+    // is grad_input = grad_output * mask, also linear. Second derivative is
+    // structurally zero, so the no-grad_fn wrap in backward_with_variables
+    // is mathematically correct — declare the higher-order stub explicitly.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "SparseToDenseBackward"; }
     auto op_id() const -> OpId override { return OpId::SparseToDense; }
 };
@@ -2834,6 +2879,12 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // dense_to_sparse is linear in the dense input (mask-selection); the
+    // backward is grad_input = grad_output_dense * mask, also linear. Second
+    // derivative is structurally zero, so the no-grad_fn wrap in
+    // backward_with_variables is mathematically correct — declare the
+    // higher-order stub explicitly.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "DenseToSparseBackward"; }
     auto op_id() const -> OpId override { return OpId::DenseToSparse; }
 };
@@ -2986,6 +3037,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // R.5: first-order backward is an opaque per-backend kernel; no
+    // Variable-level composition exists, so higher-order is an honest
+    // stub. WARN_ONCE fires in backward_with_variables.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "GridSampleBackward"; }
 
     std::string mode_;
@@ -3005,6 +3060,9 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    // R.5: first-order backward is an opaque per-backend kernel; honest
+    // higher-order stub. WARN_ONCE fires in backward_with_variables.
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "AffineGridBackward"; }
 
     std::vector<int64_t> size_;
@@ -3450,7 +3508,7 @@ public:
  */
 class FlashAttentionBackward : public Function {
 public:
-    FlashAttentionBackward(float scale, bool causal, float dropout_p, bool is_training)
+    FlashAttentionBackward(double scale, bool causal, float dropout_p, bool is_training)
         : scale_(scale), causal_(causal), dropout_p_(dropout_p), is_training_(is_training) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
@@ -3468,7 +3526,7 @@ public:
     auto name() const -> std::string override { return "FlashAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FlashAttention; }
 private:
-    float scale_;
+    double scale_;
     bool causal_;
     float dropout_p_;
     bool is_training_;
@@ -3483,7 +3541,7 @@ private:
  */
 class FusedAttentionBackward : public Function {
 public:
-    FusedAttentionBackward(float scale, bool causal, bool use_cudnn_sdpa)
+    FusedAttentionBackward(double scale, bool causal, bool use_cudnn_sdpa)
         : scale_(scale), causal_(causal), use_cudnn_sdpa_(use_cudnn_sdpa) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
@@ -3497,7 +3555,7 @@ public:
     auto name() const -> std::string override { return "FusedAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FusedAttention; }
 private:
-    float scale_;
+    double scale_;
     bool causal_;
     bool use_cudnn_sdpa_;
 };
@@ -3510,7 +3568,7 @@ private:
  */
 class FlexAttentionBackward : public Function {
 public:
-    FlexAttentionBackward(float scale, int64_t score_mod_id, bool has_block_mask)
+    FlexAttentionBackward(double scale, int64_t score_mod_id, bool has_block_mask)
         : scale_(scale), score_mod_id_(score_mod_id), has_block_mask_(has_block_mask) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
@@ -3525,7 +3583,7 @@ public:
     auto name() const -> std::string override { return "FlexAttentionBackward"; }
     auto op_id() const -> OpId override { return OpId::FlexAttention; }
 private:
-    float scale_;
+    double scale_;
     int64_t score_mod_id_;
     bool has_block_mask_;
 };

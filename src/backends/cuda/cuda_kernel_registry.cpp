@@ -27,6 +27,7 @@
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #endif
+#include "cuda_error.hpp"
 #include <cuda_runtime.h>
 #include <array>
 #include <cstdlib>
@@ -3372,7 +3373,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
-        cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(dtype), get_cuda_stream(attrs));
+        CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(dtype), get_cuda_stream(attrs)));
         return std::vector<Tensor>{output};
     });
     table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

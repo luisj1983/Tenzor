@@ -2302,7 +2302,7 @@ auto stft_cuda_kernel(const Tensor& input, int64_t n_fft,
 
     // Build window data: pad win_length to n_fft (rectangular default)
     Tensor window_dev({n_fft}, DType::Float32, input.device());
-    cudaMemsetAsync(window_dev.data_ptr(), 0, n_fft * sizeof(float), stream);
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(window_dev.data_ptr(), 0, n_fft * sizeof(float), stream));
     int64_t win_offset = (n_fft - win_length) / 2;
     if (window.is_valid() && window.numel() > 0) {
         Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32)
@@ -2443,7 +2443,7 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
 
     // Build window
     Tensor window_dev({n_fft}, DType::Float32, input.device());
-    cudaMemsetAsync(window_dev.data_ptr(), 0, n_fft * sizeof(float), stream);
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(window_dev.data_ptr(), 0, n_fft * sizeof(float), stream));
     int64_t win_offset = (n_fft - win_length) / 2;
     if (window.is_valid() && window.numel() > 0) {
         Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32)
@@ -2463,8 +2463,8 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     // Allocate output and window_sum accumulators (zeroed)
     Tensor output_buf({batch_size, expected_length}, DType::Float32, input.device());
     Tensor wsum_buf({batch_size, expected_length}, DType::Float32, input.device());
-    cudaMemsetAsync(output_buf.data_ptr(), 0, batch_size * expected_length * sizeof(float), stream);
-    cudaMemsetAsync(wsum_buf.data_ptr(),  0, batch_size * expected_length * sizeof(float), stream);
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(output_buf.data_ptr(), 0, batch_size * expected_length * sizeof(float), stream));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(wsum_buf.data_ptr(),  0, batch_size * expected_length * sizeof(float), stream));
 
     // Overlap-add
     {
@@ -2686,7 +2686,7 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
 
     // Find max value on GPU
     Tensor max_tensor({1}, DType::Int64, device);
-    cudaMemsetAsync(max_tensor.data<int64_t>(), 0xFF, sizeof(int64_t), stream); // set to -1
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(max_tensor.data<int64_t>(), 0xFF, sizeof(int64_t), stream)); // set to -1
     // Actually set to -1 properly
     int64_t neg_one = -1;
     cudaMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
@@ -2712,8 +2712,8 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
 
     if (has_weights) {
         Tensor output({output_size}, DType::Float64, device);
-        cudaMemsetAsync(output.data<double>(), 0,
-                        static_cast<size_t>(output_size) * sizeof(double), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<double>(), 0,
+                        static_cast<size_t>(output_size) * sizeof(double), stream));
 
         if (n > 0) {
             int block = 256;
@@ -2735,8 +2735,8 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
         return output;
     } else {
         Tensor output({output_size}, DType::Int64, device);
-        cudaMemsetAsync(output.data<int64_t>(), 0,
-                        static_cast<size_t>(output_size) * sizeof(int64_t), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<int64_t>(), 0,
+                        static_cast<size_t>(output_size) * sizeof(int64_t), stream));
 
         if (n > 0) {
             int block = 256;
@@ -3606,7 +3606,7 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
     }
 
     Tensor output({bins}, dtype, device);
-    cudaMemsetAsync(output.data_ptr(), 0, bins * output.element_size(), stream);
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, bins * output.element_size(), stream));
 
     int block = 256;
     int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
@@ -3622,7 +3622,7 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
                 // Convert double input to float, run float32 histogram, then convert output
                 Tensor f32_input = input_cont.to(DType::Float32);
                 Tensor f32_output({bins}, DType::Float32, device);
-                cudaMemsetAsync(f32_output.data_ptr(), 0, bins * sizeof(float), stream);
+                TENZOR_CUDA_CHECK(cudaMemsetAsync(f32_output.data_ptr(), 0, bins * sizeof(float), stream));
                 histc_kernel_f32<<<grid, block, 0, stream>>>(
                     f32_input.data<float>(), f32_output.data<float>(), n, bins,
                     static_cast<float>(min_val), static_cast<float>(max_val));
@@ -3747,7 +3747,7 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
 
         // Step 4: compute counts
         Tensor counts({num_unique}, DType::Int64, device);
-        cudaMemsetAsync(counts.data<int64_t>(), 0, num_unique * sizeof(int64_t), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(counts.data<int64_t>(), 0, num_unique * sizeof(int64_t), stream));
         unique_consecutive_counts_kernel<T><<<grid, block, 0, stream>>>(
             inverse_out.data<int64_t>(), counts.data<int64_t>(), n, num_unique);
         TENZOR_CUDA_POST_LAUNCH_CHECK();

@@ -500,10 +500,50 @@ auto CosineSimilarityBackward::backward(std::vector<Tensor> grad_outputs) -> std
 }
 
 auto CosineSimilarityBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Use tensor-level computation for the Jacobian factor (constant)
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad()),
-            Variable(result_tensors[1], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Saved (x1, x2, output) are constants;
+    // the per-input Jacobian factors
+    //   deriv1 = x2 / (n1*n2) - output * x1 / n1^2
+    //   deriv2 = x1 / (n1*n2) - output * x2 / n2^2
+    // depend only on those constants. Compute deriv1, deriv2 at tensor
+    // level once, wrap each as a non-diff Variable, then
+    //   grad_x{1,2} = grad_expanded * deriv{1,2}
+    // is a Variable-level multiply that preserves grad_fn through
+    // grad_outputs[0].
+    require_saved_tensors(3);
+    const Tensor& x1 = saved_tensors_[0];
+    const Tensor& x2 = saved_tensors_[1];
+    const Tensor& output = saved_tensors_[2];
+    auto x1_shape = std::vector<int64_t>(x1.shape().begin(), x1.shape().end());
+
+    auto n1_sq = tenzor::sum(mul(x1, x1), dim_, true);
+    auto n2_sq = tenzor::sum(mul(x2, x2), dim_, true);
+    auto eps_t = full(std::vector<int64_t>(n1_sq.shape().begin(), n1_sq.shape().end()),
+                      eps_, n1_sq.dtype(), n1_sq.device());
+    auto n1 = sqrt(tenzor::where(gt(n1_sq, eps_t), n1_sq, eps_t));
+    auto n2 = sqrt(tenzor::where(gt(n2_sq, eps_t), n2_sq, eps_t));
+    auto n1n2 = mul(n1, n2);
+    auto output_expanded = output;
+    if (output.ndim() < x1.ndim()) {
+        output_expanded = unsqueeze(output, dim_);
+    }
+    output_expanded = expand(output_expanded, x1_shape);
+    auto n1n2_expanded = expand(n1n2, x1_shape);
+    auto n1_sq_expanded = expand(n1_sq, x1_shape);
+    auto n2_sq_expanded = expand(n2_sq, x1_shape);
+
+    auto deriv1 = sub(div(x2, n1n2_expanded),
+                      mul(output_expanded, div(x1, n1_sq_expanded)));
+    auto deriv2 = sub(div(x1, n1n2_expanded),
+                      mul(output_expanded, div(x2, n2_sq_expanded)));
+    Variable deriv1_var(deriv1, /*requires_grad=*/false);
+    Variable deriv2_var(deriv2, /*requires_grad=*/false);
+
+    Variable grad_expanded = grad_outputs[0];
+    if (grad_expanded.tensor().ndim() < static_cast<int64_t>(x1_shape.size())) {
+        grad_expanded = tenzor::unsqueeze(grad_expanded, dim_);
+    }
+    grad_expanded = tenzor::expand(grad_expanded, x1_shape);
+    return {grad_expanded * deriv1_var, grad_expanded * deriv2_var};
 }
 
 // RenormBackward:
@@ -598,19 +638,67 @@ auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto RenormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // R.5 — Variable-level rewrite. Forward y = s * x with s = min(1, maxnorm/||x||_p).
+    // Full backward (see backward() above) is
+    //   grad_x = grad * scale  -  scale_per_slice * clipped * corr_factor *
+    //                              sum(grad * input, non_dim_, keepdim) / norm_p^p
+    // Constants depend only on saved (input, output); the `inner` reduction
+    // depends on grad. Wrap constants as non-diff Variables; express `inner`
+    // and the assembly via Variable ops so grad_fn flows through grad. The
+    // previous body dropped the correction term entirely.
     require_saved_tensors(2);
-    const auto& input = saved_tensors_[0];
-    const auto& output = saved_tensors_[1];
+    const Tensor& input = saved_tensors_[0];
+    const Tensor& output = saved_tensors_[1];
+    const Variable& grad_var = grad_outputs[0];
 
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
     auto eps_t = full(input_shape, detail::dtype_epsilon(input.dtype()),
                       input.dtype(), input.device());
-    auto safe_input = where(eq(input, zeros(input_shape, input.dtype(), input.device())),
-                            eps_t, input);
-    auto scale = div(output, safe_input);
+    auto zeros_t = zeros(input_shape, input.dtype(), input.device());
+    auto safe_input = where(eq(input, zeros_t), eps_t, input);
+    auto scale_tensor = div(output, safe_input);
 
-    Variable scale_var(scale, false);
-    return {grad_outputs[0] * scale_var};
+    auto abs_x = abs(input);
+    Tensor xp_contrib = (p_ == 2.0) ? mul(abs_x, abs_x) : pow(abs_x, p_);
+    Tensor norm_p_per_slice = xp_contrib;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        norm_p_per_slice = sum(norm_p_per_slice, d, /*keepdim=*/true);
+    }
+    auto one_t = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(),
+                                            norm_p_per_slice.shape().end()),
+                      1.0, input.dtype(), input.device());
+    Tensor scale_per_slice = scale_tensor;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        scale_per_slice = sum(scale_per_slice, d, /*keepdim=*/true);
+        auto slice_count = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(),
+                                                      norm_p_per_slice.shape().end()),
+                                static_cast<double>(input_shape[d]),
+                                input.dtype(), input.device());
+        scale_per_slice = div(scale_per_slice, slice_count);
+    }
+    auto clipped = lt(scale_per_slice, sub(one_t, eps_t));
+    auto clipped_f = clipped.to(input.dtype());
+    Tensor sgn = sign(input);
+    Tensor corr_factor = (p_ == 2.0) ? input : mul(sgn, pow(abs_x, p_ - 1.0));
+    auto norm_p_safe = add(norm_p_per_slice, eps_t);
+
+    Variable scale_var(scale_tensor, /*requires_grad=*/false);
+    Variable input_var(input, /*requires_grad=*/false);
+    Variable corr_per_norm_var(
+        mul(div(mul(corr_factor, clipped_f), norm_p_safe), scale_per_slice),
+        /*requires_grad=*/false);
+
+    Variable inner_var = grad_var * input_var;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        inner_var = tenzor::sum(inner_var, d, /*keepdim=*/true);
+    }
+    auto correction = corr_per_norm_var * inner_var;
+    auto grad_in = grad_var * scale_var - correction;
+    return {grad_in};
 }
 
 // =========================================================================
@@ -661,8 +749,34 @@ auto CholeskyInverseBackward::backward(std::vector<Tensor> grad_outputs) -> std:
 }
 
 auto CholeskyInverseBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward A^{-1} = cholesky_inverse(L)
+    // with A = L @ L^T. With saved (L, A^{-1}) as constants:
+    //   grad_sym = (grad + grad^T) / 2
+    //   temp     = A^{-1} @ grad_sym @ A^{-1}
+    //   grad_A   = (-temp) + (-temp)^T
+    //   grad_L   = grad_A @ L
+    //   grad_L   = tril(grad_L)   (or triu if upper_)
+    // All ops are Variable-level so grad_fn flows through grad.
+    require_saved_tensors(2);
+    Variable L_var(saved_tensors_[0], /*requires_grad=*/false);
+    Variable Ainv_var(saved_tensors_[1], /*requires_grad=*/false);
+    const int64_t ndim = saved_tensors_[0].ndim();
+
+    auto& grad = grad_outputs[0];
+    auto grad_T = tenzor::transpose(grad, ndim - 2, ndim - 1);
+    auto grad_sym = (grad + grad_T) * 0.5;
+
+    auto temp = tenzor::matmul(tenzor::matmul(Ainv_var, grad_sym), Ainv_var);
+    auto neg_temp = tenzor::neg(temp);
+    auto neg_temp_T = tenzor::transpose(neg_temp, ndim - 2, ndim - 1);
+    auto grad_A_sym = neg_temp + neg_temp_T;
+    auto grad_L = tenzor::matmul(grad_A_sym, L_var);
+    if (upper_) {
+        grad_L = tenzor::triu(grad_L);
+    } else {
+        grad_L = tenzor::tril(grad_L);
+    }
+    return {grad_L};
 }
 
 // LinalgLDLFactorBackward: complex structured backprop
@@ -858,8 +972,17 @@ auto LinalgLDLSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::
 }
 
 auto LinalgLDLSolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward X = ldl_solve(LD, pivots, B);
+    // A = LDL^T is symmetric so A^{-T} = A^{-1} and
+    //   grad_B = ldl_solve(LD, pivots, grad_X).
+    // LD is saved as a non-diff Variable; pivots is integer non-diff. The
+    // autograd-aware `tenzor::ldl_solve(Variable, Tensor, Variable)` keeps
+    // grad_fn live through grad_outputs[0].
+    require_saved_tensors(2);
+    Variable LD_var(saved_tensors_[0], /*requires_grad=*/false);
+    const Tensor& pivots = saved_tensors_[1];
+    auto grad_B = tenzor::ldl_solve(LD_var, pivots, grad_outputs[0]);
+    return {grad_B};
 }
 
 // LinalgHouseholderBackward:
@@ -1104,8 +1227,36 @@ auto TensorInvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto TensorInvBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward Y = tensorinv(X, ind). Closed form
+    //   Y_2d   = reshape(Y, {rows, cols})         (rows == cols)
+    //   grad2d = reshape(grad_Y, {rows, cols})
+    //   grad_X_2d = - Y_2d^T @ grad2d @ Y_2d^T
+    //   grad_X    = reshape(grad_X_2d, input_shape)
+    // Y is saved constant; every other step is Variable-level so grad_fn
+    // flows through grad_outputs[0].
+    require_saved_tensors(1);
+    const Tensor& Y_t = saved_tensors_[0];
+    Variable Y_var(Y_t, /*requires_grad=*/false);
+
+    auto Y_shape = std::vector<int64_t>(Y_t.shape().begin(), Y_t.shape().end());
+    const int64_t ndim_Y = static_cast<int64_t>(Y_shape.size());
+    const int64_t ind_Y  = ndim_Y - ind_;
+
+    int64_t rows = 1, cols = 1;
+    for (int64_t i = 0; i < ind_Y; ++i)      rows *= Y_shape[i];
+    for (int64_t i = ind_Y; i < ndim_Y; ++i) cols *= Y_shape[i];
+
+    auto Y_2d = tenzor::reshape(Y_var, {rows, cols});
+    auto grad_2d = tenzor::reshape(grad_outputs[0], {rows, cols});
+    auto Y_2d_t = tenzor::transpose(Y_2d, 0, 1);
+    auto temp = tenzor::matmul(tenzor::matmul(Y_2d_t, grad_2d), Y_2d_t);
+    auto result_2d = tenzor::neg(temp);
+
+    std::vector<int64_t> input_shape;
+    for (int64_t i = ind_Y; i < ndim_Y; ++i) input_shape.push_back(Y_shape[i]);
+    for (int64_t i = 0; i < ind_Y; ++i)      input_shape.push_back(Y_shape[i]);
+    auto grad_X = tenzor::reshape(result_2d, input_shape);
+    return {grad_X};
 }
 
 // TensorSolveBackward:
@@ -1157,9 +1308,37 @@ auto TensorSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 }
 
 auto TensorSolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad()),
-            Variable(result_tensors[1], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward X = tensorsolve(A, B); A, B
+    // reshaped to ({N, N}, {N, 1}). Saved (A, B, X). First-order chain:
+    //   grad_B = solve(A^T, grad_Y)              (N×1)
+    //   grad_A = - grad_B @ X^T                  (N×N) → reshape to A.shape
+    // A, X are non-diff Variables (constants from saved state); everything
+    // else is Variable-level so grad_fn flows through grad_outputs[0].
+    require_saved_tensors(3);
+    const Tensor& A_t = saved_tensors_[0];
+    const Tensor& B_t = saved_tensors_[1];
+    const Tensor& X_t = saved_tensors_[2];
+
+    auto A_shape = std::vector<int64_t>(A_t.shape().begin(), A_t.shape().end());
+    auto B_shape = std::vector<int64_t>(B_t.shape().begin(), B_t.shape().end());
+    int64_t B_numel = 1; for (auto s : B_shape) B_numel *= s;
+    int64_t A_numel = 1; for (auto s : A_shape) A_numel *= s;
+    int64_t N = B_numel;
+
+    Tensor A_2d_t = tenzor::reshape(A_t, {N, A_numel / N});
+    Tensor X_flat_t = tenzor::reshape(X_t, {N, 1});
+    Variable A_2d_var(A_2d_t, /*requires_grad=*/false);
+    Variable X_flat_var(X_flat_t, /*requires_grad=*/false);
+
+    auto grad_flat = tenzor::reshape(grad_outputs[0], {N, 1});
+    auto At_2d = tenzor::transpose(A_2d_var, 0, 1);
+    auto grad_B_flat = tenzor::solve(At_2d, grad_flat);
+    auto grad_B = tenzor::reshape(grad_B_flat, B_shape);
+
+    auto X_row = tenzor::transpose(X_flat_var, 0, 1);
+    auto grad_A_2d = tenzor::neg(tenzor::matmul(grad_B_flat, X_row));
+    auto grad_A = tenzor::reshape(grad_A_2d, A_shape);
+    return {grad_A, grad_B};
 }
 
 // LinalgVectorNormBackward:

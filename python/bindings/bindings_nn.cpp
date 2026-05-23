@@ -1764,10 +1764,31 @@ void register_nn(py::module_& m) {
     nn.def("log_sigmoid", &tenzor::nn::log_sigmoid, "Log-Sigmoid activation function",
           py::call_guard<py::gil_scoped_release>());
 
-    nn.def("softplus", [](const tenzor::Variable& input, float beta) -> tenzor::Variable {
-        return tenzor::softplus(input, beta);
+    nn.def("softplus", [](const tenzor::Variable& input, float beta, float threshold) -> tenzor::Variable {
+        // R.28: PyTorch-compatible softplus signature. When ``beta * x > threshold``
+        // the result is replaced by the linear region ``x`` (which softplus
+        // already approximates to within FP precision there). The threshold
+        // bounds forward-pass overflow on large positive inputs.
+        //
+        // Compute softplus(input, beta) unconditionally, then blend with the
+        // identity via the autograd-aware ``where`` so gradient flow is
+        // preserved on both branches. ``cond`` is a Bool tensor (non-
+        // differentiable mask).
+        auto sp = tenzor::softplus(input, beta);
+        if (!std::isfinite(threshold)) {
+            return sp;
+        }
+        const auto& xt = input.tensor();
+        auto bx = tenzor::mul(xt, static_cast<double>(beta));
+        auto thr_t = tenzor::full({1}, static_cast<double>(threshold),
+                                  xt.dtype(), xt.device());
+        auto cond = tenzor::gt(bx, thr_t);
+        tenzor::Variable cond_var(cond, false);
+        return tenzor::where(cond_var, input, sp);
     }, py::arg("input"), py::arg("beta") = 1.0f,
-       "Softplus activation: log(1 + exp(beta*x))/beta",
+       py::arg("threshold") = 20.0f,
+       "Softplus activation: log(1 + exp(beta*x))/beta, with optional linear-"
+       "region threshold for numerical stability on large inputs.",
        py::call_guard<py::gil_scoped_release>());
 
     // Reduction enum for loss functions

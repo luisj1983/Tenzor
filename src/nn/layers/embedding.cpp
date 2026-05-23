@@ -171,6 +171,38 @@ public:
             attrs.set(AttrKey::NumEmbeddings, num_embeddings_);
             std::vector<Tensor> inputs_vec = {grad_output, indices_dev};
             auto results = dispatch<OpId::EmbeddingBackward>(inputs_vec, attrs);
+
+            // R.19: GPU path previously returned only the dense gradient and
+            // never populated weight.sparse_grad, so sparse-aware optimisers
+            // (SparseAdam, etc.) saw an empty sparse buffer and silently fell
+            // back to dense updates. Mirror the CPU branch below: build a COO
+            // SparseTensor from indices_ + the dense grad rows and accumulate
+            // it onto the weight Variable.
+            if (sparse_ && input_variables_.size() > 1) {
+                // Indices come back to CPU for the SparseTensor; matches the
+                // CPU branch's COO production. The optimiser side decides
+                // how/when to move them back to device.
+                Tensor indices_cpu = (indices_.device() == Device::cpu())
+                                       ? indices_ : indices_.to(Device::cpu());
+                int64_t num_indices = indices_cpu.numel();
+
+                auto idx_tensor = zeros({1, num_indices}, DType::Int64);
+                auto* idx_ptr = idx_tensor.data<int64_t>();
+                auto* src_ptr = indices_cpu.data<int64_t>();
+                for (int64_t i = 0; i < num_indices; ++i) {
+                    idx_ptr[i] = src_ptr[i];
+                }
+
+                Tensor grad_values = grad_output.to(Device::cpu())
+                                                .reshape({num_indices, embedding_dim_});
+
+                auto sparse_grad = SparseTensor::sparse_coo(
+                    idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
+
+                auto& weight_var = input_variables_[1];
+                weight_var.accumulate_sparse_grad(sparse_grad);
+            }
+
             return results;
         }
 

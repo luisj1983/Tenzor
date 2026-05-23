@@ -39,10 +39,10 @@ auto jvp_relu(const DualTensor& x) -> DualTensor;
 auto jvp_sigmoid(const DualTensor& x) -> DualTensor;
 auto jvp_tanh(const DualTensor& x) -> DualTensor;
 auto jvp_gelu(const DualTensor& x) -> DualTensor;
-auto jvp_leaky_relu(const DualTensor& x, float negative_slope = 0.01f) -> DualTensor;
-auto jvp_elu(const DualTensor& x, float alpha = 1.0f) -> DualTensor;
+auto jvp_leaky_relu(const DualTensor& x, double negative_slope = 0.01) -> DualTensor;
+auto jvp_elu(const DualTensor& x, double alpha = 1.0) -> DualTensor;
 auto jvp_selu(const DualTensor& x) -> DualTensor;
-auto jvp_softplus(const DualTensor& x, float beta = 1.0f) -> DualTensor;
+auto jvp_softplus(const DualTensor& x, double beta = 1.0) -> DualTensor;
 auto jvp_mish(const DualTensor& x) -> DualTensor;
 auto jvp_hardswish(const DualTensor& x) -> DualTensor;
 /// @}
@@ -311,7 +311,7 @@ auto jvp_adaptive_avgpool_3d(const DualTensor& x, int64_t output_d, int64_t outp
 auto jvp_sdpa_forward(const DualTensor& Q,
                       const DualTensor& K,
                       const DualTensor& V,
-                      float scale,
+                      double scale,
                       bool causal) -> DualTensor;
 /// @}
 

@@ -212,8 +212,29 @@ auto FSDPUnit::unflatten_params() -> void {
                 .contiguous()
                 .reshape(shape);
 
-        // Update the parameter's underlying tensor
-        param->tensor() = param_data;
+        // R.18: preserve the parameter's TensorImpl/Storage handle by writing
+        // the new bytes in place. A bare `param->tensor() = param_data` swaps
+        // the impl pointer, so any saved-for-backward activation that captured
+        // the parameter Tensor before this call would see a stale TensorImpl
+        // (frozen on the previous step's values) when the backward kernel
+        // later reads it. zero_() + add_() is the codebase's public copy_
+        // surrogate (cf. zero_optimizer.cpp:2834-2835) and keeps the same
+        // TensorImpl/Storage alive.
+        auto& dst = param->tensor();
+        bool same_layout = dst.is_valid() &&
+                           dst.dtype() == param_data.dtype() &&
+                           dst.device() == param_data.device() &&
+                           dst.numel() == param_data.numel() &&
+                           std::vector<int64_t>(dst.shape().begin(), dst.shape().end()) == shape;
+        if (same_layout) {
+            dst.zero_();
+            add_(dst, param_data);
+        } else {
+            // First-ever materialization (or shape changed): no outstanding
+            // saved-activation references can exist yet, so reassignment is
+            // safe.
+            dst = param_data;
+        }
         offset += numel;
     }
 }

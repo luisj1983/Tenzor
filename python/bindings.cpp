@@ -1258,22 +1258,37 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("state"),
              "Load scaler state from dictionary");
 
-    // Autocast context manager — uses a wrapper to defer activation to __enter__
+    // Autocast context manager — uses a wrapper to defer activation to __enter__.
+    // R.23: stack of guards so nested `with autocast: with autocast: ...` on
+    // the same instance stacks correctly. A single unique_ptr would silently
+    // overwrite the outer guard's saved state on the second __enter__.
+    //
+    // The copy ctor must be explicitly deleted: ``std::vector<unique_ptr<...>>``
+    // is declaration-copyable but fails at instantiation; the original
+    // ``unique_ptr`` field carried an implicit-delete that the vector form
+    // does not. Without the explicit delete pybind11 would instantiate the
+    // copy path for ``__enter__ -> Self&`` and fail to compile.
     struct PyAutocastContext {
         bool enabled_;
         tenzor::DType dtype_;
         tenzor::Device::Type device_type_;
-        std::unique_ptr<tenzor::nn::amp::Autocast> guard_;
+        std::vector<std::unique_ptr<tenzor::nn::amp::Autocast>> guard_stack_;
 
         PyAutocastContext(bool enabled, tenzor::DType dtype, tenzor::Device::Type device_type)
             : enabled_(enabled), dtype_(dtype), device_type_(device_type) {}
 
+        PyAutocastContext(const PyAutocastContext&) = delete;
+        PyAutocastContext& operator=(const PyAutocastContext&) = delete;
+
         void enter() {
-            guard_ = std::make_unique<tenzor::nn::amp::Autocast>(enabled_, dtype_, device_type_);
+            guard_stack_.push_back(
+                std::make_unique<tenzor::nn::amp::Autocast>(enabled_, dtype_, device_type_));
         }
 
         void exit() {
-            guard_.reset();  // Destructor restores previous state
+            if (!guard_stack_.empty()) {
+                guard_stack_.pop_back();  // LIFO destructor restores prior state
+            }
         }
     };
 

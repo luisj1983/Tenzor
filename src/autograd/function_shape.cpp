@@ -281,9 +281,45 @@ auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto SliceBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Same as tensor-level backward but wrapping with requires_grad=true
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. The first-order backward is a scatter
+    // (linear in grad_output) of grad_output into a zero tensor of the
+    // original input shape; the index tensor depends only on saved
+    // start/end/step/dim and is non-differentiable. Compose the same math
+    // through Variable-level `scatter` so the resulting Variable carries a
+    // live grad_fn — `create_graph=true` users now get second-order grads
+    // instead of silent zeros.
+    if (dim_ < 0) {
+        dim_ += static_cast<int64_t>(input_shape_.size());
+    }
+    const Variable& grad_out_var = grad_outputs[0];
+    const Tensor& grad_output_raw = grad_out_var.tensor();
+    Tensor grad_t = grad_output_raw.is_contiguous() ? grad_output_raw
+                                                   : grad_output_raw.contiguous();
+    Variable grad_var = grad_t.data_ptr() == grad_output_raw.data_ptr()
+                            ? grad_out_var
+                            : Variable(grad_t, grad_out_var.requires_grad());
+
+    int64_t slice_size = grad_t.shape()[dim_];
+    int64_t total_elements = grad_t.numel();
+    auto index_shape = std::vector<int64_t>(grad_t.shape().begin(), grad_t.shape().end());
+    auto index = zeros(index_shape, DType::Int64, Device::cpu());
+    int64_t* index_ptr = index.data<int64_t>();
+    int64_t dim_stride = 1;
+    for (int64_t d = dim_ + 1; d < grad_t.ndim(); ++d) {
+        dim_stride *= grad_t.shape()[d];
+    }
+    for (int64_t i = 0; i < total_elements; ++i) {
+        int64_t pos_in_dim = (i / dim_stride) % slice_size;
+        index_ptr[i] = start_ + pos_in_dim * step_;
+    }
+    if (grad_t.device() != Device::cpu()) {
+        index = index.to(grad_t.device());
+    }
+
+    auto zeros_t = zeros(input_shape_, grad_t.dtype(), grad_t.device());
+    Variable zeros_var(zeros_t, /*requires_grad=*/false);
+    auto grad_input = tenzor::scatter(zeros_var, dim_, index, grad_var);
+    return {grad_input};
 }
 
 // UpsampleBilinearBackward implementation

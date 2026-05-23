@@ -353,7 +353,7 @@ auto abs(const Variable& input) -> Variable {
     return output;
 }
 
-auto clamp(const Variable& input, float min, float max) -> Variable {
+auto clamp(const Variable& input, double min, double max) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::clamp(input.tensor(), min, max), false);
     }
@@ -974,14 +974,17 @@ auto unary_autograd_save_output(const Variable& input, TensorOp&& tensor_op) -> 
     return output;
 }
 
-// Variant that saves input + a scalar parameter as a second tensor
-template<typename BackwardT, typename TensorOp>
-auto unary_autograd_with_param(const Variable& input, float param, TensorOp&& tensor_op) -> Variable {
+// Variant that saves input + a scalar parameter as a second tensor.
+// `Scalar` is a template parameter (typically float for activations whose
+// public API still takes float — elu/leaky_relu/softplus — and double for
+// the Float64-precision-preserving pow path; see audit-3 R.1).
+template<typename BackwardT, typename TensorOp, typename Scalar>
+auto unary_autograd_with_param(const Variable& input, Scalar param, TensorOp&& tensor_op) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tensor_op(input.tensor()), false);
     }
     auto grad_fn = std::make_shared<BackwardT>();
-    auto param_tensor = full({1}, param, input.tensor().dtype(), input.tensor().device());
+    auto param_tensor = full({1}, static_cast<double>(param), input.tensor().dtype(), input.tensor().device());
     grad_fn->save_for_backward({input.tensor(), param_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1080,7 +1083,7 @@ auto sqrt(const Variable& input) -> Variable {
         [](const Tensor& t) { return tenzor::sqrt(t); });
 }
 
-auto pow(const Variable& input, float exponent) -> Variable {
+auto pow(const Variable& input, double exponent) -> Variable {
     return unary_autograd_with_param<PowBackward>(input, exponent,
         [exponent](const Tensor& t) { return tenzor::pow(t, exponent); });
 }
@@ -1283,12 +1286,15 @@ auto min(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     return output;
 }
 
-auto std(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+auto std(const Variable& input, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::std(input.tensor(), dim, keepdim), false);
+        return Variable(tenzor::std(input.tensor(), dim, keepdim, unbiased), false);
     }
-    auto result = tenzor::std(input.tensor(), dim, keepdim);
-    auto grad_fn = std::make_shared<StdBackward>(dim, keepdim);
+    auto result = tenzor::std(input.tensor(), dim, keepdim, unbiased);
+    // R.3: thread unbiased through to the backward so the denominator
+    // matches the forward (N-1 when unbiased=true; N when false). The
+    // flag is also surfaced via saved_attributes() (R.8).
+    auto grad_fn = std::make_shared<StdBackward>(dim, keepdim, unbiased);
     // StdBackward reads dim from saved_tensors_[2] when present; saving it
     // keeps the reduction axis correct for dim-specific gradients.
     std::vector<Tensor> saved = {input.tensor(), result};
@@ -1305,12 +1311,15 @@ auto std(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     return output;
 }
 
-auto var(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+auto var(const Variable& input, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::var(input.tensor(), dim, keepdim), false);
+        return Variable(tenzor::var(input.tensor(), dim, keepdim, unbiased), false);
     }
-    auto result = tenzor::var(input.tensor(), dim, keepdim);
-    auto grad_fn = std::make_shared<VarBackward>(dim, keepdim);
+    auto result = tenzor::var(input.tensor(), dim, keepdim, unbiased);
+    // R.3: thread unbiased through to the backward so the denominator
+    // matches the forward (N-1 when unbiased=true; N when false). The
+    // flag is also surfaced via saved_attributes() (R.8).
+    auto grad_fn = std::make_shared<VarBackward>(dim, keepdim, unbiased);
     // VarBackward::backward reads saved_tensors_[0]=input and [1]=result; when a
     // dim is supplied, it optionally reads [2]=dim as an Int64 scalar tensor.
     std::vector<Tensor> saved = {input.tensor(), result};
@@ -2276,8 +2285,14 @@ auto irfft(const Variable& input,
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::fft::irfft(input.tensor(), n, dim, norm), false);
     }
+    // R.7: Save the frequency-bin count of the input *before* the irfft so
+    // the backward can pass it back to rfft. Without this, the backward
+    // would let rfft infer n from the time-domain output length, which is
+    // wrong for any padded/truncated irfft (n != 2*(input_bins-1)).
+    int64_t actual_dim = dim < 0 ? dim + input.tensor().ndim() : dim;
+    int64_t n_orig = input.tensor().shape()[actual_dim];
     auto result = tenzor::fft::irfft(input.tensor(), n, dim, norm);
-    auto grad_fn = std::make_shared<IRFFTBackward>(dim, norm);
+    auto grad_fn = std::make_shared<IRFFTBackward>(dim, norm, n_orig);
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

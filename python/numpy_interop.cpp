@@ -70,11 +70,20 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Complex128: return py::format_descriptor<std::complex<double>>::format();
         case DType::FP8_E4M3:
         case DType::FP8_E5M2:
+            // R.26: FP8 is a sub-byte float, not a quantized integer — there is
+            // no .dequantize() on FP8. Point at the .to(Float32).numpy() path
+            // which is the correct (and only) lossless route.
+            throw ::tenzor::TypeError(
+                std::string("FP8 tensors (dtype ") +
+                std::string(dtype_name(dtype)) +
+                ") cannot be exposed to NumPy directly because NumPy has no "
+                "native FP8 dtype. Cast to Float32 first: "
+                "t.to(DType::Float32).numpy()");
         case DType::QInt4x2:
         case DType::QInt8:
         case DType::QUInt8:
             throw ::tenzor::TypeError(
-                std::string("Quantized/FP8 tensors (dtype ") +
+                std::string("Quantized tensors (dtype ") +
                 std::string(dtype_name(dtype)) +
                 ") cannot be exposed to NumPy directly. Quantized tensors "
                 "must be dequantized before calling .numpy() — use "
@@ -103,6 +112,31 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
             std::string dtype_name = py::str(dtype);
             if (dtype_name.find("bfloat16") != std::string::npos) {
                 return DType::BFloat16;
+            }
+        }
+    }
+
+    // R.26: detect ml_dtypes.float8_e4m3fn / float8_e5m2 (kind='V', itemsize=1).
+    // Without this branch, FP8 NumPy arrays surface as "Unsupported NumPy dtype".
+    if (kind == 'V' && itemsize == 1) {
+        try {
+            auto ml_dtypes = py::module_::import("ml_dtypes");
+            auto e4m3 = ml_dtypes.attr("float8_e4m3fn");
+            if (dtype.equal(py::dtype::from_args(e4m3))) {
+                return DType::FP8_E4M3;
+            }
+            auto e5m2 = ml_dtypes.attr("float8_e5m2");
+            if (dtype.equal(py::dtype::from_args(e5m2))) {
+                return DType::FP8_E5M2;
+            }
+        } catch (const py::error_already_set&) {
+            // ml_dtypes not available — fall back to dtype-name string match.
+            std::string dtype_name = py::str(dtype);
+            if (dtype_name.find("float8_e4m3") != std::string::npos) {
+                return DType::FP8_E4M3;
+            }
+            if (dtype_name.find("float8_e5m2") != std::string::npos) {
+                return DType::FP8_E5M2;
             }
         }
     }

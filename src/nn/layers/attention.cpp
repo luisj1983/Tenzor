@@ -625,7 +625,34 @@ auto MultiheadAttention::forward(const Variable& query,
     Tensor combined_mask;
 
     if (attn_mask.is_valid() && attn_mask.shape().size() > 0) {
-        combined_mask = attn_mask;
+        // R.21: normalise attn_mask to a 4D shape that broadcasts cleanly
+        // against key_padding_mask's [N, 1, 1, Sk] form. PyTorch accepts:
+        //   - 2D [Sq, Sk]            -> [1, 1, Sq, Sk]
+        //   - 3D [N*H, Sq, Sk]       -> [N, H, Sq, Sk]
+        //   - 4D [N, H, Sq, Sk]      (used as-is)
+        // Previously a 3D mask was passed through verbatim; the subsequent
+        // additive combine with the 4D padding mask then crashed on shape
+        // mismatch (the 3D leading dim N*H cannot broadcast to N).
+        auto am_shape = attn_mask.shape();
+        if (am_shape.size() == 2) {
+            std::vector<int64_t> new_shape = {1, 1, am_shape[0], am_shape[1]};
+            combined_mask = reshape(attn_mask, new_shape);
+        } else if (am_shape.size() == 3) {
+            if (am_shape[0] != batch_size * num_heads_) {
+                throw std::invalid_argument(
+                    "MultiheadAttention: 3D attn_mask leading dim (" +
+                    std::to_string(am_shape[0]) + ") must equal batch_size*num_heads (" +
+                    std::to_string(batch_size * num_heads_) + ")");
+            }
+            std::vector<int64_t> new_shape = {batch_size, num_heads_, am_shape[1], am_shape[2]};
+            combined_mask = reshape(attn_mask, new_shape);
+        } else if (am_shape.size() == 4) {
+            combined_mask = attn_mask;
+        } else {
+            throw std::invalid_argument(
+                "MultiheadAttention: attn_mask must be 2D, 3D, or 4D, got " +
+                std::to_string(am_shape.size()) + "D");
+        }
     }
 
     // Add key padding mask if provided

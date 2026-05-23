@@ -4205,7 +4205,7 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
     Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
     // Initialize to zeros
-    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+    CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream));
 
     int64_t total = N * C * H_out * W_out;
     dim3 grid, block;
@@ -4337,7 +4337,7 @@ __global__ void adaptive_max_pool2d_backward_kernel(
 
 auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor {
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
-    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+    CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream));
 
     int64_t total = grad_output.numel();
     dim3 grid, block;
@@ -4500,7 +4500,7 @@ auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices,
     Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
     // Initialize to zeros
-    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+    CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream));
 
     int64_t total_output = grad_output.numel();
     int64_t total_input = grad_input.numel();
@@ -4704,7 +4704,7 @@ auto avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
     Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
     // Initialize to zeros
-    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+    CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream));
 
     int64_t total_output = grad_output.numel();
     dim3 grid, block;
@@ -7356,7 +7356,7 @@ auto imag_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
     // For real dtypes, imaginary part is zero
     Tensor result(shape, input.dtype(), input.device());
-    cudaMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream);
+    CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream));
     return result;
 }
 

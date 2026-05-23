@@ -3651,9 +3651,9 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
     if (p >= 1.0f) {
         // Drop everything
         Tensor output(shape, input.dtype(), input.device());
-        cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(output.dtype()), stream);
+        CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(output.dtype()), stream));
         Tensor mask(shape, DType::UInt8, input.device());
-        cudaMemsetAsync(mask.data_ptr(), 0, mask.numel(), stream);
+        CUDA_CHECK(cudaMemsetAsync(mask.data_ptr(), 0, mask.numel(), stream));
         return {output, mask};
     }
 

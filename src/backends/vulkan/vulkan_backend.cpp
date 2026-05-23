@@ -6,6 +6,7 @@
 #include "vulkan_helpers.hpp"
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
 #include "tenzor/utils/log.hpp"
 #ifdef TENZOR_HAS_VMA
@@ -1249,5 +1250,27 @@ extern "C" {
         return new VulkanBackend();
     }
 }
+
+namespace vulkan {
+
+// R.13: Shared FP64 capability gate for vulkan_ops_*.cpp dispatch sites.
+// Mirrors the L.5 pattern in vulkan_ops_linalg.cpp / vulkan_kernel_registry.cpp.
+void ensure_fp64_supported(int32_t device_id, const char* op_name) {
+    auto* backend = DispatchTableRegistry::get_backend(Device::Type::Vulkan);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] Vulkan backend is not initialised; cannot query shaderFloat64");
+    }
+    auto* vk = static_cast<VulkanBackend*>(backend);
+    DeviceInfo dev_info = vk->get_device_info(device_id);
+    if (!dev_info.supports_fp64) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] requires shaderFloat64 (not supported on this device)");
+    }
+}
+
+} // namespace vulkan
 
 } // namespace tenzor

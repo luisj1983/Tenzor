@@ -1,9 +1,12 @@
 """Type stubs for tenzor.nn.functional module."""
 
 from __future__ import annotations
-from typing import Optional, List, Tuple, Union
+from typing import Any, Callable, Optional, List, Sequence, Tuple, Union
 
-from tenzor import Tensor
+# R.27: the runtime functions in functional.py take and return Variable, not the
+# raw Tensor type. Alias Tensor to Variable here so type checkers see signatures
+# that match the actual runtime objects.
+from tenzor import Variable as Tensor
 
 # ============================================================================
 # Activation functions

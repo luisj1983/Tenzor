@@ -2,10 +2,12 @@
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
+#include <typeinfo>
 
 #ifdef TENZOR_HAS_ONEDNN
 #include <oneapi/dnnl/dnnl.hpp>
 #include <oneapi/dnnl/dnnl_sycl.hpp>
+#include "tenzor/utils/log.hpp"
 #endif
 
 #ifdef TENZOR_HAS_ONEMKL
@@ -333,72 +335,79 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
     Tensor output({N, C_out, D_out, H_out, W_out}, input.dtype(), input.device());
 
-    auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
-    auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
+    // R.14: wrap the oneDNN primitive build/execute in a typed catch so a
+    // dnnl::error escaping queue/stream.wait() does not crash the dispatcher.
+    try {
+        auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
+        auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
-    memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-    memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
-    memory::dims dst_dims = {N, C_out, D_out, H_out, W_out};
-    memory::dims strides_dims = {stride_d, stride_h, stride_w};
-    memory::dims padding_dims = {pad_d, pad_h, pad_w};
-    memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
+        memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
+        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims dst_dims = {N, C_out, D_out, H_out, W_out};
+        memory::dims strides_dims = {stride_d, stride_h, stride_w};
+        memory::dims padding_dims = {pad_d, pad_h, pad_w};
+        memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
-    auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
-                                   groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
+                                       groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
+        auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
 
-    auto conv_desc = (bias != nullptr) ?
-        convolution_forward::desc(
-            prop_kind::forward_inference,
-            algorithm::convolution_direct,
-            src_md, weights_md,
-            memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
-            dst_md,
-            strides_dims, dilation_dims, padding_dims, padding_dims
-        ) :
-        convolution_forward::desc(
-            prop_kind::forward_inference,
-            algorithm::convolution_direct,
-            src_md, weights_md, dst_md,
-            strides_dims, dilation_dims, padding_dims, padding_dims
-        );
+        auto conv_desc = (bias != nullptr) ?
+            convolution_forward::desc(
+                prop_kind::forward_inference,
+                algorithm::convolution_direct,
+                src_md, weights_md,
+                memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+                dst_md,
+                strides_dims, dilation_dims, padding_dims, padding_dims
+            ) :
+            convolution_forward::desc(
+                prop_kind::forward_inference,
+                algorithm::convolution_direct,
+                src_md, weights_md, dst_md,
+                strides_dims, dilation_dims, padding_dims, padding_dims
+            );
 
-    auto conv_pd = convolution_forward::primitive_desc(conv_desc, dnnl_engine);
+        auto conv_pd = convolution_forward::primitive_desc(conv_desc, dnnl_engine);
 
-    auto src_mem = sycl_interop::make_memory(conv_pd.src_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(input.data_ptr()));
-    auto weights_mem = sycl_interop::make_memory(conv_pd.weights_desc(), dnnl_engine,
+        auto src_mem = sycl_interop::make_memory(conv_pd.src_desc(), dnnl_engine,
                                                   sycl_interop::memory_kind::usm,
-                                                  const_cast<void*>(weight.data_ptr()));
-    auto dst_mem = sycl_interop::make_memory(conv_pd.dst_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(output.data_ptr()));
+                                                  const_cast<void*>(input.data_ptr()));
+        auto weights_mem = sycl_interop::make_memory(conv_pd.weights_desc(), dnnl_engine,
+                                                      sycl_interop::memory_kind::usm,
+                                                      const_cast<void*>(weight.data_ptr()));
+        auto dst_mem = sycl_interop::make_memory(conv_pd.dst_desc(), dnnl_engine,
+                                                  sycl_interop::memory_kind::usm,
+                                                  const_cast<void*>(output.data_ptr()));
 
-    auto conv_prim = convolution_forward(conv_pd);
+        auto conv_prim = convolution_forward(conv_pd);
 
-    if (bias != nullptr) {
-        auto bias_mem = sycl_interop::make_memory(
-            memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
-            dnnl_engine, sycl_interop::memory_kind::usm,
-            const_cast<void*>(bias->data_ptr()));
+        if (bias != nullptr) {
+            auto bias_mem = sycl_interop::make_memory(
+                memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+                dnnl_engine, sycl_interop::memory_kind::usm,
+                const_cast<void*>(bias->data_ptr()));
 
-        conv_prim.execute(dnnl_stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_WEIGHTS, weights_mem},
-            {DNNL_ARG_BIAS, bias_mem},
-            {DNNL_ARG_DST, dst_mem}
-        });
-    } else {
-        conv_prim.execute(dnnl_stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_WEIGHTS, weights_mem},
-            {DNNL_ARG_DST, dst_mem}
-        });
+            conv_prim.execute(dnnl_stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_BIAS, bias_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        } else {
+            conv_prim.execute(dnnl_stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        }
+
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        TENZOR_LOG_ERROR("[oneDNN conv3d_forward] {} ({})", typeid(e).name(), e.what());
+        throw;
     }
-
-    dnnl_stream.wait();
     return output;
 }
 
@@ -440,54 +449,60 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
-    auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
-    auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
+    // R.14: wrap the oneDNN primitive build/execute in a typed catch.
+    try {
+        auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
+        auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
-    memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-    memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
-    memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
-    memory::dims strides_dims = {stride_d, stride_h, stride_w};
-    memory::dims padding_dims = {pad_d, pad_h, pad_w};
-    memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
+        memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
+        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
+        memory::dims strides_dims = {stride_d, stride_h, stride_w};
+        memory::dims padding_dims = {pad_d, pad_h, pad_w};
+        memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
-    auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
-                                   groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
+                                       groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
+        auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
 
-    // Forward descriptor (needed for backward)
-    auto conv_fwd_desc = convolution_forward::desc(
-        prop_kind::forward_training,
-        algorithm::convolution_direct,
-        src_md, weights_md, dst_md,
-        strides_dims, dilation_dims, padding_dims, padding_dims);
-    auto conv_fwd_pd = convolution_forward::primitive_desc(conv_fwd_desc, dnnl_engine);
+        // Forward descriptor (needed for backward)
+        auto conv_fwd_desc = convolution_forward::desc(
+            prop_kind::forward_training,
+            algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+        auto conv_fwd_pd = convolution_forward::primitive_desc(conv_fwd_desc, dnnl_engine);
 
-    auto conv_bwd_data_desc = convolution_backward_data::desc(
-        algorithm::convolution_direct,
-        src_md, weights_md, dst_md,
-        strides_dims, dilation_dims, padding_dims, padding_dims);
-    auto conv_bwd_data_pd = convolution_backward_data::primitive_desc(
-        conv_bwd_data_desc, dnnl_engine, conv_fwd_pd);
+        auto conv_bwd_data_desc = convolution_backward_data::desc(
+            algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+        auto conv_bwd_data_pd = convolution_backward_data::primitive_desc(
+            conv_bwd_data_desc, dnnl_engine, conv_fwd_pd);
 
-    auto diff_src_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_src_desc(), dnnl_engine,
-                                                   sycl_interop::memory_kind::usm,
-                                                   const_cast<void*>(grad_input.data_ptr()));
-    auto weights_mem = sycl_interop::make_memory(conv_bwd_data_pd.weights_desc(), dnnl_engine,
-                                                  sycl_interop::memory_kind::usm,
-                                                  const_cast<void*>(weight.data_ptr()));
-    auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_dst_desc(), dnnl_engine,
-                                                   sycl_interop::memory_kind::usm,
-                                                   const_cast<void*>(grad_output.data_ptr()));
+        auto diff_src_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_src_desc(), dnnl_engine,
+                                                       sycl_interop::memory_kind::usm,
+                                                       const_cast<void*>(grad_input.data_ptr()));
+        auto weights_mem = sycl_interop::make_memory(conv_bwd_data_pd.weights_desc(), dnnl_engine,
+                                                      sycl_interop::memory_kind::usm,
+                                                      const_cast<void*>(weight.data_ptr()));
+        auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_dst_desc(), dnnl_engine,
+                                                       sycl_interop::memory_kind::usm,
+                                                       const_cast<void*>(grad_output.data_ptr()));
 
-    auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
-    conv_bwd_data_prim.execute(dnnl_stream, {
-        {DNNL_ARG_DIFF_DST, diff_dst_mem},
-        {DNNL_ARG_WEIGHTS, weights_mem},
-        {DNNL_ARG_DIFF_SRC, diff_src_mem}
-    });
+        auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
+        conv_bwd_data_prim.execute(dnnl_stream, {
+            {DNNL_ARG_DIFF_DST, diff_dst_mem},
+            {DNNL_ARG_WEIGHTS, weights_mem},
+            {DNNL_ARG_DIFF_SRC, diff_src_mem}
+        });
 
-    dnnl_stream.wait();
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        TENZOR_LOG_ERROR("[oneDNN conv3d_backward_input] {} ({})", typeid(e).name(), e.what());
+        throw;
+    }
     return grad_input;
 }
 
@@ -526,53 +541,59 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
     Tensor grad_weight(weight_shape, input.dtype(), input.device());
 
-    auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
-    auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
+    // R.14: wrap the oneDNN primitive build/execute in a typed catch.
+    try {
+        auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
+        auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
-    memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-    memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
-    memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
-    memory::dims strides_dims = {stride_d, stride_h, stride_w};
-    memory::dims padding_dims = {pad_d, pad_h, pad_w};
-    memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
+        memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
+        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
+        memory::dims strides_dims = {stride_d, stride_h, stride_w};
+        memory::dims padding_dims = {pad_d, pad_h, pad_w};
+        memory::dims dilation_dims = {dil_d - 1, dil_h - 1, dil_w - 1};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
-    auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
-                                   groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::ncdhw);
+        auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
+                                       groups == 1 ? memory::format_tag::oidhw : memory::format_tag::goidhw);
+        auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::ncdhw);
 
-    auto conv_fwd_desc = convolution_forward::desc(
-        prop_kind::forward_training,
-        algorithm::convolution_direct,
-        src_md, weights_md, dst_md,
-        strides_dims, dilation_dims, padding_dims, padding_dims);
-    auto conv_fwd_pd = convolution_forward::primitive_desc(conv_fwd_desc, dnnl_engine);
+        auto conv_fwd_desc = convolution_forward::desc(
+            prop_kind::forward_training,
+            algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+        auto conv_fwd_pd = convolution_forward::primitive_desc(conv_fwd_desc, dnnl_engine);
 
-    auto conv_bwd_weights_desc = convolution_backward_weights::desc(
-        algorithm::convolution_direct,
-        src_md, weights_md, dst_md,
-        strides_dims, dilation_dims, padding_dims, padding_dims);
-    auto conv_bwd_weights_pd = convolution_backward_weights::primitive_desc(
-        conv_bwd_weights_desc, dnnl_engine, conv_fwd_pd);
+        auto conv_bwd_weights_desc = convolution_backward_weights::desc(
+            algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+        auto conv_bwd_weights_pd = convolution_backward_weights::primitive_desc(
+            conv_bwd_weights_desc, dnnl_engine, conv_fwd_pd);
 
-    auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(input.data_ptr()));
-    auto diff_weights_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_weights_desc(), dnnl_engine,
+        auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
+                                                  sycl_interop::memory_kind::usm,
+                                                  const_cast<void*>(input.data_ptr()));
+        auto diff_weights_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_weights_desc(), dnnl_engine,
+                                                           sycl_interop::memory_kind::usm,
+                                                           const_cast<void*>(grad_weight.data_ptr()));
+        auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_dst_desc(), dnnl_engine,
                                                        sycl_interop::memory_kind::usm,
-                                                       const_cast<void*>(grad_weight.data_ptr()));
-    auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_dst_desc(), dnnl_engine,
-                                                   sycl_interop::memory_kind::usm,
-                                                   const_cast<void*>(grad_output.data_ptr()));
+                                                       const_cast<void*>(grad_output.data_ptr()));
 
-    auto conv_bwd_weights_prim = convolution_backward_weights(conv_bwd_weights_pd);
-    conv_bwd_weights_prim.execute(dnnl_stream, {
-        {DNNL_ARG_SRC, src_mem},
-        {DNNL_ARG_DIFF_DST, diff_dst_mem},
-        {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem}
-    });
+        auto conv_bwd_weights_prim = convolution_backward_weights(conv_bwd_weights_pd);
+        conv_bwd_weights_prim.execute(dnnl_stream, {
+            {DNNL_ARG_SRC, src_mem},
+            {DNNL_ARG_DIFF_DST, diff_dst_mem},
+            {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem}
+        });
 
-    dnnl_stream.wait();
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        TENZOR_LOG_ERROR("[oneDNN conv3d_backward_weight] {} ({})", typeid(e).name(), e.what());
+        throw;
+    }
     return grad_weight;
 }
 

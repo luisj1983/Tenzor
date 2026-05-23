@@ -59,7 +59,7 @@ __device__ inline void dev_store_compute(__nv_bfloat16* p, int64_t i, float v) {
 static inline Tensor create_zeros_cuda(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
-    cudaMemsetAsync(t.data_ptr(), 0, bytes, stream);
+    CUDA_CHECK(cudaMemsetAsync(t.data_ptr(), 0, bytes, stream));
     return t;
 }
 

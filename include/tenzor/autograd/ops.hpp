@@ -215,7 +215,7 @@ auto abs(const Variable& input) -> Variable;
  *
  * @see ClampBackward for gradient implementation
  */
-auto clamp(const Variable& input, float min, float max) -> Variable;
+auto clamp(const Variable& input, double min, double max) -> Variable;
 
 // ============================================================================
 // Activation Functions
@@ -513,7 +513,7 @@ auto softplus(const Variable& input, float beta = 1.0f) -> Variable;
 auto sqrt(const Variable& input) -> Variable;
 
 /// Power with scalar exponent. Grad: n*x^(n-1)
-auto pow(const Variable& input, float exponent) -> Variable;
+auto pow(const Variable& input, double exponent) -> Variable;
 
 /// Reciprocal: 1/x. Grad: -1/x²
 auto reciprocal(const Variable& input) -> Variable;
@@ -601,11 +601,13 @@ auto atan2(const Variable& y, const Variable& x) -> Variable;
 /// Min reduction along dimension
 auto min(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
 
-/// Standard deviation. Grad: (x-mean)/(N*std)
-auto std(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+/// Standard deviation. Grad: grad * (x-mean) / ((N-1)*std) when unbiased=true; / (N*std) when unbiased=false.
+auto std(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false,
+         bool unbiased = true) -> Variable;
 
-/// Variance. Grad: 2*(x-mean)/N
-auto var(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+/// Variance. Grad: 2 * grad * (x-mean) / (N-1) when unbiased=true; / N when unbiased=false.
+auto var(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false,
+         bool unbiased = true) -> Variable;
 
 /// Product reduction. Grad: prod/x (with zero handling)
 auto prod(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;

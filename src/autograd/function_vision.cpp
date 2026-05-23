@@ -17,6 +17,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -85,6 +86,18 @@ auto AffineGridBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
 }
 
 auto GridSampleBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // R.5 — honest higher-order stub. The first-order backward is an
+    // opaque per-backend kernel (OpId::GridSampleBackward) taking
+    // (input, grid, grad_output) and returning (grad_input, grad_grid).
+    // No Variable-level composition expresses the second derivative
+    // without dedicated `GridSampleBackwardBackward` kernels per backend
+    // (not yet shipped). Surface limitation via WARN_ONCE +
+    // is_higher_order_stub() so the engine counter fires instead of
+    // silently zeroing higher-order grads.
+    TENZOR_WARN_ONCE(
+        "[GridSampleBackward] higher-order backward is a stub — no "
+        "Variable-level composition of OpId::GridSampleBackward exists; "
+        "second-order grads will be zero.");
     auto result_tensors = backward({grad_outputs[0].tensor()});
     std::vector<Variable> results;
     results.reserve(result_tensors.size());
@@ -95,6 +108,14 @@ auto GridSampleBackward::backward_with_variables(std::vector<Variable> grad_outp
 }
 
 auto AffineGridBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // R.5 — honest higher-order stub. AffineGrid's first-order backward is
+    // a per-backend opaque kernel (OpId::AffineGridBackward); no
+    // Variable-level decomposition is available without dedicated
+    // second-order kernels per backend.
+    TENZOR_WARN_ONCE(
+        "[AffineGridBackward] higher-order backward is a stub — no "
+        "Variable-level composition of OpId::AffineGridBackward exists; "
+        "second-order grads will be zero.");
     auto result_tensors = backward({grad_outputs[0].tensor()});
     std::vector<Variable> results;
     results.reserve(result_tensors.size());

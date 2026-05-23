@@ -1911,13 +1911,22 @@ Returns:
                 return t;
             };
 
-            // Helper: check if a py::object is a fancy-index element (list or int Tensor)
+            // Helper: check if a py::object is a fancy-index element (list,
+            // int Tensor, or int-dtype Variable). R.30: Variable wraps Tensor
+            // but is a distinct pybind11 type — without this branch
+            // ``x[some_variable_idx]`` fell through to the slice path and
+            // silently produced wrong results.
             auto is_fancy_element = [](py::object obj) -> bool {
                 if (py::isinstance<py::list>(obj)) return true;
                 if (py::isinstance<tenzor::Tensor>(obj)) {
                     auto t = obj.cast<tenzor::Tensor>();
                     return t.dtype() == tenzor::DType::Int32 ||
                            t.dtype() == tenzor::DType::Int64;
+                }
+                if (py::isinstance<tenzor::Variable>(obj)) {
+                    auto var = obj.cast<tenzor::Variable>();
+                    auto dt = var.tensor().dtype();
+                    return dt == tenzor::DType::Int32 || dt == tenzor::DType::Int64;
                 }
                 return false;
             };
@@ -1968,6 +1977,19 @@ Returns:
                                 throw std::runtime_error(
                                     "Tensor index must be integer dtype (Int32/Int64), not boolean or float");
                             }
+                        } else if (py::isinstance<tenzor::Variable>(indices[i])) {
+                            // R.30: unwrap Variable to its underlying Tensor; only
+                            // integer dtypes are valid for fancy indexing. Take
+                            // by value — the indices[i] accessor returns a
+                            // temporary py::object that owns the Variable.
+                            auto var = indices[i].cast<tenzor::Variable>();
+                            auto t = var.tensor();
+                            if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                                fancy_indices.push_back(t);
+                            } else {
+                                throw std::runtime_error(
+                                    "Variable index must wrap an integer dtype (Int32/Int64), not boolean or float");
+                            }
                         } else if (py::isinstance<py::slice>(indices[i])) {
                             // Slice in a fancy-index context => nullopt (full dim passthrough)
                             fancy_indices.push_back(std::nullopt);
@@ -2014,6 +2036,18 @@ Returns:
                 auto t = key.cast<tenzor::Tensor>();
                 if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
                     // Integer tensor -> fancy index on dim 0
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.push_back(t);
+                } else {
+                    kind = IndexKind::TensorMask;
+                    mask_tensor = t;
+                }
+            } else if (py::isinstance<tenzor::Variable>(key)) {
+                // R.30: bare Variable index — unwrap to its underlying Tensor
+                // and dispatch as either fancy or mask depending on dtype.
+                auto var = key.cast<tenzor::Variable>();
+                auto t = var.tensor();
+                if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
                     kind = IndexKind::FancyIndex;
                     fancy_indices.push_back(t);
                 } else {
@@ -4123,16 +4157,27 @@ Returns:
           "Set global gradient computation state");
 
     // Python-friendly context manager wrapper for no_grad
-    // NoGradGuard is not movable/copyable, so we wrap it in a class that manages its lifetime
+    // NoGradGuard is not movable/copyable, so we wrap it in a class that manages its lifetime.
+    // R.23: stack the guards so nested `with no_grad: with no_grad: ...` on the
+    // same instance stacks correctly. A single unique_ptr would corrupt the
+    // outer's saved state on the second __enter__. The explicit deleted copy
+    // ctor preserves the previous (implicit-delete) behaviour now that the
+    // field is ``vector<unique_ptr>`` rather than a bare ``unique_ptr``.
     struct PyNoGradContext {
-        std::unique_ptr<tenzor::NoGradGuard> guard_;
+        std::vector<std::unique_ptr<tenzor::NoGradGuard>> guard_stack_;
+
+        PyNoGradContext() = default;
+        PyNoGradContext(const PyNoGradContext&) = delete;
+        PyNoGradContext& operator=(const PyNoGradContext&) = delete;
 
         void enter() {
-            guard_ = std::make_unique<tenzor::NoGradGuard>();
+            guard_stack_.push_back(std::make_unique<tenzor::NoGradGuard>());
         }
 
         void exit() {
-            guard_.reset();
+            if (!guard_stack_.empty()) {
+                guard_stack_.pop_back();  // LIFO destructor restores prior state
+            }
         }
     };
 
@@ -4172,17 +4217,23 @@ Returns:
             return wrapper;
         }, py::arg("func"));
 
-    // Python-friendly context manager for enable_grad
+    // Python-friendly context manager for enable_grad.
+    // R.23: LIFO stack of prior states so nested re-entry on the same instance
+    // restores the correct value on exit.
     struct PyEnableGradContext {
-        bool prev_state_ = false;
+        std::vector<bool> prev_state_stack_;
 
         void enter() {
-            prev_state_ = tenzor::is_grad_enabled();
+            prev_state_stack_.push_back(tenzor::is_grad_enabled());
             tenzor::set_grad_enabled(true);
         }
 
         void exit() {
-            tenzor::set_grad_enabled(prev_state_);
+            if (!prev_state_stack_.empty()) {
+                bool prev = prev_state_stack_.back();
+                prev_state_stack_.pop_back();
+                tenzor::set_grad_enabled(prev);
+            }
         }
     };
 

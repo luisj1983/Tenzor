@@ -15,6 +15,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -32,16 +33,35 @@ namespace tenzor {
 // ============================================================================
 
 auto SpMMBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Compute gradient at Tensor level (sparse matrix is a constant, no graph needed through it)
-    // but wrap result as a Variable that preserves requires_grad for graph continuity
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward: Y = S @ D with S sparse (const).
+    // Backward: grad_D = S^T @ grad_Y. S^T is saved as a constant SparseTensor
+    // (set via set_sparse_transposed); compose via the autograd-aware
+    // `tenzor::spmm(SparseTensor, Variable)` so grad_fn stays live through
+    // the dense Variable — `create_graph=true` users now get real
+    // higher-order grads.
+    if (!sparse_transposed_.has_value()) {
+        TENZOR_WARN_ONCE(
+            "[SpMMBackward] missing sparse_transposed_; falling back to "
+            "tensor-level backward (higher-order will be zero).");
+        auto result_tensors = backward({grad_outputs[0].tensor()});
+        return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    }
+    auto grad_D = tenzor::spmm(*sparse_transposed_, grad_outputs[0]);
+    return {grad_D};
 }
 
 auto SpMVBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Same pattern as SpMM — sparse matrix is constant, gradient flows through dense input only
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite mirroring SpMM. Forward y = S @ v.
+    // Backward grad_v = S^T @ grad_y, dispatched via autograd-aware spmv.
+    if (!sparse_transposed_.has_value()) {
+        TENZOR_WARN_ONCE(
+            "[SpMVBackward] missing sparse_transposed_; falling back to "
+            "tensor-level backward (higher-order will be zero).");
+        auto result_tensors = backward({grad_outputs[0].tensor()});
+        return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    }
+    auto grad_v = tenzor::spmv(*sparse_transposed_, grad_outputs[0]);
+    return {grad_v};
 }
 
 // ============================================================================
@@ -158,11 +178,24 @@ auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto SpGEMMBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    std::vector<Variable> results;
-    results.reserve(result_tensors.size());
-    for (auto& t : result_tensors) {
-        results.emplace_back(t, grad_outputs[0].requires_grad());
+    // R.5 — Variable-level rewrite. Forward C = A @ B (both sparse). A, B
+    // are saved as constant transposes (sparse_b_t_, sparse_a_t_). Dense
+    // grads:
+    //   grad_A = grad_C @ B^T  ==  spmm(B^T, grad_C)
+    //   grad_B = A^T @ grad_C  ==  spmm(A^T, grad_C)
+    // Run the tensor backward first to retain the existing sparse_grad
+    // accumulation side-effect (for SparseAdam), then recompute the
+    // returned dense grads at Variable level so grad_fn flows through
+    // grad_outputs[0].
+    auto _side = backward({grad_outputs[0].tensor()});
+    (void)_side;
+
+    std::vector<Variable> results(2);
+    if (sparse_b_t_.has_value()) {
+        results[0] = tenzor::spmm(*sparse_b_t_, grad_outputs[0]);
+    }
+    if (sparse_a_t_.has_value()) {
+        results[1] = tenzor::spmm(*sparse_a_t_, grad_outputs[0]);
     }
     return results;
 }
@@ -189,8 +222,18 @@ auto SparseTriSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::
 }
 
 auto SparseTriSolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward x = L^{-1} @ b (or U^{-1} @ b).
+    // L (or U) is a saved constant sparse triangular matrix.  Adjoint:
+    //   grad_b = L^{-T} @ grad_x  (lower)  i.e. solve L^T y = grad_x
+    //   grad_b = U^{-T} @ grad_x  (upper)  i.e. solve U^T y = grad_x
+    // `sparse_l_t_` already stores the transposed factor; the autograd-
+    // aware `tenzor::sparse_triangular_solve(SparseTensor, Variable, bool)`
+    // keeps grad_fn live through grad_outputs[0].
+    if (!sparse_l_t_.has_value()) {
+        return {grad_outputs[0]};
+    }
+    auto grad_b = tenzor::sparse_triangular_solve(*sparse_l_t_, grad_outputs[0], !upper_);
+    return {grad_b};
 }
 
 // ============================================================================
@@ -306,8 +349,27 @@ auto SparseSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
 
 auto SparseSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward Y = sparse_softmax(X). Backward
+    //   grad_X = (grad_Y - sum(grad_Y * Y, dim=last, keepdim=true)) * Y * mask
+    // Y (dense materialised) and mask (sparsity 0/1) depend only on saved
+    // forward state — non-diff constants. Variable mul / sub / sum keep
+    // grad_fn live on grad_outputs[0].
+    if (!output_sparse_.has_value()) {
+        throw std::runtime_error("SparseSoftmaxBackward: output_sparse_ not set");
+    }
+    require_saved_tensors(1);
+    const Tensor& mask_t = saved_tensors()[0];
+    auto y_dense = output_sparse_->to_dense();
+    Variable y_var(y_dense, /*requires_grad=*/false);
+    Variable mask_var(mask_t, /*requires_grad=*/false);
+
+    const int64_t last_dim = static_cast<int64_t>(y_dense.shape().size()) - 1;
+    auto gy_y = grad_outputs[0] * y_var;
+    auto row_sum = tenzor::sum(gy_y, last_dim, /*keepdim=*/true);
+    auto diff = grad_outputs[0] - row_sum;
+    auto grad_x = diff * y_var;
+    grad_x = grad_x * mask_var;
+    return {grad_x};
 }
 
 // ============================================================================
@@ -360,8 +422,25 @@ auto SparseLogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std
 
 auto SparseLogSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // R.5 — Variable-level rewrite. Forward Y = sparse_log_softmax(X):
+    //   grad_X = (grad_Y * mask) - (exp(Y) * mask) * sum(grad_Y * mask, dim=last, keepdim=true)
+    // exp(Y) * mask zeros off-pattern exp(0)=1 contributions. Y, mask are
+    // non-diff constants.
+    if (!output_sparse_.has_value()) {
+        throw std::runtime_error("SparseLogSoftmaxBackward: output_sparse_ not set");
+    }
+    require_saved_tensors(1);
+    const Tensor& mask_t = saved_tensors()[0];
+    auto y_dense = output_sparse_->to_dense();
+    Variable mask_var(mask_t, /*requires_grad=*/false);
+    Variable exp_y_masked_var(tenzor::exp(y_dense) * mask_t, /*requires_grad=*/false);
+
+    const int64_t last_dim = static_cast<int64_t>(y_dense.shape().size()) - 1;
+    auto grad_y_masked = grad_outputs[0] * mask_var;
+    auto row_sum = tenzor::sum(grad_y_masked, last_dim, /*keepdim=*/true);
+    auto grad_x = grad_y_masked - exp_y_masked_var * row_sum;
+    grad_x = grad_x * mask_var;
+    return {grad_x};
 }
 
 } // namespace tenzor

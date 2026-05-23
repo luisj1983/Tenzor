@@ -16,6 +16,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -407,10 +408,18 @@ auto IndexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto IndexBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // IndexBackward uses index_put with accumulation, which doesn't need
-    // Variable-level scatter_add. Fall through to Tensor-level backward
-    // since advanced indexing backward (index_put) is not differentiable
-    // through the index positions themselves.
+    // R.5 — honest higher-order stub. Advanced (fancy) indexing backward is
+    // implemented as `index_put` with accumulation; the project does not yet
+    // expose a Variable-level multi-tensor `index_put` overload whose
+    // backward closes the loop. Until that lands, the tensor-level path is
+    // mathematically correct for *first* order, but `create_graph=true`
+    // users would silently see zeros. Emit a one-shot warning and report
+    // the stub status through `is_higher_order_stub()` so the engine
+    // counter fires.
+    TENZOR_WARN_ONCE(
+        "[IndexBackward] higher-order backward is a stub — advanced "
+        "(fancy) indexing backward (index_put + accumulate) does not yet "
+        "have a Variable-level overload; second-order grads will be zero.");
     auto result = backward({grad_outputs[0].tensor()});
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }

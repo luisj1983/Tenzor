@@ -117,13 +117,17 @@ def elu(input: Variable, alpha: float = 1.0) -> Variable:
     return _nn.elu(input, alpha)
 
 
-def gelu(input: Variable) -> Variable:
+def gelu(input: Variable, approximate: str = "none") -> Variable:
     """Apply the Gaussian Error Linear Unit function element-wise.
 
     Parameters
     ----------
     input : Variable
         Input tensor.
+    approximate : str, optional
+        ``"none"`` for the exact GELU using the error function (default), or
+        ``"tanh"`` for the tanh-based approximation used in many transformer
+        implementations.
 
     Returns
     -------
@@ -133,8 +137,9 @@ def gelu(input: Variable) -> Variable:
     Example
     -------
     >>> y = F.gelu(x)
+    >>> y = F.gelu(x, approximate="tanh")
     """
-    return _nn.gelu(input)
+    return _nn.gelu(input, approximate)
 
 
 def sigmoid(input: Variable) -> Variable:
@@ -356,10 +361,13 @@ def glu(input: Variable, dim: int = -1) -> Variable:
     return _nn.glu(input, dim)
 
 
-def softplus(input: Variable, beta: float = 1.0) -> Variable:
+def softplus(input: Variable, beta: float = 1.0,
+             threshold: float = 20.0) -> Variable:
     """Apply the Softplus function element-wise.
 
-    Computes ``(1/beta) * log(1 + exp(beta * x))``.
+    Computes ``(1/beta) * log(1 + exp(beta * x))``. For numerical stability,
+    when ``beta * x > threshold`` the output reverts to the linear identity
+    ``x`` (which softplus already approximates to within FP precision there).
 
     Parameters
     ----------
@@ -367,6 +375,9 @@ def softplus(input: Variable, beta: float = 1.0) -> Variable:
         Input tensor.
     beta : float, optional
         Scaling factor.  Default: ``1.0``.
+    threshold : float, optional
+        Switch to a linear-region approximation when ``beta * x > threshold``.
+        Default: ``20.0``.
 
     Returns
     -------
@@ -377,7 +388,7 @@ def softplus(input: Variable, beta: float = 1.0) -> Variable:
     -------
     >>> y = F.softplus(x, beta=1.0)
     """
-    return _nn.softplus(input, beta)
+    return _nn.softplus(input, beta, threshold)
 
 
 # ---------------------------------------------------------------------------

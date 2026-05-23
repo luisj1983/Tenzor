@@ -232,7 +232,30 @@ auto FSDP2::unshard_params() -> void {
         // Find and update the corresponding module parameter
         for (auto& [pname, param] : named_params) {
             if (pname == name && param) {
-                param->tensor() = full;
+                // R.18: preserve param's TensorImpl/Storage when possible so
+                // any saved-for-backward activation that captured the
+                // pre-unshard Tensor (or the unsharded Tensor across a
+                // forward/backward cycle) sees the updated bytes rather
+                // than a stale frozen view. When the unshard/reshard cycle
+                // changes the parameter's shape (the multi-process case),
+                // storage must be replaced -- saved activations would be
+                // size-mismatched anyway, and FSDP2's invariant is that
+                // unshard/reshard happen at activation boundaries.
+                auto& dst = param->tensor();
+                std::vector<int64_t> dst_shape(dst.is_valid() ? std::vector<int64_t>(dst.shape().begin(), dst.shape().end())
+                                                   : std::vector<int64_t>{});
+                std::vector<int64_t> full_shape(full.shape().begin(), full.shape().end());
+                bool same_layout = dst.is_valid() &&
+                                   dst.dtype() == full.dtype() &&
+                                   dst.device() == full.device() &&
+                                   dst.numel() == full.numel() &&
+                                   dst_shape == full_shape;
+                if (same_layout) {
+                    dst.zero_();
+                    add_(dst, full);
+                } else {
+                    dst = full;
+                }
                 break;
             }
         }
@@ -252,7 +275,24 @@ auto FSDP2::reshard_params() -> void {
         // Write the local shard back to the module parameter
         for (auto& [pname, param] : named_params) {
             if (pname == name && param) {
-                param->tensor() = dt.local_tensor();
+                // R.18: same rationale as unshard_params -- prefer in-place
+                // copy to keep TensorImpl identity stable across the cycle.
+                auto local = dt.local_tensor();
+                auto& dst = param->tensor();
+                std::vector<int64_t> dst_shape(dst.is_valid() ? std::vector<int64_t>(dst.shape().begin(), dst.shape().end())
+                                                   : std::vector<int64_t>{});
+                std::vector<int64_t> local_shape(local.shape().begin(), local.shape().end());
+                bool same_layout = dst.is_valid() &&
+                                   dst.dtype() == local.dtype() &&
+                                   dst.device() == local.device() &&
+                                   dst.numel() == local.numel() &&
+                                   dst_shape == local_shape;
+                if (same_layout) {
+                    dst.zero_();
+                    add_(dst, local);
+                } else {
+                    dst = local;
+                }
                 break;
             }
         }

@@ -6,6 +6,22 @@
 
 namespace tenzor::optim {
 
+// R.16: see adam.cpp for the full rationale.
+namespace {
+inline auto optim_state_dtype(DType param_dtype) -> DType {
+    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
+        return DType::Float32;
+    }
+    return param_dtype;
+}
+inline auto make_optim_state(const Tensor& param) -> Tensor {
+    DType state_dt = optim_state_dtype(param.dtype());
+    if (state_dt == param.dtype()) return zeros_like(param);
+    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
+    return zeros(shape, state_dt, param.device());
+}
+} // namespace
+
 LAMB::LAMB(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
            double beta2, double eps, double weight_decay)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2),
@@ -60,15 +76,22 @@ auto LAMB::step_impl() -> void {
 
         const Tensor& grad = param.grad().value();
 
+        // R.16: half-precision params run the math in state_dt (Float32).
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
+
+        Tensor param_hi = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+        Tensor grad_hi  = needs_upcast ? grad.to(state_dt) : grad;
 
         // Update moment estimates (no weight decay in moment computation)
         exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
-                     grad * scalar(1.0 - hp.beta1);
+                     grad_hi * scalar(1.0 - hp.beta1);
         exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
-                        grad * grad * scalar(1.0 - hp.beta2);
+                        grad_hi * grad_hi * scalar(1.0 - hp.beta2);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
@@ -82,12 +105,12 @@ auto LAMB::step_impl() -> void {
 
         // Decoupled weight decay
         if (hp.weight_decay > 0.0) {
-            update = update + param.tensor() * scalar(hp.weight_decay);
+            update = update + param_hi * scalar(hp.weight_decay);
         }
 
         // Compute trust ratio (LAMB scaling)
         // param_norm = ||param||_2, update_norm = ||update||_2
-        auto param_norm_t = sqrt(sum(param.tensor() * param.tensor()));
+        auto param_norm_t = sqrt(sum(param_hi * param_hi));
         auto update_norm_t = sqrt(sum(update * update));
 
         double param_norm = 0.0;
@@ -108,7 +131,8 @@ auto LAMB::step_impl() -> void {
         }
 
         // Apply update with trust ratio
-        param.tensor() = param.tensor() - update * scalar(hp.lr * trust_ratio);
+        Tensor updated = param_hi - update * scalar(hp.lr * trust_ratio);
+        param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
     }
 }
 
@@ -117,8 +141,9 @@ auto LAMB::initialize_buffers() -> void {
     exp_avg_sq_.clear();
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -131,8 +156,9 @@ auto LAMB::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see LAMB::initialize_buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});

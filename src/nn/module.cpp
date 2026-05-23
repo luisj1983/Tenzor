@@ -147,6 +147,12 @@ auto Module::to(DType dtype) -> void {
     for (auto& [_, module] : submodules_) {
         module->to(dtype);
     }
+
+    // R.15: mirror the to(Device) fix — re-propagate train/eval mode to
+    // submodules after the dtype conversion so any freshly-recreated child
+    // (e.g. Dropout) inherits the parent's training flag instead of its
+    // default-constructed training_=true.
+    train(training_);
 }
 
 auto Module::cuda(int device_id) -> void {

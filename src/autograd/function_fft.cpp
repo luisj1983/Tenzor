@@ -335,11 +335,17 @@ auto IRFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto IRFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {fft::rfft(grad_outputs[0], std::nullopt, dim_, invert_fft_norm(norm_))};
+    // R.7: Forward saved the original frequency-bin count so the adjoint
+    // rfft reproduces that exact bin count instead of letting rfft infer
+    // n from the time-domain shape (which differs whenever the forward
+    // irfft used a non-default n).
+    std::optional<int64_t> n_opt = (n_orig_ >= 0) ? std::optional<int64_t>(n_orig_) : std::nullopt;
+    return {fft::rfft(grad_outputs[0], n_opt, dim_, invert_fft_norm(norm_))};
 }
 
 auto IRFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::rfft(grad_outputs[0], std::nullopt, dim_, invert_fft_norm(norm_))};
+    std::optional<int64_t> n_opt = (n_orig_ >= 0) ? std::optional<int64_t>(n_orig_) : std::nullopt;
+    return {fft_autograd::rfft(grad_outputs[0], n_opt, dim_, invert_fft_norm(norm_))};
 }
 
 // ============================================================================

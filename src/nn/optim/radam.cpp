@@ -5,6 +5,22 @@
 
 namespace tenzor::optim {
 
+// R.16: see adam.cpp for the full rationale.
+namespace {
+inline auto optim_state_dtype(DType param_dtype) -> DType {
+    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
+        return DType::Float32;
+    }
+    return param_dtype;
+}
+inline auto make_optim_state(const Tensor& param) -> Tensor {
+    DType state_dt = optim_state_dtype(param.dtype());
+    if (state_dt == param.dtype()) return zeros_like(param);
+    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
+    return zeros(shape, state_dt, param.device());
+}
+} // namespace
+
 RAdam::RAdam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
              double beta2, double eps, double weight_decay)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2),
@@ -63,17 +79,23 @@ auto RAdam::step_impl() -> void {
 
         const Tensor& grad = param.grad().value();
 
+        // R.16: half-precision params run the math in the state dtype.
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         // CPU fallback path — use dtype-appropriate scalar tensors to
         // preserve Float64 precision (static_cast<float> truncates doubles)
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
 
-        auto grad_copy = grad.clone();
+        Tensor param_hi  = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+        Tensor grad_copy = needs_upcast ? grad.to(state_dt) : grad.clone();
 
         // Weight decay (L2 regularization)
         if (hp.weight_decay > 0.0) {
-            grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
+            grad_copy = grad_copy + param_hi * scalar(hp.weight_decay);
         }
 
         // Update biased first moment estimate
@@ -89,6 +111,7 @@ auto RAdam::step_impl() -> void {
         double beta2_t = std::pow(hp.beta2, step_count_);
         double rho_t = rho_inf - 2.0 * step_count_ * beta2_t / (1.0 - beta2_t);
 
+        Tensor updated;
         if (rho_t > 5.0) {
             // Variance is tractable — use rectified Adam update
             double bias_correction2 = 1.0 - beta2_t;
@@ -100,14 +123,13 @@ auto RAdam::step_impl() -> void {
 
             auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
                         + scalar(hp.eps);
-            param.tensor() = param.tensor() -
-                            div(exp_avg_[i], denom) * scalar(step_size);
+            updated = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
         } else {
             // Variance is intractable — use SGD with momentum
             double step_size = hp.lr / bias_correction1;
-            param.tensor() = param.tensor() -
-                            exp_avg_[i] * scalar(step_size);
+            updated = param_hi - exp_avg_[i] * scalar(step_size);
         }
+        param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
     }
 }
 
@@ -117,8 +139,9 @@ auto RAdam::initialize_buffers() -> void {
 
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -131,8 +154,9 @@ auto RAdam::on_parameters_appended_(size_t old_count, size_t new_count) -> void 
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see RAdam::initialize_buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});

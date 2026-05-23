@@ -12,6 +12,29 @@
 
 namespace tenzor::optim {
 
+// R.16: Adam-family optimisers keep moment buffers in Float32 when the
+// parameter is a half-precision dtype (Float16 / BFloat16). Storing
+// exp_avg / exp_avg_sq at the parameter's dtype underflows for eps=1e-8 in
+// Float16 and erodes the BFloat16 mantissa to ~3 bits of effective
+// precision after a few thousand steps. Mirrors PyTorch's master-weights
+// convention used by AMP: the parameter stays in low precision, the
+// optimiser state is upcast. param/grad are upcast inside the step lambda
+// and cast back to param dtype on assignment.
+namespace {
+inline auto optim_state_dtype(DType param_dtype) -> DType {
+    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
+        return DType::Float32;
+    }
+    return param_dtype;
+}
+inline auto make_optim_state(const Tensor& param) -> Tensor {
+    DType state_dt = optim_state_dtype(param.dtype());
+    if (state_dt == param.dtype()) return zeros_like(param);
+    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
+    return zeros(shape, state_dt, param.device());
+}
+} // namespace
+
 // Adam::Adam implementation
 Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
           double beta2, double eps, double weight_decay, bool amsgrad)
@@ -112,17 +135,26 @@ auto Adam::step_impl() -> void {
             continue;
         }
 
+        // R.16: when the parameter is half precision, run the step math in
+        // the state buffer's dtype (Float32). param/grad are upcast on entry
+        // and downcast on write-back; exp_avg / exp_avg_sq already live at
+        // the state dtype.
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         // ── AMSGrad CPU: scalar per-param path (needs per-param maximum()) ──
         if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
             double bc1 = 1.0 - std::pow(hp.beta1, step_count_);
             double bc2 = 1.0 - std::pow(hp.beta2, step_count_);
             double step_size = hp.lr / bc1;
             auto scalar = [&](double value) -> Tensor {
-                return full({1}, value, param.tensor().dtype(), param.tensor().device());
+                return full({1}, value, state_dt, param.tensor().device());
             };
-            auto grad_copy = grad.clone();
+            Tensor param_hi = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+            Tensor grad_copy = needs_upcast ? grad.to(state_dt) : grad.clone();
             if (hp.weight_decay > 0.0)
-                grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
+                grad_copy = grad_copy + param_hi * scalar(hp.weight_decay);
 
             exp_avg_[i]    = exp_avg_[i]    * scalar(hp.beta1) + grad_copy * scalar(1.0 - hp.beta1);
             exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
@@ -131,7 +163,36 @@ auto Adam::step_impl() -> void {
             max_exp_avg_sq_[i] = maximum(max_exp_avg_sq_[i], exp_avg_sq_[i]);
             auto denom = sqrt(max_exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bc2))
                         + scalar(hp.eps);
-            param.tensor() = param.tensor() - div(exp_avg_[i], denom) * scalar(step_size);
+            Tensor updated = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
+            param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
+            continue;
+        }
+
+        // R.16: half-precision params cannot use the foreach fast path
+        // because foreach_lerp_/foreach_addcdiv_ require all the lists to
+        // share dtype with the param. Inline the same Adam update in the
+        // state dtype and skip the bucket. Other dtypes flow through the
+        // foreach batch below unchanged.
+        if (needs_upcast) {
+            double bc1 = 1.0 - std::pow(hp.beta1, step_count_);
+            double bc2 = 1.0 - std::pow(hp.beta2, step_count_);
+            double step_size = hp.lr / bc1;
+            auto scalar = [&](double value) -> Tensor {
+                return full({1}, value, state_dt, param.tensor().device());
+            };
+            Tensor param_hi  = param.tensor().to(state_dt);
+            Tensor grad_copy = grad.to(state_dt);
+            if (hp.weight_decay > 0.0)
+                grad_copy = grad_copy + param_hi * scalar(hp.weight_decay);
+
+            exp_avg_[i]    = exp_avg_[i]    * scalar(hp.beta1) + grad_copy * scalar(1.0 - hp.beta1);
+            exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                             grad_copy * grad_copy * scalar(1.0 - hp.beta2);
+
+            auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bc2))
+                        + scalar(hp.eps);
+            Tensor updated = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
+            param.tensor() = updated.to(param_dt);
             continue;
         }
 
@@ -213,10 +274,11 @@ auto Adam::initialize_buffers() -> void {
 
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         }
     }
@@ -231,10 +293,11 @@ auto Adam::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see Adam::initialize_buffers for the dtype rationale.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         } else {
             exp_avg_.push_back(Tensor{});
@@ -455,13 +518,20 @@ auto AdamW::step_impl() -> void {
             continue;
         }
 
+        // R.16: half-precision params use Float32 state buffers; cast
+        // param/grad to the state dtype for the math, cast back on write.
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         // CPU fallback path — use dtype-appropriate scalar tensors to
         // preserve Float64 precision (static_cast<float> truncates doubles)
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
 
-        auto grad_copy = grad.clone();
+        Tensor param_hi  = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+        Tensor grad_copy = needs_upcast ? grad.to(state_dt) : grad.clone();
 
         // Update biased first moment estimate
         exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
@@ -491,12 +561,12 @@ auto AdamW::step_impl() -> void {
 
         // Decoupled weight decay (AdamW)
         if (hp.weight_decay > 0) {
-            param.tensor() = param.tensor() * scalar(1.0 - hp.lr * hp.weight_decay);
+            param_hi = param_hi * scalar(1.0 - hp.lr * hp.weight_decay);
         }
 
         // Update parameters
-        param.tensor() = param.tensor() -
-                        div(exp_avg_[i], denom) * scalar(step_size);
+        param_hi = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
+        param.tensor() = needs_upcast ? param_hi.to(param_dt) : param_hi;
     }
 }
 
@@ -515,10 +585,11 @@ auto AdamW::initialize_buffers() -> void {
 
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         }
     }
@@ -532,10 +603,11 @@ auto AdamW::on_parameters_appended_(size_t old_count, size_t new_count) -> void 
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see AdamW::initialize_buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         } else {
             exp_avg_.push_back(Tensor{});
