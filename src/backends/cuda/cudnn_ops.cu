@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace tenzor {
@@ -3972,6 +3974,86 @@ struct ConvolutionDescriptorNd {
     }
 };
 
+// audit L.6: RAII wrapper that owns BOTH the cudnnConvolutionDescriptor_t and
+// the std::array<int, 3> storage for padding/stride/dilation. The raw int*
+// pointers handed to cudnnSetConvolutionNdDescriptor() previously aliased
+// lambda-local stack arrays declared at the call site (pad_arr/str_arr/dil_arr).
+// A refactor that moved descriptor setup into a helper without forwarding
+// those arrays would silently leave the descriptor pointing at freed stack
+// memory, with no compile-time diagnostic. Wrapping the arrays here ties
+// their lifetime to the descriptor itself: as long as the CudnnConvNdDesc
+// object is alive, the cuDNN descriptor remains valid.
+//
+// The constructor narrows int64_t -> int with range validation so a
+// pathological input (negative dilation, INT_MAX-sized padding) throws a
+// clean std::runtime_error instead of producing a silently truncated
+// descriptor that cuDNN then misinterprets.
+struct CudnnConvNdDesc {
+    cudnnConvolutionDescriptor_t desc = nullptr;
+    std::array<int, 3> padding{};
+    std::array<int, 3> stride{};
+    std::array<int, 3> dilation{};
+
+    CudnnConvNdDesc(const std::array<int64_t, 3>& pad_in,
+                    const std::array<int64_t, 3>& str_in,
+                    const std::array<int64_t, 3>& dil_in,
+                    cudnnConvolutionMode_t mode,
+                    cudnnDataType_t compute_type) {
+        auto validate_narrow = [](int64_t v, const char* field, int axis) -> int {
+            if (v < 0) {
+                throw std::runtime_error(
+                    std::string("CudnnConvNdDesc: negative ") + field
+                    + " at axis " + std::to_string(axis)
+                    + " (value=" + std::to_string(v) + ")");
+            }
+            if (v > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+                throw std::runtime_error(
+                    std::string("CudnnConvNdDesc: ") + field
+                    + " at axis " + std::to_string(axis)
+                    + " exceeds INT_MAX (value=" + std::to_string(v) + ")");
+            }
+            return static_cast<int>(v);
+        };
+        // Stride and dilation must be >= 1 — cuDNN treats 0 as undefined
+        // behaviour and silently produces garbage output strides.
+        auto validate_positive = [&](int64_t v, const char* field, int axis) -> int {
+            int narrowed = validate_narrow(v, field, axis);
+            if (narrowed < 1) {
+                throw std::runtime_error(
+                    std::string("CudnnConvNdDesc: ") + field
+                    + " at axis " + std::to_string(axis)
+                    + " must be >= 1 (value=" + std::to_string(v) + ")");
+            }
+            return narrowed;
+        };
+        for (int i = 0; i < 3; ++i) {
+            padding[i]  = validate_narrow(pad_in[i],  "padding",  i);
+            stride[i]   = validate_positive(str_in[i], "stride",  i);
+            dilation[i] = validate_positive(dil_in[i], "dilation", i);
+        }
+        CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&desc));
+        CUDNN_CHECK(cudnnSetConvolutionNdDescriptor(
+            desc, /*arrayLength=*/3,
+            padding.data(), stride.data(), dilation.data(),
+            mode, compute_type));
+    }
+
+    ~CudnnConvNdDesc() {
+        if (desc) cudnnDestroyConvolutionDescriptor(desc);
+    }
+
+    CudnnConvNdDesc(const CudnnConvNdDesc&) = delete;
+    CudnnConvNdDesc& operator=(const CudnnConvNdDesc&) = delete;
+
+    // Accessor — the returned descriptor's int* arrays are guaranteed valid
+    // for the lifetime of this CudnnConvNdDesc instance.
+    cudnnConvolutionDescriptor_t handle() const { return desc; }
+
+    void set_group_count(int groups) {
+        CUDNN_CHECK(cudnnSetConvolutionGroupCount(desc, groups));
+    }
+};
+
 auto cudnn_conv3d_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -4018,7 +4100,6 @@ auto cudnn_conv3d_forward(
     // Set up Nd descriptors (5D for Conv3d)
     TensorDescriptorNd input_desc, output_desc;
     FilterDescriptorNd filter_desc;
-    ConvolutionDescriptorNd conv_desc;
 
     std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
     std::vector<int> output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
@@ -4028,10 +4109,11 @@ auto cudnn_conv3d_forward(
     output_desc.set(cudnn_dtype, output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
-    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
-    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
-    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+    // audit L.6: descriptor + int arrays bundled in CudnnConvNdDesc — the
+    // raw int* pointers passed to cudnnSetConvolutionNdDescriptor() live
+    // inside the object instead of on the caller's stack.
+    CudnnConvNdDesc conv_desc(padding, stride, dilation,
+                              CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
         conv_desc.set_group_count(static_cast<int>(groups));
@@ -4039,7 +4121,7 @@ auto cudnn_conv3d_forward(
 
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
-        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
     } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
         // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
         // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
@@ -4051,7 +4133,7 @@ auto cudnn_conv3d_forward(
         // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
         // pick TF32 for speed.
         if (!::tenzor::cuda::matmul::allow_tf32()) {
-            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_FMA_MATH));
         }
     }
     #endif
@@ -4062,7 +4144,7 @@ auto cudnn_conv3d_forward(
     cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
 
     CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
-        handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+        handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
         output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
     const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
@@ -4075,7 +4157,7 @@ auto cudnn_conv3d_forward(
         if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
         size_t ws_size = 0;
         cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
-            handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+            handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
             output_desc.desc, perf_results[i].algo, &ws_size);
         if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
             if (perf_results[i].time < best_time) {
@@ -4087,7 +4169,7 @@ auto cudnn_conv3d_forward(
     }
     if (best_time == std::numeric_limits<float>::max()) {
         CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
-            handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+            handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
             output_desc.desc, algo, &workspace_size));
     }
 
@@ -4095,7 +4177,7 @@ auto cudnn_conv3d_forward(
 
     dispatch_conv_forward(
         handle, input_desc.desc, input.data_ptr(), filter_desc.desc, weight.data_ptr(),
-        conv_desc.desc, algo, workspace, workspace_size,
+        conv_desc.handle(), algo, workspace, workspace_size,
         output_desc.desc, output.data_ptr(), input.dtype());
 
     // Add bias if present: bias shape is [out_channels], described as [1, out_channels, 1, 1, 1]
@@ -4165,7 +4247,6 @@ auto cudnn_conv3d_backward(
 
     TensorDescriptorNd input_desc, grad_output_desc;
     FilterDescriptorNd filter_desc;
-    ConvolutionDescriptorNd conv_desc;
 
     std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
     std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
@@ -4175,10 +4256,9 @@ auto cudnn_conv3d_backward(
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
-    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
-    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
-    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+    // audit L.6: descriptor + int arrays bundled in CudnnConvNdDesc.
+    CudnnConvNdDesc conv_desc(padding, stride, dilation,
+                              CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
         conv_desc.set_group_count(static_cast<int>(groups));
@@ -4186,7 +4266,7 @@ auto cudnn_conv3d_backward(
 
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
-        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
     } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
         // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
         // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
@@ -4198,7 +4278,7 @@ auto cudnn_conv3d_backward(
         // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
         // pick TF32 for speed.
         if (!::tenzor::cuda::matmul::allow_tf32()) {
-            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_FMA_MATH));
         }
     }
     #endif
@@ -4212,7 +4292,7 @@ auto cudnn_conv3d_backward(
         cudnnConvolutionBwdDataAlgoPerf_t perf_results[kMaxAlgos];
 
         CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
-            handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+            handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
             input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
         cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
@@ -4223,7 +4303,7 @@ auto cudnn_conv3d_backward(
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
-                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 input_desc.desc, perf_results[i].algo, &ws_size);
             if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
                 if (perf_results[i].time < best_time) {
@@ -4235,14 +4315,14 @@ auto cudnn_conv3d_backward(
         }
         if (best_time == std::numeric_limits<float>::max()) {
             CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
-                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 input_desc.desc, algo, &workspace_size));
         }
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_data(
             handle, filter_desc.desc, weight.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
-            conv_desc.desc, algo, workspace, workspace_size,
+            conv_desc.handle(), algo, workspace, workspace_size,
             input_desc.desc, grad_input.data_ptr(), input.dtype());
     }
 
@@ -4253,7 +4333,7 @@ auto cudnn_conv3d_backward(
         cudnnConvolutionBwdFilterAlgoPerf_t perf_results[kMaxAlgos];
 
         CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
-            handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+            handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
             filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
         cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
@@ -4264,7 +4344,7 @@ auto cudnn_conv3d_backward(
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 filter_desc.desc, perf_results[i].algo, &ws_size);
             if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
                 if (perf_results[i].time < best_time) {
@@ -4276,14 +4356,14 @@ auto cudnn_conv3d_backward(
         }
         if (best_time == std::numeric_limits<float>::max()) {
             CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 filter_desc.desc, algo, &workspace_size));
         }
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_filter(
             handle, input_desc.desc, input.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
-            conv_desc.desc, algo, workspace, workspace_size,
+            conv_desc.handle(), algo, workspace, workspace_size,
             filter_desc.desc, grad_weight.data_ptr(), input.dtype());
     }
 
@@ -4354,7 +4434,6 @@ auto cudnn_conv_transpose3d_forward(
     // The filter descriptor uses the same weight layout.
     TensorDescriptorNd input_desc, output_desc;
     FilterDescriptorNd filter_desc;
-    ConvolutionDescriptorNd conv_desc;
 
     // input_desc describes our input (which is the "grad_output" in cuDNN backward data terms)
     std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
@@ -4367,10 +4446,9 @@ auto cudnn_conv_transpose3d_forward(
     output_desc.set(cudnn_dtype, output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
-    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
-    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
-    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+    // audit L.6: descriptor + int arrays bundled in CudnnConvNdDesc.
+    CudnnConvNdDesc conv_desc(padding, stride, dilation,
+                              CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
         conv_desc.set_group_count(static_cast<int>(groups));
@@ -4378,7 +4456,7 @@ auto cudnn_conv_transpose3d_forward(
 
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
-        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
     } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
         // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
         // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
@@ -4390,7 +4468,7 @@ auto cudnn_conv_transpose3d_forward(
         // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
         // pick TF32 for speed.
         if (!::tenzor::cuda::matmul::allow_tf32()) {
-            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_FMA_MATH));
         }
     }
     #endif
@@ -4401,7 +4479,7 @@ auto cudnn_conv_transpose3d_forward(
     cudnnConvolutionBwdDataAlgoPerf_t perf_results[kMaxAlgos];
 
     CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
-        handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+        handle, filter_desc.desc, input_desc.desc, conv_desc.handle(),
         output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
     const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
@@ -4413,7 +4491,7 @@ auto cudnn_conv_transpose3d_forward(
         if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
         size_t ws_size = 0;
         cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
-            handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+            handle, filter_desc.desc, input_desc.desc, conv_desc.handle(),
             output_desc.desc, perf_results[i].algo, &ws_size);
         if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
             if (perf_results[i].time < best_time) {
@@ -4425,7 +4503,7 @@ auto cudnn_conv_transpose3d_forward(
     }
     if (best_time == std::numeric_limits<float>::max()) {
         CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
-            handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+            handle, filter_desc.desc, input_desc.desc, conv_desc.handle(),
             output_desc.desc, algo, &workspace_size));
     }
 
@@ -4434,7 +4512,7 @@ auto cudnn_conv_transpose3d_forward(
     // BackwardData: filter * input -> output (transposed conv forward)
     dispatch_conv_bwd_data(
         handle, filter_desc.desc, weight.data_ptr(), input_desc.desc, input.data_ptr(),
-        conv_desc.desc, algo, workspace, workspace_size,
+        conv_desc.handle(), algo, workspace, workspace_size,
         output_desc.desc, output.data_ptr(), input.dtype());
 
     // Add bias
@@ -4505,7 +4583,6 @@ auto cudnn_conv_transpose3d_backward(
     // Descriptors: same layout as forward
     TensorDescriptorNd input_desc, grad_output_desc;
     FilterDescriptorNd filter_desc;
-    ConvolutionDescriptorNd conv_desc;
 
     std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
     std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)d_out, (int)h_out, (int)w_out};
@@ -4515,10 +4592,9 @@ auto cudnn_conv_transpose3d_backward(
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
     filter_desc.set(cudnn_dtype, filter_dims);
 
-    int pad_arr[3] = {(int)padding[0], (int)padding[1], (int)padding[2]};
-    int str_arr[3] = {(int)stride[0],  (int)stride[1],  (int)stride[2]};
-    int dil_arr[3] = {(int)dilation[0],(int)dilation[1],(int)dilation[2]};
-    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+    // audit L.6: descriptor + int arrays bundled in CudnnConvNdDesc.
+    CudnnConvNdDesc conv_desc(padding, stride, dilation,
+                              CUDNN_CROSS_CORRELATION, compute_type);
 
     if (groups > 1) {
         conv_desc.set_group_count(static_cast<int>(groups));
@@ -4526,7 +4602,7 @@ auto cudnn_conv_transpose3d_backward(
 
     #ifdef TENZOR_HAS_TENSOR_CORES
     if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
-        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
     } else if (cudnn_dtype == CUDNN_DATA_FLOAT) {
         // cuDNN 8+ silently uses TF32 on Ampere+ for Float32 convolutions
         // when the math type is left at CUDNN_DEFAULT_MATH. That breaks
@@ -4538,7 +4614,7 @@ auto cudnn_conv_transpose3d_backward(
         // the math type at CUDNN_DEFAULT_MATH so cuDNN can opportunistically
         // pick TF32 for speed.
         if (!::tenzor::cuda::matmul::allow_tf32()) {
-            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_FMA_MATH));
+            CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.handle(), CUDNN_FMA_MATH));
         }
     }
     #endif
@@ -4553,7 +4629,7 @@ auto cudnn_conv_transpose3d_backward(
         cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
 
         CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
-            handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+            handle, grad_output_desc.desc, filter_desc.desc, conv_desc.handle(),
             input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
         cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
@@ -4564,7 +4640,7 @@ auto cudnn_conv_transpose3d_backward(
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
-                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.handle(),
                 input_desc.desc, perf_results[i].algo, &ws_size);
             if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
                 if (perf_results[i].time < best_time) {
@@ -4576,14 +4652,14 @@ auto cudnn_conv_transpose3d_backward(
         }
         if (best_time == std::numeric_limits<float>::max()) {
             CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
-                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.handle(),
                 input_desc.desc, algo, &workspace_size));
         }
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_forward(
             handle, grad_output_desc.desc, grad_output.data_ptr(), filter_desc.desc, weight.data_ptr(),
-            conv_desc.desc, algo, workspace, workspace_size,
+            conv_desc.handle(), algo, workspace, workspace_size,
             input_desc.desc, grad_input.data_ptr(), input.dtype());
     }
 
@@ -4595,7 +4671,7 @@ auto cudnn_conv_transpose3d_backward(
         cudnnConvolutionBwdFilterAlgoPerf_t perf_results[kMaxAlgos];
 
         CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
-            handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+            handle, grad_output_desc.desc, input_desc.desc, conv_desc.handle(),
             filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
         cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
@@ -4606,7 +4682,7 @@ auto cudnn_conv_transpose3d_backward(
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+                handle, grad_output_desc.desc, input_desc.desc, conv_desc.handle(),
                 filter_desc.desc, perf_results[i].algo, &ws_size);
             if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
                 if (perf_results[i].time < best_time) {
@@ -4618,14 +4694,14 @@ auto cudnn_conv_transpose3d_backward(
         }
         if (best_time == std::numeric_limits<float>::max()) {
             CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+                handle, grad_output_desc.desc, input_desc.desc, conv_desc.handle(),
                 filter_desc.desc, algo, &workspace_size));
         }
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_filter(
             handle, grad_output_desc.desc, grad_output.data_ptr(), input_desc.desc, input.data_ptr(),
-            conv_desc.desc, algo, workspace, workspace_size,
+            conv_desc.handle(), algo, workspace, workspace_size,
             filter_desc.desc, grad_weight.data_ptr(), input.dtype());
     }
 

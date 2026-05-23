@@ -2451,6 +2451,37 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Expected speedup: 2-4x for long sequences (memory-bandwidth-bound).
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // audit L.5: hoist the Float64 device-capability pre-check up to
+            // the registry boundary so every dispatcher entry point that
+            // reaches OpId::FlashAttention (autograd Function, IREE custom
+            // call, nn::Attention layer, etc.) gets the same typed
+            // user-facing error. Previously this guard lived only inside
+            // `dispatchFlashAttention`, so callers that took alternate code
+            // paths (e.g. the FP64 composed-ops slow path that still
+            // compiles an FP64 SPIR-V shader downstream) would crash with a
+            // cryptic SPIR-V compile failure instead.
+            const Tensor& Q_pre = inputs[0];
+            const Tensor& K_pre = inputs[1];
+            const Tensor& V_pre = inputs[2];
+            if (Q_pre.dtype() == DType::Float64
+                || K_pre.dtype() == DType::Float64
+                || V_pre.dtype() == DType::Float64)
+            {
+                int32_t device_id = Q_pre.device().index;
+                DeviceInfo dev_info = get_vulkan_backend()->get_device_info(device_id);
+                if (!dev_info.supports_fp64) {
+                    throw std::runtime_error(
+                        "Vulkan FlashAttention: Float64 requested but the active "
+                        "Vulkan device does not advertise VkPhysicalDeviceFeatures::"
+                        "shaderFloat64. FP64 compute shaders are not supported on "
+                        "this GPU (common on mobile/integrated parts). The project "
+                        "rule forbids CPU fallback or Float32 upcast — either run "
+                        "on a discrete GPU with FP64 support or use a different "
+                        "backend (CPU / CUDA / ROCm / OneAPI all have native FP64 "
+                        "FlashAttention kernels).");
+                }
+            }
+
             // Phase 1.5: LSE is now emitted INSIDE the fused shader (binding
             // 4) in the same pass as the output. The previous composed-ops
             // `logsumexp(Q @ Kᵀ * scale)` recompute was deleted — that
