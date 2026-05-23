@@ -1807,9 +1807,11 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::CrossEntropyLoss>(nn, "CrossEntropyLoss",
         "Cross Entropy Loss for multi-class classification (combines LogSoftmax and NLLLoss)")
-        .def(py::init<tenzor::nn::Reduction>(),
+        .def(py::init<tenzor::nn::Reduction, float, int64_t>(),
              py::arg("reduction") = tenzor::nn::Reduction::Mean,
-             "Create CrossEntropyLoss with specified reduction mode")
+             py::arg("label_smoothing") = 0.0f,
+             py::arg("ignore_index") = -100,
+             "Create CrossEntropyLoss with specified reduction, label smoothing, and ignore_index")
         .def("forward", &tenzor::nn::CrossEntropyLoss::forward,
              py::arg("input"), py::arg("target"),
              "Compute cross entropy loss between input logits and target class indices",
@@ -1820,9 +1822,10 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::NLLLoss>(nn, "NLLLoss",
         "Negative Log Likelihood Loss for classification with log-probabilities")
-        .def(py::init<tenzor::nn::Reduction>(),
+        .def(py::init<tenzor::nn::Reduction, int64_t>(),
              py::arg("reduction") = tenzor::nn::Reduction::Mean,
-             "Create NLLLoss with specified reduction mode")
+             py::arg("ignore_index") = -100,
+             "Create NLLLoss with specified reduction mode and ignore_index")
         .def("forward", &tenzor::nn::NLLLoss::forward,
              py::arg("input"), py::arg("target"),
              "Compute NLL loss between input log-probabilities and target class indices",
@@ -2092,10 +2095,12 @@ void register_nn(py::module_& m) {
           py::arg("reduction") = tenzor::nn::Reduction::Mean);
     nn.def("cross_entropy", &tenzor::nn::cross_entropy, "Cross entropy loss function",
           py::arg("input"), py::arg("target"),
-          py::arg("reduction") = tenzor::nn::Reduction::Mean);
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::arg("ignore_index") = -100);
     nn.def("nll_loss", &tenzor::nn::nll_loss, "NLL loss function",
           py::arg("input"), py::arg("target"),
-          py::arg("reduction") = tenzor::nn::Reduction::Mean);
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::arg("ignore_index") = -100);
     nn.def("bce_loss", &tenzor::nn::bce_loss, "BCE loss function",
           py::arg("input"), py::arg("target"),
           py::arg("reduction") = tenzor::nn::Reduction::Mean);
@@ -2317,6 +2322,7 @@ void register_nn(py::module_& m) {
     nn.def("functional_nll_loss", &tenzor::nn::functional::nll_loss,
            py::arg("input"), py::arg("target"),
            py::arg("reduction") = tenzor::nn::Reduction::Mean,
+           py::arg("ignore_index") = -100,
            "Negative log likelihood loss",
            py::call_guard<py::gil_scoped_release>());
 

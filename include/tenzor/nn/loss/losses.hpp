@@ -173,9 +173,14 @@ public:
      * @param label_smoothing Smoothing factor in [0, 1). When > 0, targets become
      *        (1 - label_smoothing) * one_hot(target) + label_smoothing / num_classes.
      *        Default 0.0 (no smoothing, matches original behavior).
+     * @param ignore_index Class index to ignore (PyTorch default: -100). Samples
+     *        whose target equals @p ignore_index contribute zero to the loss and
+     *        are excluded from the mean denominator. Only honoured for the
+     *        class-index target form (one-hot/soft-target inputs are unaffected).
      */
     explicit CrossEntropyLoss(Reduction reduction = Reduction::Mean,
-                              float label_smoothing = 0.0f);
+                              float label_smoothing = 0.0f,
+                              int64_t ignore_index = -100);
 
     auto forward(const Variable& input, const Tensor& target) -> Variable;
     auto operator()(const Variable& input, const Tensor& target) -> Variable {
@@ -185,6 +190,7 @@ public:
 private:
     Reduction reduction_;
     float label_smoothing_;
+    int64_t ignore_index_;
 };
 
 /**
@@ -328,7 +334,16 @@ private:
  */
 class NLLLoss {
 public:
-    explicit NLLLoss(Reduction reduction = Reduction::Mean);
+    /**
+     * @brief Construct NLLLoss.
+     *
+     * @param reduction Reduction mode (None, Mean, Sum, BatchMean).
+     * @param ignore_index Class index to ignore (PyTorch default: -100). Samples
+     *        whose target equals @p ignore_index contribute zero to the loss and
+     *        are excluded from the mean denominator.
+     */
+    explicit NLLLoss(Reduction reduction = Reduction::Mean,
+                     int64_t ignore_index = -100);
 
     auto forward(const Variable& input, const Tensor& target) -> Variable;
     auto operator()(const Variable& input, const Tensor& target) -> Variable {
@@ -337,6 +352,7 @@ public:
 
 private:
     Reduction reduction_;
+    int64_t ignore_index_;
 };
 
 /**
@@ -471,7 +487,8 @@ auto mse_loss(const Variable& input, const Variable& target,
 
 /** @brief Functional cross entropy loss computation */
 auto cross_entropy(const Variable& input, const Tensor& target,
-                  Reduction reduction = Reduction::Mean) -> Variable;
+                  Reduction reduction = Reduction::Mean,
+                  int64_t ignore_index = -100) -> Variable;
 
 /** @brief Functional BCE loss computation */
 auto bce_loss(const Variable& input, const Variable& target,
@@ -479,7 +496,8 @@ auto bce_loss(const Variable& input, const Variable& target,
 
 /** @brief Functional NLL loss computation */
 auto nll_loss(const Variable& input, const Tensor& target,
-             Reduction reduction = Reduction::Mean) -> Variable;
+             Reduction reduction = Reduction::Mean,
+             int64_t ignore_index = -100) -> Variable;
 
 /** @brief Functional L1 loss computation */
 auto l1_loss(const Variable& input, const Variable& target,

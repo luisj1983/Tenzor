@@ -992,7 +992,7 @@ auto interpolate(const Variable& input,
 // ============================================================================
 
 auto nll_loss(const Variable& input, const Tensor& target,
-              Reduction reduction) -> Variable {
+              Reduction reduction, int64_t ignore_index) -> Variable {
     // NLL loss: -sum(input[i, target[i]]) / N
     //
     // Use Variable-level ops throughout so backward propagates through the
@@ -1001,22 +1001,66 @@ auto nll_loss(const Variable& input, const Tensor& target,
     // result in a Variable with no grad_fn — silently zeroing input.grad()
     // on backward (raw-tensor-op breaks autograd graph pattern). The
     // bound Python helper functional_nll_loss exposes this directly.
+    //
+    // J.5: honour ignore_index. Targets equal to ignore_index are clamped to
+    // 0 *before* gather so it never throws / reads garbage, then the
+    // per-sample loss is multiplied by a (target != ignore_index) mask so
+    // those samples contribute zero. For Reduction::Mean we divide by the
+    // unmasked count (= mask.sum()) instead of N — matching PyTorch.
     auto shape = input.tensor().shape();
     int64_t N = shape[0];
 
-    // Reshape target to [N, 1] for column gather. target is index data
-    // (Int64) — keep as a plain Tensor; Variable gather takes (Variable,
-    // dim, Tensor index).
-    Tensor target_2d = tenzor::reshape(target, {N, 1});
+    // Ensure target lives on the input's device for gather + comparisons.
+    Tensor target_dev = (target.device() == input.tensor().device())
+                            ? target
+                            : target.to(input.tensor().device());
+
+    // Build the keep/drop mask on the input's device.
+    Tensor ignore_t   = tenzor::full_like(target_dev,
+                                          static_cast<double>(ignore_index));
+    Tensor is_ignored = tenzor::eq(target_dev, ignore_t);  // bool, shape [N]
+    Tensor keep_mask  = tenzor::ne(target_dev, ignore_t);  // bool, shape [N]
+
+    // Clamp out-of-range / sentinel targets to 0 so gather succeeds even
+    // when ignore_index is negative or >= num_classes.
+    Tensor zero_t = tenzor::full_like(target_dev, 0.0);
+    Tensor safe_target = tenzor::where(is_ignored, zero_t, target_dev);
+
+    // Reshape safe target to [N, 1] for column gather. The index is plain
+    // index data (Int64) — keep as a Tensor; Variable gather takes
+    // (Variable, dim, Tensor index).
+    Tensor target_2d = tenzor::reshape(safe_target, {N, 1});
 
     // Variable gather → Variable reshape → Variable neg.
     Variable gathered = tenzor::gather(input, /*dim=*/1, target_2d);
     Variable loss_per_sample =
         tenzor::neg(tenzor::reshape(gathered, std::vector<int64_t>{N}));
 
-    if (reduction == Reduction::Mean) return tenzor::mean(loss_per_sample);
-    if (reduction == Reduction::Sum) return tenzor::sum(loss_per_sample);
-    return loss_per_sample;
+    // Mask out ignored samples in input dtype (already on input device).
+    Tensor mask_in_dtype = keep_mask.to(input.tensor().dtype());
+    Variable mask_var(mask_in_dtype, /*requires_grad=*/false);
+    Variable masked_loss = loss_per_sample * mask_var;
+
+    if (reduction == Reduction::Mean) {
+        // Denominator is the number of non-ignored samples.  Clamp to >= 1
+        // so an all-ignored batch yields 0 rather than NaN (matches
+        // PyTorch's behaviour for the common-sense edge case).  Sum
+        // through Float32 because clamp_min lacks BF16 dispatch; the
+        // count is a tiny scalar so no precision concern.
+        const DType out_dtype = input.tensor().dtype();
+        Tensor mask_f32 = mask_in_dtype.dtype() == DType::Float32
+                              ? mask_in_dtype
+                              : mask_in_dtype.to(DType::Float32);
+        Tensor denom_f32 = tenzor::clamp_min(tenzor::sum(mask_f32), 1.0);
+        Tensor denom = (denom_f32.dtype() == out_dtype)
+                           ? denom_f32
+                           : denom_f32.to(out_dtype);
+        Variable denom_var(denom, /*requires_grad=*/false);
+        Variable total = tenzor::sum(masked_loss);
+        return total / denom_var;
+    }
+    if (reduction == Reduction::Sum) return tenzor::sum(masked_loss);
+    return masked_loss;
 }
 
 // ============================================================================

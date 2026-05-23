@@ -377,8 +377,9 @@ auto dropout(const Variable& input, double p = 0.5, bool training = true) -> Var
 /** @brief Functional cross-entropy loss */
 inline auto cross_entropy(const Variable& input, const Tensor& target,
                            Reduction reduction = Reduction::Mean,
-                           float label_smoothing = 0.0f) -> Variable {
-    CrossEntropyLoss loss(reduction, label_smoothing);
+                           float label_smoothing = 0.0f,
+                           int64_t ignore_index = -100) -> Variable {
+    CrossEntropyLoss loss(reduction, label_smoothing, ignore_index);
     return loss(input, target);
 }
 
@@ -489,9 +490,13 @@ auto interpolate(const Variable& input,
  * @param input Log-probabilities [N, C]
  * @param target Class indices [N] (LongTensor)
  * @param reduction Reduction mode
+ * @param ignore_index Class index to skip (PyTorch default: -100). Samples
+ *        whose target equals @p ignore_index contribute zero loss and are
+ *        excluded from the mean denominator.
  */
 auto nll_loss(const Variable& input, const Tensor& target,
-              Reduction reduction = Reduction::Mean) -> Variable;
+              Reduction reduction = Reduction::Mean,
+              int64_t ignore_index = -100) -> Variable;
 
 /**
  * @brief Functional smooth L1 loss (Huber loss)
