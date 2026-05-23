@@ -25,8 +25,13 @@ namespace nn {
 
 /**
  * @brief Checkpoint file format version
+ *
+ * v2 (audit K.2): adds an `rng_state` section after scheduler_state
+ * so save/load survives across the dropout / BN-noise / sampling
+ * random sequence.  v1 files are read with rng_state left empty —
+ * callers should treat that as "RNG was not captured".
  */
-constexpr uint32_t CHECKPOINT_VERSION = 1;
+constexpr uint32_t CHECKPOINT_VERSION = 2;
 
 /**
  * @brief Checkpoint file magic number for format identification
@@ -94,6 +99,13 @@ struct Checkpoint {
     std::unordered_map<std::string, Tensor> model_state;  ///< Model parameters and buffers
     std::unordered_map<std::string, Tensor> optimizer_state;  ///< Optimizer state
     std::unordered_map<std::string, Tensor> scheduler_state;  ///< Scheduler state
+    /// Per-device RNG snapshots (audit K.2).  Each entry is keyed
+    /// "<device_type>:<index>" (e.g. "cpu:0", "cuda:0") and stores the
+    /// concatenated (seed, initial_seed, engine_state[..]) as a 1-D
+    /// Int64 tensor.  ModelCheckpoint::save() populates this from
+    /// tenzor::default_generator(device) for every device the model
+    /// touches; ModelCheckpoint::load() restores via Generator::set_state.
+    std::unordered_map<std::string, Tensor> rng_state;
     TrainingMetadata metadata;                            ///< Training metadata
     CheckpointConfig config;                              ///< Checkpoint configuration
 

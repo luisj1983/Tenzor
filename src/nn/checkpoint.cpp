@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/nn/checkpoint.hpp"
 #include "../../include/tenzor/nn/safetensors.hpp"
+#include "../../include/tenzor/core/generator.hpp"  // K.2 per-device RNG snapshots
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <algorithm>
+#include <set>
 #include <unordered_set>
 
 namespace tenzor {
@@ -149,6 +151,66 @@ auto ModelCheckpoint::save(
         checkpoint.metadata.timestamp = get_timestamp();
     }
 
+    // Audit K.2: capture per-device RNG snapshots so resuming reproduces
+    // dropout / BN-noise / sampling exactly.  We always snapshot the CPU
+    // default generator; we also snapshot any GPU device that holds at
+    // least one model parameter so the model's stochastic forward path
+    // resumes deterministically.
+    {
+        auto pack_state = [](const tenzor::GeneratorState& s) -> Tensor {
+            // Layout: [seed, initial_seed, engine_state[0..N-1]]
+            const size_t n = 2 + s.engine_state.size();
+            Tensor t({static_cast<int64_t>(n)}, DType::Int64, Device::cpu());
+            auto* p = t.data<int64_t>();
+            p[0] = static_cast<int64_t>(s.seed);
+            p[1] = static_cast<int64_t>(s.initial_seed);
+            for (size_t i = 0; i < s.engine_state.size(); ++i) {
+                p[2 + i] = static_cast<int64_t>(s.engine_state[i]);
+            }
+            return t;
+        };
+        auto dev_key = [](Device::Type dt, int32_t idx) -> std::string {
+            const char* name = "cpu";
+            switch (dt) {
+                case Device::Type::CPU:    name = "cpu";    break;
+                case Device::Type::CUDA:   name = "cuda";   break;
+                case Device::Type::ROCm:   name = "rocm";   break;
+                case Device::Type::OneAPI: name = "oneapi"; break;
+                case Device::Type::Vulkan: name = "vulkan"; break;
+                case Device::Type::MPS:    name = "mps";    break;
+                default: name = "cpu"; break;  // sentinel / COUNT — should never hit
+            }
+            return std::string(name) + ":" + std::to_string(idx);
+        };
+        // CPU default generator: always snapshot.
+        try {
+            checkpoint.rng_state[dev_key(Device::Type::CPU, 0)] =
+                pack_state(tenzor::default_generator(Device::cpu()).get_state());
+        } catch (const std::exception&) {
+            // CPU generator should always exist; ignore if not.
+        }
+        // Per-GPU snapshot for every device the model touches.
+        std::set<std::pair<int, int32_t>> devices_seen;
+        for (const auto& [name, t] : checkpoint.model_state) {
+            const auto& d = t.device();
+            if (d.type != Device::Type::CPU) {
+                devices_seen.insert({static_cast<int>(d.type), d.index});
+            }
+        }
+        for (const auto& [dt_int, idx] : devices_seen) {
+            Device dev{static_cast<Device::Type>(dt_int), idx};
+            try {
+                const auto& gen = tenzor::default_generator(dev);
+                checkpoint.rng_state[dev_key(dev.type, idx)] =
+                    pack_state(gen.get_state());
+            } catch (const std::exception&) {
+                // Generator for this device may not be exposed yet
+                // (e.g., Vulkan currently); skip rather than fail the
+                // save — partial RNG coverage is better than none.
+            }
+        }
+    }
+
     // Atomic write if configured
     if (config_.atomic_save) {
         std::string temp_path = path + ".tmp";
@@ -160,7 +222,58 @@ auto ModelCheckpoint::save(
 }
 
 auto ModelCheckpoint::load(const std::string& path) -> Checkpoint {
-    return read_checkpoint(path);
+    Checkpoint c = read_checkpoint(path);
+
+    // Audit K.2: restore per-device RNG snapshots.  This runs at load()
+    // time (not inside the user's resume loop) so subsequent model
+    // forward passes reproduce dropout / sampling masks.
+    if (!c.rng_state.empty()) {
+        auto unpack_state = [](const Tensor& t) -> tenzor::GeneratorState {
+            tenzor::GeneratorState s;
+            if (t.numel() < 2) return s;
+            Tensor host = (t.device().type != Device::Type::CPU) ? t.cpu() : t;
+            const auto* p = host.data<int64_t>();
+            s.seed         = static_cast<uint64_t>(p[0]);
+            s.initial_seed = static_cast<uint64_t>(p[1]);
+            const int64_t engine_n = host.numel() - 2;
+            s.engine_state.resize(static_cast<size_t>(engine_n));
+            for (int64_t i = 0; i < engine_n; ++i) {
+                s.engine_state[static_cast<size_t>(i)] =
+                    static_cast<uint64_t>(p[2 + i]);
+            }
+            return s;
+        };
+        for (const auto& [key, t] : c.rng_state) {
+            // Key format: "<device_type>:<index>".
+            auto colon = key.rfind(':');
+            if (colon == std::string::npos) continue;
+            std::string dev_str = key.substr(0, colon);
+            int32_t idx = 0;
+            try {
+                idx = std::stoi(key.substr(colon + 1));
+            } catch (const std::exception&) {
+                continue;
+            }
+            Device::Type dt = Device::Type::CPU;
+            if      (dev_str == "cpu")    dt = Device::Type::CPU;
+            else if (dev_str == "cuda")   dt = Device::Type::CUDA;
+            else if (dev_str == "rocm")   dt = Device::Type::ROCm;
+            else if (dev_str == "oneapi") dt = Device::Type::OneAPI;
+            else if (dev_str == "vulkan") dt = Device::Type::Vulkan;
+            else if (dev_str == "mps")    dt = Device::Type::MPS;
+            else continue;
+            Device dev{dt, idx};
+            try {
+                auto& gen = tenzor::default_generator(dev);
+                gen.set_state(unpack_state(t));
+            } catch (const std::exception&) {
+                // Device generator unavailable — skip; matches save-side
+                // partial-coverage semantics.
+            }
+        }
+    }
+
+    return c;
 }
 
 auto ModelCheckpoint::save_model(
@@ -369,6 +482,37 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
         file.write(reinterpret_cast<const char*>(data_ptr), data_size);
     }
 
+    // ========== RNG State (v2+, audit K.2) ==========
+    uint32_t num_rng_tensors = static_cast<uint32_t>(checkpoint.rng_state.size());
+    file.write(reinterpret_cast<const char*>(&num_rng_tensors), sizeof(num_rng_tensors));
+
+    for (const auto& [name, tensor] : checkpoint.rng_state) {
+        // Write state name (device key like "cpu:0", "cuda:0").
+        uint32_t name_len = static_cast<uint32_t>(name.size());
+        file.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+        file.write(name.data(), name_len);
+
+        // Write tensor shape (always 1-D, but encode generically for future
+        // device-specific RNG formats).
+        auto shape = tensor.shape();
+        uint32_t ndim = static_cast<uint32_t>(shape.size());
+        file.write(reinterpret_cast<const char*>(&ndim), sizeof(ndim));
+        file.write(reinterpret_cast<const char*>(shape.data()),
+                   ndim * sizeof(int64_t));
+
+        // Write tensor dtype (always Int64 for current packing).
+        uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
+        file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
+
+        // RNG snapshots are always CPU-resident already, but mirror the
+        // pattern for forward-compat if a backend's generator state goes
+        // through device-side packing in the future.
+        Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
+        size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
+        const void* data_ptr = host_tensor.data_ptr();
+        file.write(reinterpret_cast<const char*>(data_ptr), data_size);
+    }
+
     // ========== Metadata ==========
     auto metadata_dict = checkpoint.metadata.to_dict();
     uint32_t num_metadata = static_cast<uint32_t>(metadata_dict.size());
@@ -541,6 +685,39 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
         file.read(reinterpret_cast<char*>(data_ptr), data_size);
 
         checkpoint.scheduler_state[name] = std::move(tensor);
+    }
+
+    // ========== RNG State (v2+, audit K.2) ==========
+    // v1 files written before K.2 don't have this section; the version
+    // check skips the read and leaves checkpoint.rng_state empty so
+    // callers can detect "RNG wasn't captured".
+    if (checkpoint.version >= 2) {
+        uint32_t num_rng_tensors;
+        file.read(reinterpret_cast<char*>(&num_rng_tensors), sizeof(num_rng_tensors));
+
+        for (uint32_t i = 0; i < num_rng_tensors; ++i) {
+            uint32_t name_len;
+            file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
+            std::string name(name_len, '\0');
+            file.read(name.data(), name_len);
+
+            uint32_t ndim;
+            file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
+            std::vector<int64_t> shape(ndim);
+            file.read(reinterpret_cast<char*>(shape.data()),
+                      ndim * sizeof(int64_t));
+
+            uint8_t dtype_byte;
+            file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
+            DType dtype = static_cast<DType>(dtype_byte);
+
+            Tensor tensor(shape, dtype, Device::cpu());
+            size_t data_size = tensor.numel() * tensor.dtype_size();
+            void* data_ptr = tensor.data_ptr();
+            file.read(reinterpret_cast<char*>(data_ptr), data_size);
+
+            checkpoint.rng_state[name] = std::move(tensor);
+        }
     }
 
     // ========== Metadata ==========
