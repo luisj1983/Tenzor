@@ -257,7 +257,9 @@ std::vector<Tensor> mps_instancenorm_backward(const Tensor& grad_output, const T
                                                const Tensor& weight);
 Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t stride_h, int64_t stride_w,
-                          int64_t pad_h, int64_t pad_w, int64_t groups);
+                          int64_t pad_h, int64_t pad_w,
+                          int64_t dilation_h, int64_t dilation_w,
+                          int64_t groups);
 Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim);
 Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim);
 Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim, Tensor& out_indices);
@@ -490,12 +492,21 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // ================================================================
     table.register_kernel(OpId::Conv2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t sh = attrs.get_int(AttrKey::StrideH, 1);
-            int64_t sw = attrs.get_int(AttrKey::StrideW, 1);
-            int64_t ph = attrs.get_int(AttrKey::PaddingH, 0);
-            int64_t pw = attrs.get_int(AttrKey::PaddingW, 0);
+            // Per-axis keys win when present; scalar keys are the fallback so
+            // callers that set only the scalar variant still work end-to-end
+            // (mirrors the CPU registry pattern). Audit Q.9: previously
+            // hard-coded dilation=1 silently ignored any dilated convolution.
+            int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sh = attrs.has(AttrKey::StrideH)   ? attrs.get_int(AttrKey::StrideH)   : s;
+            int64_t sw = attrs.has(AttrKey::StrideW)   ? attrs.get_int(AttrKey::StrideW)   : s;
+            int64_t ph = attrs.has(AttrKey::PaddingH)  ? attrs.get_int(AttrKey::PaddingH)  : p;
+            int64_t pw = attrs.has(AttrKey::PaddingW)  ? attrs.get_int(AttrKey::PaddingW)  : p;
+            int64_t dh = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+            int64_t dw = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            return {mps_conv2d_kernel(inputs[0], inputs[1], sh, sw, ph, pw, groups)};
+            return {mps_conv2d_kernel(inputs[0], inputs[1], sh, sw, ph, pw, dh, dw, groups)};
         });
 
     // ================================================================

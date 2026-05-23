@@ -125,6 +125,15 @@ namespace oneapi {
                             bool align_corners, sycl::queue& queue) -> Tensor;
     auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
                             bool align_corners, sycl::queue& queue) -> Tensor;
+    auto grid_sample_backward_kernel(const Tensor& grad_output,
+                                     const Tensor& input, const Tensor& grid,
+                                     const std::string& mode,
+                                     const std::string& padding_mode,
+                                     bool align_corners, sycl::queue& queue)
+        -> std::pair<Tensor, Tensor>;
+    auto affine_grid_backward_kernel(const Tensor& grad_grid,
+                                     const std::vector<int64_t>& size,
+                                     bool align_corners, sycl::queue& queue) -> Tensor;
 
     // Sampling / statistics (native OneAPI — replaces previous CPU fallbacks)
     auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor;
@@ -560,14 +569,17 @@ namespace oneapi {
                                      int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
 
     // ---- 1D Pooling operations (kernels/pooling.cpp) ----
-    auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                           int64_t padding, sycl::queue& queue) -> std::vector<Tensor>;
+    // Q.7: MaxPool1d gains a dilation parameter (PyTorch supports it); 1D
+    // variants now take std::array<int64_t, 1> per-axis values matching the
+    // 3D vector form (was previously scalar-only).
+    auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
+                           std::array<int64_t, 1> padding, std::array<int64_t, 1> dilation, sycl::queue& queue) -> std::vector<Tensor>;
     auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
-    auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                           int64_t padding, sycl::queue& queue) -> Tensor;
-    auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t stride,
-                             int64_t padding, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
+                           std::array<int64_t, 1> padding, sycl::queue& queue) -> Tensor;
+    auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
+                             std::array<int64_t, 1> padding, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
     auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
                                      sycl::queue& queue) -> std::vector<Tensor>;
     auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
@@ -2271,13 +2283,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool1dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // F.11: per-axis with scalar fallback via attr_macros helpers.
+            // Q.7: per-axis std::array<int64_t, 1>; MaxPool1d now plumbs
+            // dilation (was previously missing, silently forced to 1).
             const auto k = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
             const auto s = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
             const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
-            return oneapi::maxpool1d_forward(inputs[0], k[0], s[0], p[0], get_q(inputs));
+            const auto d = ::tenzor::backend::attrs::dilation_1d(attrs);
+            return oneapi::maxpool1d_forward(inputs[0], k, s, p, d, get_q(inputs));
         });
 
     table.register_kernel(OpId::MaxPool1dBackward,
@@ -2288,23 +2302,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AvgPool1dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Q.7: per-axis std::array<int64_t, 1>.
             const auto k = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
             const auto s = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
             const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
-            return {oneapi::avgpool1d_forward(inputs[0], k[0], s[0], p[0], get_q(inputs))};
+            return {oneapi::avgpool1d_forward(inputs[0], k, s, p, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AvgPool1dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Q.7: per-axis std::array<int64_t, 1>.
             const auto k = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::KernelSize, AttrKey::KernelSizeW, /*default*/ 2);
             const auto s = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
             const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return {oneapi::avgpool1d_backward(inputs[0], k[0], s[0], p[0], input_shape, get_q(inputs))};
+            return {oneapi::avgpool1d_backward(inputs[0], k, s, p, input_shape, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d,
@@ -3821,6 +3837,26 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return oneapi::affine_grid_kernel(inputs[0], size, align_corners, get_q(inputs));
     });
+
+    // audit Q.4: grid_sample / affine_grid backward.
+    table.register_kernel(OpId::GridSampleBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            auto [gi, gg] = oneapi::grid_sample_backward_kernel(
+                inputs[2], inputs[0], inputs[1], mode, padding_mode, align_corners,
+                get_q(inputs));
+            return {gi, gg};
+        });
+    table.register_single_output_kernel(OpId::AffineGridBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto size_span = attrs.get_int_list(AttrKey::OutputSize);
+            std::vector<int64_t> size(size_span.begin(), size_span.end());
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            return oneapi::affine_grid_backward_kernel(
+                inputs[0], size, align_corners, get_q(inputs));
+        });
 
     table.register_kernel(OpId::GatherRelativePositionBias,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {

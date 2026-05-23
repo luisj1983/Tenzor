@@ -174,6 +174,15 @@ namespace rocm {
                             bool align_corners, hipStream_t stream) -> Tensor;
     auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& size,
                                   bool align_corners, hipStream_t stream) -> Tensor;
+    auto grid_sample_backward_kernel_host(const Tensor& grad_output,
+                                          const Tensor& input, const Tensor& grid,
+                                          const std::string& mode,
+                                          const std::string& padding_mode,
+                                          bool align_corners, hipStream_t stream)
+        -> std::pair<Tensor, Tensor>;
+    auto affine_grid_backward_kernel_host(const Tensor& grad_grid,
+                                          const std::vector<int64_t>& size,
+                                          bool align_corners, hipStream_t stream) -> Tensor;
 
     // Sampling / statistics (native ROCm — replaces previous CPU fallbacks)
     auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor;
@@ -601,9 +610,11 @@ namespace rocm {
     auto eye_kernel(int64_t n, int64_t m, int64_t k, DType dtype, Device device, hipStream_t stream) -> Tensor;
 
     // Additional convolution and pooling operations
+    // Q.8: per-axis dilation_h/w added (was forced to 1).
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                          int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
-                                         int64_t output_padding_h, int64_t output_padding_w, hipStream_t stream) -> Tensor;
+                                         int64_t output_padding_h, int64_t output_padding_w,
+                                         int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                  int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
                                  int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
@@ -639,15 +650,17 @@ namespace rocm {
     auto adaptive_maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices, const Tensor& input, hipStream_t stream) -> Tensor;
 
     // 1D Pooling operations
-    auto maxpool1d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
-                               int64_t padding, int64_t dilation, hipStream_t stream)
+    // Q.6: per-axis std::array<int64_t, 1> signatures (1D has only one spatial
+    // axis but the API matches the per-axis sweep across 2D/3D).
+    auto maxpool1d_forward_hip(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
+                               std::array<int64_t, 1> padding, std::array<int64_t, 1> dilation, hipStream_t stream)
         -> std::pair<Tensor, Tensor>;
     auto maxpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
                                 const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
-    auto avgpool1d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
-                               int64_t padding, hipStream_t stream) -> Tensor;
+    auto avgpool1d_forward_hip(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
+                               std::array<int64_t, 1> padding, hipStream_t stream) -> Tensor;
     auto avgpool1d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
-                                int64_t kernel_size, int64_t stride, int64_t padding,
+                                std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding,
                                 hipStream_t stream) -> Tensor;
     auto adaptive_maxpool1d_forward_hip(const Tensor& input, int64_t output_size,
                                         hipStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -659,15 +672,16 @@ namespace rocm {
                                           const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
 
     // 3D Pooling operations
-    auto maxpool3d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
-                               int64_t padding, hipStream_t stream)
+    // Q.6: per-axis std::array<int64_t, 3> signatures honour asymmetric D/H/W.
+    auto maxpool3d_forward_hip(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride,
+                               std::array<int64_t, 3> padding, hipStream_t stream)
         -> std::pair<Tensor, Tensor>;
     auto maxpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
                                 const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
-    auto avgpool3d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
-                               int64_t padding, hipStream_t stream) -> Tensor;
+    auto avgpool3d_forward_hip(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride,
+                               std::array<int64_t, 3> padding, hipStream_t stream) -> Tensor;
     auto avgpool3d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
-                                int64_t kernel_size, int64_t stride, int64_t padding,
+                                std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
                                 hipStream_t stream) -> Tensor;
     auto adaptive_maxpool3d_forward_hip(const Tensor& input,
                                          int64_t output_d, int64_t output_h, int64_t output_w,
@@ -1514,16 +1528,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // 1D Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Audit F.11: read per-axis W keys with scalar fallback. PyTorch's
-        // 1-D pool API only has one spatial axis (W), but the dispatcher may
-        // still pass AttrKey::StrideW / PaddingW / DilationW.
+        // Q.6: per-axis std::array<int64_t, 1> signature (was scalar W).
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
         const auto dilation    = ::tenzor::backend::attrs::dilation_1d(attrs);
         auto [output, indices] = rocm::maxpool1d_forward_hip(inputs[0],
-            kernel_size[0], stride[0], padding[0], dilation[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, dilation, get_hip_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -1533,24 +1545,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Audit F.11: per-axis W key with scalar fallback.
+        // Q.6: per-axis std::array<int64_t, 1> signature.
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
         return rocm::avgpool1d_forward_hip(inputs[0],
-            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Audit F.11: per-axis W key with scalar fallback.
+        // Q.6: per-axis std::array<int64_t, 1> signature.
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_1d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
         return rocm::avgpool1d_backward_hip(inputs[0], input_shape,
-            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1578,23 +1590,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // 3D Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Q.6: per-axis std::array<int64_t, 3> kernel signature accepts
+        // asymmetric kernel/stride/padding across D/H/W.
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
-        // Phase 2.1: ROCm maxpool3d kernel is scalar-only; reject asymmetric.
-        if (kernel_size[0] != kernel_size[1] || kernel_size[1] != kernel_size[2] ||
-            stride[0] != stride[1] || stride[1] != stride[2] ||
-            padding[0] != padding[1] || padding[1] != padding[2]) {
-            throw std::invalid_argument(
-                "MaxPool3dForward (ROCm): backend kernel only supports symmetric "
-                "kernel/stride/padding across D/H/W; got kernel=(" +
-                std::to_string(kernel_size[0]) + "," + std::to_string(kernel_size[1]) + "," + std::to_string(kernel_size[2]) +
-                "), stride=(" + std::to_string(stride[0]) + "," + std::to_string(stride[1]) + "," + std::to_string(stride[2]) +
-                "), padding=(" + std::to_string(padding[0]) + "," + std::to_string(padding[1]) + "," + std::to_string(padding[2]) + ")");
-        }
         auto [output, indices] = rocm::maxpool3d_forward_hip(inputs[0],
-            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, get_hip_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -1604,42 +1607,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Q.6: per-axis std::array<int64_t, 3> kernel signature.
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
-        if (kernel_size[0] != kernel_size[1] || kernel_size[1] != kernel_size[2] ||
-            stride[0] != stride[1] || stride[1] != stride[2] ||
-            padding[0] != padding[1] || padding[1] != padding[2]) {
-            throw std::invalid_argument(
-                "AvgPool3dForward (ROCm): backend kernel only supports symmetric "
-                "kernel/stride/padding across D/H/W; got kernel=(" +
-                std::to_string(kernel_size[0]) + "," + std::to_string(kernel_size[1]) + "," + std::to_string(kernel_size[2]) +
-                "), stride=(" + std::to_string(stride[0]) + "," + std::to_string(stride[1]) + "," + std::to_string(stride[2]) +
-                "), padding=(" + std::to_string(padding[0]) + "," + std::to_string(padding[1]) + "," + std::to_string(padding[2]) + ")");
-        }
         return rocm::avgpool3d_forward_hip(inputs[0],
-            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Q.6: per-axis std::array<int64_t, 3> kernel signature.
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_3d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
-        if (kernel_size[0] != kernel_size[1] || kernel_size[1] != kernel_size[2] ||
-            stride[0] != stride[1] || stride[1] != stride[2] ||
-            padding[0] != padding[1] || padding[1] != padding[2]) {
-            throw std::invalid_argument(
-                "AvgPool3dBackward (ROCm): backend kernel only supports symmetric "
-                "kernel/stride/padding across D/H/W; got kernel=(" +
-                std::to_string(kernel_size[0]) + "," + std::to_string(kernel_size[1]) + "," + std::to_string(kernel_size[2]) +
-                "), stride=(" + std::to_string(stride[0]) + "," + std::to_string(stride[1]) + "," + std::to_string(stride[2]) +
-                "), padding=(" + std::to_string(padding[0]) + "," + std::to_string(padding[1]) + "," + std::to_string(padding[2]) + ")");
-        }
         return rocm::avgpool3d_backward_hip(inputs[0], input_shape,
-            kernel_size[0], stride[0], padding[0], get_hip_stream(attrs));
+            kernel_size, stride, padding, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3913,14 +3898,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, dilation, groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // Audit F.11: per-axis stride/padding/output_padding via shared helpers.
+        // Audit F.11 + Q.8: per-axis stride/padding/output_padding/dilation
+        // via shared helpers. Dilation was previously omitted, silently
+        // forced to 1 (PyTorch supports dilation > 1).
         const auto stride         = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding        = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto output_padding = ::tenzor::backend::attrs::output_padding_2d(attrs);
+        const auto dilation       = ::tenzor::backend::attrs::dilation_2d(attrs);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias,
             stride[0], stride[1], padding[0], padding[1],
             output_padding[0], output_padding[1],
+            dilation[0], dilation[1],
             get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -4135,6 +4124,26 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return rocm::affine_grid_kernel_host(inputs[0], size, align_corners, get_hip_stream(attrs));
     });
+
+    // audit Q.4: grid_sample / affine_grid backward.
+    table.register_kernel(OpId::GridSampleBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            auto [gi, gg] = rocm::grid_sample_backward_kernel_host(
+                inputs[2], inputs[0], inputs[1], mode, padding_mode, align_corners,
+                get_hip_stream(attrs));
+            return {gi, gg};
+        });
+    table.register_single_output_kernel(OpId::AffineGridBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto size_span = attrs.get_int_list(AttrKey::OutputSize);
+            std::vector<int64_t> size(size_span.begin(), size_span.end());
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            return rocm::affine_grid_backward_kernel_host(
+                inputs[0], size, align_corners, get_hip_stream(attrs));
+        });
 
     // --- Cast/Dtype Operations -------------------------------------------------
     table.register_single_output_kernel(OpId::Cast, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

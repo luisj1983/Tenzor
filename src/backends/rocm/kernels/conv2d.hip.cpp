@@ -1822,7 +1822,9 @@ __global__ void conv_transpose2d_forward_kernel(
     int64_t padding_h,
     int64_t padding_w,
     int64_t output_padding_h,
-    int64_t output_padding_w
+    int64_t output_padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w
 ) {
     int64_t total_elements = batch * out_channels * out_h * out_w;
 
@@ -1836,13 +1838,15 @@ __global__ void conv_transpose2d_forward_kernel(
 
         T sum = bias ? bias[oc] : T(0);
 
-        // Iterate over input positions that contribute to this output
+        // Q.8: honour per-axis dilation. The output position oh/ow maps back to
+        // input via (oh + padding_h - kh * dilation_h) / stride_h (and same for
+        // W). Setting dilation_h/w=1 reproduces the previous behaviour.
         for (int64_t ic = 0; ic < in_channels; ++ic) {
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                     // Find corresponding input position
-                    int64_t h_offset = oh + padding_h - kh;
-                    int64_t w_offset = ow + padding_w - kw;
+                    int64_t h_offset = oh + padding_h - kh * dilation_h;
+                    int64_t w_offset = ow + padding_w - kw * dilation_w;
 
                     if (h_offset % stride_h != 0 || w_offset % stride_w != 0) continue;
 
@@ -1875,8 +1879,12 @@ auto conv_transpose2d_forward_kernel(
     int64_t padding_w,
     int64_t output_padding_h,
     int64_t output_padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     hipStream_t stream
 ) -> Tensor {
+    // Q.8: per-axis dilation_h/w added. PyTorch ConvTranspose2d supports
+    // dilation > 1; previous ROCm kernel silently forced 1.
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -1889,9 +1897,9 @@ auto conv_transpose2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Output size for transpose conv
-    int64_t out_h = (in_h - 1) * stride_h - 2 * padding_h + kernel_h + output_padding_h;
-    int64_t out_w = (in_w - 1) * stride_w - 2 * padding_w + kernel_w + output_padding_w;
+    // Output size for transpose conv (dilated kernel effective size).
+    int64_t out_h = (in_h - 1) * stride_h - 2 * padding_h + dilation_h * (kernel_h - 1) + output_padding_h + 1;
+    int64_t out_w = (in_w - 1) * stride_w - 2 * padding_w + dilation_w * (kernel_w - 1) + output_padding_w + 1;
 
     Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
 
@@ -1907,7 +1915,8 @@ auto conv_transpose2d_forward_kernel(
             output.data<float>(),
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
-            padding_h, padding_w, output_padding_h, output_padding_w);
+            padding_h, padding_w, output_padding_h, output_padding_w,
+            dilation_h, dilation_w);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(conv_transpose2d_forward_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1916,7 +1925,8 @@ auto conv_transpose2d_forward_kernel(
             output.data<double>(),
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
-            padding_h, padding_w, output_padding_h, output_padding_w);
+            padding_h, padding_w, output_padding_h, output_padding_w,
+            dilation_h, dilation_w);
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -1928,7 +1938,8 @@ auto conv_transpose2d_forward_kernel(
         }
         auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                                        stride_h, stride_w, padding_h, padding_w,
-                                                       output_padding_h, output_padding_w, stream);
+                                                       output_padding_h, output_padding_w,
+                                                       dilation_h, dilation_w, stream);
         auto result_f16 = result.to(DType::Float16);
         fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
         return result_f16;
@@ -1943,7 +1954,8 @@ auto conv_transpose2d_forward_kernel(
         }
         auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                                        stride_h, stride_w, padding_h, padding_w,
-                                                       output_padding_h, output_padding_w, stream);
+                                                       output_padding_h, output_padding_w,
+                                                       dilation_h, dilation_w, stream);
         return result.to(DType::BFloat16);
     } else {
         throw std::runtime_error("conv_transpose2d_forward: unsupported dtype");

@@ -525,7 +525,9 @@ Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
 
 Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t stride_h, int64_t stride_w,
-                          int64_t pad_h, int64_t pad_w, int64_t groups) {
+                          int64_t pad_h, int64_t pad_w,
+                          int64_t dilation_h, int64_t dilation_w,
+                          int64_t groups) {
     ensure_initialized();
 
     // Native MPSGraph Conv2d. Uses MPSGraph's convolution2D API directly
@@ -551,8 +553,9 @@ Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
             "mps_conv2d_kernel: groups must divide in/out channels and "
             "weight's in-channels-per-group must equal in_c/groups.");
     }
-    int64_t out_h = (in_h + 2 * pad_h - kh) / stride_h + 1;
-    int64_t out_w = (in_w + 2 * pad_w - kw) / stride_w + 1;
+    // Effective kernel extent expands with dilation: eff_k = dilation * (k - 1) + 1.
+    int64_t out_h = (in_h + 2 * pad_h - dilation_h * (kh - 1) - 1) / stride_h + 1;
+    int64_t out_w = (in_w + 2 * pad_w - dilation_w * (kw - 1) - 1) / stride_w + 1;
 
     Tensor output({batch, out_c, out_h, out_w}, input.dtype(), input.device());
 
@@ -582,8 +585,8 @@ Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
         [MPSGraphConvolution2DOpDescriptor
             descriptorWithStrideInX:static_cast<NSUInteger>(stride_w)
                           strideInY:static_cast<NSUInteger>(stride_h)
-                    dilationRateInX:1
-                    dilationRateInY:1
+                    dilationRateInX:static_cast<NSUInteger>(dilation_w)
+                    dilationRateInY:static_cast<NSUInteger>(dilation_h)
                              groups:static_cast<NSUInteger>(groups)
                         paddingLeft:static_cast<NSUInteger>(pad_w)
                        paddingRight:static_cast<NSUInteger>(pad_w)

@@ -2,6 +2,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -2332,14 +2333,20 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 // 1D Pooling Operations
 // =============================================================================
 
-auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, sycl::queue& queue) -> std::vector<Tensor> {
+auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a,
+                       std::array<int64_t, 1> padding_a, std::array<int64_t, 1> dilation_a, sycl::queue& queue) -> std::vector<Tensor> {
+    // Q.7: per-axis std::array<int64_t, 1> signature + dilation parameter
+    // (previously missing — PyTorch supports dilation > 1).
+    const int64_t kernel_size = kernel_size_a[0];
+    const int64_t stride      = stride_a[0];
+    const int64_t padding     = padding_a[0];
+    const int64_t dilation    = dilation_a[0];
     auto shape = input.shape();
     if (shape.size() != 3) {
         throw std::invalid_argument("MaxPool1d requires 3D input (N, C, L)");
     }
     const int64_t N = shape[0], C = shape[1], L_in = shape[2];
-    const int64_t L_out = (L_in + 2 * padding - kernel_size) / stride + 1;
+    const int64_t L_out = (L_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     Tensor output({N, C, L_out}, input.dtype(), input.device());
     Tensor indices({N, C, L_out}, DType::Int64, input.device());
@@ -2354,7 +2361,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t k = 0; k < kernel_size; ++k) {
-                int64_t li = l * stride - padding + k;
+                int64_t li = l * stride - padding + k * dilation;
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = in_ptr[idx];
@@ -2374,7 +2381,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             double mx = -1.7976931348623157e+308; int64_t mi = 0;
             for (int64_t k = 0; k < kernel_size; ++k) {
-                int64_t li = l * stride - padding + k;
+                int64_t li = l * stride - padding + k * dilation;
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     double v = in_ptr[idx];
@@ -2394,7 +2401,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t k = 0; k < kernel_size; ++k) {
-                int64_t li = l * stride - padding + k;
+                int64_t li = l * stride - padding + k * dilation;
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = static_cast<float>(in_ptr[idx]);
@@ -2414,7 +2421,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t k = 0; k < kernel_size; ++k) {
-                int64_t li = l * stride - padding + k;
+                int64_t li = l * stride - padding + k * dilation;
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = bf16_to_f32(in_ptr[idx]);
@@ -2515,8 +2522,12 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
     return grad_input;
 }
 
-auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, sycl::queue& queue) -> Tensor {
+auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a,
+                       std::array<int64_t, 1> padding_a, sycl::queue& queue) -> Tensor {
+    // Q.7: per-axis std::array<int64_t, 1> signature.
+    const int64_t kernel_size = kernel_size_a[0];
+    const int64_t stride      = stride_a[0];
+    const int64_t padding     = padding_a[0];
     auto shape = input.shape();
     if (shape.size() != 3) {
         throw std::invalid_argument("AvgPool1d requires 3D input (N, C, L)");
@@ -2588,8 +2599,12 @@ auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     return output;
 }
 
-auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t stride,
-                         int64_t padding, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor {
+auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a,
+                         std::array<int64_t, 1> padding_a, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor {
+    // Q.7: per-axis std::array<int64_t, 1> signature.
+    const int64_t kernel_size = kernel_size_a[0];
+    const int64_t stride      = stride_a[0];
+    const int64_t padding     = padding_a[0];
     if (input_shape.size() != 3) {
         throw std::invalid_argument("AvgPool1d backward requires 3D input_shape (N, C, L)");
     }
