@@ -2832,6 +2832,11 @@ Returns:
          "Element-wise exponential", py::call_guard<py::gil_scoped_release>());
     m.def("log", [](const tenzor::Tensor& t) { return tenzor::log(t); },
          "Element-wise natural logarithm", py::call_guard<py::gil_scoped_release>());
+    // Audit J.3: Variable overload — preserves autograd graph so callers
+    // can compose log() into a loss without manually wiring a Function.
+    m.def("log", [](const tenzor::Variable& v) { return tenzor::log(v); },
+         "Element-wise natural logarithm (autograd-aware Variable overload)",
+         py::arg("input"));
     m.def("sqrt", [](const tenzor::Tensor& t) { return tenzor::sqrt(t); },
          "Element-wise square root", py::call_guard<py::gil_scoped_release>());
     m.def("abs", [](const tenzor::Tensor& t) { return tenzor::abs(t); },
@@ -2840,6 +2845,12 @@ Returns:
          return tenzor::pow(input, exponent);
          }, "Element-wise power",
          py::arg("input"), py::arg("exponent"), py::call_guard<py::gil_scoped_release>());
+    // Audit J.3: Variable overload — autograd-aware pow(v, scalar). The
+    // C++ overload lives in include/tenzor/autograd/ops.hpp.
+    m.def("pow", [](const tenzor::Variable& input, double exponent) {
+         return tenzor::pow(input, static_cast<float>(exponent));
+         }, "Element-wise power (autograd-aware Variable overload)",
+         py::arg("input"), py::arg("exponent"));
     m.def("sin", [](const tenzor::Tensor& t) { return tenzor::sin(t); },
          "Element-wise sine", py::call_guard<py::gil_scoped_release>());
     m.def("cos", [](const tenzor::Tensor& t) { return tenzor::cos(t); },
@@ -3774,10 +3785,12 @@ Returns:
         .def("__rmatmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return b.matmul(a);
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
-        // Power (uses tensor-level pow, wraps back in Variable)
+        // Power — uses the autograd-aware ``tenzor::pow(Variable, float)``
+        // overload from include/tenzor/autograd/ops.hpp so the resulting
+        // Variable retains its grad_fn (audit J.3: previously dropped the
+        // graph by re-wrapping a Tensor with requires_grad=false).
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
-            auto result = tenzor::pow(a.tensor(), exp);
-            return tenzor::Variable(result, false);
+            return tenzor::pow(a, exp);
         }, py::is_operator())
         // Modulo and floor division (operate on underlying tensors)
         .def("__mod__", [](const tenzor::Variable& a, const tenzor::Variable& b) {

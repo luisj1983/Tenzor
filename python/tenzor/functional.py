@@ -434,7 +434,8 @@ def l1_loss(input: Variable, target: Variable, reduction: str = "mean") -> Varia
     return _nn.l1_loss(input, target, _reduction(reduction))
 
 
-def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
+def cross_entropy(input: Variable, target: Variable, reduction: str = "mean",
+                  ignore_index: int = -100) -> Variable:
     """Compute the cross-entropy loss between logits and class indices.
 
     Combines ``log_softmax`` and ``nll_loss`` in a single function for
@@ -450,6 +451,12 @@ def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") ->
     reduction : str, optional
         Reduction mode: ``'mean'``, ``'sum'``, or ``'none'``.
         Default: ``'mean'``.
+    ignore_index : int, optional
+        Class index that should be skipped. Samples whose target equals
+        ``ignore_index`` contribute zero to the loss and are excluded from
+        the mean denominator. Default: ``-100`` (matches PyTorch). Only
+        honoured for the class-index target form; one-hot / soft targets
+        are unaffected.
 
     Returns
     -------
@@ -460,10 +467,11 @@ def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") ->
     -------
     >>> loss = F.cross_entropy(logits, labels)
     """
-    return _nn.cross_entropy(input, target, _reduction(reduction))
+    return _nn.cross_entropy(input, target, _reduction(reduction), ignore_index)
 
 
-def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
+def nll_loss(input: Variable, target: Variable, reduction: str = "mean",
+             ignore_index: int = -100) -> Variable:
     """Compute the negative log-likelihood loss.
 
     Parameters
@@ -475,6 +483,10 @@ def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Vari
     reduction : str, optional
         Reduction mode: ``'mean'``, ``'sum'``, or ``'none'``.
         Default: ``'mean'``.
+    ignore_index : int, optional
+        Class index that should be skipped. Samples whose target equals
+        ``ignore_index`` contribute zero to the loss and are excluded from
+        the mean denominator. Default: ``-100`` (matches PyTorch).
 
     Returns
     -------
@@ -486,7 +498,7 @@ def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Vari
     >>> log_probs = F.log_softmax(logits, dim=-1)
     >>> loss = F.nll_loss(log_probs, labels)
     """
-    return _nn.nll_loss(input, target, _reduction(reduction))
+    return _nn.nll_loss(input, target, _reduction(reduction), ignore_index)
 
 
 def bce_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -2157,54 +2169,98 @@ def alpha_dropout(input: Variable, p: float = 0.5,
 def focal_loss(input: Variable, target: Variable, alpha: float = 0.25,
                gamma: float = 2.0, reduction: str = "mean") -> Variable:
     """Focal loss for binary classification (Lin et al. 2017)
-    (audit E.8).
+    (audit E.8 / J.3).
 
     FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t).
 
     Assumes ``input`` contains logits and ``target`` contains 0/1
     labels (or class probabilities) matching ``input.shape``.
+
+    Audit J.3: implemented as a pure Variable-level composition. The
+    previous implementation extracted raw Tensors from ``input`` and
+    wrapped the result back into a Variable, severing the autograd graph
+    and silently flowing zero gradients into the model.
     """
     import tenzor as tz
-    # Stable sigmoid + log: BCE with logits formulation.
-    log_p = -tz.log1p(tz.exp(-input.tensor()))             # log sigmoid(x)
-    log_1mp = -input.tensor() - tz.log1p(tz.exp(-input.tensor()))  # log (1 - sigmoid(x))
-    p = sigmoid(input).tensor()
-    one_minus_p = tz.full(list(p.shape()), 1.0, dtype=p.dtype()) - p
-    t = target.tensor()
-    one_minus_t = tz.full(list(t.shape()), 1.0, dtype=t.dtype()) - t
+    # Ensure target is a Variable so * / - / + dispatch the
+    # autograd-aware overloads (and accept a plain Tensor for convenience).
+    if not isinstance(target, tz.Variable):
+        target = tz.Variable(target, requires_grad=False)
 
-    # alpha_t = alpha for positives, (1 - alpha) for negatives.
-    alpha_t = alpha * t + (1.0 - alpha) * one_minus_t
-    # (1 - p_t)^gamma with p_t = p when t=1 else (1-p).
-    p_t = p * t + one_minus_p * one_minus_t
-    one_minus_pt = tz.full(list(p_t.shape()), 1.0, dtype=p_t.dtype()) - p_t
-    weight = alpha_t * tz.pow(one_minus_pt, gamma)
-    # log p_t = log p when t=1 else log(1-p)
-    log_pt = log_p * t + log_1mp * one_minus_t
-    loss = -(weight * log_pt)
+    p = sigmoid(input)                       # autograd-aware sigmoid
+    # p_t = p     if target == 1
+    #     = 1-p   if target == 0
+    # alpha_t = alpha    if target == 1
+    #         = 1-alpha  if target == 0
+    one_minus_target = 1.0 - target
+    p_t = p * target + (1.0 - p) * one_minus_target
+    alpha_t = alpha * target + (1.0 - alpha) * one_minus_target
+
+    # (1 - p_t)^gamma — Variable.__pow__ currently bypasses autograd, so
+    # route through the autograd-aware tz.pow(Variable, float) overload.
+    one_minus_pt = 1.0 - p_t
+    focal_weight = alpha_t * tz.pow(one_minus_pt, float(gamma))
+    log_pt = tz.log(p_t)                     # autograd-aware log
+    loss = -(focal_weight * log_pt)
 
     if reduction == "mean":
-        return Variable(tz.mean(loss), requires_grad=input.requires_grad())
+        return tz.mean(loss)
     if reduction == "sum":
-        return Variable(tz.sum(loss), requires_grad=input.requires_grad())
-    return Variable(loss, requires_grad=input.requires_grad())
+        return tz.sum(loss)
+    return loss
 
 
 def dice_loss(input: Variable, target: Variable, smooth: float = 1.0,
               reduction: str = "mean") -> Variable:
-    """Sorensen–Dice loss for segmentation (audit E.8).
+    """Sorensen-Dice loss for segmentation (audit E.8 / J.3).
 
     DL = 1 - (2 * |X ∩ Y| + smooth) / (|X| + |Y| + smooth).
-    ``input`` is treated as probabilities in [0, 1]; pass a sigmoid /
-    softmax output.
+    ``input`` is treated as logits; a sigmoid is applied internally so
+    gradients flow back through the activation.
+
+    Spatial dimensions (everything after the leading batch axis) are
+    reduced when computing the per-sample intersection / union; the
+    ``reduction`` argument then folds the resulting per-sample dice
+    score.
+
+    Audit J.3: implemented as a pure Variable-level composition. The
+    previous implementation summed raw Tensors and re-wrapped the result,
+    so ``loss.backward()`` produced zero gradients on ``input``.
     """
     import tenzor as tz
-    intersection = tz.sum(input.tensor() * target.tensor())
-    denom = tz.sum(input.tensor()) + tz.sum(target.tensor())
-    loss = 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
-    if reduction == "mean" or reduction == "sum":
-        return Variable(loss, requires_grad=input.requires_grad())
-    return Variable(loss, requires_grad=input.requires_grad())
+    if not isinstance(target, tz.Variable):
+        target = tz.Variable(target, requires_grad=False)
+
+    p = sigmoid(input)                       # autograd-aware sigmoid
+    ndim = len(p.tensor().shape)
+    # Sum over every axis after the batch dim so we get a per-sample
+    # dice; for a 1-D / 0-D input fall back to a single global reduction.
+    spatial_dims = list(range(1, ndim)) if ndim > 1 else []
+
+    if spatial_dims:
+        # tz.sum(Variable, dim=int) only takes a single axis; iterate
+        # from the trailing axis to the first so earlier indices stay
+        # valid (sum() is order-independent so the math is unchanged).
+        intersection = p * target
+        union_p = p
+        union_t = target
+        for d in reversed(spatial_dims):
+            intersection = tz.sum(intersection, dim=d)
+            union_p = tz.sum(union_p, dim=d)
+            union_t = tz.sum(union_t, dim=d)
+        union = union_p + union_t
+    else:
+        intersection = tz.sum(p * target)
+        union = tz.sum(p) + tz.sum(target)
+
+    dice = (2.0 * intersection + smooth) / (union + smooth)
+    loss = 1.0 - dice
+
+    if reduction == "mean":
+        return tz.mean(loss)
+    if reduction == "sum":
+        return tz.sum(loss)
+    return loss
 
 
 def margin_ranking_loss(input1: Variable, input2: Variable, target: Variable,
