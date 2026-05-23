@@ -219,6 +219,13 @@ auto SliceBackward::forward(std::vector<Variable> inputs) -> std::vector<Variabl
 }
 
 auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Belt-and-braces: the autograd `slice(...)` factory normalises `dim`
+    // before constructing this Backward, but the ctor is reachable from
+    // elsewhere (custom ops, jit lowering, deserialised graphs). Re-normalise
+    // here so the raw `grad_output.shape()[dim_]` indexing below is safe.
+    if (dim_ < 0) {
+        dim_ += static_cast<int64_t>(input_shape_.size());
+    }
     const auto& grad_output_raw = grad_outputs[0];
 
     // grad_output here often arrives as a non-contiguous strided view —

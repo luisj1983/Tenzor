@@ -16,6 +16,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -429,9 +430,12 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     auto grad_b = tenzor::sum(go, 0, false);
 
     if (needs_upcast) {
-        grad_x = Variable(grad_x.tensor().to(orig_dt), grad_x.requires_grad());
-        grad_w = Variable(grad_w.tensor().to(orig_dt), grad_w.requires_grad());
-        grad_b = Variable(grad_b.tensor().to(orig_dt), grad_b.requires_grad());
+        // Use autograd-aware cast (TypeCastBackward) so the Variable graph
+        // stays intact for higher-order derivatives. The raw
+        // `Variable(t.to(orig_dt), requires_grad)` rewrap severed grad_fn.
+        grad_x = tenzor::nn::variable_cast(grad_x, orig_dt);
+        grad_w = tenzor::nn::variable_cast(grad_w, orig_dt);
+        grad_b = tenzor::nn::variable_cast(grad_b, orig_dt);
     }
     return {grad_x, grad_w, grad_b};
 }

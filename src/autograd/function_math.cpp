@@ -78,7 +78,7 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // fractional n the derivative is undefined; let pow produce NaN so the
     // caller sees the invalid region, rather than fabricating a wrong
     // value via |x|+eps + sign(x).
-    auto pow_term = pow(input, static_cast<float>(exp_val - 1.0));
+    auto pow_term = pow(input, exp_val - 1.0);
     auto scaled = mul(pow_term, exp_val);
     return {mul(grad, scaled)};
 }
@@ -96,8 +96,13 @@ auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         return {grad_outputs[0]};
     }
 
-    Variable input_var(input, false);
-    auto pow_term = tenzor::pow(input_var, static_cast<float>(exp_val - 1.0));
+    // Stay in Tensor-land for the pow so we can use the `double` overload
+    // (`tenzor::pow(Tensor, double)` — see include/tenzor/ops/math.hpp). The
+    // Variable overload only accepts `float`, which would silently narrow
+    // 23 mantissa bits in the Float64 path. `input` has `requires_grad=false`
+    // so dropping the Variable wrap costs no graph connectivity.
+    auto pow_term_t = tenzor::pow(input, exp_val - 1.0);
+    Variable pow_term(pow_term_t, false);
     auto scaled = pow_term * exp_val;
     return {grad_outputs[0] * scaled};
 }

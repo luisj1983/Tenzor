@@ -16,6 +16,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 
 namespace tenzor {
@@ -770,11 +771,18 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
 }
 
 auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Variable {
-    // Normalise dim for the trace so the lowering doesn't have to.
-    int64_t recorded_dim = dim;
-    if (recorded_dim < 0) {
-        recorded_dim += static_cast<int64_t>(input.shape().size());
+    // Normalise dim against input rank up front so SliceBackward never receives
+    // a negative axis (UB inside the backward's index-builder which indexes
+    // `grad_output.shape()[dim_]` raw). Throw if still out of range — the slice
+    // call below would also fail, but catching it here gives a clearer error.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) {
+        dim += ndim;
     }
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("slice: dim out of range");
+    }
+    int64_t recorded_dim = dim;
 
     auto compute = [&]() {
         return input.tensor().slice(dim, start, end, step);
