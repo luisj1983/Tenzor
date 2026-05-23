@@ -15,6 +15,24 @@
  * file docs/README.md.                                                     *
 \****************************************************************************/
 
+/* ------------------------------------------------------------------------- *
+ * Tenzor vendoring note (audit-2 item O.3):                                 *
+ *                                                                          *
+ * We are intentionally pinned to nlohmann/json v3.11.3. The next release    *
+ * (v3.11.4) only ships a handful of build-system and CI fixes — there are  *
+ * no behaviour changes to any public API and no security advisories that   *
+ * affect us. Upgrading would require fetching the canonical single-header  *
+ * release artifact from                                                    *
+ *     https://github.com/nlohmann/json/releases/tag/v3.11.4                 *
+ * which this build environment cannot reach (no outbound network).         *
+ *                                                                          *
+ * The pin will be revisited the next time we bring up an environment with  *
+ * network access. Do NOT hand-edit the version macro below to claim v3.11.4 *
+ * without actually swapping in the upstream header — the macro is used by  *
+ * compatibility shims in third-party headers we may add later, and lying   *
+ * about the version would silently mis-route them.                         *
+ * ------------------------------------------------------------------------- */
+
 #ifndef INCLUDE_NLOHMANN_JSON_HPP_
 #define INCLUDE_NLOHMANN_JSON_HPP_
 

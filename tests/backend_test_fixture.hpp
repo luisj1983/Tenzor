@@ -1,5 +1,17 @@
 #pragma once
 
+// ============================================================================
+// IMPORTANT: no test file may call `tenzor::initialize()` directly.
+// ----------------------------------------------------------------------------
+// Use `tenzor::testing::EnsureInitialized()` (declared below) from any
+// SetUp / SetUpTestSuite / Environment::SetUp that needs the runtime to be
+// initialised. It wraps the canonical `std::call_once` so the underlying
+// `tenzor::initialize()` runs exactly once per process across all test
+// suites, regardless of which order Google Test instantiates them in. A
+// direct call risks reinitialising backends in the middle of another
+// suite's run, and bypasses the TF32-disable defaults this helper applies.
+// ============================================================================
+
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include <cstdlib>
@@ -9,6 +21,29 @@
 
 namespace tenzor {
 namespace testing {
+
+// ----------------------------------------------------------------------------
+// EnsureInitialized: process-wide one-shot library bring-up for test fixtures.
+// ----------------------------------------------------------------------------
+// Thread-safe via std::call_once. Sets TENZOR_DISABLE_TF32=1 (only if the
+// caller has not already set it) so cuBLAS does not silently downgrade FP32
+// matmul to TF32 on Ampere+, which would blow through the parity tolerances
+// the test suite uses. Idempotent: subsequent calls are no-ops.
+//
+// Call this from BackendTest::SetUp, any TestEnvironment::SetUp, or any
+// custom fixture's SetUp / SetUpTestSuite. Never call `tenzor::initialize()`
+// directly from a test (see header banner above).
+inline void EnsureInitialized() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        // Force IEEE 754 FP32 on CUDA matmul — cuBLAS defaults to TF32 on
+        // Ampere+, which silently drops ~13 mantissa bits and blows through
+        // the 1e-4/1e-5 tolerances most parity tests use. Respect the
+        // caller's explicit value if they set it themselves.
+        setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);
+        tenzor::initialize();
+    });
+}
 
 // Forward declarations for parsing utilities (defined in multi_backend_dtype_fixture.hpp).
 // Duplicated here to keep this header self-contained.
@@ -140,6 +175,9 @@ inline bool isBackendNameAvailable(const std::string& backend_name) {
 class BackendTest : public ::testing::TestWithParam<std::string> {
 protected:
     Device device;
+    // NOTE: init_flag is retained for ABI/compat with any out-of-tree fixture
+    // that may have referenced it, but is no longer used by SetUp — the
+    // one-shot guard now lives inside EnsureInitialized() above.
     static std::once_flag init_flag;
 
     // Set TENZOR_REQUIRE_MULTI_BACKEND=1 in CI to turn every "backend not
@@ -153,17 +191,10 @@ protected:
     }
 
     void SetUp() override {
-        // Initialize Tenzor library and load backends (thread-safe, exactly once)
-        std::call_once(init_flag, []() {
-            // Force IEEE 754 FP32 on CUDA matmul — cuBLAS defaults to TF32 on
-            // Ampere+, which silently drops ~13 mantissa bits and blows through
-            // the 1e-4/1e-5 tolerances most parity tests use. Respect the
-            // caller's explicit value if they set it themselves. Applied
-            // globally here so individual parity binaries don't each need a
-            // custom main().
-            setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);
-            tenzor::initialize();
-        });
+        // Bring up the Tenzor runtime exactly once per process. Test files
+        // MUST NOT call tenzor::initialize() directly — the helper applies
+        // the TENZOR_DISABLE_TF32 default required by FP32 parity tests.
+        ::tenzor::testing::EnsureInitialized();
 
         // Deterministic RNG seed per test. Parity tests that use randn() would
         // otherwise produce different inputs on every process invocation, which
@@ -256,8 +287,7 @@ inline std::once_flag BackendTest::init_flag;
         AllDevices, \
         TestSuiteName, \
         ::testing::ValuesIn([]() -> std::vector<std::string> { \
-            static std::once_flag init; \
-            std::call_once(init, []() { tenzor::initialize(); }); \
+            ::tenzor::testing::EnsureInitialized(); \
             std::vector<std::string> result = {"cpu"}; \
             struct Info { const char* name; Device::Type type; }; \
             constexpr Info backends[] = { \
