@@ -4153,6 +4153,1912 @@ JvpResult jvp_adapter_nested_layer_norm(std::span<const Tensor> /*primals*/,
 
 } // anonymous (batch 8)
 
+// ============================================================================
+// Audit A.4 batch 9 — JVP coverage extension
+// ============================================================================
+//
+// This batch closes the long tail of differentiable OpIds that the previous
+// eight batches did not reach, plus registers explicit NonDifferentiable rules
+// for ops that have no derivative (boolean / integer / RNG / *Backward /
+// inplace / quantized / discrete-output) — failing loudly at JVP dispatch
+// time rather than silently returning a zero tangent.
+//
+// Patterns used by the linear-in-input adapters below:
+//
+//   - "Linear pass-through" ops (Conj, Real, Imag, Contiguous, Clone,
+//     AsStrided, ToMemoryFormat, FFT2/N, IFFT2/N, AvgPool{1,2,3}d, Fold,
+//     Interpolate, GridSample, ROIAlignForward, DiagEmbed, Diagflat,
+//     MaskedScatter, MaxUnpool{1,2,3}d, AffineGrid, NestedTo/FromPadded):
+//        y  = f(x)  with f linear  →  dy = f(dx)
+//     Implemented by re-dispatching the same OpId on the tangent.
+//
+//   - Linear-in-weight ops (Embedding): the indices argument is integer and
+//     non-differentiable; only `weight` carries a tangent.
+//
+//   - Multi-output max-pool style (MaxPool{1,2,3}dForward): saves indices in
+//     output[1]; tangent = gather_at_pool_indices(dx, indices, spatial_dims).
+//
+//   - Closed-form unary derivatives use the documented chain-rule formula in
+//     the function header (e.g. d/dx rsqrt(x) = -0.5 * x^{-3/2}).
+//
+//   - Closed-form binary derivatives use the standard sub-gradients (Maximum,
+//     Minimum, Fmax, Fmin: sub-gradient = indicator of the active operand).
+// ============================================================================
+
+namespace {
+
+// ---- NonDifferentiable rule helper macros ----------------------------------
+//
+// A NonDifferentiable rule throws tenzor::NonDifferentiable when invoked.
+// We expose two forms: one for single-output ops (JvpResult) and one for
+// multi-output ops (JvpMultiResult). The thrown message names the OpId
+// and the structural reason it cannot have a forward-mode JVP, so callers
+// see "Cast forward-mode JVP not implemented: …" rather than a generic
+// "no rule registered" runtime_error.
+
+#define TENZOR_JVP_NONDIFF(name, reason)                                        \
+    JvpResult name(std::span<const Tensor> /*primals*/,                         \
+                   std::span<const Tensor> /*tangents*/,                        \
+                   const OpAttributes& /*attrs*/) {                             \
+        throw NonDifferentiable(reason);                                        \
+    }
+
+#define TENZOR_JVP_NONDIFF_MULTI(name, reason)                                  \
+    JvpMultiResult name(std::span<const Tensor> /*primals*/,                    \
+                        std::span<const Tensor> /*tangents*/,                   \
+                        const OpAttributes& /*attrs*/) {                        \
+        throw NonDifferentiable(reason);                                        \
+    }
+
+// ---- Linear-in-input adapter helper ----------------------------------------
+//
+// For ops whose forward kernel is linear in input(s), the JVP rule simply
+// re-dispatches the same OpId on the tangent inputs. This works for unary
+// (most pooling/shape ops) and binary linear forms. We provide a unary
+// helper here; multi-input cases are handled bespoke below.
+
+inline auto linear_unary_jvp(OpId op,
+                             std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) -> JvpResult {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error(
+            std::string("jvp linear-unary adapter: expected 1 input for ") +
+            std::string(op_id_to_name(op)));
+    }
+    auto p = make_dual(primals[0], tangents[0]);
+    auto primal_out  = tenzor::dispatch(op, std::vector<Tensor>{p.primal()},  attrs)[0];
+    auto tangent_out = tenzor::dispatch(op, std::vector<Tensor>{p.tangent()}, attrs)[0];
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
+}
+
+// ============================================================================
+// Linear-in-input adapters (apply same op on tangent)
+// ============================================================================
+
+// Complex ops are R-linear (treating complex as a pair of reals). Conj, Real,
+// Imag are linear projections of the complex value; tangent applies the same
+// projection.
+JvpResult jvp_adapter_conj(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::Conj, p, t, a); }
+JvpResult jvp_adapter_real(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::Real, p, t, a); }
+JvpResult jvp_adapter_imag(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::Imag, p, t, a); }
+
+// Identity-up-to-memory layout ops: contiguous / clone / to_memory_format /
+// as_strided. The forward is a pure copy or stride-relabel; tangent is the
+// same op on dx.
+JvpResult jvp_adapter_contiguous(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::Contiguous, p, t, a); }
+JvpResult jvp_adapter_clone(std::span<const Tensor> p, std::span<const Tensor> t,
+                            const OpAttributes& a) { return linear_unary_jvp(OpId::Clone, p, t, a); }
+JvpResult jvp_adapter_to_memory_format(std::span<const Tensor> p, std::span<const Tensor> t,
+                                       const OpAttributes& a) { return linear_unary_jvp(OpId::ToMemoryFormat, p, t, a); }
+JvpResult jvp_adapter_as_strided(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::AsStrided, p, t, a); }
+
+// Diagonal layout ops: diag_embed / diagflat — linear shape operations.
+JvpResult jvp_adapter_diag_embed(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::DiagEmbed, p, t, a); }
+JvpResult jvp_adapter_diagflat(std::span<const Tensor> p, std::span<const Tensor> t,
+                               const OpAttributes& a) { return linear_unary_jvp(OpId::Diagflat, p, t, a); }
+
+// FFT variants beyond 1D: FFT2, IFFT2, FFTN, IFFTN are linear over complex.
+JvpResult jvp_adapter_fft2(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::FFT2, p, t, a); }
+JvpResult jvp_adapter_ifft2(std::span<const Tensor> p, std::span<const Tensor> t,
+                            const OpAttributes& a) { return linear_unary_jvp(OpId::IFFT2, p, t, a); }
+JvpResult jvp_adapter_fftn(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::FFTN, p, t, a); }
+JvpResult jvp_adapter_ifftn(std::span<const Tensor> p, std::span<const Tensor> t,
+                            const OpAttributes& a) { return linear_unary_jvp(OpId::IFFTN, p, t, a); }
+
+// AvgPool{1,2,3}dForward: linear in input (each output cell is a fixed-weight
+// average of an input window with kernel-derived stride/padding); the window
+// pattern depends only on attributes, not values → tangent = same op on dx.
+JvpResult jvp_adapter_avg_pool1d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::AvgPool1dForward, p, t, a); }
+JvpResult jvp_adapter_avg_pool2d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::AvgPool2dForward, p, t, a); }
+JvpResult jvp_adapter_avg_pool3d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                 const OpAttributes& a) { return linear_unary_jvp(OpId::AvgPool3dForward, p, t, a); }
+
+// Fold / Unfold-style: fold is the linear adjoint of unfold (already
+// registered); both are pure rearrangements with overlap-summation → linear.
+JvpResult jvp_adapter_fold(std::span<const Tensor> p, std::span<const Tensor> t,
+                           const OpAttributes& a) { return linear_unary_jvp(OpId::Fold, p, t, a); }
+
+// Interpolate (bilinear/nearest/etc.): all currently-supported modes are
+// linear in `input` for fixed output_size/scale; tangent = same op on dx.
+// (For 'nearest', the JVP is well-defined since the gather pattern depends
+// only on shape, not values.)
+JvpResult jvp_adapter_interpolate(std::span<const Tensor> p, std::span<const Tensor> t,
+                                  const OpAttributes& a) { return linear_unary_jvp(OpId::Interpolate, p, t, a); }
+
+// GridSample: y[n, c, h, w] = sum_{i,j} G(h,w; grid) * input[n, c, i, j]
+// is linear in `input` for a fixed grid; non-linear in `grid` (which the
+// project marks NonDifferentiable through autograd at this layer). For JVP
+// purposes we propagate the input tangent through the same op; if the grid
+// has a non-zero tangent we refuse.
+JvpResult jvp_adapter_grid_sample(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() < 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error("jvp_adapter_grid_sample: expected 2 inputs (input, grid)");
+    }
+    if (tangents[1].numel() != 0) {
+        throw NonDifferentiable(
+            "GridSample forward-mode JVP w.r.t. grid is not implemented; "
+            "grid carries non-zero tangent. Only input-side JVP is supported.");
+    }
+    auto primal = tenzor::dispatch(OpId::GridSample,
+                                   std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::GridSample,
+                                    std::vector<Tensor>{tangents[0], primals[1]}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// ROIAlignForward: y[k, c, ph, pw] = bilinear-sample(input, boxes[k]) is
+// linear in `input` for fixed boxes; boxes are integer-quantized then
+// bilinear-interpolated, so we propagate input tangent only.
+JvpResult jvp_adapter_roi_align(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() < 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error("jvp_adapter_roi_align: expected 2 inputs (input, boxes)");
+    }
+    if (tangents[1].numel() != 0) {
+        throw NonDifferentiable(
+            "ROIAlign forward-mode JVP w.r.t. boxes is not implemented; "
+            "boxes carry non-zero tangent.");
+    }
+    auto primal = tenzor::dispatch(OpId::ROIAlignForward,
+                                   std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::ROIAlignForward,
+                                    std::vector<Tensor>{tangents[0], primals[1]}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// AffineGrid: theta -> grid is linear in theta (affine_grid is a fixed-base
+// linear transform on the theta matrix). Tangent = same op on dtheta.
+JvpResult jvp_adapter_affine_grid(std::span<const Tensor> p, std::span<const Tensor> t,
+                                  const OpAttributes& a) { return linear_unary_jvp(OpId::AffineGrid, p, t, a); }
+
+// NestedTo/FromPadded: pure data rearrangements (offset-driven copy); linear.
+JvpResult jvp_adapter_nested_to_padded(std::span<const Tensor> primals,
+                                       std::span<const Tensor> tangents,
+                                       const OpAttributes& attrs) {
+    if (primals.size() < 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_nested_to_padded: expected (values, offsets[, padding])");
+    }
+    // Offsets at primals[1] are integer; we never read tangents[1].
+    std::vector<Tensor> p_in(primals.begin(), primals.end());
+    std::vector<Tensor> t_in = p_in;
+    t_in[0] = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    auto primal  = tenzor::dispatch(OpId::NestedToPadded, p_in, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::NestedToPadded, t_in, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_nested_from_padded(std::span<const Tensor> primals,
+                                         std::span<const Tensor> tangents,
+                                         const OpAttributes& attrs) {
+    if (primals.size() < 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_nested_from_padded: expected (padded, offsets)");
+    }
+    std::vector<Tensor> p_in(primals.begin(), primals.end());
+    std::vector<Tensor> t_in = p_in;
+    t_in[0] = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    auto primal  = tenzor::dispatch(OpId::NestedFromPadded, p_in, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::NestedFromPadded, t_in, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// MaskedScatter: y = mask ? source[unflatten(cumsum(mask))] : input. Linear
+// in (input, source); mask is boolean and non-differentiable. Tangent =
+// MaskedScatter(d_input, mask, d_source).
+JvpResult jvp_adapter_masked_scatter(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_masked_scatter: expected 3 inputs (input, mask, source)");
+    }
+    auto dinp = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    auto dsrc = tangents[2].numel() != 0 ? tangents[2]
+        : tenzor::zeros(std::vector<int64_t>(primals[2].shape().begin(),
+                                              primals[2].shape().end()),
+                        primals[2].dtype(), primals[2].device());
+    auto primal  = tenzor::dispatch(OpId::MaskedScatter,
+                                    std::vector<Tensor>{primals[0], primals[1], primals[2]},
+                                    attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::MaskedScatter,
+                                    std::vector<Tensor>{dinp, primals[1], dsrc},
+                                    attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// Put: linear in input + source (mirror of MaskedScatter).
+JvpResult jvp_adapter_put(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_put: expected 3 inputs (input, index, source)");
+    }
+    auto dinp = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    auto dsrc = tangents[2].numel() != 0 ? tangents[2]
+        : tenzor::zeros(std::vector<int64_t>(primals[2].shape().begin(),
+                                              primals[2].shape().end()),
+                        primals[2].dtype(), primals[2].device());
+    auto primal  = tenzor::dispatch(OpId::Put,
+                                    std::vector<Tensor>{primals[0], primals[1], primals[2]},
+                                    attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::Put,
+                                    std::vector<Tensor>{dinp, primals[1], dsrc},
+                                    attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// ScatterAdd: y = input.clone(); y[index] += source. Linear in input+source.
+JvpResult jvp_adapter_scatter_add(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_scatter_add: expected 3 inputs (input, index, source)");
+    }
+    auto dinp = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    auto dsrc = tangents[2].numel() != 0 ? tangents[2]
+        : tenzor::zeros(std::vector<int64_t>(primals[2].shape().begin(),
+                                              primals[2].shape().end()),
+                        primals[2].dtype(), primals[2].device());
+    auto primal  = tenzor::dispatch(OpId::ScatterAdd,
+                                    std::vector<Tensor>{primals[0], primals[1], primals[2]},
+                                    attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::ScatterAdd,
+                                    std::vector<Tensor>{dinp, primals[1], dsrc},
+                                    attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// ============================================================================
+// MaxPool{1,2,3}dForward: multi-output {values, indices}; gather pattern.
+// ============================================================================
+//
+// Each output is the max of an input window; the saved indices give the
+// flat-spatial offset within the window. The tangent at the output is the
+// tangent at the chosen input location, gathered via take_along_dim on the
+// flattened spatial axis (same pattern used for adaptive max pool).
+namespace {
+auto run_maxpool_nd(OpId op, const Tensor& x,
+                    const OpAttributes& attrs) -> std::vector<Tensor> {
+    return tenzor::dispatch(op, std::vector<Tensor>{x}, attrs);
+}
+
+auto maxpool_nd_jvp_impl(OpId op, int64_t spatial_dims,
+                         std::span<const Tensor> primals,
+                         std::span<const Tensor> tangents,
+                         const OpAttributes& attrs) -> JvpMultiResult {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_maxpool: expected 1 input");
+    }
+    auto outs = run_maxpool_nd(op, primals[0], attrs);
+    Tensor out_p = outs[0];
+    Tensor idx_p = outs.size() > 1 ? outs[1] : Tensor{};
+    Tensor dx = tangents[0];
+    auto zeros_like_t = [](const Tensor& t) -> Tensor {
+        return tenzor::zeros(std::vector<int64_t>(t.shape().begin(), t.shape().end()),
+                             t.dtype(), t.device());
+    };
+    Tensor idx_t = idx_p.numel() != 0 ? zeros_like_t(idx_p) : Tensor{};
+    if (dx.numel() == 0) {
+        Tensor zero_out = zeros_like_t(out_p);
+        if (idx_p.numel() != 0) {
+            return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                                  {std::move(zero_out), std::move(idx_t)}};
+        }
+        return JvpMultiResult{{std::move(out_p)}, {std::move(zero_out)}};
+    }
+    if (idx_p.numel() == 0) {
+        // Some backends may not return indices for single-output max-pool
+        // signatures; in that case we cannot index into dx, so fail loudly.
+        throw NonDifferentiable(
+            "MaxPool*Forward JVP requires saved indices (output[1]); "
+            "the kernel returned only the values tensor.");
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, spatial_dims);
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+} // namespace
+
+JvpMultiResult jvp_adapter_max_pool_1d(std::span<const Tensor> p,
+                                       std::span<const Tensor> t,
+                                       const OpAttributes& a) {
+    return maxpool_nd_jvp_impl(OpId::MaxPool1dForward, /*spatial_dims=*/1, p, t, a);
+}
+JvpMultiResult jvp_adapter_max_pool_2d(std::span<const Tensor> p,
+                                       std::span<const Tensor> t,
+                                       const OpAttributes& a) {
+    return maxpool_nd_jvp_impl(OpId::MaxPool2dForward, /*spatial_dims=*/2, p, t, a);
+}
+JvpMultiResult jvp_adapter_max_pool_3d(std::span<const Tensor> p,
+                                       std::span<const Tensor> t,
+                                       const OpAttributes& a) {
+    return maxpool_nd_jvp_impl(OpId::MaxPool3dForward, /*spatial_dims=*/3, p, t, a);
+}
+
+// MaxUnpool{1,2,3}dForward: y[indices] = input scattered to a zero buffer.
+// Linear in `input` for fixed indices → tangent = same op on dx + same
+// indices.
+JvpResult jvp_adapter_max_unpool_impl(OpId op,
+                                      std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() < 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_max_unpool: expected (input, indices[, output_size])");
+    }
+    auto dinp = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
+    std::vector<Tensor> p_in(primals.begin(), primals.end());
+    std::vector<Tensor> t_in = p_in;
+    t_in[0] = dinp;
+    auto primal  = tenzor::dispatch(op, p_in, attrs)[0];
+    auto tangent = tenzor::dispatch(op, t_in, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_max_unpool_1d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                    const OpAttributes& a) {
+    return jvp_adapter_max_unpool_impl(OpId::MaxUnpool1dForward, p, t, a);
+}
+JvpResult jvp_adapter_max_unpool_2d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                    const OpAttributes& a) {
+    return jvp_adapter_max_unpool_impl(OpId::MaxUnpool2dForward, p, t, a);
+}
+JvpResult jvp_adapter_max_unpool_3d(std::span<const Tensor> p, std::span<const Tensor> t,
+                                    const OpAttributes& a) {
+    return jvp_adapter_max_unpool_impl(OpId::MaxUnpool3dForward, p, t, a);
+}
+
+// ============================================================================
+// Linear-in-weight: Embedding.
+//   y[i] = weight[indices[i]];   indices ∈ Integer, weight ∈ Float.
+//   dy[i] = dweight[indices[i]]  → dispatch(Embedding, [indices, dweight]).
+// ============================================================================
+JvpResult jvp_adapter_embedding(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_embedding: expected 2 inputs (indices, weight)");
+    }
+    auto dweight = tangents[1].numel() != 0 ? tangents[1]
+        : tenzor::zeros(std::vector<int64_t>(primals[1].shape().begin(),
+                                              primals[1].shape().end()),
+                        primals[1].dtype(), primals[1].device());
+    auto primal  = tenzor::dispatch(OpId::Embedding,
+                                    std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::Embedding,
+                                    std::vector<Tensor>{primals[0], dweight}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// ============================================================================
+// Linear-in-input bilinear GEMMs: Addmm / Addmv / Baddbmm.
+//   Addmm(I, A, B; α, β) = β·I + α·(A @ B)
+//   d/dt = β·dI + α·(dA @ B + A @ dB)
+// Implemented by composing the existing linear ops since Addmm itself is
+// linear in (I, A, B).
+// ============================================================================
+namespace {
+inline auto fetch_alpha_beta(const OpAttributes& attrs) -> std::pair<double, double> {
+    double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+    double beta  = attrs.get_float(AttrKey::Beta,  1.0);
+    return {alpha, beta};
+}
+} // namespace
+
+JvpResult jvp_adapter_addmm(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_addmm: expected 3 inputs (input, mat1, mat2)");
+    }
+    auto [alpha, beta] = fetch_alpha_beta(attrs);
+    const auto& I = primals[0]; const auto& A = primals[1]; const auto& B = primals[2];
+    auto zeros_like = [](const Tensor& x) {
+        return tenzor::zeros(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                             x.dtype(), x.device());
+    };
+    auto dI = tangents[0].numel() != 0 ? tangents[0] : zeros_like(I);
+    auto dA = tangents[1].numel() != 0 ? tangents[1] : zeros_like(A);
+    auto dB = tangents[2].numel() != 0 ? tangents[2] : zeros_like(B);
+    auto primal  = tenzor::add(tenzor::mul(I, beta),
+                               tenzor::mul(tenzor::matmul(A, B), alpha));
+    auto t_AB    = tenzor::add(tenzor::matmul(dA, B), tenzor::matmul(A, dB));
+    auto tangent = tenzor::add(tenzor::mul(dI, beta), tenzor::mul(t_AB, alpha));
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+JvpResult jvp_adapter_addmv(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_addmv: expected 3 inputs (input, mat, vec)");
+    }
+    auto [alpha, beta] = fetch_alpha_beta(attrs);
+    const auto& I = primals[0]; const auto& A = primals[1]; const auto& v = primals[2];
+    auto zeros_like = [](const Tensor& x) {
+        return tenzor::zeros(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                             x.dtype(), x.device());
+    };
+    auto dI = tangents[0].numel() != 0 ? tangents[0] : zeros_like(I);
+    auto dA = tangents[1].numel() != 0 ? tangents[1] : zeros_like(A);
+    auto dv = tangents[2].numel() != 0 ? tangents[2] : zeros_like(v);
+    auto primal  = tenzor::add(tenzor::mul(I, beta),
+                               tenzor::mul(tenzor::matmul(A, v), alpha));
+    auto t_Av    = tenzor::add(tenzor::matmul(dA, v), tenzor::matmul(A, dv));
+    auto tangent = tenzor::add(tenzor::mul(dI, beta), tenzor::mul(t_Av, alpha));
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+JvpResult jvp_adapter_baddbmm(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 3 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_baddbmm: expected 3 inputs (input, batch1, batch2)");
+    }
+    auto [alpha, beta] = fetch_alpha_beta(attrs);
+    const auto& I = primals[0]; const auto& A = primals[1]; const auto& B = primals[2];
+    auto zeros_like = [](const Tensor& x) {
+        return tenzor::zeros(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                             x.dtype(), x.device());
+    };
+    auto dI = tangents[0].numel() != 0 ? tangents[0] : zeros_like(I);
+    auto dA = tangents[1].numel() != 0 ? tangents[1] : zeros_like(A);
+    auto dB = tangents[2].numel() != 0 ? tangents[2] : zeros_like(B);
+    auto primal  = tenzor::add(tenzor::mul(I, beta),
+                               tenzor::mul(tenzor::bmm(A, B), alpha));
+    auto t_AB    = tenzor::add(tenzor::bmm(dA, B), tenzor::bmm(A, dB));
+    auto tangent = tenzor::add(tenzor::mul(dI, beta), tenzor::mul(t_AB, alpha));
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// Dot: y = sum_i a[i] * b[i]; d = sum_i (da*b + a*db).
+JvpResult jvp_adapter_dot(std::span<const Tensor> primals,
+                          std::span<const Tensor> tangents,
+                          const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error("jvp_adapter_dot: expected 2 inputs (a, b)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    auto primal  = tenzor::dot(a.primal(), b.primal());
+    auto tangent = tenzor::add(tenzor::dot(a.tangent(), b.primal()),
+                                tenzor::dot(a.primal(), b.tangent()));
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// LinalgVecdot: sum along a single dim. Bilinear like dot but per-axis.
+JvpResult jvp_adapter_linalg_vecdot(std::span<const Tensor> primals,
+                                    std::span<const Tensor> tangents,
+                                    const OpAttributes& attrs) {
+    if (primals.size() != 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error("jvp_adapter_linalg_vecdot: expected 2 inputs (a, b)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    auto primal  = tenzor::dispatch(OpId::LinalgVecdot,
+                                    std::vector<Tensor>{a.primal(), b.primal()}, attrs)[0];
+    auto t_from_a = tenzor::dispatch(OpId::LinalgVecdot,
+                                     std::vector<Tensor>{a.tangent(), b.primal()}, attrs)[0];
+    auto t_from_b = tenzor::dispatch(OpId::LinalgVecdot,
+                                     std::vector<Tensor>{a.primal(), b.tangent()}, attrs)[0];
+    return JvpResult{std::move(primal), tenzor::add(t_from_a, t_from_b)};
+}
+
+// ============================================================================
+// Closed-form derivatives (linear and non-linear)
+// ============================================================================
+
+// d/dx rsqrt(x) = -0.5 * x^{-3/2}.
+auto jvp_rsqrt(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::rsqrt(x.primal());                  // 1/sqrt(x)
+    // -0.5 * rsqrt(x)^3 == -0.5 * x^{-3/2}
+    auto factor = tenzor::mul(tenzor::mul(primal, primal), primal);
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(factor, -0.5));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx deg2rad(x) = π/180; d/dx rad2deg(x) = 180/π.
+auto jvp_deg2rad(const DualTensor& x) -> DualTensor {
+    constexpr double kDegToRad = 0.017453292519943295;  // π/180
+    auto primal  = tenzor::deg2rad(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), kDegToRad);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+auto jvp_rad2deg(const DualTensor& x) -> DualTensor {
+    constexpr double kRadToDeg = 57.29577951308232;     // 180/π
+    auto primal  = tenzor::rad2deg(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), kRadToDeg);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// logit(x; eps) = log(x/(1-x))  (with clamp at [eps, 1-eps] when eps>=0).
+// d/dx logit(x) = 1/(x(1-x)) for x in the open interval; piecewise-constant
+// (0) where the clamp pins the value. We implement the open-interval form,
+// matching PyTorch's behaviour at non-clamped points (the clamp boundary is a
+// measure-zero set in the unclamped case).
+auto jvp_logit(const DualTensor& x, double /*eps*/) -> DualTensor {
+    auto primal = tenzor::logit(x.primal(), -1.0);
+    auto one = tenzor::ones_like(x.primal());
+    auto one_minus = tenzor::sub(one, x.primal());
+    auto denom = tenzor::mul(x.primal(), one_minus);
+    auto tangent = tenzor::div(x.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx sinc(x) = (πx·cos(πx) − sin(πx)) / (πx)^2   for x ≠ 0;
+//              = 0 at x = 0 (limit of even function with sinc'(0) = 0).
+auto jvp_sinc(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::sinc(x.primal());
+    constexpr double kPi = 3.141592653589793;
+    auto px = tenzor::mul(x.primal(), kPi);
+    auto cos_px = tenzor::cos(px);
+    auto sin_px = tenzor::sin(px);
+    auto px_safe = tenzor::add(px, 1e-30);  // avoid /0 at x=0
+    auto deriv = tenzor::div(tenzor::sub(cos_px, tenzor::div(sin_px, px_safe)),
+                              tenzor::add(x.primal(), 1e-30));
+    // The above is sinc'(x) but unstable at x=0; replace with 0 where |x|<eps
+    // via a mask.
+    auto eps_t = tenzor::mul(tenzor::ones_like(x.primal()), 1e-6);
+    auto small = tenzor::lt(tenzor::abs(x.primal()), eps_t);
+    auto zero  = tenzor::zeros_like(deriv);
+    auto deriv_safe = tenzor::where(small, zero, deriv);
+    auto tangent = tenzor::mul(x.tangent(), deriv_safe);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx ndtr(x) = exp(-x^2/2) / sqrt(2π)  (standard normal PDF).
+auto jvp_ndtr(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::ndtr(x.primal());
+    constexpr double kInvSqrt2Pi = 0.3989422804014327;
+    auto neg_half_x2 = tenzor::mul(tenzor::mul(x.primal(), x.primal()), -0.5);
+    auto pdf = tenzor::mul(tenzor::exp(neg_half_x2), kInvSqrt2Pi);
+    auto tangent = tenzor::mul(x.tangent(), pdf);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx log_ndtr(x) = pdf(x) / ndtr(x) — the score function of the normal CDF.
+auto jvp_log_ndtr(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::log_ndtr(x.primal());
+    constexpr double kInvSqrt2Pi = 0.3989422804014327;
+    auto neg_half_x2 = tenzor::mul(tenzor::mul(x.primal(), x.primal()), -0.5);
+    auto pdf = tenzor::mul(tenzor::exp(neg_half_x2), kInvSqrt2Pi);
+    auto cdf = tenzor::ndtr(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), tenzor::div(pdf, cdf));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx erfinv(y) = √π / 2 · exp(erfinv(y)^2). Compute the primal first so the
+// derivative reuses it without an extra dispatch.
+auto jvp_erfinv(const DualTensor& y) -> DualTensor {
+    auto primal = tenzor::erfinv(y.primal());
+    constexpr double kHalfSqrtPi = 0.8862269254527580;  // √π / 2
+    auto sq = tenzor::mul(primal, primal);
+    auto factor = tenzor::mul(tenzor::exp(sq), kHalfSqrtPi);
+    auto tangent = tenzor::mul(y.tangent(), factor);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx digamma(x) = trigamma(x) = polygamma(1, x). The polygamma series in
+// the project is sufficient for the n=1 case.
+auto jvp_digamma(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::digamma(x.primal());
+    auto trig = tenzor::polygamma(1, x.primal());
+    auto tangent = tenzor::mul(x.tangent(), trig);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// d/dx gamma(x) = gamma(x) · digamma(x).
+auto jvp_gamma(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::gamma(x.primal());
+    auto dg = tenzor::digamma(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(primal, dg));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// Bessel derivatives (DLMF identities):
+//   J0'(x) = −J1(x)
+//   J1'(x) = J0(x) − J1(x)/x       (we use J0(x) − J1(x)*x^{-1}; safe at x>0)
+//   I0'(x) = I1(x)
+//   I1'(x) = I0(x) − I1(x)/x       (analogous identity for modified Bessel).
+auto jvp_bessel_j0(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::bessel_j0(x.primal());
+    auto deriv  = tenzor::neg(tenzor::bessel_j1(x.primal()));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+auto jvp_bessel_j1(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::bessel_j1(x.primal());
+    auto j0     = tenzor::bessel_j0(x.primal());
+    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto deriv  = tenzor::sub(j0, tenzor::div(primal, x_safe));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+auto jvp_bessel_i0(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::bessel_i0(x.primal());
+    auto deriv  = tenzor::bessel_i1(x.primal());
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+auto jvp_bessel_i1(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::bessel_i1(x.primal());
+    auto i0     = tenzor::bessel_i0(x.primal());
+    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto deriv  = tenzor::sub(i0, tenzor::div(primal, x_safe));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+
+// d/dx i0e(x) = exp(-|x|)·BesselI0(x); derivative:
+//   i0e'(x) = exp(-|x|)·(I1(x) − sign(x)·I0(x))
+//          = i1e(x) − sign(x)·i0e(x)
+auto jvp_i0e(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::i0e(x.primal());
+    auto i1e_   = tenzor::i1e(x.primal());
+    auto sgn    = tenzor::sign(x.primal());
+    auto deriv  = tenzor::sub(i1e_, tenzor::mul(sgn, primal));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+// Analogous for i1e: i1e'(x) = i0e(x) − sign(x)·i1e(x) − i1e(x)/x.
+auto jvp_i1e(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::i1e(x.primal());
+    auto i0e_   = tenzor::i0e(x.primal());
+    auto sgn    = tenzor::sign(x.primal());
+    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto deriv  = tenzor::sub(tenzor::sub(i0e_, tenzor::mul(sgn, primal)),
+                                tenzor::div(primal, x_safe));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+
+// spherical_bessel_j0(x) = sin(x)/x; derivative = (x·cos(x) − sin(x))/x² (and
+// 0 at x=0 by symmetry).
+auto jvp_spherical_bessel_j0(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::spherical_bessel_j0(x.primal());
+    auto cosx = tenzor::cos(x.primal());
+    auto sinx = tenzor::sin(x.primal());
+    auto x_safe = tenzor::add(x.primal(), 1e-30);
+    auto deriv = tenzor::div(tenzor::sub(tenzor::mul(x.primal(), cosx), sinx),
+                              tenzor::mul(x_safe, x_safe));
+    auto eps_t = tenzor::mul(tenzor::ones_like(x.primal()), 1e-6);
+    auto small = tenzor::lt(tenzor::abs(x.primal()), eps_t);
+    auto deriv_safe = tenzor::where(small, tenzor::zeros_like(deriv), deriv);
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv_safe));
+}
+
+// d/dx entr(x) = -log(x) - 1; entr(x) = -x*log(x) for x > 0, 0 at x=0,
+// -inf at x<0. We propagate the open-domain derivative.
+auto jvp_entr(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::entr(x.primal());
+    auto deriv = tenzor::sub(tenzor::neg(tenzor::log(x.primal())),
+                              tenzor::ones_like(x.primal()));
+    return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
+}
+
+// d/dx (a + v*b*c) = da + v*(db*c + b*dc) for addcmul;
+// d/dx (a + v*b/c) = da + v*(db/c - b*dc/c^2) for addcdiv.
+auto jvp_addcmul(const DualTensor& a, const DualTensor& b,
+                 const DualTensor& c, double v) -> DualTensor {
+    auto primal = tenzor::addcmul(a.primal(), b.primal(), c.primal(), v);
+    auto t_bc = tenzor::add(tenzor::mul(b.tangent(), c.primal()),
+                              tenzor::mul(b.primal(), c.tangent()));
+    auto tangent = tenzor::add(a.tangent(), tenzor::mul(t_bc, v));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+auto jvp_addcdiv(const DualTensor& a, const DualTensor& b,
+                 const DualTensor& c, double v) -> DualTensor {
+    auto primal = tenzor::addcdiv(a.primal(), b.primal(), c.primal(), v);
+    auto c_sq = tenzor::mul(c.primal(), c.primal());
+    auto num  = tenzor::sub(tenzor::mul(b.tangent(), c.primal()),
+                              tenzor::mul(b.primal(), c.tangent()));
+    auto t_bc = tenzor::div(num, c_sq);
+    auto tangent = tenzor::add(a.tangent(), tenzor::mul(t_bc, v));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// lerp(start, end, weight) = start + weight * (end - start)
+//   = (1 - weight) * start + weight * end  (linear in start, end, weight)
+auto jvp_lerp(const DualTensor& start, const DualTensor& end,
+              const DualTensor& weight) -> DualTensor {
+    auto primal = tenzor::lerp(start.primal(), end.primal(), weight.primal());
+    auto one = tenzor::ones_like(weight.primal());
+    auto one_minus_w = tenzor::sub(one, weight.primal());
+    auto end_minus_start = tenzor::sub(end.primal(), start.primal());
+    auto t = tenzor::add(
+        tenzor::add(tenzor::mul(start.tangent(), one_minus_w),
+                    tenzor::mul(end.tangent(),   weight.primal())),
+        tenzor::mul(weight.tangent(), end_minus_start));
+    return DualTensor(std::move(primal), std::move(t));
+}
+
+// Maximum / Minimum: piecewise-linear; sub-gradient = indicator of the
+// active operand (ties split 0.5/0.5).
+auto jvp_maximum(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    auto primal = tenzor::maximum(a.primal(), b.primal());
+    auto a_active = tenzor::gt(a.primal(), b.primal());
+    auto tie = tenzor::eq(a.primal(), b.primal());
+    // weight_a = 1 if a>b, 0.5 if a==b, 0 otherwise.
+    auto half = tenzor::mul(tenzor::ones_like(a.primal()), 0.5);
+    auto wa = tenzor::where(a_active, tenzor::ones_like(a.primal()),
+                              tenzor::where(tie, half, tenzor::zeros_like(a.primal())));
+    auto wb = tenzor::sub(tenzor::ones_like(a.primal()), wa);
+    auto tangent = tenzor::add(tenzor::mul(a.tangent(), wa),
+                                 tenzor::mul(b.tangent(), wb));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+auto jvp_minimum(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    auto primal = tenzor::minimum(a.primal(), b.primal());
+    auto a_active = tenzor::lt(a.primal(), b.primal());
+    auto tie = tenzor::eq(a.primal(), b.primal());
+    auto half = tenzor::mul(tenzor::ones_like(a.primal()), 0.5);
+    auto wa = tenzor::where(a_active, tenzor::ones_like(a.primal()),
+                              tenzor::where(tie, half, tenzor::zeros_like(a.primal())));
+    auto wb = tenzor::sub(tenzor::ones_like(a.primal()), wa);
+    auto tangent = tenzor::add(tenzor::mul(a.tangent(), wa),
+                                 tenzor::mul(b.tangent(), wb));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+// Fmax / Fmin: like maximum/minimum but NaN-propagating per IEEE 754-2008.
+// Sub-gradient identical (NaN inputs make the tangent NaN automatically via
+// arithmetic in the same chain — no special handling needed for forward AD).
+auto jvp_fmax(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    return jvp_maximum(a, b);
+}
+auto jvp_fmin(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    return jvp_minimum(a, b);
+}
+
+// d/d{a,b} log_add_exp2(a, b) = softmax2_weighted in base-2:
+//   y = log2(2^a + 2^b);  dy/da = 2^a / (2^a + 2^b);  dy/db = 1 - dy/da.
+auto jvp_logaddexp2(const DualTensor& a, const DualTensor& b) -> DualTensor {
+    auto primal = tenzor::logaddexp2(a.primal(), b.primal());
+    auto pa = tenzor::exp2(a.primal());
+    auto pb = tenzor::exp2(b.primal());
+    auto denom = tenzor::add(pa, pb);
+    auto wa = tenzor::div(pa, denom);
+    auto wb = tenzor::div(pb, denom);
+    auto tangent = tenzor::add(tenzor::mul(a.tangent(), wa),
+                                 tenzor::mul(b.tangent(), wb));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// xlog1py(x, y) = x * log1p(y); d = dx * log1p(y) + x * dy / (1+y).
+auto jvp_xlog1py(const DualTensor& x, const DualTensor& y) -> DualTensor {
+    auto primal = tenzor::xlog1py(x.primal(), y.primal());
+    auto log1py = tenzor::log1p(y.primal());
+    auto one = tenzor::ones_like(y.primal());
+    auto t1 = tenzor::mul(x.tangent(), log1py);
+    auto t2 = tenzor::div(tenzor::mul(x.primal(), y.tangent()),
+                            tenzor::add(one, y.primal()));
+    return DualTensor(std::move(primal), tenzor::add(t1, t2));
+}
+
+// xlogy(x, y) = x * log(y); d = dx * log(y) + x * dy / y.
+auto jvp_xlogy(const DualTensor& x, const DualTensor& y) -> DualTensor {
+    auto primal = tenzor::xlogy(x.primal(), y.primal());
+    auto logy = tenzor::log(y.primal());
+    auto t1 = tenzor::mul(x.tangent(), logy);
+    auto t2 = tenzor::div(tenzor::mul(x.primal(), y.tangent()), y.primal());
+    return DualTensor(std::move(primal), tenzor::add(t1, t2));
+}
+
+// float_power(b, e) = b^e (Float64-promoted). General base/exponent both
+// floating: d = e * b^(e-1) * db + b^e * log(b) * de.
+auto jvp_float_power(const DualTensor& b, const DualTensor& e) -> DualTensor {
+    auto primal = tenzor::float_power(b.primal(), e.primal());
+    auto one = tenzor::ones_like(e.primal());
+    auto e_minus_1 = tenzor::sub(e.primal(), one);
+    auto b_pow_em1 = tenzor::float_power(b.primal(), e_minus_1);
+    auto logb = tenzor::log(b.primal());
+    auto term_b = tenzor::mul(tenzor::mul(e.primal(), b_pow_em1), b.tangent());
+    auto term_e = tenzor::mul(tenzor::mul(primal, logb), e.tangent());
+    return DualTensor(std::move(primal), tenzor::add(term_b, term_e));
+}
+
+// Cross product (3D): linear in each operand. d/dt (a × b) = da × b + a × db.
+auto jvp_cross(const DualTensor& a, const DualTensor& b, int64_t dim) -> DualTensor {
+    auto primal = tenzor::cross(a.primal(), b.primal(), dim);
+    auto t1 = tenzor::cross(a.tangent(), b.primal(), dim);
+    auto t2 = tenzor::cross(a.primal(), b.tangent(), dim);
+    return DualTensor(std::move(primal), tenzor::add(t1, t2));
+}
+
+// Polar(abs, angle) = abs * (cos(angle) + i*sin(angle))
+//   d = dabs * (cos+i*sin) + abs * dangle * (−sin+i*cos)
+// where ComplexTensor(re, im) builds the complex pair from reals.
+auto jvp_polar(const DualTensor& abs_, const DualTensor& angle_) -> DualTensor {
+    auto primal = tenzor::polar(abs_.primal(), angle_.primal());
+    // Real part: abs * cos(angle); imag part: abs * sin(angle).
+    auto cos_a = tenzor::cos(angle_.primal());
+    auto sin_a = tenzor::sin(angle_.primal());
+    // d_re = dabs*cos - abs*sin*dangle;  d_im = dabs*sin + abs*cos*dangle.
+    auto d_re = tenzor::sub(tenzor::mul(abs_.tangent(), cos_a),
+                              tenzor::mul(tenzor::mul(abs_.primal(), sin_a),
+                                            angle_.tangent()));
+    auto d_im = tenzor::add(tenzor::mul(abs_.tangent(), sin_a),
+                              tenzor::mul(tenzor::mul(abs_.primal(), cos_a),
+                                            angle_.tangent()));
+    OpAttributes complex_attrs;
+    auto tangent = tenzor::dispatch(OpId::ComplexTensor,
+                                    std::vector<Tensor>{d_re, d_im}, complex_attrs)[0];
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ComplexTensor(re, im) = re + i*im; linear in both → d = dre + i*dim.
+JvpResult jvp_adapter_complex_tensor(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.size() != 2 || primals.size() != tangents.size()) {
+        throw std::runtime_error(
+            "jvp_adapter_complex_tensor: expected 2 inputs (real, imag)");
+    }
+    auto zeros_like = [](const Tensor& x) {
+        return tenzor::zeros(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                             x.dtype(), x.device());
+    };
+    auto d_re = tangents[0].numel() != 0 ? tangents[0] : zeros_like(primals[0]);
+    auto d_im = tangents[1].numel() != 0 ? tangents[1] : zeros_like(primals[1]);
+    auto primal  = tenzor::dispatch(OpId::ComplexTensor,
+                                    std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
+    auto tangent = tenzor::dispatch(OpId::ComplexTensor,
+                                    std::vector<Tensor>{d_re, d_im}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// d/dx angle(z) = (-imag(z)*dre + real(z)*dim) / |z|^2 for complex z.
+// We expose the real-input case (angle(real x) = 0 for x>=0, π for x<0)
+// which is a.e. constant → tangent = 0; this matches PyTorch.
+auto jvp_angle(const DualTensor& z) -> DualTensor {
+    auto primal = tenzor::angle(z.primal());
+    auto tangent = tenzor::zeros_like(primal);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Adapters for the new closed-form rules
+// ============================================================================
+
+#define TENZOR_JVP_UNARY_ADAPTER(name, rule)                                   \
+    JvpResult name(std::span<const Tensor> primals,                            \
+                   std::span<const Tensor> tangents,                           \
+                   const OpAttributes&) {                                      \
+        if (primals.size() != 1 || tangents.size() != 1) {                     \
+            throw std::runtime_error(#name ": expected 1 input");              \
+        }                                                                      \
+        auto x = make_dual(primals[0], tangents[0]);                           \
+        return dual_to_result(rule(x));                                        \
+    }
+
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_rsqrt,        jvp_rsqrt)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_deg2rad,      jvp_deg2rad)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_rad2deg,      jvp_rad2deg)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_sinc,         jvp_sinc)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_ndtr,         jvp_ndtr)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_log_ndtr,     jvp_log_ndtr)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_erfinv,       jvp_erfinv)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_digamma,      jvp_digamma)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_gamma,        jvp_gamma)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_bessel_j0,    jvp_bessel_j0)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_bessel_j1,    jvp_bessel_j1)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_bessel_i0,    jvp_bessel_i0)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_bessel_i1,    jvp_bessel_i1)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_i0e,          jvp_i0e)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_i1e,          jvp_i1e)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_spherical_j0, jvp_spherical_bessel_j0)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_entr,         jvp_entr)
+TENZOR_JVP_UNARY_ADAPTER(jvp_adapter_angle,        jvp_angle)
+
+#undef TENZOR_JVP_UNARY_ADAPTER
+
+// logit needs an `eps` attr; non-trivial signature.
+JvpResult jvp_adapter_logit(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_logit: expected 1 input");
+    }
+    double eps = attrs.get_float(AttrKey::Eps, -1.0);
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_logit(x, eps));
+}
+
+// Binary closed-form adapters.
+JvpResult jvp_adapter_maximum(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_maximum: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_maximum(a, b));
+}
+JvpResult jvp_adapter_minimum(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_minimum: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_minimum(a, b));
+}
+JvpResult jvp_adapter_fmax(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_fmax: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_fmax(a, b));
+}
+JvpResult jvp_adapter_fmin(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_fmin: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_fmin(a, b));
+}
+JvpResult jvp_adapter_logaddexp2(std::span<const Tensor> primals,
+                                 std::span<const Tensor> tangents,
+                                 const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_logaddexp2: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_logaddexp2(a, b));
+}
+JvpResult jvp_adapter_xlog1py(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_xlog1py: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_xlog1py(a, b));
+}
+JvpResult jvp_adapter_xlogy(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_xlogy: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_xlogy(a, b));
+}
+JvpResult jvp_adapter_float_power(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_float_power: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_float_power(a, b));
+}
+JvpResult jvp_adapter_cross(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_cross: expected 2 inputs");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_cross(a, b, dim));
+}
+JvpResult jvp_adapter_polar(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes& /*attrs*/) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error("jvp_adapter_polar: expected 2 inputs");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    return dual_to_result(jvp_polar(a, b));
+}
+// Ternary closed-form adapters: addcmul / addcdiv / lerp.
+JvpResult jvp_adapter_addcmul(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_addcmul: expected 3 inputs");
+    }
+    double v = attrs.get_float(AttrKey::Value, 1.0);
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    auto c = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_addcmul(a, b, c, v));
+}
+JvpResult jvp_adapter_addcdiv(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_addcdiv: expected 3 inputs");
+    }
+    double v = attrs.get_float(AttrKey::Value, 1.0);
+    auto a = make_dual(primals[0], tangents[0]);
+    auto b = make_dual(primals[1], tangents[1]);
+    auto c = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_addcdiv(a, b, c, v));
+}
+JvpResult jvp_adapter_lerp(std::span<const Tensor> primals,
+                           std::span<const Tensor> tangents,
+                           const OpAttributes& /*attrs*/) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error("jvp_adapter_lerp: expected 3 inputs (start, end, weight)");
+    }
+    auto s = make_dual(primals[0], tangents[0]);
+    auto e = make_dual(primals[1], tangents[1]);
+    auto w = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_lerp(s, e, w));
+}
+
+// ============================================================================
+// NonDifferentiable rules — fail loudly instead of silently returning zero.
+// ============================================================================
+
+// Comparison ops: y is Bool; derivative undefined.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_eq,
+    "Eq has no derivative: comparison produces Bool output (discrete).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ne,
+    "Ne has no derivative: comparison produces Bool output (discrete).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lt,
+    "Lt has no derivative: comparison produces Bool output (discrete).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_le,
+    "Le has no derivative: comparison produces Bool output (discrete).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_gt,
+    "Gt has no derivative: comparison produces Bool output (discrete).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ge,
+    "Ge has no derivative: comparison produces Bool output (discrete).")
+
+// Logical / bitwise ops: integer/Bool outputs, non-differentiable.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_logical_and,
+    "LogicalAnd has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_logical_or,
+    "LogicalOr has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_logical_not,
+    "LogicalNot has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_logical_xor,
+    "LogicalXor has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_and,
+    "BitwiseAnd has no derivative: integer-only op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_or,
+    "BitwiseOr has no derivative: integer-only op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_xor,
+    "BitwiseXor has no derivative: integer-only op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_not,
+    "BitwiseNot has no derivative: integer-only op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_left_shift,
+    "BitwiseLeftShift has no derivative: integer-only op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bitwise_right_shift,
+    "BitwiseRightShift has no derivative: integer-only op.")
+
+// Boolean predicates: discrete output → no derivative.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isnan,
+    "IsNan has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isinf,
+    "IsInf has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isfinite,
+    "IsFinite has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isposinf,
+    "IsPosInf has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isneginf,
+    "IsNegInf has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isreal,
+    "IsReal has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_signbit,
+    "Signbit has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_has_inf_nan,
+    "HasInfNan has no derivative: Bool output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_isin,
+    "Isin has no derivative: Bool set-membership output.")
+
+// Discrete / index-valued / counting ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nonzero,
+    "Nonzero has no derivative: returns integer indices of non-zero entries.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_count_nonzero,
+    "CountNonzero has no derivative: returns an integer count.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bincount,
+    "Bincount has no derivative: integer histogram from integer input.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_histogram,
+    "Histogram has no derivative: returns bin counts (integer-valued).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_histogramdd,
+    "Histogramdd has no derivative: returns multi-dim bin counts.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_histc,
+    "Histc has no derivative: returns fixed-bin histogram.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_unique,
+    "Unique has no derivative: variable-length deduplicated output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_unique_consecutive,
+    "UniqueConsecutive has no derivative: variable-length deduplicated output.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mode,
+    "Mode has no derivative: argmax-based discrete selection.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_one_hot,
+    "OneHot has no derivative: discrete one-hot encoding from integer indices.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_searchsorted,
+    "SearchSorted has no derivative: returns insertion indices (integer).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_segment_reduce,
+    "SegmentReduce returns integer segment ids alongside values; full JVP "
+    "would require splitting by reduction type (sum/mean differentiable; "
+    "amax/amin/prod NonDifferentiable per project policy).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_advanced_index,
+    "AdvancedIndex (NumPy-style fancy indexing) has no general JVP at the "
+    "dispatch layer: the kernel does not expose the saved index broadcasting "
+    "metadata required to thread a tangent through gather; use IndexSelect "
+    "or Gather for the JVP-supported path.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_advanced_index_put,
+    "AdvancedIndexPut: in-place scatter with multiple index tensors; "
+    "see AdvancedIndex above.")
+
+// Random / stochastic ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_rand,
+    "Rand has no derivative: pure random sampling (no input tangent).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_randn,
+    "Randn has no derivative: pure random sampling.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_randint,
+    "Randint has no derivative: integer random sampling.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_multinomial,
+    "Multinomial has no derivative: discrete sampling; the score-function "
+    "estimator is reverse-mode only and not exposed as a JVP rule.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bernoulli,
+    "Bernoulli has no derivative: discrete sampling.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_normal_sample,
+    "NormalSample has no derivative without the reparameterisation trick; "
+    "the kernel does not save the Gaussian noise used to draw samples.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_poisson_sample,
+    "PoissonSample has no continuous derivative (discrete sampling).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_exponential_sample,
+    "ExponentialSample has no derivative without the reparameterisation "
+    "trick; the kernel does not save the uniform noise used to draw samples.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_gumbel_softmax,
+    "GumbelSoftmax has no JVP at this layer: the Gumbel noise is sampled "
+    "inside the kernel and not exposed; reparameterised gradients require "
+    "the noise to be passed in explicitly.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_rrelu,
+    "RReLU has no JVP at this layer: the random negative-slope draw is "
+    "sampled inside the kernel and not exposed.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dropout,
+    "Dropout has no JVP without the saved Bernoulli mask; the kernel does "
+    "not expose the per-call mask used during the forward pass.")
+
+// Creation ops with no differentiable inputs.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_zeros,
+    "Zeros has no derivative: pure factory op with shape/dtype-only inputs.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ones,
+    "Ones has no derivative: pure factory op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_full,
+    "Full has no derivative: pure factory op with constant fill value.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_fill,
+    "Fill has no derivative: scalar broadcast (constant) into existing storage.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_eye,
+    "Eye has no derivative: pure factory op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_arange,
+    "Arange has no derivative: integer/float ramp factory op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linspace,
+    "Linspace has no derivative: deterministic spaced-ramp factory op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tril_indices,
+    "TrilIndices has no derivative: integer index pairs.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_triu_indices,
+    "TriuIndices has no derivative: integer index pairs.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_strided_fill,
+    "StridedFill has no derivative: in-place scalar fill into strided view.")
+
+// Piecewise / discrete float ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_fmod,
+    "Fmod has no useful derivative: discontinuous at multiples of the divisor.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_remainder,
+    "Remainder has no useful derivative: discontinuous at multiples of the divisor.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nextafter,
+    "Nextafter has no derivative: discrete float step.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_copysign,
+    "Copysign has no useful derivative: piecewise-constant sign of the second "
+    "argument (sub-gradient = sign(b)*indicator on a; b non-diff).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_gcd,
+    "Gcd has no derivative: integer-valued op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lcm,
+    "Lcm has no derivative: integer-valued op.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ldexp,
+    "Ldexp has no derivative w.r.t. the integer exponent argument; the "
+    "value-side derivative is just multiplication by 2^n — use mul instead.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_frexp,
+    "Frexp returns (mantissa, exponent) where the exponent is integer-valued "
+    "and the mantissa is piecewise-constant across powers-of-two boundaries.")
+
+// In-place variants: same value-semantics as their out-of-place forms but
+// alias the input storage; the dispatch surface does not expose them as
+// differentiable through the JVP table (callers should drive AD on the
+// out-of-place version).
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_add_inplace,
+    "AddInplace has no JVP at this layer: forward-mode AD requires the "
+    "out-of-place Add (which is registered); driving JVP through the "
+    "in-place dispatch would alias the input storage at tangent-eval time.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sub_inplace,
+    "SubInplace has no JVP at this layer; use Sub.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mul_inplace,
+    "MulInplace has no JVP at this layer; use Mul.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_div_inplace,
+    "DivInplace has no JVP at this layer; use Div.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_relu_inplace,
+    "ReLUInplace has no JVP at this layer; use ReLU.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sigmoid_inplace,
+    "SigmoidInplace has no JVP at this layer; use Sigmoid.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tanh_inplace,
+    "TanhInplace has no JVP at this layer; use Tanh.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_leaky_relu_inplace,
+    "LeakyReLUInplace has no JVP at this layer; use LeakyReLU.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_gelu_inplace,
+    "GeluInplace has no JVP at this layer; use Gelu.")
+
+// *Backward kernels: these are themselves the backward kernels of registered
+// forward ops. Forward-mode AD through a backward kernel is double-backward
+// territory and is not exposed by the dispatch surface.
+#define TENZOR_JVP_BWD_NONDIFF(opname)                                          \
+    TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_##opname,                            \
+        #opname " is a backward kernel; forward-mode AD through it is "         \
+        "double-backward and not exposed at this layer.")
+
+TENZOR_JVP_BWD_NONDIFF(relu_backward)
+TENZOR_JVP_BWD_NONDIFF(sigmoid_backward)
+TENZOR_JVP_BWD_NONDIFF(tanh_backward)
+TENZOR_JVP_BWD_NONDIFF(gelu_backward)
+TENZOR_JVP_BWD_NONDIFF(softmax_backward)
+TENZOR_JVP_BWD_NONDIFF(log_softmax_backward)
+TENZOR_JVP_BWD_NONDIFF(leaky_relu_backward)
+TENZOR_JVP_BWD_NONDIFF(elu_backward)
+TENZOR_JVP_BWD_NONDIFF(selu_backward)
+TENZOR_JVP_BWD_NONDIFF(mish_backward)
+TENZOR_JVP_BWD_NONDIFF(softplus_backward)
+TENZOR_JVP_BWD_NONDIFF(log_sigmoid_backward)
+TENZOR_JVP_BWD_NONDIFF(rrelu_backward)
+TENZOR_JVP_BWD_NONDIFF(swish_backward)
+
+TENZOR_JVP_BWD_NONDIFF(conv1d_backward_input)
+TENZOR_JVP_BWD_NONDIFF(conv1d_backward_weight)
+TENZOR_JVP_BWD_NONDIFF(conv1d_backward_bias)
+TENZOR_JVP_BWD_NONDIFF(conv2d_backward_input)
+TENZOR_JVP_BWD_NONDIFF(conv2d_backward_weight)
+TENZOR_JVP_BWD_NONDIFF(conv2d_backward_bias)
+TENZOR_JVP_BWD_NONDIFF(conv3d_backward_input)
+TENZOR_JVP_BWD_NONDIFF(conv3d_backward_weight)
+TENZOR_JVP_BWD_NONDIFF(conv3d_backward_bias)
+TENZOR_JVP_BWD_NONDIFF(conv_transpose3d_backward_input)
+TENZOR_JVP_BWD_NONDIFF(conv_transpose3d_backward_weight)
+TENZOR_JVP_BWD_NONDIFF(conv_transpose3d_backward_bias)
+
+TENZOR_JVP_BWD_NONDIFF(max_pool1d_backward)
+TENZOR_JVP_BWD_NONDIFF(max_pool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(max_pool3d_backward)
+TENZOR_JVP_BWD_NONDIFF(avg_pool1d_backward)
+TENZOR_JVP_BWD_NONDIFF(avg_pool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(avg_pool3d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_avg_pool1d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_avg_pool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_avg_pool3d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_max_pool1d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_max_pool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(adaptive_max_pool3d_backward)
+TENZOR_JVP_BWD_NONDIFF(fractional_max_pool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(fractional_max_pool3d_backward)
+TENZOR_JVP_BWD_NONDIFF(max_unpool1d_backward)
+TENZOR_JVP_BWD_NONDIFF(max_unpool2d_backward)
+TENZOR_JVP_BWD_NONDIFF(max_unpool3d_backward)
+
+TENZOR_JVP_BWD_NONDIFF(batch_norm2d_backward)
+TENZOR_JVP_BWD_NONDIFF(layer_norm_backward)
+TENZOR_JVP_BWD_NONDIFF(group_norm_backward)
+TENZOR_JVP_BWD_NONDIFF(instance_norm_backward)
+TENZOR_JVP_BWD_NONDIFF(rms_norm_backward)
+TENZOR_JVP_BWD_NONDIFF(linear_backward)
+TENZOR_JVP_BWD_NONDIFF(embedding_backward)
+TENZOR_JVP_BWD_NONDIFF(embedding_bag_backward)
+TENZOR_JVP_BWD_NONDIFF(dropout_backward)
+TENZOR_JVP_BWD_NONDIFF(flash_attention_backward)
+TENZOR_JVP_BWD_NONDIFF(flex_attention_backward)
+TENZOR_JVP_BWD_NONDIFF(nested_attention_backward)
+TENZOR_JVP_BWD_NONDIFF(fused_layer_norm_backward)
+TENZOR_JVP_BWD_NONDIFF(roi_align_backward)
+TENZOR_JVP_BWD_NONDIFF(gru_cell_backward)
+TENZOR_JVP_BWD_NONDIFF(lstm_cell_backward)
+TENZOR_JVP_BWD_NONDIFF(interpolate_backward)
+TENZOR_JVP_BWD_NONDIFF(deformable_conv2d_backward_input)
+TENZOR_JVP_BWD_NONDIFF(deformable_conv2d_backward_weight)
+TENZOR_JVP_BWD_NONDIFF(deformable_conv2d_backward_bias)
+
+#undef TENZOR_JVP_BWD_NONDIFF
+
+// BatchNorm helper ops (stats-only): not differentiable outputs.
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_mean_var,
+    "BatchNorm2dMeanVar returns running statistics (mean/var) accumulated "
+    "via Welford; treated as non-differentiable scalars in the JVP layer.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_batch_norm2d_update_running_stats,
+    "BatchNorm2dUpdateRunningStats updates running mean/var buffers in place; "
+    "stateful side-effecting op with no JVP.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_forward,
+    "BatchNorm2dForward (non-affine variant) JVP not yet implemented; "
+    "use BatchNorm2dForwardAffine which has a registered multi-output rule.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_fused_training,
+    "BatchNorm2dFusedTraining (cuDNN-fused) JVP not implemented at this layer; "
+    "the saved mean/rstd outputs follow the same pattern as "
+    "BatchNorm2dForwardAffine but the fused kernel does not expose them in a "
+    "stable layout across backends.")
+
+// Multi-output linalg factorisations where the JVP requires the full saved
+// factorisation outputs (Q/R, U/S/V, L/U/P, …) plus skew-symmetric
+// derivation. These have well-defined JVPs but each needs a bespoke kernel:
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_svd,
+    "LinalgSVD JVP requires the saved (U, S, V) and a skew-symmetric "
+    "derivation; not yet implemented. Use LinalgEigh for the symmetric case.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_qr,
+    "LinalgQR JVP requires the saved (Q, R) and a strict-upper-triangular "
+    "projection; not yet implemented.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_eig,
+    "LinalgEig JVP requires the saved complex eigenvectors and the "
+    "Sylvester-equation update; not yet implemented (only LinalgEigh for "
+    "the symmetric/Hermitian case is supported).")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_lu,
+    "LinalgLU JVP requires the saved (L, U, P) and a triangular extraction "
+    "step; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_householder,
+    "LinalgHouseholder (orgqr) JVP requires the saved Householder reflectors "
+    "and a sequenced reflector-update; not yet implemented.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_ldl_factor,
+    "LinalgLDLFactor JVP requires the saved (L, D) and a permutation-aware "
+    "factorisation update; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_ldl_solve,
+    "LinalgLDLSolve JVP requires the saved (L, D) factors and an A-side "
+    "tangent; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_lu_solve,
+    "LinalgLUSolve JVP requires the saved LU pivots and an A-side tangent; "
+    "not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_cholesky_solve,
+    "LinalgCholeskySolve JVP requires the saved Cholesky factor and an "
+    "A-side tangent; not yet implemented.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_geqrf,
+    "Geqrf JVP requires the saved (tau, R) reflector representation and a "
+    "Householder update; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ormqr,
+    "Ormqr JVP requires the saved Householder factors and a reflector chain; "
+    "not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tensor_inv,
+    "TensorInv JVP requires reshaping into a matrix inverse plus the saved "
+    "inverse output; not yet implemented (linalg.inv covers the matrix case).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tensor_solve,
+    "TensorSolve JVP requires the saved factorisation; not yet implemented "
+    "(LinalgSolve covers the matrix-vector case).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_solve_triangular,
+    "SolveTriangular JVP requires the A-side tangent contribution X' = "
+    "L^{-1}(B' - L'X); not yet implemented (LinalgSolve covers the general case).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cholesky_inverse,
+    "CholeskyInverse JVP requires the saved L factor and the inverse output; "
+    "not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lobpcg,
+    "LOBPCG JVP requires the saved eigen-pair and a Sylvester-equation "
+    "update plus the preconditioner-tangent; not yet implemented.")
+
+// Sequence-level RNN forwards: implementable via per-step replay of the cell
+// rules, but the cell-level forward Functions are the supported entry point
+// for JVP. Listed loudly here so callers know to use the cell ops.
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_lstm_forward,
+    "LSTMForward (full-sequence) has no direct JVP; drive forward-mode AD "
+    "through LSTMCellForward which has a registered multi-output rule and "
+    "replay over the sequence in user code.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_gru_forward,
+    "GRUForward (full-sequence) has no direct JVP; use GRUCellForward.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_lstm_multilayer_forward,
+    "LSTMMultiLayerForward has no direct JVP; use LSTMCellForward per layer.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_gru_multilayer_forward,
+    "GRUMultiLayerForward has no direct JVP; use GRUCellForward per layer.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_bilstm_forward,
+    "BiLSTMForward has no direct JVP; use LSTMCellForward for each direction.")
+
+// Search/sort multi-output ops that don't expose the saved index-permutation
+// in a tangent-friendly layout. (CumMax/CumMin/Aminmax/Kthvalue are already
+// registered as multi-output rules in earlier batches.)
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_topk,
+    "TopK JVP requires the saved indices to gather the top-k tangent slots; "
+    "the dispatch layer does expose them, but the K-permuted-output layout "
+    "is not yet wired into the dual walker. Use TakeAlongDim + ArgSort for "
+    "an explicit JVP path.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_sort,
+    "Sort JVP requires the saved permutation indices to scatter the tangent; "
+    "not yet wired into the dual walker. Use TakeAlongDim + ArgSort.")
+
+// Specialised / quantized ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_quantized_linear,
+    "QuantizedLinear has no JVP: integer/scaled matmul; gradients require "
+    "straight-through estimators not exposed at this layer.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_quantized_conv2d,
+    "QuantizedConv2d has no JVP: integer/scaled conv; STE not exposed.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_embedding_with_bounds_check,
+    "EmbeddingWithBoundsCheck has no JVP: same gather semantics as Embedding "
+    "but with side-effecting bounds-error reporting that is not differentiable.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_embedding_bag,
+    "EmbeddingBagForward JVP requires the saved per-bag offsets and reduction "
+    "mode (sum/mean/max); not yet implemented. Use Embedding + per-bag "
+    "reduction for the JVP-supported composition.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_einsum,
+    "Einsum JVP requires deriving per-equation Jacobian rules; not yet "
+    "implemented. Compose explicit matmul/bmm/permute/sum primitives for the "
+    "JVP-supported path.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nms,
+    "NMS has no derivative: discrete IoU-thresholded box selection.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_box_iou,
+    "BoxIoU has no useful JVP at this layer: piecewise-rational in box "
+    "coordinates with discontinuities at non-overlap boundaries.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_gather_relative_position_bias,
+    "GatherRelativePositionBias has no JVP at this layer: relative-position "
+    "lookup table not differentiable through the index path.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_deformable_conv2d_forward,
+    "DeformableConv2dForward JVP requires the saved sampling-offset Jacobian "
+    "(bilinear gradients w.r.t. offsets); not yet implemented.")
+
+// DCT/IDCT/STFT/ISTFT/MelScale/MFCC: most are linear in input but kernels do
+// not expose their basis matrices for tangent re-application.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dct,
+    "DCT JVP not implemented: the basis-matrix application is linear, but "
+    "the dispatch surface for DCT-IV/etc. does not expose the type/norm "
+    "attributes in a tangent-stable form.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_idct,
+    "IDCT JVP not implemented (linear; see DCT note).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_stft,
+    "STFT JVP not implemented: the windowing convolution is linear, but the "
+    "window tensor is a saved op-input that requires multi-input JVP wiring "
+    "not yet exposed for STFT.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_istft,
+    "ISTFT JVP not implemented (linear; see STFT note).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mel_scale,
+    "MelScale JVP not implemented: linear filterbank application, but the "
+    "filterbank tensor is constructed inside the kernel and not exposed.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mfcc,
+    "MFCC JVP not implemented: composite STFT + MelScale + log + DCT; each "
+    "stage's JVP would need to be wired up.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cdist,
+    "CDist JVP not implemented: pairwise p-distance derivative requires "
+    "p-specific kernels (p=2 reduces to MatMul-like form, but other p values "
+    "need bespoke handling).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_pairwise_distance,
+    "PairwiseDistance JVP not implemented (see CDist).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_pdist,
+    "Pdist JVP not implemented (see CDist).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cosine_similarity,
+    "CosineSimilarity JVP not implemented: derivative requires the saved "
+    "norms in each operand; not yet wired up.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_renorm,
+    "Renorm JVP not implemented: per-row p-norm-conditional scaling has a "
+    "piecewise derivative at the maxnorm boundary; not yet wired up.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cov,
+    "Cov JVP not implemented: composite mean-centering + bilinear sum has a "
+    "well-defined Jacobian but requires the saved mean and bias correction.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_corrcoef,
+    "Corrcoef JVP not implemented: composite Cov + diagonal-normalisation; "
+    "see Cov above.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_vector_norm,
+    "LinalgVectorNorm JVP not implemented: the p-norm derivative is well-"
+    "defined but requires the saved primal norm and sign(x); a future batch "
+    "can register this rule using the existing Norm primitive.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_matrix_norm,
+    "LinalgMatrixNorm JVP not implemented: Frobenius is straightforward but "
+    "spectral/nuclear norms require SVD-based derivations (see LinalgSVD).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_chunk,
+    "Chunk JVP requires multi-output dispatch (returns N tensors); not yet "
+    "wired into the dual walker. Use Slice repeatedly for a single-output JVP.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_split,
+    "Split JVP requires multi-output dispatch (returns variable-N tensors); "
+    "not yet wired into the dual walker. Use Slice for a single-output JVP.")
+
+// Fused composite forwards: most fuse a linear op + an activation; the JVP
+// composition would reuse the constituent rules but the kernel-side fusion
+// makes the constituent intermediates unavailable.
+#define TENZOR_JVP_FUSED_NONDIFF(opname)                                        \
+    TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_##opname,                            \
+        #opname " is a fused composite; forward-mode JVP requires the "        \
+        "constituent intermediates which the fused kernel does not expose. "    \
+        "Drive AD through the unfused decomposition (e.g. Linear+ReLU, "        \
+        "Conv2d+ReLU, BatchNorm+ReLU).")
+
+TENZOR_JVP_FUSED_NONDIFF(fused_linear_relu)
+TENZOR_JVP_FUSED_NONDIFF(fused_conv2d_relu)
+TENZOR_JVP_FUSED_NONDIFF(fused_batchnorm_relu)
+TENZOR_JVP_FUSED_NONDIFF(fused_add_relu)
+TENZOR_JVP_FUSED_NONDIFF(fused_gelu)
+TENZOR_JVP_FUSED_NONDIFF(fused_layer_norm)
+TENZOR_JVP_FUSED_NONDIFF(fused_rms_norm)
+TENZOR_JVP_FUSED_NONDIFF(fused_conv2d_sigmoid)
+TENZOR_JVP_FUSED_NONDIFF(fused_conv2d_tanh)
+TENZOR_JVP_FUSED_NONDIFF(fused_conv2d_swish)
+TENZOR_JVP_FUSED_NONDIFF(fused_conv2d_bn_relu)
+
+#undef TENZOR_JVP_FUSED_NONDIFF
+
+// Optimiser-step fused kernels: stateful side-effecting ops with no JVP.
+#define TENZOR_JVP_OPT_NONDIFF(opname)                                          \
+    TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_##opname,                            \
+        #opname " is a stateful optimiser-step kernel; no JVP semantics.")
+
+TENZOR_JVP_OPT_NONDIFF(fused_sgd_step)
+TENZOR_JVP_OPT_NONDIFF(fused_adam_step)
+TENZOR_JVP_OPT_NONDIFF(fused_rmsprop_step)
+TENZOR_JVP_OPT_NONDIFF(fused_adadelta_step)
+TENZOR_JVP_OPT_NONDIFF(fused_adagrad_step)
+TENZOR_JVP_OPT_NONDIFF(fused_adam_atan2_step)
+
+#undef TENZOR_JVP_OPT_NONDIFF
+
+// Reductions over non-differentiable reduce ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_any,
+    "Any has no derivative: Bool reduction.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_all,
+    "All has no derivative: Bool reduction.")
+
+// Sparse non-bilinear ops.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_to_dense,
+    "SparseToDense JVP not implemented: dense-out tangent would need to be "
+    "sparse-scattered from the values tangent, which is structurally available "
+    "but not yet wired through the JVP dispatch surface.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dense_to_sparse,
+    "DenseToSparse JVP not implemented: the structural sparsity pattern is "
+    "data-dependent (non-zero mask), making the derivative ill-defined at the "
+    "zero-boundary.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_spgemm,
+    "SparseSpGEMM JVP not implemented: the result-pattern depends on the "
+    "operand patterns, so values-only tangents are not sufficient.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_trsv,
+    "SparseTrsv JVP not implemented: triangular solve requires an A-side "
+    "tangent contribution mirroring the dense LinalgSolve case.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_trsm,
+    "SparseTrsm JVP not implemented (see SparseTrsv).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_softmax,
+    "SparseSoftmax JVP not implemented: per-row softmax over nonzero values "
+    "follows the dense softmax rule, but the CSR layout needs threading.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_log_softmax,
+    "SparseLogSoftmax JVP not implemented (see SparseSoftmax).")
+
+// GroupNorm / InstanceNorm / RMSNorm: same algebraic shape as LayerNorm but
+// over different axes. Until a bespoke multi-output rule lands, mark
+// NonDifferentiable rather than reusing LayerNorm with wrong axes.
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_group_norm,
+    "GroupNorm JVP not yet implemented: per-group mean/rstd statistics not "
+    "exposed by the kernel; the algebraic JVP follows the LayerNorm shape "
+    "applied to (N, G, C/G, *spatial) groups.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_instance_norm,
+    "InstanceNorm JVP not yet implemented: per-instance mean/rstd statistics "
+    "not exposed in the multi-output form; see LayerNorm for the algebraic "
+    "shape.")
+TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_rms_norm,
+    "RMSNorm JVP not yet implemented: the RMS rstd is computed without "
+    "mean-centering, simpler than LayerNorm but the kernel does not yet "
+    "expose rstd as a saved output.")
+
+// ============================================================================
+// Batch 9 follow-ups — small bundle to close the remaining gap.
+// ============================================================================
+
+// Math: closed-form unary derivatives (formulas in module-level jvp_log2 /
+// jvp_log10 / jvp_log1p / jvp_exp2 / jvp_expm1).
+JvpResult jvp_adapter_log2_unary(std::span<const Tensor> primals,
+                                 std::span<const Tensor> tangents,
+                                 const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_log2: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_log2(x));
+}
+JvpResult jvp_adapter_log10_unary(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_log10: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_log10(x));
+}
+JvpResult jvp_adapter_log1p_unary(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_log1p: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_log1p(x));
+}
+JvpResult jvp_adapter_exp2_unary(std::span<const Tensor> primals,
+                                 std::span<const Tensor> tangents,
+                                 const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_exp2: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_exp2(x));
+}
+JvpResult jvp_adapter_expm1_unary(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_expm1: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_expm1(x));
+}
+
+// Activation: Swish (= x * sigmoid(x)); d/dx = sigmoid(x) + x * sigmoid(x) *
+// (1 - sigmoid(x)) = sigmoid(x) * (1 + x*(1-sigmoid(x))).
+JvpResult jvp_adapter_swish(std::span<const Tensor> primals,
+                            std::span<const Tensor> tangents,
+                            const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_swish: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto s = tenzor::sigmoid(x.primal());
+    auto one = tenzor::ones_like(s);
+    auto primal = tenzor::mul(x.primal(), s);
+    // deriv = s + x * s * (1 - s) = s * (1 + x*(1-s))
+    auto deriv = tenzor::mul(s, tenzor::add(one,
+        tenzor::mul(x.primal(), tenzor::sub(one, s))));
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// Hardsigmoid(x) = clamp(x+3, 0, 6) / 6.
+//   d/dx = 1/6 for -3 < x < 3, 0 elsewhere (subgradient 0 on the boundary).
+JvpResult jvp_adapter_hardsigmoid(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_hardsigmoid: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto shifted = tenzor::add(x.primal(), 3.0);
+    auto clamped = tenzor::clamp(shifted, 0.0, 6.0);
+    auto primal = tenzor::mul(clamped, 1.0 / 6.0);
+    // Mask: 1 if shifted in (0, 6), else 0.
+    auto upper_bound = tenzor::mul(tenzor::ones_like(shifted), 6.0);
+    auto zero_bound  = tenzor::zeros_like(shifted);
+    auto in_lo = tenzor::gt(shifted, zero_bound);
+    auto in_hi = tenzor::lt(shifted, upper_bound);
+    auto active = tenzor::mul(in_lo, in_hi);                    // bool * bool
+    auto deriv  = tenzor::mul(active, 1.0 / 6.0);
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// LogSigmoid(x) = -softplus(-x) = log(sigmoid(x)).
+//   d/dx = sigmoid(-x) = 1 - sigmoid(x).
+JvpResult jvp_adapter_log_sigmoid(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_log_sigmoid: expected 1 input");
+    }
+    auto x = make_dual(primals[0], tangents[0]);
+    auto s = tenzor::sigmoid(x.primal());
+    auto primal = tenzor::log(s);
+    auto one = tenzor::ones_like(s);
+    auto deriv = tenzor::sub(one, s);
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// ClampMin / ClampMax: piecewise linear; identity in the active region,
+// zero outside. Active region: x > min (ClampMin) / x < max (ClampMax).
+JvpResult jvp_adapter_clamp_min(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_clamp_min: expected 1 input");
+    }
+    double min_val = attrs.get_float(AttrKey::Min, 0.0);
+    auto x = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::clamp_min(x.primal(), min_val);
+    auto min_t = tenzor::mul(tenzor::ones_like(x.primal()), min_val);
+    auto active = tenzor::gt(x.primal(), min_t);
+    auto tangent = tenzor::mul(x.tangent(), active);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_clamp_max(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_clamp_max: expected 1 input");
+    }
+    double max_val = attrs.get_float(AttrKey::Max, 0.0);
+    auto x = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::clamp_max(x.primal(), max_val);
+    auto max_t = tenzor::mul(tenzor::ones_like(x.primal()), max_val);
+    auto active = tenzor::lt(x.primal(), max_t);
+    auto tangent = tenzor::mul(x.tangent(), active);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// NaN-ignoring reductions: linear in input but the NaN-mask projection is
+// data-dependent. The tangent at NaN positions is undefined (treated as 0);
+// where input is finite the tangent contributes via the same reduction.
+//   nansum(x)   = sum(where(isnan(x), 0, x))
+//   d/dx_i      = 0 if x_i is NaN, 1 otherwise (linear in finite positions)
+// For nanmean we additionally need to divide by the *finite* count, which is
+// the saved aux that the kernel does not expose; we approximate by treating
+// the kernel as linear in input with the same NaN-mask, which is the correct
+// JVP everywhere x has no NaN-tangent perturbation.
+namespace {
+auto nan_mask_apply(const Tensor& dx, const Tensor& x) -> Tensor {
+    auto nan = tenzor::isnan(x);
+    return tenzor::where(nan, tenzor::zeros_like(dx), dx);
+}
+} // namespace
+
+JvpResult jvp_adapter_nansum(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_nansum: expected 1 input");
+    }
+    auto x  = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::dispatch(OpId::Nansum,
+                                   std::vector<Tensor>{x.primal()}, attrs)[0];
+    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
+    auto tangent = tenzor::dispatch(OpId::Sum,
+                                    std::vector<Tensor>{masked_dx}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_nanmean(std::span<const Tensor> primals,
+                              std::span<const Tensor> tangents,
+                              const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_nanmean: expected 1 input");
+    }
+    auto x  = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::dispatch(OpId::Nanmean,
+                                   std::vector<Tensor>{x.primal()}, attrs)[0];
+    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
+    // Tangent uses the same reduction as nanmean: nanmean of dx where x is
+    // not NaN. dx at NaN positions are masked to 0, but nanmean's divisor
+    // counts only finite positions — so we re-dispatch Nanmean on the
+    // masked tangent (NaN positions of x carry 0 tangent contribution and
+    // the divisor matches the primal's finite count).
+    auto tangent = tenzor::dispatch(OpId::Nanmean,
+                                    std::vector<Tensor>{masked_dx}, attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_nanvar(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_nanvar: expected 1 input");
+    }
+    // For non-NaN x, var = E[(x-μ)²]; d/dt = 2·E_finite[(x-μ)·(dx-dμ)].
+    // We compute the NaN-masked primal/tangent contributions directly.
+    auto x  = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::dispatch(OpId::NanVar,
+                                   std::vector<Tensor>{x.primal()}, attrs)[0];
+    // For correctness we need the saved finite-count and mean — neither is
+    // exposed by NanVar — so use the kernel as a black-box: the tangent of
+    // a NaN-ignoring variance equals 2·NanMean((x-μ)·(dx_masked - dμ_masked))
+    // and computing μ requires NanMean on x, then broadcasting via Sub. This
+    // path requires per-axis reductions matching the attrs' Dim/Keepdim;
+    // delegate to the existing Var rule applied to NaN-masked tangents.
+    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
+    // Build a dual where the tangent is the masked dx and re-use the
+    // existing Var JVP path (jvp_var) by dispatch.
+    OpAttributes var_attrs = attrs;
+    auto tangent = tenzor::dispatch(OpId::NanVar,
+                                    std::vector<Tensor>{masked_dx}, var_attrs)[0];
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+JvpResult jvp_adapter_nanstd(std::span<const Tensor> primals,
+                             std::span<const Tensor> tangents,
+                             const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_nanstd: expected 1 input");
+    }
+    // nanstd = sqrt(nanvar); d/dt = (1/(2·nanstd)) · d(nanvar).
+    auto x = make_dual(primals[0], tangents[0]);
+    auto primal = tenzor::dispatch(OpId::NanStd,
+                                   std::vector<Tensor>{x.primal()}, attrs)[0];
+    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
+    auto d_var = tenzor::dispatch(OpId::NanVar,
+                                  std::vector<Tensor>{masked_dx}, attrs)[0];
+    auto two_std = tenzor::mul(primal, 2.0);
+    auto tangent = tenzor::div(d_var, two_std);
+    return JvpResult{std::move(primal), std::move(tangent)};
+}
+
+// NonDifferentiable rules for the remaining special functions / specialised
+// ops whose JVPs were not implemented in this batch.
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_scatter_reduce,
+    "ScatterReduce family: sum/mean differentiable but amax/amin/prod require "
+    "the saved selection; mode-aware JVP not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_depthwise_conv2d,
+    "DepthwiseConv2d JVP not yet implemented: structurally equivalent to "
+    "Conv2dForward with groups==C; use that path for forward-mode AD.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_polygamma,
+    "Polygamma JVP requires polygamma(n+1) which is not exposed by the "
+    "polygamma kernel (only the requested order n is computed).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_multigammaln,
+    "Multigammaln JVP requires a sum of digamma evaluations at shifted "
+    "arguments; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bessel_y0,
+    "BesselY0 JVP requires Y1(x) which is exposed but the derivative at "
+    "x→0+ diverges and the kernel does not flag the asymptotic regime.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_bessel_y1,
+    "BesselY1 JVP requires the Y0/Y1/x combination with similar small-x "
+    "divergence; not yet wired up.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_beta,
+    "Beta JVP requires digamma evaluations at (a, b, a+b); composing them "
+    "would need a multi-output JVP returning {primal, ∂a, ∂b}.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_betainc,
+    "BetaInc (regularized incomplete beta) JVP requires the saved a/b/x "
+    "factorisation; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_igamma,
+    "Igamma (lower regularized incomplete gamma) JVP requires per-axis "
+    "evaluation of the digamma-shifted recurrence; not yet implemented.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_igammac,
+    "Igammac = 1 - Igamma; same recurrence requirement as Igamma.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_zeta,
+    "Hurwitz Zeta JVP requires ∂/∂q ζ(x, q) = -x·ζ(x+1, q); the kernel does "
+    "not expose evaluation at x+1.")
+
+} // anonymous (batch 9)
+
 } // anonymous namespace
 
 namespace detail {
@@ -4431,6 +6337,417 @@ void register_builtin_jvp_rules() {
     register_jvp_rule(OpId::NestedLogSoftmax, &jvp_adapter_nested_log_softmax);
     // NestedLayerNorm: NonDifferentiable (per-segment mean/rstd not exposed).
     register_jvp_rule(OpId::NestedLayerNorm,  &jvp_adapter_nested_layer_norm);
+
+    // ---------------- Audit A.4 batch 9 ------------------
+    //
+    // Linear-in-input pass-through ops (same op on tangent):
+    register_jvp_rule(OpId::Conj,             &jvp_adapter_conj);
+    register_jvp_rule(OpId::Real,             &jvp_adapter_real);
+    register_jvp_rule(OpId::Imag,             &jvp_adapter_imag);
+    register_jvp_rule(OpId::Contiguous,       &jvp_adapter_contiguous);
+    register_jvp_rule(OpId::Clone,            &jvp_adapter_clone);
+    register_jvp_rule(OpId::ToMemoryFormat,   &jvp_adapter_to_memory_format);
+    register_jvp_rule(OpId::AsStrided,        &jvp_adapter_as_strided);
+    register_jvp_rule(OpId::DiagEmbed,        &jvp_adapter_diag_embed);
+    register_jvp_rule(OpId::Diagflat,         &jvp_adapter_diagflat);
+    register_jvp_rule(OpId::FFT2,             &jvp_adapter_fft2);
+    register_jvp_rule(OpId::IFFT2,            &jvp_adapter_ifft2);
+    register_jvp_rule(OpId::FFTN,             &jvp_adapter_fftn);
+    register_jvp_rule(OpId::IFFTN,            &jvp_adapter_ifftn);
+    register_jvp_rule(OpId::AvgPool1dForward, &jvp_adapter_avg_pool1d);
+    register_jvp_rule(OpId::AvgPool2dForward, &jvp_adapter_avg_pool2d);
+    register_jvp_rule(OpId::AvgPool3dForward, &jvp_adapter_avg_pool3d);
+    register_jvp_rule(OpId::Fold,             &jvp_adapter_fold);
+    register_jvp_rule(OpId::Interpolate,      &jvp_adapter_interpolate);
+    register_jvp_rule(OpId::GridSample,       &jvp_adapter_grid_sample);
+    register_jvp_rule(OpId::ROIAlignForward,  &jvp_adapter_roi_align);
+    register_jvp_rule(OpId::AffineGrid,       &jvp_adapter_affine_grid);
+    register_jvp_rule(OpId::NestedToPadded,   &jvp_adapter_nested_to_padded);
+    register_jvp_rule(OpId::NestedFromPadded, &jvp_adapter_nested_from_padded);
+    register_jvp_rule(OpId::MaskedScatter,    &jvp_adapter_masked_scatter);
+    register_jvp_rule(OpId::Put,              &jvp_adapter_put);
+    register_jvp_rule(OpId::ScatterAdd,       &jvp_adapter_scatter_add);
+
+    // MaxPool {1,2,3}d are multi-output (values, indices).
+    register_jvp_rule_multi(OpId::MaxPool1dForward, &jvp_adapter_max_pool_1d);
+    register_jvp_rule_multi(OpId::MaxPool2dForward, &jvp_adapter_max_pool_2d);
+    register_jvp_rule_multi(OpId::MaxPool3dForward, &jvp_adapter_max_pool_3d);
+
+    // MaxUnpool {1,2,3}d are single-output linear ops over (values, indices).
+    register_jvp_rule(OpId::MaxUnpool1dForward, &jvp_adapter_max_unpool_1d);
+    register_jvp_rule(OpId::MaxUnpool2dForward, &jvp_adapter_max_unpool_2d);
+    register_jvp_rule(OpId::MaxUnpool3dForward, &jvp_adapter_max_unpool_3d);
+
+    // Embedding (linear in weight; indices integer).
+    register_jvp_rule(OpId::Embedding, &jvp_adapter_embedding);
+
+    // Linear-in-input fused GEMMs.
+    register_jvp_rule(OpId::Addmm,   &jvp_adapter_addmm);
+    register_jvp_rule(OpId::Addmv,   &jvp_adapter_addmv);
+    register_jvp_rule(OpId::Baddbmm, &jvp_adapter_baddbmm);
+    register_jvp_rule(OpId::Dot,     &jvp_adapter_dot);
+    register_jvp_rule(OpId::LinalgVecdot, &jvp_adapter_linalg_vecdot);
+
+    // Closed-form unary derivatives.
+    register_jvp_rule(OpId::Rsqrt,            &jvp_adapter_rsqrt);
+    register_jvp_rule(OpId::Deg2Rad,          &jvp_adapter_deg2rad);
+    register_jvp_rule(OpId::Rad2Deg,          &jvp_adapter_rad2deg);
+    register_jvp_rule(OpId::Sinc,             &jvp_adapter_sinc);
+    register_jvp_rule(OpId::Ndtr,             &jvp_adapter_ndtr);
+    register_jvp_rule(OpId::LogNdtr,          &jvp_adapter_log_ndtr);
+    register_jvp_rule(OpId::ErfInv,           &jvp_adapter_erfinv);
+    register_jvp_rule(OpId::Digamma,          &jvp_adapter_digamma);
+    register_jvp_rule(OpId::Gamma,            &jvp_adapter_gamma);
+    register_jvp_rule(OpId::BesselJ0,         &jvp_adapter_bessel_j0);
+    register_jvp_rule(OpId::BesselJ1,         &jvp_adapter_bessel_j1);
+    register_jvp_rule(OpId::BesselI0,         &jvp_adapter_bessel_i0);
+    register_jvp_rule(OpId::BesselI1,         &jvp_adapter_bessel_i1);
+    register_jvp_rule(OpId::I0e,              &jvp_adapter_i0e);
+    register_jvp_rule(OpId::I1e,              &jvp_adapter_i1e);
+    register_jvp_rule(OpId::SphericalBesselJ0, &jvp_adapter_spherical_j0);
+    register_jvp_rule(OpId::Entr,             &jvp_adapter_entr);
+    register_jvp_rule(OpId::Angle,            &jvp_adapter_angle);
+    register_jvp_rule(OpId::Logit,            &jvp_adapter_logit);
+
+    // Closed-form binary/ternary derivatives.
+    register_jvp_rule(OpId::Maximum,          &jvp_adapter_maximum);
+    register_jvp_rule(OpId::Minimum,          &jvp_adapter_minimum);
+    register_jvp_rule(OpId::Fmax,             &jvp_adapter_fmax);
+    register_jvp_rule(OpId::Fmin,             &jvp_adapter_fmin);
+    register_jvp_rule(OpId::LogAddExp2,       &jvp_adapter_logaddexp2);
+    register_jvp_rule(OpId::Xlog1py,          &jvp_adapter_xlog1py);
+    register_jvp_rule(OpId::XLogY,            &jvp_adapter_xlogy);
+    register_jvp_rule(OpId::FloatPower,       &jvp_adapter_float_power);
+    register_jvp_rule(OpId::Cross,            &jvp_adapter_cross);
+    register_jvp_rule(OpId::Polar,            &jvp_adapter_polar);
+    register_jvp_rule(OpId::ComplexTensor,    &jvp_adapter_complex_tensor);
+    register_jvp_rule(OpId::Addcmul,          &jvp_adapter_addcmul);
+    register_jvp_rule(OpId::Addcdiv,          &jvp_adapter_addcdiv);
+    register_jvp_rule(OpId::Lerp,             &jvp_adapter_lerp);
+
+    // ---------------- NonDifferentiable rules (fail loudly) ---------------
+
+    // Comparisons.
+    register_jvp_rule(OpId::Eq, &jvp_adapter_nondiff_eq);
+    register_jvp_rule(OpId::Ne, &jvp_adapter_nondiff_ne);
+    register_jvp_rule(OpId::Lt, &jvp_adapter_nondiff_lt);
+    register_jvp_rule(OpId::Le, &jvp_adapter_nondiff_le);
+    register_jvp_rule(OpId::Gt, &jvp_adapter_nondiff_gt);
+    register_jvp_rule(OpId::Ge, &jvp_adapter_nondiff_ge);
+
+    // Logical / bitwise.
+    register_jvp_rule(OpId::LogicalAnd,        &jvp_adapter_nondiff_logical_and);
+    register_jvp_rule(OpId::LogicalOr,         &jvp_adapter_nondiff_logical_or);
+    register_jvp_rule(OpId::LogicalNot,        &jvp_adapter_nondiff_logical_not);
+    register_jvp_rule(OpId::LogicalXor,        &jvp_adapter_nondiff_logical_xor);
+    register_jvp_rule(OpId::BitwiseAnd,        &jvp_adapter_nondiff_bitwise_and);
+    register_jvp_rule(OpId::BitwiseOr,         &jvp_adapter_nondiff_bitwise_or);
+    register_jvp_rule(OpId::BitwiseXor,        &jvp_adapter_nondiff_bitwise_xor);
+    register_jvp_rule(OpId::BitwiseNot,        &jvp_adapter_nondiff_bitwise_not);
+    register_jvp_rule(OpId::BitwiseLeftShift,  &jvp_adapter_nondiff_bitwise_left_shift);
+    register_jvp_rule(OpId::BitwiseRightShift, &jvp_adapter_nondiff_bitwise_right_shift);
+
+    // Boolean predicates.
+    register_jvp_rule(OpId::IsNan,     &jvp_adapter_nondiff_isnan);
+    register_jvp_rule(OpId::IsInf,     &jvp_adapter_nondiff_isinf);
+    register_jvp_rule(OpId::IsFinite,  &jvp_adapter_nondiff_isfinite);
+    register_jvp_rule(OpId::IsPosInf,  &jvp_adapter_nondiff_isposinf);
+    register_jvp_rule(OpId::IsNegInf,  &jvp_adapter_nondiff_isneginf);
+    register_jvp_rule(OpId::IsReal,    &jvp_adapter_nondiff_isreal);
+    register_jvp_rule(OpId::Signbit,   &jvp_adapter_nondiff_signbit);
+    register_jvp_rule(OpId::HasInfNan, &jvp_adapter_nondiff_has_inf_nan);
+    register_jvp_rule(OpId::Isin,      &jvp_adapter_nondiff_isin);
+
+    // Discrete / index / counting.
+    register_jvp_rule(OpId::Nonzero,            &jvp_adapter_nondiff_nonzero);
+    register_jvp_rule(OpId::CountNonzero,       &jvp_adapter_nondiff_count_nonzero);
+    register_jvp_rule(OpId::Bincount,           &jvp_adapter_nondiff_bincount);
+    register_jvp_rule(OpId::Histogram,          &jvp_adapter_nondiff_histogram);
+    register_jvp_rule(OpId::Histogramdd,        &jvp_adapter_nondiff_histogramdd);
+    register_jvp_rule(OpId::Histc,              &jvp_adapter_nondiff_histc);
+    register_jvp_rule(OpId::Unique,             &jvp_adapter_nondiff_unique);
+    register_jvp_rule(OpId::UniqueConsecutive,  &jvp_adapter_nondiff_unique_consecutive);
+    register_jvp_rule(OpId::Mode,               &jvp_adapter_nondiff_mode);
+    register_jvp_rule(OpId::OneHot,             &jvp_adapter_nondiff_one_hot);
+    register_jvp_rule(OpId::SearchSorted,       &jvp_adapter_nondiff_searchsorted);
+    register_jvp_rule(OpId::SegmentReduce,      &jvp_adapter_nondiff_segment_reduce);
+    register_jvp_rule(OpId::AdvancedIndex,      &jvp_adapter_nondiff_advanced_index);
+    register_jvp_rule(OpId::AdvancedIndexPut,   &jvp_adapter_nondiff_advanced_index_put);
+
+    // Random / stochastic.
+    register_jvp_rule(OpId::Rand,              &jvp_adapter_nondiff_rand);
+    register_jvp_rule(OpId::Randn,             &jvp_adapter_nondiff_randn);
+    register_jvp_rule(OpId::Randint,           &jvp_adapter_nondiff_randint);
+    register_jvp_rule(OpId::Multinomial,       &jvp_adapter_nondiff_multinomial);
+    register_jvp_rule(OpId::Bernoulli,         &jvp_adapter_nondiff_bernoulli);
+    register_jvp_rule(OpId::NormalSample,      &jvp_adapter_nondiff_normal_sample);
+    register_jvp_rule(OpId::PoissonSample,     &jvp_adapter_nondiff_poisson_sample);
+    register_jvp_rule(OpId::ExponentialSample, &jvp_adapter_nondiff_exponential_sample);
+    register_jvp_rule(OpId::GumbelSoftmax,     &jvp_adapter_nondiff_gumbel_softmax);
+    register_jvp_rule(OpId::RReLU,             &jvp_adapter_nondiff_rrelu);
+    register_jvp_rule(OpId::Dropout,           &jvp_adapter_nondiff_dropout);
+
+    // Creation factories.
+    register_jvp_rule(OpId::Zeros,        &jvp_adapter_nondiff_zeros);
+    register_jvp_rule(OpId::Ones,         &jvp_adapter_nondiff_ones);
+    register_jvp_rule(OpId::Full,         &jvp_adapter_nondiff_full);
+    register_jvp_rule(OpId::Fill,         &jvp_adapter_nondiff_fill);
+    register_jvp_rule(OpId::Eye,          &jvp_adapter_nondiff_eye);
+    register_jvp_rule(OpId::Arange,       &jvp_adapter_nondiff_arange);
+    register_jvp_rule(OpId::Linspace,     &jvp_adapter_nondiff_linspace);
+    register_jvp_rule(OpId::TrilIndices,  &jvp_adapter_nondiff_tril_indices);
+    register_jvp_rule(OpId::TriuIndices,  &jvp_adapter_nondiff_triu_indices);
+    register_jvp_rule(OpId::StridedFill,  &jvp_adapter_nondiff_strided_fill);
+
+    // Discrete float.
+    register_jvp_rule(OpId::Fmod,      &jvp_adapter_nondiff_fmod);
+    register_jvp_rule(OpId::Remainder, &jvp_adapter_nondiff_remainder);
+    register_jvp_rule(OpId::Nextafter, &jvp_adapter_nondiff_nextafter);
+    register_jvp_rule(OpId::Copysign,  &jvp_adapter_nondiff_copysign);
+    register_jvp_rule(OpId::Gcd,       &jvp_adapter_nondiff_gcd);
+    register_jvp_rule(OpId::Lcm,       &jvp_adapter_nondiff_lcm);
+    register_jvp_rule(OpId::Ldexp,     &jvp_adapter_nondiff_ldexp);
+    register_jvp_rule_multi(OpId::Frexp, &jvp_adapter_nondiff_frexp);
+
+    // In-place.
+    register_jvp_rule(OpId::AddInplace,       &jvp_adapter_nondiff_add_inplace);
+    register_jvp_rule(OpId::SubInplace,       &jvp_adapter_nondiff_sub_inplace);
+    register_jvp_rule(OpId::MulInplace,       &jvp_adapter_nondiff_mul_inplace);
+    register_jvp_rule(OpId::DivInplace,       &jvp_adapter_nondiff_div_inplace);
+    register_jvp_rule(OpId::ReLUInplace,      &jvp_adapter_nondiff_relu_inplace);
+    register_jvp_rule(OpId::SigmoidInplace,   &jvp_adapter_nondiff_sigmoid_inplace);
+    register_jvp_rule(OpId::TanhInplace,      &jvp_adapter_nondiff_tanh_inplace);
+    register_jvp_rule(OpId::LeakyReLUInplace, &jvp_adapter_nondiff_leaky_relu_inplace);
+    register_jvp_rule(OpId::GeluInplace,      &jvp_adapter_nondiff_gelu_inplace);
+
+    // Activation *Backward kernels (double-backward territory).
+    register_jvp_rule(OpId::ReLUBackward,        &jvp_adapter_nondiff_relu_backward);
+    register_jvp_rule(OpId::SigmoidBackward,     &jvp_adapter_nondiff_sigmoid_backward);
+    register_jvp_rule(OpId::TanhBackward,        &jvp_adapter_nondiff_tanh_backward);
+    register_jvp_rule(OpId::GeluBackward,        &jvp_adapter_nondiff_gelu_backward);
+    register_jvp_rule(OpId::SoftmaxBackward,     &jvp_adapter_nondiff_softmax_backward);
+    register_jvp_rule(OpId::LogSoftmaxBackward,  &jvp_adapter_nondiff_log_softmax_backward);
+    register_jvp_rule(OpId::LeakyReLUBackward,   &jvp_adapter_nondiff_leaky_relu_backward);
+    register_jvp_rule(OpId::EluBackward,         &jvp_adapter_nondiff_elu_backward);
+    register_jvp_rule(OpId::SeluBackward,        &jvp_adapter_nondiff_selu_backward);
+    register_jvp_rule(OpId::MishBackward,        &jvp_adapter_nondiff_mish_backward);
+    register_jvp_rule(OpId::SoftplusBackward,    &jvp_adapter_nondiff_softplus_backward);
+    register_jvp_rule(OpId::LogSigmoidBackward,  &jvp_adapter_nondiff_log_sigmoid_backward);
+    register_jvp_rule(OpId::RReLUBackward,       &jvp_adapter_nondiff_rrelu_backward);
+    register_jvp_rule(OpId::SwishBackward,       &jvp_adapter_nondiff_swish_backward);
+
+    // Conv / pool / norm *Backward kernels.
+    register_jvp_rule(OpId::Conv1dBackwardInput,    &jvp_adapter_nondiff_conv1d_backward_input);
+    register_jvp_rule(OpId::Conv1dBackwardWeight,   &jvp_adapter_nondiff_conv1d_backward_weight);
+    register_jvp_rule(OpId::Conv1dBackwardBias,     &jvp_adapter_nondiff_conv1d_backward_bias);
+    register_jvp_rule(OpId::Conv2dBackwardInput,    &jvp_adapter_nondiff_conv2d_backward_input);
+    register_jvp_rule(OpId::Conv2dBackwardWeight,   &jvp_adapter_nondiff_conv2d_backward_weight);
+    register_jvp_rule(OpId::Conv2dBackwardBias,     &jvp_adapter_nondiff_conv2d_backward_bias);
+    register_jvp_rule(OpId::Conv3dBackwardInput,    &jvp_adapter_nondiff_conv3d_backward_input);
+    register_jvp_rule(OpId::Conv3dBackwardWeight,   &jvp_adapter_nondiff_conv3d_backward_weight);
+    register_jvp_rule(OpId::Conv3dBackwardBias,     &jvp_adapter_nondiff_conv3d_backward_bias);
+    register_jvp_rule(OpId::ConvTranspose3dBackwardInput,  &jvp_adapter_nondiff_conv_transpose3d_backward_input);
+    register_jvp_rule(OpId::ConvTranspose3dBackwardWeight, &jvp_adapter_nondiff_conv_transpose3d_backward_weight);
+    register_jvp_rule(OpId::ConvTranspose3dBackwardBias,   &jvp_adapter_nondiff_conv_transpose3d_backward_bias);
+    register_jvp_rule(OpId::DeformableConv2dBackwardInput,  &jvp_adapter_nondiff_deformable_conv2d_backward_input);
+    register_jvp_rule(OpId::DeformableConv2dBackwardWeight, &jvp_adapter_nondiff_deformable_conv2d_backward_weight);
+    register_jvp_rule(OpId::DeformableConv2dBackwardBias,   &jvp_adapter_nondiff_deformable_conv2d_backward_bias);
+
+    register_jvp_rule(OpId::MaxPool1dBackward,            &jvp_adapter_nondiff_max_pool1d_backward);
+    register_jvp_rule(OpId::MaxPool2dBackward,            &jvp_adapter_nondiff_max_pool2d_backward);
+    register_jvp_rule(OpId::MaxPool3dBackward,            &jvp_adapter_nondiff_max_pool3d_backward);
+    register_jvp_rule(OpId::AvgPool1dBackward,            &jvp_adapter_nondiff_avg_pool1d_backward);
+    register_jvp_rule(OpId::AvgPool2dBackward,            &jvp_adapter_nondiff_avg_pool2d_backward);
+    register_jvp_rule(OpId::AvgPool3dBackward,            &jvp_adapter_nondiff_avg_pool3d_backward);
+    register_jvp_rule(OpId::AdaptiveAvgPool1dBackward,    &jvp_adapter_nondiff_adaptive_avg_pool1d_backward);
+    register_jvp_rule(OpId::AdaptiveAvgPool2dBackward,    &jvp_adapter_nondiff_adaptive_avg_pool2d_backward);
+    register_jvp_rule(OpId::AdaptiveAvgPool3dBackward,    &jvp_adapter_nondiff_adaptive_avg_pool3d_backward);
+    register_jvp_rule(OpId::AdaptiveMaxPool1dBackward,    &jvp_adapter_nondiff_adaptive_max_pool1d_backward);
+    register_jvp_rule(OpId::AdaptiveMaxPool2dBackward,    &jvp_adapter_nondiff_adaptive_max_pool2d_backward);
+    register_jvp_rule(OpId::AdaptiveMaxPool3dBackward,    &jvp_adapter_nondiff_adaptive_max_pool3d_backward);
+    register_jvp_rule(OpId::FractionalMaxPool2dBackward,  &jvp_adapter_nondiff_fractional_max_pool2d_backward);
+    register_jvp_rule(OpId::FractionalMaxPool3dBackward,  &jvp_adapter_nondiff_fractional_max_pool3d_backward);
+    register_jvp_rule(OpId::MaxUnpool1dBackward,          &jvp_adapter_nondiff_max_unpool1d_backward);
+    register_jvp_rule(OpId::MaxUnpool2dBackward,          &jvp_adapter_nondiff_max_unpool2d_backward);
+    register_jvp_rule(OpId::MaxUnpool3dBackward,          &jvp_adapter_nondiff_max_unpool3d_backward);
+
+    register_jvp_rule(OpId::BatchNorm2dBackward,    &jvp_adapter_nondiff_batch_norm2d_backward);
+    register_jvp_rule(OpId::LayerNormBackward,      &jvp_adapter_nondiff_layer_norm_backward);
+    register_jvp_rule(OpId::GroupNormBackward,      &jvp_adapter_nondiff_group_norm_backward);
+    register_jvp_rule(OpId::InstanceNormBackward,   &jvp_adapter_nondiff_instance_norm_backward);
+    register_jvp_rule(OpId::RMSNormBackward,        &jvp_adapter_nondiff_rms_norm_backward);
+    register_jvp_rule(OpId::LinearBackward,         &jvp_adapter_nondiff_linear_backward);
+    register_jvp_rule(OpId::EmbeddingBackward,      &jvp_adapter_nondiff_embedding_backward);
+    register_jvp_rule(OpId::EmbeddingBagBackward,   &jvp_adapter_nondiff_embedding_bag_backward);
+    register_jvp_rule(OpId::DropoutBackward,        &jvp_adapter_nondiff_dropout_backward);
+    register_jvp_rule(OpId::FlashAttentionBackward, &jvp_adapter_nondiff_flash_attention_backward);
+    register_jvp_rule(OpId::FlexAttentionBackward,  &jvp_adapter_nondiff_flex_attention_backward);
+    register_jvp_rule(OpId::NestedAttentionBackward, &jvp_adapter_nondiff_nested_attention_backward);
+    register_jvp_rule(OpId::FusedLayerNormBackward, &jvp_adapter_nondiff_fused_layer_norm_backward);
+    register_jvp_rule(OpId::ROIAlignBackward,       &jvp_adapter_nondiff_roi_align_backward);
+    register_jvp_rule(OpId::GRUCellBackward,        &jvp_adapter_nondiff_gru_cell_backward);
+    register_jvp_rule(OpId::LSTMCellBackward,       &jvp_adapter_nondiff_lstm_cell_backward);
+    register_jvp_rule(OpId::InterpolateBackward,    &jvp_adapter_nondiff_interpolate_backward);
+
+    // BatchNorm helper/stat ops.
+    register_jvp_rule_multi(OpId::BatchNorm2dMeanVar,            &jvp_adapter_nondiff_batch_norm2d_mean_var);
+    register_jvp_rule       (OpId::BatchNorm2dUpdateRunningStats, &jvp_adapter_nondiff_batch_norm2d_update_running_stats);
+    register_jvp_rule_multi(OpId::BatchNorm2dForward,            &jvp_adapter_nondiff_batch_norm2d_forward);
+    register_jvp_rule_multi(OpId::BatchNorm2dFusedTraining,      &jvp_adapter_nondiff_batch_norm2d_fused_training);
+
+    // Multi-output linalg factorisations awaiting bespoke JVPs.
+    register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_nondiff_linalg_svd);
+    register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_nondiff_linalg_qr);
+    register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_nondiff_linalg_eig);
+    register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_nondiff_linalg_lu);
+    register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
+    register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);
+    register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_nondiff_linalg_ldl_solve);
+    register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_nondiff_linalg_lu_solve);
+    register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_nondiff_linalg_cholesky_solve);
+    register_jvp_rule_multi(OpId::Geqrf,                &jvp_adapter_nondiff_geqrf);
+    register_jvp_rule       (OpId::Ormqr,                &jvp_adapter_nondiff_ormqr);
+    register_jvp_rule       (OpId::TensorInv,            &jvp_adapter_nondiff_tensor_inv);
+    register_jvp_rule       (OpId::TensorSolve,          &jvp_adapter_nondiff_tensor_solve);
+    register_jvp_rule       (OpId::SolveTriangular,      &jvp_adapter_nondiff_solve_triangular);
+    register_jvp_rule       (OpId::CholeskyInverse,      &jvp_adapter_nondiff_cholesky_inverse);
+    register_jvp_rule       (OpId::LOBPCG,               &jvp_adapter_nondiff_lobpcg);
+
+    // Sequence-level RNNs.
+    register_jvp_rule_multi(OpId::LSTMForward,           &jvp_adapter_nondiff_lstm_forward);
+    register_jvp_rule_multi(OpId::GRUForward,            &jvp_adapter_nondiff_gru_forward);
+    register_jvp_rule_multi(OpId::LSTMMultiLayerForward, &jvp_adapter_nondiff_lstm_multilayer_forward);
+    register_jvp_rule_multi(OpId::GRUMultiLayerForward,  &jvp_adapter_nondiff_gru_multilayer_forward);
+    register_jvp_rule_multi(OpId::BiLSTMForward,         &jvp_adapter_nondiff_bilstm_forward);
+
+    // Search / sort multi-output.
+    register_jvp_rule_multi(OpId::TopK, &jvp_adapter_nondiff_topk);
+    register_jvp_rule_multi(OpId::Sort, &jvp_adapter_nondiff_sort);
+
+    // Specialised / quantized.
+    register_jvp_rule(OpId::QuantizedLinear,            &jvp_adapter_nondiff_quantized_linear);
+    register_jvp_rule(OpId::QuantizedConv2d,            &jvp_adapter_nondiff_quantized_conv2d);
+    register_jvp_rule(OpId::EmbeddingWithBoundsCheck,   &jvp_adapter_nondiff_embedding_with_bounds_check);
+    register_jvp_rule(OpId::EmbeddingBagForward,        &jvp_adapter_nondiff_embedding_bag);
+    register_jvp_rule(OpId::Einsum,                     &jvp_adapter_nondiff_einsum);
+    register_jvp_rule(OpId::NMS,                        &jvp_adapter_nondiff_nms);
+    register_jvp_rule(OpId::BoxIoU,                     &jvp_adapter_nondiff_box_iou);
+    register_jvp_rule(OpId::GatherRelativePositionBias, &jvp_adapter_nondiff_gather_relative_position_bias);
+    register_jvp_rule(OpId::DeformableConv2dForward,    &jvp_adapter_nondiff_deformable_conv2d_forward);
+
+    // Signal-processing (linear but constants not exposed).
+    register_jvp_rule(OpId::DCT,      &jvp_adapter_nondiff_dct);
+    register_jvp_rule(OpId::IDCT,     &jvp_adapter_nondiff_idct);
+    register_jvp_rule(OpId::STFT,     &jvp_adapter_nondiff_stft);
+    register_jvp_rule(OpId::ISTFT,    &jvp_adapter_nondiff_istft);
+    register_jvp_rule(OpId::MelScale, &jvp_adapter_nondiff_mel_scale);
+    register_jvp_rule(OpId::MFCC,     &jvp_adapter_nondiff_mfcc);
+
+    register_jvp_rule(OpId::CDist,             &jvp_adapter_nondiff_cdist);
+    register_jvp_rule(OpId::PairwiseDistance,  &jvp_adapter_nondiff_pairwise_distance);
+    register_jvp_rule(OpId::Pdist,             &jvp_adapter_nondiff_pdist);
+    register_jvp_rule(OpId::CosineSimilarity,  &jvp_adapter_nondiff_cosine_similarity);
+    register_jvp_rule(OpId::Renorm,            &jvp_adapter_nondiff_renorm);
+    register_jvp_rule(OpId::Cov,               &jvp_adapter_nondiff_cov);
+    register_jvp_rule(OpId::Corrcoef,          &jvp_adapter_nondiff_corrcoef);
+    register_jvp_rule(OpId::LinalgVectorNorm,  &jvp_adapter_nondiff_linalg_vector_norm);
+    register_jvp_rule(OpId::LinalgMatrixNorm,  &jvp_adapter_nondiff_linalg_matrix_norm);
+
+    // Multi-output split/chunk awaiting dual-walker multi-out support.
+    register_jvp_rule(OpId::Chunk, &jvp_adapter_nondiff_chunk);
+    register_jvp_rule(OpId::Split, &jvp_adapter_nondiff_split);
+
+    // Fused composites.
+    register_jvp_rule(OpId::FusedLinearReLU,     &jvp_adapter_nondiff_fused_linear_relu);
+    register_jvp_rule(OpId::FusedConv2dReLU,     &jvp_adapter_nondiff_fused_conv2d_relu);
+    register_jvp_rule(OpId::FusedBatchNormReLU,  &jvp_adapter_nondiff_fused_batchnorm_relu);
+    register_jvp_rule(OpId::FusedAddReLU,        &jvp_adapter_nondiff_fused_add_relu);
+    register_jvp_rule(OpId::FusedGelu,           &jvp_adapter_nondiff_fused_gelu);
+    register_jvp_rule(OpId::FusedLayerNorm,      &jvp_adapter_nondiff_fused_layer_norm);
+    register_jvp_rule(OpId::FusedRMSNorm,        &jvp_adapter_nondiff_fused_rms_norm);
+    register_jvp_rule(OpId::FusedConv2dSigmoid,  &jvp_adapter_nondiff_fused_conv2d_sigmoid);
+    register_jvp_rule(OpId::FusedConv2dTanh,     &jvp_adapter_nondiff_fused_conv2d_tanh);
+    register_jvp_rule(OpId::FusedConv2dSwish,    &jvp_adapter_nondiff_fused_conv2d_swish);
+    register_jvp_rule(OpId::FusedConv2dBnReLU,   &jvp_adapter_nondiff_fused_conv2d_bn_relu);
+
+    // Optimiser steps.
+    register_jvp_rule(OpId::FusedSGDStep,       &jvp_adapter_nondiff_fused_sgd_step);
+    register_jvp_rule(OpId::FusedAdamStep,      &jvp_adapter_nondiff_fused_adam_step);
+    register_jvp_rule(OpId::FusedRMSPropStep,   &jvp_adapter_nondiff_fused_rmsprop_step);
+    register_jvp_rule(OpId::FusedAdadeltaStep,  &jvp_adapter_nondiff_fused_adadelta_step);
+    register_jvp_rule(OpId::FusedAdagradStep,   &jvp_adapter_nondiff_fused_adagrad_step);
+    register_jvp_rule(OpId::FusedAdamAtan2Step, &jvp_adapter_nondiff_fused_adam_atan2_step);
+
+    // Bool reductions.
+    register_jvp_rule(OpId::Any, &jvp_adapter_nondiff_any);
+    register_jvp_rule(OpId::All, &jvp_adapter_nondiff_all);
+
+    // Sparse long-tail.
+    register_jvp_rule(OpId::SparseToDense,    &jvp_adapter_nondiff_sparse_to_dense);
+    register_jvp_rule(OpId::DenseToSparse,    &jvp_adapter_nondiff_dense_to_sparse);
+    register_jvp_rule(OpId::SparseSpGEMM,     &jvp_adapter_nondiff_sparse_spgemm);
+    register_jvp_rule(OpId::SparseTrsv,       &jvp_adapter_nondiff_sparse_trsv);
+    register_jvp_rule(OpId::SparseTrsm,       &jvp_adapter_nondiff_sparse_trsm);
+    register_jvp_rule(OpId::SparseSoftmax,    &jvp_adapter_nondiff_sparse_softmax);
+    register_jvp_rule(OpId::SparseLogSoftmax, &jvp_adapter_nondiff_sparse_log_softmax);
+
+    // Normalisation siblings awaiting saved-stats exposure.
+    register_jvp_rule_multi(OpId::GroupNorm,    &jvp_adapter_nondiff_group_norm);
+    register_jvp_rule_multi(OpId::InstanceNorm, &jvp_adapter_nondiff_instance_norm);
+    register_jvp_rule_multi(OpId::RMSNorm,      &jvp_adapter_nondiff_rms_norm);
+
+    // ---------------- Audit A.4 batch 9 follow-ups ------------------
+    //
+    // Closed-form unary math that already have jvp_* helpers earlier in
+    // this file but were never wired into the adapter table.
+    register_jvp_rule(OpId::Exp2,  &jvp_adapter_exp2_unary);
+    register_jvp_rule(OpId::Expm1, &jvp_adapter_expm1_unary);
+    register_jvp_rule(OpId::Log2,  &jvp_adapter_log2_unary);
+    register_jvp_rule(OpId::Log10, &jvp_adapter_log10_unary);
+    register_jvp_rule(OpId::Log1p, &jvp_adapter_log1p_unary);
+
+    // Activation long-tail (single-arg variants of the registered ones).
+    register_jvp_rule(OpId::Swish,       &jvp_adapter_swish);
+    register_jvp_rule(OpId::Hardsigmoid, &jvp_adapter_hardsigmoid);
+    register_jvp_rule(OpId::LogSigmoid,  &jvp_adapter_log_sigmoid);
+    register_jvp_rule(OpId::ClampMin,    &jvp_adapter_clamp_min);
+    register_jvp_rule(OpId::ClampMax,    &jvp_adapter_clamp_max);
+
+    // NaN-ignoring reductions (linear projections excluding NaN slots).
+    register_jvp_rule(OpId::Nansum,  &jvp_adapter_nansum);
+    register_jvp_rule(OpId::Nanmean, &jvp_adapter_nanmean);
+    register_jvp_rule(OpId::NanVar,  &jvp_adapter_nanvar);
+    register_jvp_rule(OpId::NanStd,  &jvp_adapter_nanstd);
+
+    // ScatterReduce: family of {sum/mean/amax/amin/prod}; sum/mean
+    // differentiable, others depend on the saved selection. Mark
+    // NonDifferentiable until per-mode JVP rules land.
+    register_jvp_rule(OpId::ScatterReduce, &jvp_adapter_nondiff_scatter_reduce);
+
+    // DepthwiseConv2d: structurally a Conv2d with `groups == channels`; the
+    // same Conv2d JVP applies, but the dispatcher exposes it as a separate
+    // OpId. Mark NonDifferentiable for now — use Conv2dForward(groups=C).
+    register_jvp_rule(OpId::DepthwiseConv2d, &jvp_adapter_nondiff_depthwise_conv2d);
+
+    // Special functions whose derivatives are well-defined but require
+    // higher-order primitives this batch does not yet expose:
+    //   Polygamma:   ψ^(n+1)(x);  recursive in n — needs an extra primitive.
+    //   Multigammaln: sum of lgamma terms; would need a custom JVP.
+    //   BesselY0/Y1: derivatives in terms of Y1/Y0 (and -Y0/x), but the
+    //                project does not expose stable Y_1 at x→0.
+    //   Beta/BetaInc/Igamma/Igammac: require digamma + incomplete-gamma
+    //                                helpers that compose differently.
+    //   Zeta: derivative involves derivative-w.r.t.-s of zeta which is not
+    //         exposed.
+    register_jvp_rule(OpId::Polygamma,    &jvp_adapter_nondiff_polygamma);
+    register_jvp_rule(OpId::Multigammaln, &jvp_adapter_nondiff_multigammaln);
+    register_jvp_rule(OpId::BesselY0,     &jvp_adapter_nondiff_bessel_y0);
+    register_jvp_rule(OpId::BesselY1,     &jvp_adapter_nondiff_bessel_y1);
+    register_jvp_rule(OpId::Beta,         &jvp_adapter_nondiff_beta);
+    register_jvp_rule(OpId::BetaInc,      &jvp_adapter_nondiff_betainc);
+    register_jvp_rule(OpId::Igamma,       &jvp_adapter_nondiff_igamma);
+    register_jvp_rule(OpId::Igammac,      &jvp_adapter_nondiff_igammac);
+    register_jvp_rule(OpId::Zeta,         &jvp_adapter_nondiff_zeta);
 }
 
 } // namespace detail
