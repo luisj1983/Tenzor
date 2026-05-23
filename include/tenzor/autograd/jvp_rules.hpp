@@ -294,4 +294,39 @@ auto jvp_adaptive_avgpool_2d(const DualTensor& x, int64_t output_h, int64_t outp
 auto jvp_adaptive_avgpool_3d(const DualTensor& x, int64_t output_d, int64_t output_h, int64_t output_w) -> DualTensor;
 /// @}
 
+/// @name Attention JVP Rules (Audit A.4 batch 8)
+/// @{
+/// Scaled dot-product attention forward-mode JVP. Common JVP for the FlashAttention,
+/// FusedAttention, FlexAttention (identity score-mod), NestedAttention families:
+///   S    = (Q @ K^T) * scale     [+ causal_mask]
+///   P    = softmax(S, dim=-1)
+///   y    = P @ V
+/// Tangent:
+///   S_t  = ((dQ @ K^T) + (Q @ dK^T)) * scale
+///   P_t  = P * (S_t - sum(P * S_t, dim=-1, keepdim=true))
+///   y_t  = (P_t @ V) + (P @ dV)
+/// The causal mask is constant — apply identically to S and S_t before the
+/// softmax. Dropout (dropout_p > 0) makes the JVP discontinuous unless the
+/// Bernoulli mask is saved; we refuse forward-mode AD in that case.
+auto jvp_sdpa_forward(const DualTensor& Q,
+                      const DualTensor& K,
+                      const DualTensor& V,
+                      float scale,
+                      bool causal) -> DualTensor;
+/// @}
+
+/// @name Loss-function JVP Rules (Audit A.4 batch 8)
+/// @{
+/// FusedSoftmaxCrossEntropy(logits, targets, reduction="mean"|"sum"|"none"):
+///   p          = softmax(logits, dim=-1)
+///   per_loss[i] = logsumexp(logits[i]) - logits[i, target[i]]
+/// Forward-mode tangent:
+///   per_t[i]   = sum_j p[i,j] * dlogits[i,j] - dlogits[i, target[i]]
+/// Then reduce: mean → mean(per_t); sum → sum(per_t); none → per_t.
+/// `targets` is integer and non-differentiable.
+auto jvp_fused_softmax_cross_entropy(const DualTensor& logits,
+                                     const Tensor& targets,
+                                     const std::string& reduction) -> DualTensor;
+/// @}
+
 } // namespace tenzor

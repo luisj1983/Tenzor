@@ -11,6 +11,7 @@
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/utils/error.hpp"
 #include <array>
 #include <climits>
 #include <cmath>
@@ -1633,6 +1634,149 @@ auto jvp_adaptive_avgpool_3d(const DualTensor& x,
     auto tangent = tenzor::dispatch(OpId::AdaptiveAvgPool3d,
                                     std::vector<Tensor>{x.tangent()}, attrs)[0];
     return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Audit A.4 batch 8: Attention family (single-output JVP) + losses
+// ============================================================================
+
+// Scaled dot-product attention forward-mode JVP. Used by FlashAttention,
+// FusedAttention, FlexAttention (identity score-mod), and NestedAttention
+// (when the per-segment structure can be flattened to a dense [B*Heads, L, E]
+// view). Math:
+//
+//   S    = (Q @ K^T) * scale           shape [..., Lq, Lk]
+//   if causal: S += mask_add where mask_add[i,j] = 0 if j<=i else -inf
+//   P    = softmax(S, dim=-1)
+//   y    = P @ V                       shape [..., Lq, Ev]
+//
+// Tangent (chain rule):
+//   S_t  = ((dQ @ K^T) + (Q @ dK^T)) * scale       (mask is constant)
+//   P_t  = P * (S_t - sum(P * S_t, dim=-1, keepdim))
+//   y_t  = (P_t @ V) + (P @ dV)
+auto jvp_sdpa_forward(const DualTensor& Q,
+                      const DualTensor& K,
+                      const DualTensor& V,
+                      float scale,
+                      bool causal) -> DualTensor {
+    const Tensor& Qp = Q.primal();   const Tensor& Qt = Q.tangent();
+    const Tensor& Kp = K.primal();   const Tensor& Kt = K.tangent();
+    const Tensor& Vp = V.primal();   const Tensor& Vt = V.tangent();
+
+    // K^T over the last two dims.
+    int64_t ndim_K = static_cast<int64_t>(Kp.shape().size());
+    int64_t a = ndim_K - 2, b = ndim_K - 1;
+    auto Kt_T = tenzor::transpose(Kp, a, b);
+    auto Kt_T_tan = tenzor::transpose(Kt, a, b);
+
+    // Tensor scalar for `scale`. Broadcasts cleanly against the score tensor.
+    Tensor scale_t = tenzor::full({1}, scale, Qp.dtype(), Qp.device());
+
+    // S = Q @ K^T * scale
+    auto S = tenzor::mul(tenzor::matmul(Qp, Kt_T), scale_t);
+    // S_t = (dQ @ K^T + Q @ dK^T) * scale
+    auto S_t = tenzor::mul(
+        tenzor::add(tenzor::matmul(Qt,  Kt_T),
+                    tenzor::matmul(Qp,  Kt_T_tan)),
+        scale_t);
+
+    if (causal) {
+        // Build a triu mask on the last two dims (Lq, Lk). triu with diag=1
+        // selects the strictly-upper triangle (future positions); we want
+        // those positions to be -inf in S (and 0 in S_t — masked-fill with 0
+        // simulates "constant mask"; equivalently we can subtract a large
+        // value, but `masked_fill` is the canonical pattern in the codebase).
+        const auto& Sshape = S.shape();
+        int64_t Lq = Sshape[static_cast<size_t>(ndim_K) - 2];
+        int64_t Lk = Sshape[static_cast<size_t>(ndim_K) - 1];
+        Tensor ones2d = tenzor::ones({Lq, Lk}, Qp.dtype(), Qp.device());
+        Tensor mask_upper = tenzor::triu(ones2d, /*diagonal=*/1);
+        // Cast to Bool for masked_fill. `mask_upper > 0` gives a Bool mask.
+        Tensor zero = tenzor::full({1}, 0.0f, Qp.dtype(), Qp.device());
+        Tensor mask_bool = tenzor::gt(mask_upper, zero);
+        S = tenzor::masked_fill(S, mask_bool,
+                                -std::numeric_limits<float>::infinity());
+        // Mask is constant: corresponding S_t entries don't contribute to the
+        // softmax output (the row is renormalised after softmax, so the
+        // tangent contribution at masked positions is zeroed by setting the
+        // same entries to 0 here — this matches the math where the mask is a
+        // constant additive offset with zero derivative).
+        S_t = tenzor::masked_fill(S_t, mask_bool, 0.0f);
+    }
+
+    // P = softmax(S, dim=-1)   (compute via shifted exp / sum for stability,
+    // matching jvp_softmax).
+    int64_t last_dim = -1;
+    auto S_max = tenzor::max(S, last_dim, /*keepdim=*/true);
+    auto S_shifted = tenzor::sub(S, S_max);
+    auto exp_S = tenzor::exp(S_shifted);
+    auto sum_exp = tenzor::sum(exp_S, last_dim, /*keepdim=*/true);
+    auto P = tenzor::div(exp_S, sum_exp);
+
+    // P_t = P * (S_t - sum(P * S_t, dim=-1, keepdim))
+    auto P_St = tenzor::mul(P, S_t);
+    auto sum_P_St = tenzor::sum(P_St, last_dim, /*keepdim=*/true);
+    auto P_t = tenzor::mul(P, tenzor::sub(S_t, sum_P_St));
+
+    // y = P @ V; y_t = P_t @ V + P @ dV
+    auto y   = tenzor::matmul(P,   Vp);
+    auto y_t = tenzor::add(tenzor::matmul(P_t, Vp),
+                           tenzor::matmul(P,   Vt));
+    return DualTensor(std::move(y), std::move(y_t));
+}
+
+// FusedSoftmaxCrossEntropy(logits, targets, reduction) JVP.
+// Formula (per-sample, logits row x, target t):
+//   loss_i = logsumexp(x_i) - x_i[t_i]
+//   d_loss_i = sum_j softmax(x_i)[j] * dx_i[j] - dx_i[t_i]
+// Then apply reduction:
+//   "mean" → mean(per_loss); "sum" → sum(per_loss); "none" → per_loss.
+auto jvp_fused_softmax_cross_entropy(const DualTensor& logits,
+                                     const Tensor& targets,
+                                     const std::string& reduction) -> DualTensor {
+    const Tensor& X  = logits.primal();
+    const Tensor& dX = logits.tangent();
+
+    // Stable softmax across the last dim (class dim).
+    int64_t last_dim = -1;
+    auto x_max  = tenzor::max(X, last_dim, /*keepdim=*/true);
+    auto shift  = tenzor::sub(X, x_max);
+    auto exp_s  = tenzor::exp(shift);
+    auto sum_e  = tenzor::sum(exp_s, last_dim, /*keepdim=*/true);
+    auto P      = tenzor::div(exp_s, sum_e);                // softmax
+    auto lse    = tenzor::add(tenzor::log(sum_e), x_max);   // [B,1]
+
+    // Per-sample primal loss: logsumexp - gather(logits, target).
+    // Reshape targets to a keepdim-style [B,1] index tensor for gather.
+    int64_t B = X.shape()[0];
+    Tensor tgt_2d = tenzor::reshape(targets, std::vector<int64_t>{B, 1});
+    auto x_at_tgt = tenzor::gather(X, /*dim=*/1, tgt_2d);   // [B,1]
+    auto per_loss = tenzor::sub(lse, x_at_tgt);             // [B,1]
+    per_loss = tenzor::reshape(per_loss, std::vector<int64_t>{B});
+
+    // Per-sample tangent.
+    // sum_j p[j] * dx[j] over class dim → [B,1]; gather(dX, tgt) → [B,1].
+    auto P_dx = tenzor::mul(P, dX);
+    auto sum_P_dx = tenzor::sum(P_dx, last_dim, /*keepdim=*/true);  // [B,1]
+    auto dx_at_tgt = tenzor::gather(dX, /*dim=*/1, tgt_2d);          // [B,1]
+    auto per_tan = tenzor::sub(sum_P_dx, dx_at_tgt);                  // [B,1]
+    per_tan = tenzor::reshape(per_tan, std::vector<int64_t>{B});
+
+    // Apply reduction.
+    Tensor primal_out;
+    Tensor tangent_out;
+    if (reduction == "mean") {
+        primal_out  = tenzor::mean(per_loss);
+        tangent_out = tenzor::mean(per_tan);
+    } else if (reduction == "sum") {
+        primal_out  = tenzor::sum(per_loss);
+        tangent_out = tenzor::sum(per_tan);
+    } else {
+        // "none" (or anything else): return per-sample.
+        primal_out  = std::move(per_loss);
+        tangent_out = std::move(per_tan);
+    }
+    return DualTensor(std::move(primal_out), std::move(tangent_out));
 }
 
 // ============================================================================
@@ -3454,6 +3598,561 @@ JvpResult jvp_adapter_adaptive_avgpool_3d(std::span<const Tensor> primals,
 
 } // anonymous (batch 7)
 
+// ===========================================================================
+// Audit A.4 batch 8: Attention family + losses + adaptive/fractional max pool
+// + gather-at-saved-indices for Median + NonDifferentiable stubs for
+// Quantile / Nanmedian / NestedLayerNorm / NestedAttention / dropout-on
+// FlashAttention / non-identity FlexAttention.
+// ===========================================================================
+
+namespace {
+
+// ---- Attention adapters --------------------------------------------------
+
+// Helper: route FlashAttention / FusedAttention inputs (Q, K, V) through the
+// shared SDPA JVP. We require dropout_p == 0 — dropout makes the JVP
+// discontinuous unless we save & re-use the Bernoulli mask, which the
+// dispatcher does not pipe through.
+JvpResult jvp_adapter_flash_attention(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_flash_attention: expected 3 inputs (Q, K, V)");
+    }
+    double dropout_p = attrs.get_float(AttrKey::DropoutP, 0.0);
+    if (dropout_p > 0.0) {
+        throw NonDifferentiable(
+            "FlashAttention forward-mode JVP: dropout_p>0 makes the JVP "
+            "discontinuous unless the Bernoulli mask is saved and replayed; "
+            "set dropout_p=0 to use forward-mode AD.");
+    }
+    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    bool causal = attrs.get_bool(AttrKey::Causal, false);
+    auto Q = make_dual(primals[0], tangents[0]);
+    auto K = make_dual(primals[1], tangents[1]);
+    auto V = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_sdpa_forward(Q, K, V, scale, causal));
+}
+
+// FusedAttention reuses the same JVP formula (it does not expose dropout).
+JvpResult jvp_adapter_fused_attention(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() != 3 || tangents.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_fused_attention: expected 3 inputs (Q, K, V)");
+    }
+    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    bool causal = attrs.get_bool(AttrKey::Causal, false);
+    auto Q = make_dual(primals[0], tangents[0]);
+    auto K = make_dual(primals[1], tangents[1]);
+    auto V = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_sdpa_forward(Q, K, V, scale, causal));
+}
+
+// FlexAttention: identical to FusedAttention only for the identity score-mod
+// (ScoreModId == 0) without a block_mask (which would be a non-diff
+// integer-mask input). Other score-mods are user-supplied OpIds that don't
+// compose at the Variable-level JVP layer; refuse rather than silently
+// dropping the mod's tangent contribution.
+JvpResult jvp_adapter_flex_attention(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+    bool has_block_mask  = (primals.size() > 3);
+    if (score_mod_id != 0 || has_block_mask) {
+        throw NonDifferentiable(
+            "FlexAttention forward-mode JVP: only the identity score-mod "
+            "(ScoreModId=0) without a block_mask is supported. Non-identity "
+            "score_mods are user OpIds not composable at this layer; block "
+            "masks are non-differentiable.");
+    }
+    if (primals.size() < 3 || tangents.size() < 3) {
+        throw std::runtime_error(
+            "jvp_adapter_flex_attention: expected 3 inputs (Q, K, V)");
+    }
+    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    // FlexAttention is non-causal by default; causal is encoded via score-mod
+    // or block_mask, both of which we've already refused above.
+    auto Q = make_dual(primals[0], tangents[0]);
+    auto K = make_dual(primals[1], tangents[1]);
+    auto V = make_dual(primals[2], tangents[2]);
+    return dual_to_result(jvp_sdpa_forward(Q, K, V, scale, /*causal=*/false));
+}
+
+// NestedAttention: per-segment scaled dot-product over a packed [SumL, H, E]
+// values buffer governed by Int64 offsets. The forward kernel iterates over
+// segments and the JVP would need to (a) re-derive the per-segment softmax
+// and (b) re-apply the offset-driven gather pattern in dual form. The
+// underlying primitives (NestedAttention is dispatched as a single fused op)
+// are not exposed at the tensor-level API, so a faithful JVP requires
+// integration in C++ at kernel level. Refuse for now with a typed exception.
+JvpResult jvp_adapter_nested_attention(std::span<const Tensor> primals,
+                                       std::span<const Tensor> /*tangents*/,
+                                       const OpAttributes& /*attrs*/) {
+    if (primals.size() != 5) {
+        throw std::runtime_error(
+            "jvp_adapter_nested_attention: expected 5 inputs "
+            "(Q_vals, K_vals, V_vals, offsets, mask?)");
+    }
+    throw NonDifferentiable(
+        "NestedAttention forward-mode JVP not implemented: the fused "
+        "per-segment kernel is not decomposable at the Tensor-level API. "
+        "Use forward-mode AD through the manual unpadded matmul+softmax path "
+        "instead.");
+}
+
+// ---- Loss adapters -------------------------------------------------------
+
+// FusedSoftmaxCrossEntropy(logits, targets) JVP. `targets` is integer (no
+// tangent). Reads AttrKey::Reduction (default "mean").
+JvpResult jvp_adapter_fused_softmax_cross_entropy(
+        std::span<const Tensor> primals,
+        std::span<const Tensor> tangents,
+        const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_fused_softmax_cross_entropy: expected 2 inputs "
+            "(logits, targets)");
+    }
+    std::string reduction(attrs.get_string(AttrKey::Reduction, "mean"));
+    auto logits = make_dual(primals[0], tangents[0]);
+    return dual_to_result(
+        jvp_fused_softmax_cross_entropy(logits, primals[1], reduction));
+}
+
+// CTCLossForward: dynamic-programming forward-backward over log-prob
+// alignments. Forward-mode through DP requires propagating tangents through
+// the per-(t, s) lattice using the same recurrence — feasible but requires
+// a dedicated DP kernel (not just primitives). Refuse explicitly rather
+// than silently zeroing tangents.
+JvpResult jvp_adapter_ctc_loss_forward(std::span<const Tensor> /*primals*/,
+                                       std::span<const Tensor> /*tangents*/,
+                                       const OpAttributes& /*attrs*/) {
+    throw NonDifferentiable(
+        "CTCLossForward forward-mode JVP not implemented: the dynamic-"
+        "programming alpha-beta recurrence is not expressible as a "
+        "composition of registered primitives. A dedicated dual-DP kernel "
+        "would be needed.");
+}
+
+// ---- Adaptive max pool: gather-at-saved-indices --------------------------
+//
+// AdaptiveMaxPool{1,2,3}d returns {output, indices}: `output[..., o] =
+// input[..., argmax_window(o)]` and `indices[..., o] = argmax_window(o)`.
+// Forward-mode tangent: gather(dx, indices) per output cell. Implemented by
+// running the kernel once (to obtain indices), then gathering the input
+// tangent at those flat-window indices using `take_along_dim` on the
+// flattened spatial axes — matching the kth-value pattern.
+
+namespace {
+
+// Run AdaptiveMaxPool{1,2,3}d once via dispatch, returning {output, indices}.
+auto run_adaptive_maxpool_nd(OpId op, const Tensor& x,
+                             const OpAttributes& attrs) -> std::vector<Tensor> {
+    return tenzor::dispatch(op, std::vector<Tensor>{x}, attrs);
+}
+
+// Common per-rank tangent gather: flatten the trailing `ndims` spatial axes
+// of `dx` and of `indices` into a single dim, take_along_dim, then reshape
+// the gathered values back to the output's [N, C, *out_dims] layout. The
+// indices tensor from the kernel is already flat-encoded (single int per
+// spatial output cell into the flat input window of that batch/channel).
+auto gather_at_pool_indices(const Tensor& dx,
+                            const Tensor& indices,
+                            int64_t spatial_dims) -> Tensor {
+    // dx: [N, C, *in_spatial];  indices: [N, C, *out_spatial]
+    const auto& dx_shape  = dx.shape();
+    const auto& idx_shape = indices.shape();
+    int64_t total_ndim = static_cast<int64_t>(dx_shape.size());
+    int64_t lead = total_ndim - spatial_dims;  // N + C dims (== 2 typically)
+
+    // Flatten trailing spatial dims of dx → [N, C, in_prod]; same for
+    // indices → [N, C, out_prod].
+    int64_t in_prod = 1;
+    for (int64_t d = lead; d < total_ndim; ++d) in_prod *= dx_shape[d];
+    int64_t out_prod = 1;
+    for (int64_t d = lead; d < static_cast<int64_t>(idx_shape.size()); ++d)
+        out_prod *= idx_shape[d];
+
+    std::vector<int64_t> dx_flat_shape(dx_shape.begin(),
+                                       dx_shape.begin() + lead);
+    dx_flat_shape.push_back(in_prod);
+    std::vector<int64_t> idx_flat_shape(idx_shape.begin(),
+                                        idx_shape.begin() + lead);
+    idx_flat_shape.push_back(out_prod);
+
+    Tensor dx_flat  = tenzor::reshape(dx,      dx_flat_shape);
+    Tensor idx_flat = tenzor::reshape(indices, idx_flat_shape);
+
+    Tensor gathered = tenzor::take_along_dim(dx_flat, idx_flat,
+                                              /*dim=*/lead);
+    // Reshape back to indices' original [N, C, *out_spatial] layout.
+    return tenzor::reshape(gathered,
+        std::vector<int64_t>(idx_shape.begin(), idx_shape.end()));
+}
+
+} // anonymous (helpers)
+
+JvpMultiResult jvp_adapter_adaptive_maxpool_1d(std::span<const Tensor> primals,
+                                               std::span<const Tensor> tangents,
+                                               const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_adaptive_maxpool_1d: expected 1 input");
+    }
+    auto outs = run_adaptive_maxpool_nd(OpId::AdaptiveMaxPool1d, primals[0], attrs);
+    Tensor out_p = outs[0], idx_p = outs[1];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0) {
+        Tensor zero_out = tenzor::zeros(
+            std::vector<int64_t>(out_p.shape().begin(), out_p.shape().end()),
+            out_p.dtype(), out_p.device());
+        Tensor zero_idx = tenzor::zeros(
+            std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+            idx_p.dtype(), idx_p.device());
+        return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                              {std::move(zero_out), std::move(zero_idx)}};
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, /*spatial_dims=*/1);
+    Tensor idx_t = tenzor::zeros(
+        std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+        idx_p.dtype(), idx_p.device());
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+
+JvpMultiResult jvp_adapter_adaptive_maxpool_2d(std::span<const Tensor> primals,
+                                               std::span<const Tensor> tangents,
+                                               const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_adaptive_maxpool_2d: expected 1 input");
+    }
+    auto outs = run_adaptive_maxpool_nd(OpId::AdaptiveMaxPool2d, primals[0], attrs);
+    Tensor out_p = outs[0], idx_p = outs[1];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0) {
+        Tensor zero_out = tenzor::zeros(
+            std::vector<int64_t>(out_p.shape().begin(), out_p.shape().end()),
+            out_p.dtype(), out_p.device());
+        Tensor zero_idx = tenzor::zeros(
+            std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+            idx_p.dtype(), idx_p.device());
+        return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                              {std::move(zero_out), std::move(zero_idx)}};
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, /*spatial_dims=*/2);
+    Tensor idx_t = tenzor::zeros(
+        std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+        idx_p.dtype(), idx_p.device());
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+
+JvpMultiResult jvp_adapter_adaptive_maxpool_3d(std::span<const Tensor> primals,
+                                               std::span<const Tensor> tangents,
+                                               const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_adaptive_maxpool_3d: expected 1 input");
+    }
+    auto outs = run_adaptive_maxpool_nd(OpId::AdaptiveMaxPool3d, primals[0], attrs);
+    Tensor out_p = outs[0], idx_p = outs[1];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0) {
+        Tensor zero_out = tenzor::zeros(
+            std::vector<int64_t>(out_p.shape().begin(), out_p.shape().end()),
+            out_p.dtype(), out_p.device());
+        Tensor zero_idx = tenzor::zeros(
+            std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+            idx_p.dtype(), idx_p.device());
+        return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                              {std::move(zero_out), std::move(zero_idx)}};
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, /*spatial_dims=*/3);
+    Tensor idx_t = tenzor::zeros(
+        std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+        idx_p.dtype(), idx_p.device());
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+
+// ---- FractionalMaxPool2d/3d: gather-at-saved-indices ----------------------
+//
+// Both fractional max pool forwards return {output, indices} just like the
+// adaptive max pools; the sampling pattern is data-independent of the input
+// values (it's a function of random/uniform samples passed as input[1]),
+// so given the saved indices the JVP is the same gather-at-indices pattern.
+// The optional samples tensor (input[1]) is integer/uniform and carries no
+// meaningful tangent.
+
+JvpMultiResult jvp_adapter_fractional_maxpool_2d(std::span<const Tensor> primals,
+                                                 std::span<const Tensor> tangents,
+                                                 const OpAttributes& attrs) {
+    if (primals.empty() || tangents.empty()) {
+        throw std::runtime_error("jvp_adapter_fractional_maxpool_2d: missing inputs");
+    }
+    // Re-run the forward to capture indices.
+    std::vector<Tensor> inps;
+    inps.reserve(primals.size());
+    for (const auto& t : primals) inps.push_back(t);
+    auto outs = tenzor::dispatch(OpId::FractionalMaxPool2dForward, inps, attrs);
+    Tensor out_p = outs[0], idx_p = outs[1];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0) {
+        Tensor zero_out = tenzor::zeros(
+            std::vector<int64_t>(out_p.shape().begin(), out_p.shape().end()),
+            out_p.dtype(), out_p.device());
+        Tensor zero_idx = tenzor::zeros(
+            std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+            idx_p.dtype(), idx_p.device());
+        return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                              {std::move(zero_out), std::move(zero_idx)}};
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, /*spatial_dims=*/2);
+    Tensor idx_t = tenzor::zeros(
+        std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+        idx_p.dtype(), idx_p.device());
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+
+JvpMultiResult jvp_adapter_fractional_maxpool_3d(std::span<const Tensor> primals,
+                                                 std::span<const Tensor> tangents,
+                                                 const OpAttributes& attrs) {
+    if (primals.empty() || tangents.empty()) {
+        throw std::runtime_error("jvp_adapter_fractional_maxpool_3d: missing inputs");
+    }
+    std::vector<Tensor> inps;
+    inps.reserve(primals.size());
+    for (const auto& t : primals) inps.push_back(t);
+    auto outs = tenzor::dispatch(OpId::FractionalMaxPool3dForward, inps, attrs);
+    Tensor out_p = outs[0], idx_p = outs[1];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0) {
+        Tensor zero_out = tenzor::zeros(
+            std::vector<int64_t>(out_p.shape().begin(), out_p.shape().end()),
+            out_p.dtype(), out_p.device());
+        Tensor zero_idx = tenzor::zeros(
+            std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+            idx_p.dtype(), idx_p.device());
+        return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                              {std::move(zero_out), std::move(zero_idx)}};
+    }
+    Tensor out_t = gather_at_pool_indices(dx, idx_p, /*spatial_dims=*/3);
+    Tensor idx_t = tenzor::zeros(
+        std::vector<int64_t>(idx_p.shape().begin(), idx_p.shape().end()),
+        idx_p.dtype(), idx_p.device());
+    return JvpMultiResult{{std::move(out_p), std::move(idx_p)},
+                          {std::move(out_t), std::move(idx_t)}};
+}
+
+// ---- Median (multi-output: {values, indices}) ---------------------------
+//
+// Median dispatch (OpId::Median): inputs = {x}; outputs = {values, indices}.
+// Forward-mode tangent: take_along_dim(dx, indices, dim) — exact gather at
+// the saved median positions. When dim==INT64_MIN the kernel flattens then
+// reduces along axis 0, so we replicate that flattening for dx.
+JvpMultiResult jvp_adapter_median(std::span<const Tensor> primals,
+                                  std::span<const Tensor> tangents,
+                                  const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_median: expected 1 input");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+
+    OpAttributes mattrs;
+    mattrs.set(AttrKey::Dim, dim);
+    mattrs.set(AttrKey::Keepdim, keepdim);
+    auto outs = tenzor::dispatch(OpId::Median,
+                                 std::vector<Tensor>{primals[0]}, mattrs);
+    Tensor values_p  = outs[0];
+    Tensor indices_p = outs[1];
+
+    const Tensor& dx = tangents[0];
+    Tensor values_t;
+    if (dx.numel() == 0) {
+        values_t = tenzor::zeros(
+            std::vector<int64_t>(values_p.shape().begin(),
+                                  values_p.shape().end()),
+            values_p.dtype(), values_p.device());
+    } else if (dim == INT64_MIN) {
+        // Full reduction over flattened input.
+        Tensor dx_flat = tenzor::reshape(dx, std::vector<int64_t>{dx.numel()});
+        Tensor idx_flat = tenzor::reshape(indices_p,
+            std::vector<int64_t>{indices_p.numel()});
+        values_t = tenzor::take_along_dim(dx_flat, idx_flat, /*dim=*/0);
+        if (keepdim) {
+            std::vector<int64_t> kshape(dx.ndim(), 1);
+            values_t = tenzor::reshape(values_t, kshape);
+        } else {
+            values_t = tenzor::reshape(values_t, std::vector<int64_t>{1});
+        }
+    } else {
+        Tensor idx_kd = keepdim ? indices_p
+                                : tenzor::unsqueeze(indices_p, dim);
+        auto gathered = tenzor::take_along_dim(dx, idx_kd, dim);
+        values_t = keepdim ? gathered : tenzor::squeeze(gathered, dim);
+    }
+
+    Tensor indices_t = tenzor::zeros(
+        std::vector<int64_t>(indices_p.shape().begin(), indices_p.shape().end()),
+        indices_p.dtype(), indices_p.device());
+
+    return JvpMultiResult{{std::move(values_p), std::move(indices_p)},
+                          {std::move(values_t), std::move(indices_t)}};
+}
+
+// ---- NonDifferentiable stubs: Quantile / Nanquantile / Nanmedian ---------
+//
+// Quantile uses linear interpolation between two sorted neighbours; the
+// per-element interpolation indices and weights are not exposed by the
+// kernel, so a closed-form JVP would require either (a) re-implementing
+// the search at the autograd layer or (b) extending the kernel to return
+// the index pair. Until one of those lands, we mark these explicitly
+// non-differentiable rather than silently zeroing tangents.
+//
+// Nanmedian's NaN-aware median selects different elements depending on the
+// NaN mask of the input — the output is discontinuous with respect to
+// continuous perturbations that flip a NaN to a finite value (and vice
+// versa). Even the finite-NaN case lacks an "indices" output to gather
+// against.
+JvpResult jvp_adapter_quantile(std::span<const Tensor> /*primals*/,
+                               std::span<const Tensor> /*tangents*/,
+                               const OpAttributes& /*attrs*/) {
+    throw NonDifferentiable(
+        "Quantile forward-mode JVP not implemented: linear-interpolation "
+        "indices/weights are not exposed by the kernel. Use Median for an "
+        "indexed quantile path that supports JVP.");
+}
+
+JvpResult jvp_adapter_nanquantile(std::span<const Tensor> /*primals*/,
+                                  std::span<const Tensor> /*tangents*/,
+                                  const OpAttributes& /*attrs*/) {
+    throw NonDifferentiable(
+        "Nanquantile forward-mode JVP not implemented: NaN-mask-dependent "
+        "selection makes the JVP discontinuous, and interpolation indices "
+        "are not exposed.");
+}
+
+JvpResult jvp_adapter_nanmedian(std::span<const Tensor> /*primals*/,
+                                std::span<const Tensor> /*tangents*/,
+                                const OpAttributes& /*attrs*/) {
+    throw NonDifferentiable(
+        "Nanmedian forward-mode JVP not implemented: the kernel does not "
+        "return indices, and NaN-driven selection is discontinuous in the "
+        "input.");
+}
+
+// ---- Nested softmax / log-softmax: per-segment linear-in-input JVP -------
+//
+// NestedSoftmax / NestedLogSoftmax operate on packed `values` over segments
+// defined by `offsets`. The mathematical structure is identical to dense
+// softmax/log-softmax along `dim`, just restricted to per-segment rows —
+// which means the JVP formula is the same per segment and we can express
+// it by re-running the nested kernel on the tangent values where the
+// operation is linear (log-softmax tangent: dt - softmax(...)*sum(dt)),
+// but the nested-softmax tangent involves a per-segment softmax, which
+// itself is the kernel output — so the simplest correct path is to call
+// the nested kernel twice (once for the primal, once on a fused expression
+// that yields the tangent). For NestedSoftmax that fused expression isn't
+// a single nested op, so we delegate by computing the tangent using the
+// returned primal output: P_t = P * (dvalues - sum_per_segment(P*dvalues)).
+// The "sum per segment" reduction matches OpId::NestedSum semantics.
+JvpResult jvp_adapter_nested_softmax(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_nested_softmax: expected 2 inputs (values, offsets)");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    const Tensor& values = primals[0];
+    const Tensor& offsets = primals[1];
+    const Tensor& dvalues = tangents[0];
+
+    // Primal: P = nested_softmax(values, offsets, dim).
+    OpAttributes sattrs;
+    sattrs.set(AttrKey::Dim, dim);
+    auto P = tenzor::dispatch(OpId::NestedSoftmax,
+                              std::vector<Tensor>{values, offsets}, sattrs)[0];
+
+    Tensor tangent;
+    if (dvalues.numel() == 0) {
+        tangent = tenzor::zeros(
+            std::vector<int64_t>(P.shape().begin(), P.shape().end()),
+            P.dtype(), P.device());
+    } else {
+        // Per-segment reduction sum_j P[j] * dvalues[j] is a NestedSum
+        // (keepdim=true so the broadcast works against the per-position
+        // entries within the same segment).
+        OpAttributes rattrs;
+        rattrs.set(AttrKey::Dim, dim);
+        rattrs.set(AttrKey::Keepdim, true);
+        Tensor P_dv = tenzor::mul(P, dvalues);
+        Tensor seg_sum = tenzor::dispatch(OpId::NestedSum,
+            std::vector<Tensor>{P_dv, offsets}, rattrs)[0];
+        // P_t = P * (dvalues - seg_sum)
+        tangent = tenzor::mul(P, tenzor::sub(dvalues, seg_sum));
+    }
+    return JvpResult{std::move(P), std::move(tangent)};
+}
+
+// NestedLogSoftmax: y = log_softmax_per_segment(values).
+// Tangent: dy = dvalues - softmax_per_segment * sum_per_segment(dvalues).
+JvpResult jvp_adapter_nested_log_softmax(std::span<const Tensor> primals,
+                                         std::span<const Tensor> tangents,
+                                         const OpAttributes& attrs) {
+    if (primals.size() != 2 || tangents.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_nested_log_softmax: expected 2 inputs (values, offsets)");
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    const Tensor& values = primals[0];
+    const Tensor& offsets = primals[1];
+    const Tensor& dvalues = tangents[0];
+
+    // Primal: log P.
+    OpAttributes sattrs;
+    sattrs.set(AttrKey::Dim, dim);
+    auto logP = tenzor::dispatch(OpId::NestedLogSoftmax,
+        std::vector<Tensor>{values, offsets}, sattrs)[0];
+
+    Tensor tangent;
+    if (dvalues.numel() == 0) {
+        tangent = tenzor::zeros(
+            std::vector<int64_t>(logP.shape().begin(), logP.shape().end()),
+            logP.dtype(), logP.device());
+    } else {
+        // softmax_per_segment = exp(logP) (no recomputation through the
+        // values needed; logP is the kernel's exact output).
+        Tensor P = tenzor::exp(logP);
+        OpAttributes rattrs;
+        rattrs.set(AttrKey::Dim, dim);
+        rattrs.set(AttrKey::Keepdim, true);
+        Tensor seg_sum_dv = tenzor::dispatch(OpId::NestedSum,
+            std::vector<Tensor>{dvalues, offsets}, rattrs)[0];
+        tangent = tenzor::sub(dvalues, tenzor::mul(P, seg_sum_dv));
+    }
+    return JvpResult{std::move(logP), std::move(tangent)};
+}
+
+// NestedLayerNorm: requires per-segment mean/var statistics that are not
+// exposed by the nested kernel; the dispatch returns only the normalised
+// values. A correct JVP needs the saved mean/rstd to express the chain
+// rule (same shape as the dense LayerNorm rule), so we refuse rather than
+// silently zeroing tangents.
+JvpResult jvp_adapter_nested_layer_norm(std::span<const Tensor> /*primals*/,
+                                        std::span<const Tensor> /*tangents*/,
+                                        const OpAttributes& /*attrs*/) {
+    throw NonDifferentiable(
+        "NestedLayerNorm forward-mode JVP not implemented: the dispatcher "
+        "returns only the normalised values; per-segment mean/rstd are not "
+        "exposed and are required to express the chain rule.");
+}
+
+} // anonymous (batch 8)
+
 } // anonymous namespace
 
 namespace detail {
@@ -3686,6 +4385,52 @@ void register_builtin_jvp_rules() {
     register_jvp_rule(OpId::AdaptiveAvgPool1d, &jvp_adapter_adaptive_avgpool_1d);
     register_jvp_rule(OpId::AdaptiveAvgPool2d, &jvp_adapter_adaptive_avgpool_2d);
     register_jvp_rule(OpId::AdaptiveAvgPool3d, &jvp_adapter_adaptive_avgpool_3d);
+
+    // ---------------- Audit A.4 batch 8 ------------------
+    //
+    // Attention family: FlashAttention / FusedAttention / FlexAttention share
+    // the same JVP (P = softmax(Q@K^T*scale [+mask]); y = P@V). NestedAttention
+    // and FlexAttention with non-identity score-mod / block_mask are
+    // explicitly NonDifferentiable (raises tenzor::NonDifferentiable at JVP
+    // call time rather than silently zeroing tangents).
+    register_jvp_rule(OpId::FlashAttention,  &jvp_adapter_flash_attention);
+    register_jvp_rule(OpId::FusedAttention,  &jvp_adapter_fused_attention);
+    register_jvp_rule(OpId::FlexAttention,   &jvp_adapter_flex_attention);
+    register_jvp_rule(OpId::NestedAttention, &jvp_adapter_nested_attention);
+
+    // Losses. CTCLossForward is structurally non-differentiable at this
+    // layer (dynamic-programming alpha/beta lattice).
+    register_jvp_rule(OpId::FusedSoftmaxCrossEntropy,
+                      &jvp_adapter_fused_softmax_cross_entropy);
+    register_jvp_rule(OpId::CTCLossForward, &jvp_adapter_ctc_loss_forward);
+
+    // Adaptive max pool: multi-output {values, indices}; tangent = gather
+    // (take_along_dim) on flattened spatial dims using saved indices.
+    register_jvp_rule_multi(OpId::AdaptiveMaxPool1d, &jvp_adapter_adaptive_maxpool_1d);
+    register_jvp_rule_multi(OpId::AdaptiveMaxPool2d, &jvp_adapter_adaptive_maxpool_2d);
+    register_jvp_rule_multi(OpId::AdaptiveMaxPool3d, &jvp_adapter_adaptive_maxpool_3d);
+
+    // Fractional max pool: same gather-at-indices pattern.
+    register_jvp_rule_multi(OpId::FractionalMaxPool2dForward,
+                            &jvp_adapter_fractional_maxpool_2d);
+    register_jvp_rule_multi(OpId::FractionalMaxPool3dForward,
+                            &jvp_adapter_fractional_maxpool_3d);
+
+    // Median: multi-output {values, indices}; gather at saved indices.
+    register_jvp_rule_multi(OpId::Median, &jvp_adapter_median);
+
+    // Quantile / Nanquantile / Nanmedian: NonDifferentiable (interpolation
+    // indices/weights not exposed; NaN-mask-dependent selection is discontinuous).
+    register_jvp_rule(OpId::Quantile,    &jvp_adapter_quantile);
+    register_jvp_rule(OpId::Nanquantile, &jvp_adapter_nanquantile);
+    register_jvp_rule(OpId::Nanmedian,   &jvp_adapter_nanmedian);
+
+    // Nested softmax / log-softmax: per-segment JVP using the nested
+    // kernels plus NestedSum for the per-segment reduction.
+    register_jvp_rule(OpId::NestedSoftmax,    &jvp_adapter_nested_softmax);
+    register_jvp_rule(OpId::NestedLogSoftmax, &jvp_adapter_nested_log_softmax);
+    // NestedLayerNorm: NonDifferentiable (per-segment mean/rstd not exposed).
+    register_jvp_rule(OpId::NestedLayerNorm,  &jvp_adapter_nested_layer_norm);
 }
 
 } // namespace detail
