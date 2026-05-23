@@ -331,6 +331,10 @@ target_include_directories(tenzor_core PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+# G.12: vendored nlohmann/json header path (third_party/nlohmann/json.hpp).
+# PRIVATE — only the serving module currently uses it; not part of the public ABI.
+target_link_libraries(tenzor_core PRIVATE tenzor_nlohmann_json)
+
 # Link dependencies
 target_link_libraries(tenzor_core PUBLIC
     Threads::Threads

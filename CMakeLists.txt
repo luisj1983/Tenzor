@@ -434,6 +434,14 @@ endif()
 # Include CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# G.12: vendored nlohmann/json (single header, header-only, no link deps).
+# Exposed as an INTERFACE library so the serving module (and any future
+# consumer such as model hub / config IO) can `#include <nlohmann/json.hpp>`.
+add_library(tenzor_nlohmann_json INTERFACE)
+target_include_directories(tenzor_nlohmann_json INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party>
+)
+
 # Add subdirectories
 add_subdirectory(src)
 

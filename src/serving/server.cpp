@@ -10,6 +10,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -17,6 +18,24 @@
 #include <mutex>
 #ifdef TENZOR_HAS_HTTPLIB
 #include <httplib.h>
+#endif
+
+// G.12: vendored nlohmann/json (third_party/nlohmann/json.hpp). Used to
+// replace the previous ad-hoc std::string::find('"') request parsing in
+// the /v1/models/.../{load,predict} and /v1/experiments endpoints.
+#include <nlohmann/json.hpp>
+
+// G.12: explicit build-config gate. When TENZOR_BUILD_SERVING is ON,
+// the serving subsystem requires at least one HTTP/gRPC transport. We
+// don't fire when serving is OFF because this TU is unconditionally
+// compiled into tenzor_core (the InferenceServer class needs to exist
+// even in trimmed builds for header / ABI compatibility) — the runtime
+// guard in serve_loop() handles the OFF case with a typed exception.
+#if defined(TENZOR_BUILD_SERVING) && !defined(TENZOR_HAS_HTTPLIB) && !defined(TENZOR_HAS_GRPC)
+static_assert(false,
+    "tenzor::serving requires at least one HTTP/gRPC transport when "
+    "TENZOR_BUILD_SERVING=ON. The httplib FetchContent should run "
+    "automatically; if it didn't, check src/CMakeLists.txt.");
 #endif
 
 namespace tenzor {
@@ -291,7 +310,186 @@ auto InferenceServer::wait() -> void {
 
 auto InferenceServer::serve_loop() -> void {
 #ifdef TENZOR_HAS_HTTPLIB
+    using nlohmann::json;
     httplib::Server svr;
+
+    // ---------- Helpers (JSON dtype <-> Tensor) ----------
+    auto dtype_from_request = [](const std::string& s) -> DType {
+        // Accept the canonical names emitted by dtype_name() so a client
+        // round-trips an output_dtype string back into a predict request.
+        if (s == "float32" || s == "f32") return DType::Float32;
+        if (s == "float64" || s == "f64") return DType::Float64;
+        if (s == "float16" || s == "f16" || s == "half") return DType::Float16;
+        if (s == "bfloat16" || s == "bf16") return DType::BFloat16;
+        if (s == "int32"   || s == "i32") return DType::Int32;
+        if (s == "int64"   || s == "i64") return DType::Int64;
+        if (s == "int8"    || s == "i8")  return DType::Int8;
+        if (s == "uint8"   || s == "u8")  return DType::UInt8;
+        if (s == "bool")                  return DType::Bool;
+        throw std::runtime_error("unsupported dtype in request: " + s);
+    };
+
+    // Build a host-side Tensor of the given dtype/shape from a JSON array.
+    // Numeric arrays are accepted as plain JSON numbers; the request always
+    // travels in textual JSON (binary payloads use the gRPC path).
+    auto tensor_from_json = [&](const json& shape_j, const json& data_j,
+                                DType dtype, Device device) -> Tensor {
+        if (!shape_j.is_array()) {
+            throw std::runtime_error("\"shape\" must be a JSON array");
+        }
+        if (!data_j.is_array()) {
+            throw std::runtime_error("\"data\" must be a JSON array");
+        }
+        std::vector<int64_t> shape;
+        shape.reserve(shape_j.size());
+        int64_t expected = 1;
+        for (const auto& d : shape_j) {
+            auto v = d.get<int64_t>();
+            shape.push_back(v);
+            expected *= (v < 0 ? 0 : v);
+        }
+        if (static_cast<int64_t>(data_j.size()) != expected) {
+            throw std::runtime_error("data length does not match shape product");
+        }
+
+        // Allocate on host first, then move to target device via .to() if
+        // needed. Avoids touching GPU memory from host JSON deserialization
+        // code paths.
+        auto host = tenzor::empty(shape, dtype, Device::cpu());
+
+        auto write_typed = [&](auto* out_ptr, auto convert) {
+            using T = std::remove_pointer_t<decltype(out_ptr)>;
+            for (size_t i = 0; i < data_j.size(); ++i) {
+                out_ptr[i] = static_cast<T>(convert(data_j[i]));
+            }
+        };
+
+        switch (dtype) {
+            case DType::Float32:
+                write_typed(host.data<float>(),
+                            [](const json& v){ return v.get<double>(); });
+                break;
+            case DType::Float64:
+                write_typed(host.data<double>(),
+                            [](const json& v){ return v.get<double>(); });
+                break;
+            case DType::Int32:
+                write_typed(host.data<int32_t>(),
+                            [](const json& v){ return v.get<int64_t>(); });
+                break;
+            case DType::Int64:
+                write_typed(host.data<int64_t>(),
+                            [](const json& v){ return v.get<int64_t>(); });
+                break;
+            case DType::Int8:
+                write_typed(host.data<int8_t>(),
+                            [](const json& v){ return v.get<int64_t>(); });
+                break;
+            case DType::UInt8:
+                write_typed(host.data<uint8_t>(),
+                            [](const json& v){ return v.get<int64_t>(); });
+                break;
+            case DType::Bool:
+                write_typed(host.data<bool>(),
+                            [](const json& v){ return v.get<bool>(); });
+                break;
+            case DType::Float16: {
+                auto* out = host.data<Float16>();
+                for (size_t i = 0; i < data_j.size(); ++i) {
+                    out[i] = Float16(static_cast<float>(data_j[i].get<double>()));
+                }
+                break;
+            }
+            case DType::BFloat16: {
+                auto* out = host.data<BFloat16>();
+                for (size_t i = 0; i < data_j.size(); ++i) {
+                    out[i] = BFloat16(static_cast<float>(data_j[i].get<double>()));
+                }
+                break;
+            }
+            default:
+                throw std::runtime_error(
+                    std::string("dtype not supported by JSON predict path: ") +
+                    std::string(dtype_name(dtype)));
+        }
+
+        // Move to target device (no-op if already on CPU).
+        if (device.type != Device::Type::CPU) {
+            return host.to(device);
+        }
+        return host;
+    };
+
+    // Serialize a host Tensor (assumed contiguous) into the JSON output_data
+    // array. Mirrors the dtype switch above.
+    auto json_from_tensor = [](const Tensor& t) -> json {
+        json arr = json::array();
+        const auto n = static_cast<size_t>(t.numel());
+        switch (t.dtype()) {
+            case DType::Float32: {
+                const auto* p = t.data<float>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(p[i]);
+                break;
+            }
+            case DType::Float64: {
+                const auto* p = t.data<double>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(p[i]);
+                break;
+            }
+            case DType::Int32: {
+                const auto* p = t.data<int32_t>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(p[i]);
+                break;
+            }
+            case DType::Int64: {
+                const auto* p = t.data<int64_t>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(p[i]);
+                break;
+            }
+            case DType::Int8: {
+                const auto* p = t.data<int8_t>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(static_cast<int>(p[i]));
+                break;
+            }
+            case DType::UInt8: {
+                const auto* p = t.data<uint8_t>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(static_cast<unsigned>(p[i]));
+                break;
+            }
+            case DType::Bool: {
+                const auto* p = t.data<bool>();
+                for (size_t i = 0; i < n; ++i) arr.push_back(p[i]);
+                break;
+            }
+            case DType::Float16: {
+                const auto* p = t.data<Float16>();
+                for (size_t i = 0; i < n; ++i) {
+                    arr.push_back(static_cast<float>(p[i]));
+                }
+                break;
+            }
+            case DType::BFloat16: {
+                const auto* p = t.data<BFloat16>();
+                for (size_t i = 0; i < n; ++i) {
+                    arr.push_back(static_cast<float>(p[i]));
+                }
+                break;
+            }
+            default:
+                throw std::runtime_error(
+                    std::string("dtype not supported by JSON predict response: ") +
+                    std::string(dtype_name(t.dtype())));
+        }
+        return arr;
+    };
+
+    auto json_error = [](httplib::Response& res, int status,
+                         const std::string& msg) {
+        json j;
+        j["error"] = msg;
+        res.status = status;
+        res.set_content(j.dump(), "application/json");
+    };
 
     // ---------- Authentication middleware ----------
     if (config_.enable_auth && !config_.api_keys.empty()) {
@@ -303,7 +501,7 @@ auto InferenceServer::serve_loop() -> void {
             auto it = req.headers.find(config_.auth_header);
             if (it == req.headers.end()) {
                 res.status = 401;
-                res.set_content(R"({"error":"missing authentication header"})", "application/json");
+                res.set_content(json{{"error","missing authentication header"}}.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
             // Extract Bearer token
@@ -317,7 +515,7 @@ auto InferenceServer::serve_loop() -> void {
             }
             if (!valid) {
                 res.status = 403;
-                res.set_content(R"({"error":"invalid api key"})", "application/json");
+                res.set_content(json{{"error","invalid api key"}}.dump(), "application/json");
                 auto& metrics = MetricsRegistry::instance().get_metrics("_auth");
                 metrics.error_count.fetch_add(1, std::memory_order_relaxed);
                 return httplib::Server::HandlerResponse::Handled;
@@ -336,7 +534,8 @@ auto InferenceServer::serve_loop() -> void {
 
     // Health check
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(R"({"status":"ok","version":"0.1.0"})", "application/json");
+        res.set_content(json{{"status","ok"},{"version","0.1.0"}}.dump(),
+                        "application/json");
     });
 
     // Prometheus metrics
@@ -347,14 +546,9 @@ auto InferenceServer::serve_loop() -> void {
     // List models
     svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
         auto models = repository_.list_models();
-        std::ostringstream oss;
-        oss << R"({"models":[)";
-        for (size_t i = 0; i < models.size(); ++i) {
-            if (i > 0) oss << ",";
-            oss << "\"" << models[i] << "\"";
-        }
-        oss << "]}";
-        res.set_content(oss.str(), "application/json");
+        json j;
+        j["models"] = models;
+        res.set_content(j.dump(), "application/json");
     });
 
     // Model status
@@ -363,7 +557,7 @@ auto InferenceServer::serve_loop() -> void {
         auto model = repository_.get_model(name);
         if (!model) {
             res.status = 404;
-            res.set_content(R"({"error":"model not found"})", "application/json");
+            res.set_content(json{{"error","model not found"}}.dump(), "application/json");
             return;
         }
         auto state = model->state.load();
@@ -374,55 +568,44 @@ auto InferenceServer::serve_loop() -> void {
             case ModelState::UNLOADING: state_str = "UNLOADING"; break;
             case ModelState::FAILED: state_str = "FAILED"; break;
         }
-        std::ostringstream oss;
-        oss << R"({"model_name":")" << name
-            << R"(","version":)" << model->version
-            << R"(,"status":")" << state_str << "\"}";
-        res.set_content(oss.str(), "application/json");
+        json j;
+        j["model_name"] = name;
+        j["version"]    = model->version;
+        j["status"]     = state_str;
+        res.set_content(j.dump(), "application/json");
     });
 
     // Load model
-    svr.Post(R"(/v1/models/([^/]+)/load)", [this](const httplib::Request& req, httplib::Response& res) {
+    svr.Post(R"(/v1/models/([^/]+)/load)", [this, &json_error](const httplib::Request& req, httplib::Response& res) {
         auto name = req.matches[1].str();
-        // Expect JSON body: {"model_path": "/path/to/model"}
-        auto path_pos = req.body.find("\"model_path\"");
-        if (path_pos == std::string::npos) {
-            res.status = 400;
-            res.set_content(R"({"error":"missing model_path"})", "application/json");
+        // Expect JSON body: {"model_path": "/path/to/model", "device": "cpu"}
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (const json::parse_error& e) {
+            json_error(res, 400, std::string("malformed JSON: ") + e.what());
             return;
         }
-        // Simple JSON value extraction
-        auto colon_pos = req.body.find(':', path_pos);
-        auto quote1 = req.body.find('"', colon_pos);
-        auto quote2 = req.body.find('"', quote1 + 1);
-        if (quote1 == std::string::npos || quote2 == std::string::npos) {
-            res.status = 400;
-            res.set_content(R"({"error":"invalid model_path"})", "application/json");
+        if (!body.contains("model_path") || !body["model_path"].is_string()) {
+            json_error(res, 400, "missing or non-string model_path");
             return;
         }
-        auto model_path = req.body.substr(quote1 + 1, quote2 - quote1 - 1);
+        std::string model_path = body["model_path"].get<std::string>();
 
-        // Parse optional "device" field (defaults to "cpu")
         Device target_device = Device::cpu();
-        auto device_pos = req.body.find("\"device\"");
-        if (device_pos != std::string::npos) {
-            auto dev_colon = req.body.find(':', device_pos);
-            auto dev_q1 = req.body.find('"', dev_colon);
-            auto dev_q2 = req.body.find('"', dev_q1 + 1);
-            if (dev_q1 != std::string::npos && dev_q2 != std::string::npos) {
-                auto device_str = req.body.substr(dev_q1 + 1, dev_q2 - dev_q1 - 1);
-                target_device = Device::from_string(device_str);
-            }
+        if (body.contains("device") && body["device"].is_string()) {
+            target_device = Device::from_string(body["device"].get<std::string>());
         }
 
         try {
             repository_.load_model(name, model_path, target_device);
-            res.set_content(R"({"success":true})", "application/json");
+            res.set_content(json{{"success",true}}.dump(), "application/json");
         } catch (const std::exception& e) {
+            json j;
+            j["success"] = false;
+            j["message"] = e.what();
             res.status = 500;
-            std::ostringstream oss;
-            oss << R"({"success":false,"message":")" << e.what() << "\"}";
-            res.set_content(oss.str(), "application/json");
+            res.set_content(j.dump(), "application/json");
         }
     });
 
@@ -431,17 +614,24 @@ auto InferenceServer::serve_loop() -> void {
         auto name = req.matches[1].str();
         try {
             repository_.unload_model(name);
-            res.set_content(R"({"success":true})", "application/json");
+            res.set_content(json{{"success",true}}.dump(), "application/json");
         } catch (const std::exception& e) {
+            json j;
+            j["success"] = false;
+            j["message"] = e.what();
             res.status = 500;
-            std::ostringstream oss;
-            oss << R"({"success":false,"message":")" << e.what() << "\"}";
-            res.set_content(oss.str(), "application/json");
+            res.set_content(j.dump(), "application/json");
         }
     });
 
-    // Predict (simplified: accepts raw float data, returns raw float data)
-    svr.Post(R"(/v1/models/([^/]+)/predict)", [this, &rate_limit_mutex, &rate_limit_buckets](const httplib::Request& req, httplib::Response& res) {
+    // Predict — JSON in, JSON out.
+    // Request:  {"shape":[...], "dtype":"float32", "data":[...]}
+    // Response: {"output_shape":[...], "output_dtype":"...", "output_data":[...]}
+    svr.Post(R"(/v1/models/([^/]+)/predict)",
+             [this, &rate_limit_mutex, &rate_limit_buckets,
+              &dtype_from_request, &tensor_from_json, &json_from_tensor,
+              &json_error]
+             (const httplib::Request& req, httplib::Response& res) {
         // Rate limiting check
         if (config_.enable_rate_limit) {
             auto client_ip = req.remote_addr;
@@ -460,8 +650,7 @@ auto InferenceServer::serve_loop() -> void {
                 bucket.tokens + elapsed * config_.rate_limit_rps);
             bucket.last_refill = now;
             if (bucket.tokens < 1.0) {
-                res.status = 429;
-                res.set_content(R"({"error":"rate limit exceeded"})", "application/json");
+                json_error(res, 429, "rate limit exceeded");
                 return;
             }
             bucket.tokens -= 1.0;
@@ -470,42 +659,44 @@ auto InferenceServer::serve_loop() -> void {
         auto name = req.matches[1].str();
         auto model = repository_.get_model(name);
         if (!model || model->state.load() != ModelState::READY) {
-            res.status = 404;
-            res.set_content(R"({"error":"model not ready"})", "application/json");
+            json_error(res, 404, "model not ready");
             return;
         }
 
         auto start = std::chrono::high_resolution_clock::now();
 
         try {
-            // Parse binary tensor data from body
-            // Format: [4 bytes: ndim][ndim * 8 bytes: shape][rest: float32 data]
-            if (req.body.size() < 4) {
-                res.status = 400;
-                res.set_content(R"({"error":"body too short"})", "application/json");
+            json body;
+            try {
+                body = json::parse(req.body);
+            } catch (const json::parse_error& e) {
+                json_error(res, 400, std::string("malformed JSON: ") + e.what());
                 return;
             }
 
-            const char* body = req.body.data();
-            int32_t ndim;
-            std::memcpy(&ndim, body, 4);
-            body += 4;
-
-            if (req.body.size() < static_cast<size_t>(4 + ndim * 8)) {
-                res.status = 400;
-                res.set_content(R"({"error":"body too short for shape"})", "application/json");
+            if (!body.contains("shape") || !body.contains("data")) {
+                json_error(res, 400, "request must contain \"shape\" and \"data\"");
                 return;
             }
+            // dtype defaults to float32 to preserve the previous ad-hoc
+            // float-only behavior when clients omit the field.
+            DType dtype = DType::Float32;
+            if (body.contains("dtype") && body["dtype"].is_string()) {
+                try {
+                    dtype = dtype_from_request(body["dtype"].get<std::string>());
+                } catch (const std::exception& e) {
+                    json_error(res, 400, e.what());
+                    return;
+                }
+            }
 
-            std::vector<int64_t> shape(ndim);
-            std::memcpy(shape.data(), body, ndim * 8);
-            body += ndim * 8;
-
-            size_t data_bytes = req.body.size() - 4 - ndim * 8;
-            auto input = tenzor::from_data(
-                reinterpret_cast<const float*>(body),
-                shape, model->device
-            );
+            Tensor input;
+            try {
+                input = tensor_from_json(body["shape"], body["data"], dtype, model->device);
+            } catch (const std::exception& e) {
+                json_error(res, 400, e.what());
+                return;
+            }
 
             // Submit to batcher and wait for result
             auto future = model->batcher->submit(input);
@@ -520,94 +711,89 @@ auto InferenceServer::serve_loop() -> void {
             metrics.total_latency_us.fetch_add(latency_us);
             metrics.record_latency(latency_us);
 
-            // Return binary tensor data
-            auto output_cont = output.contiguous();
-            size_t out_data_bytes = output_cont.numel() * dtype_size(output_cont.dtype());
-            auto out_shape = output_cont.shape();
-            int32_t out_ndim = static_cast<int32_t>(out_shape.size());
+            // Pull output back to host (cheap no-op when already on CPU) and
+            // serialize to JSON. contiguous() guarantees the data<T>() reads
+            // are tight-packed.
+            Tensor output_host = (output.device().type == Device::Type::CPU)
+                ? output.contiguous()
+                : output.to(Device::cpu()).contiguous();
 
-            std::string response;
-            response.resize(4 + out_ndim * 8 + out_data_bytes);
-            char* rp = response.data();
-            std::memcpy(rp, &out_ndim, 4); rp += 4;
-            std::memcpy(rp, out_shape.data(), out_ndim * 8); rp += out_ndim * 8;
-            std::memcpy(rp, output_cont.data<float>(), out_data_bytes);
+            json resp;
+            resp["output_shape"] = output_host.shape();
+            resp["output_dtype"] = std::string(dtype_name(output_host.dtype()));
+            resp["output_data"]  = json_from_tensor(output_host);
 
-            res.set_content(response, "application/octet-stream");
+            res.set_content(resp.dump(), "application/json");
         } catch (const std::exception& e) {
             auto& metrics = MetricsRegistry::instance().get_metrics(name);
             metrics.error_count.fetch_add(1);
-            res.status = 500;
-            std::ostringstream oss;
-            oss << R"({"error":")" << e.what() << "\"}";
-            res.set_content(oss.str(), "application/json");
+            json_error(res, 500, e.what());
         }
     });
 
     // A/B experiment management
-    svr.Post("/v1/experiments", [this](const httplib::Request& req, httplib::Response& res) {
-        // Parse: {"name":"exp1","model_a":"v1","model_b":"v2","fraction_b":0.1}
-        auto extract = [&](const std::string& key) -> std::string {
-            auto pos = req.body.find("\"" + key + "\"");
-            if (pos == std::string::npos) return {};
-            auto colon = req.body.find(':', pos);
-            auto q1 = req.body.find('"', colon);
-            auto q2 = req.body.find('"', q1 + 1);
-            if (q1 == std::string::npos || q2 == std::string::npos) return {};
-            return req.body.substr(q1 + 1, q2 - q1 - 1);
+    svr.Post("/v1/experiments", [this, &json_error](const httplib::Request& req, httplib::Response& res) {
+        // {"name":"exp1","model_a":"v1","model_b":"v2","fraction_b":0.1}
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (const json::parse_error& e) {
+            json_error(res, 400, std::string("malformed JSON: ") + e.what());
+            return;
+        }
+        auto str_or_empty = [&](const char* k) -> std::string {
+            return (body.contains(k) && body[k].is_string())
+                ? body[k].get<std::string>()
+                : std::string{};
         };
-        auto name = extract("name");
-        auto model_a = extract("model_a");
-        auto model_b = extract("model_b");
+        auto name    = str_or_empty("name");
+        auto model_a = str_or_empty("model_a");
+        auto model_b = str_or_empty("model_b");
         if (name.empty() || model_a.empty() || model_b.empty()) {
-            res.status = 400;
-            res.set_content(R"({"error":"missing name, model_a, or model_b"})", "application/json");
+            json_error(res, 400, "missing name, model_a, or model_b");
             return;
         }
         double fraction_b = 0.1;
-        auto frac_pos = req.body.find("\"fraction_b\"");
-        if (frac_pos != std::string::npos) {
-            auto colon = req.body.find(':', frac_pos);
-            fraction_b = std::stod(req.body.substr(colon + 1));
+        if (body.contains("fraction_b") && body["fraction_b"].is_number()) {
+            fraction_b = body["fraction_b"].get<double>();
         }
         traffic_router_.set_experiment(name, {model_a, model_b, fraction_b});
-        res.set_content(R"({"success":true})", "application/json");
+        res.set_content(json{{"success",true}}.dump(), "application/json");
     });
 
     svr.Get("/v1/experiments", [this](const httplib::Request&, httplib::Response& res) {
         auto experiments = traffic_router_.list_experiments();
-        std::ostringstream oss;
-        oss << "[";
-        for (size_t i = 0; i < experiments.size(); ++i) {
-            if (i > 0) oss << ",";
-            auto [a_count, b_count] = traffic_router_.get_metrics(experiments[i]);
-            oss << R"({"name":")" << experiments[i]
-                << R"(","requests_a":)" << a_count
-                << R"(,"requests_b":)" << b_count << "}";
+        json arr = json::array();
+        for (const auto& e : experiments) {
+            auto [a_count, b_count] = traffic_router_.get_metrics(e);
+            arr.push_back({
+                {"name",       e},
+                {"requests_a", a_count},
+                {"requests_b", b_count},
+            });
         }
-        oss << "]";
-        res.set_content(oss.str(), "application/json");
+        res.set_content(arr.dump(), "application/json");
     });
 
     svr.Delete(R"(/v1/experiments/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
         auto name = req.matches[1].str();
         traffic_router_.remove_experiment(name);
-        res.set_content(R"({"success":true})", "application/json");
+        res.set_content(json{{"success",true}}.dump(), "application/json");
     });
 
     std::cout << "[TenzorServing] HTTP server listening on port " << config_.http_port << std::endl;
     svr.listen("0.0.0.0", config_.http_port);
 #else
-    // Audit G.12: previously the !TENZOR_HAS_HTTPLIB build entered a
-    // silent 100ms-sleep busy-loop that pretended the server was running.
-    // The serving subsystem requires an HTTP transport — surface a typed
-    // build-config error so users wire one in (httplib, or the planned
-    // gRPC transport) rather than seeing a no-op idle "server".
+    // G.12: per the audit, the non-httplib fallback (which previously
+    // entered a silent 100ms-sleep busy-loop pretending to serve) has
+    // been removed. The build-time static_assert above guarantees that
+    // some HTTP/gRPC transport is configured, so reaching this branch
+    // means the build picked a transport other than httplib — surface a
+    // typed runtime error rather than silently no-op'ing.
     throw std::runtime_error(
-        "tenzor::serving::InferenceServer::serve_loop: this build was "
-        "configured without TENZOR_HAS_HTTPLIB. Rebuild with httplib "
-        "enabled (or another supported transport) before starting the "
-        "inference server.");
+        "tenzor::serving::InferenceServer::serve_loop: this build has "
+        "no httplib transport. Configure with TENZOR_BUILD_SERVING=ON "
+        "or call the gRPC server entry point instead.");
 #endif
 }
 
