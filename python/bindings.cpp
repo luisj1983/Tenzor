@@ -3045,17 +3045,30 @@ void bind_compression(py::module& m) {
 
     m.def("jvp", [](py::function py_func,
                      const tenzor::Variable& input,
-                     const tenzor::Tensor& tangent) {
+                     const tenzor::Tensor& tangent,
+                     const std::string& mode) {
         auto func = [&py_func](const tenzor::Variable& x) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             py::object result = py_func(x);
             return result.cast<tenzor::Variable>();
         };
-        auto [output, tangent_out] = tenzor::jvp(func, input, tangent);
+        tenzor::JvpMode jvp_mode;
+        if (mode == "walker") {
+            jvp_mode = tenzor::JvpMode::Walker;
+        } else if (mode == "dual") {
+            jvp_mode = tenzor::JvpMode::Dual;
+        } else {
+            throw std::invalid_argument(
+                "jvp: mode must be 'walker' or 'dual', got '" + mode + "'");
+        }
+        auto [output, tangent_out] = tenzor::jvp(func, input, tangent, jvp_mode);
         return py::make_tuple(output, tangent_out);
     }, py::arg("func"), py::arg("input"), py::arg("tangent"),
+    py::arg("mode") = std::string("walker"),
     "Compute Jacobian-Vector Product (forward-mode AD).\n"
-    "Returns (output, tangent_output) where tangent_output = J @ tangent.");
+    "Returns (output, tangent_output) where tangent_output = J @ tangent.\n"
+    "mode='walker' (default) builds the autograd graph then walks it;\n"
+    "mode='dual' additionally raises the is_dual_mode() TLS flag.");
 
     m.def("jacobian", [](py::function py_func,
                           const tenzor::Variable& input) {

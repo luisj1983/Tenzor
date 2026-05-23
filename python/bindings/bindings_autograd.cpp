@@ -205,17 +205,31 @@ void register_autograd(py::module_& m) {
     "Return a function that computes the Hessian of a scalar-valued f.");
 
     func_mod.def("jvp", [](py::function f, const tenzor::Variable& x,
-                           const tenzor::Tensor& tangent) {
+                           const tenzor::Tensor& tangent,
+                           const std::string& mode) {
         py::gil_scoped_acquire gil;
         auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
             py::gil_scoped_acquire inner_gil;
             py::object result = f(input);
             return result.cast<tenzor::Variable>();
         };
-        auto [out, tangent_out] = tenzor::jvp(cpp_fn, x, tangent);
+        tenzor::JvpMode jvp_mode;
+        if (mode == "walker") {
+            jvp_mode = tenzor::JvpMode::Walker;
+        } else if (mode == "dual") {
+            jvp_mode = tenzor::JvpMode::Dual;
+        } else {
+            throw std::invalid_argument(
+                "jvp: mode must be 'walker' or 'dual', got '" + mode + "'");
+        }
+        auto [out, tangent_out] = tenzor::jvp(cpp_fn, x, tangent, jvp_mode);
         return py::make_tuple(out, tangent_out);
     }, py::arg("f"), py::arg("x"), py::arg("tangent"),
-    "Forward-mode Jacobian-vector product. Returns (output, J_f(x) @ tangent).");
+    py::arg("mode") = std::string("walker"),
+    "Forward-mode Jacobian-vector product. Returns (output, J_f(x) @ tangent).\n"
+    "mode='walker' (default): build the autograd graph then walk it.\n"
+    "mode='dual': raise the is_dual_mode() TLS flag while invoking f, enabling\n"
+    "  per-op dual_apply<> interceptors when present.");
 
     func_mod.def("hvp", [](py::function f, const tenzor::Variable& x,
                            const tenzor::Tensor& v) {

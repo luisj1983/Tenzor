@@ -229,7 +229,8 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
 
 auto jvp(std::function<Variable(const Variable&)> func,
          const Variable& input,
-         const Tensor& tangent) -> std::pair<Variable, Tensor> {
+         const Tensor& tangent,
+         JvpMode mode) -> std::pair<Variable, Tensor> {
     // Forward-mode AD via the registered dispatch_jvp rules when possible,
     // with a finite-difference fallback for ops/compositions not yet covered.
     //
@@ -251,6 +252,18 @@ auto jvp(std::function<Variable(const Variable&)> func,
     //      the entire walk aborts and we fall back to FD for the whole
     //      function. No partial / "stitched" walks (per project no-
     //      workaround policy).
+    //
+    // JvpMode::Dual additionally raises the `is_dual_mode()` TLS flag for
+    // the duration of `func(input)`. Per-op Variable interceptors (a
+    // follow-up; see jvp_dispatch.hpp) can read that flag to route directly
+    // through `dual_apply<>`. With no interceptors wired yet the behaviour
+    // is identical to JvpMode::Walker because the walker is still the
+    // source of truth once `func(input)` returns.
+
+    std::optional<DualModeGuard> dual_guard;
+    if (mode == JvpMode::Dual) {
+        dual_guard.emplace();  // sets is_dual_mode()=true for this scope
+    }
 
     auto output = func(input);
 

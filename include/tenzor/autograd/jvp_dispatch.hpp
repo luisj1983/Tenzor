@@ -165,4 +165,68 @@ void register_jvp_rule_multi(OpId op, JvpRuleFnMulti fn);
  */
 void ensure_jvp_rules_registered();
 
+// ===========================================================================
+// dual_apply<>: forward-mode interceptor entry point
+// ===========================================================================
+//
+// The `is_dual_mode()` TLS flag toggles forward-mode AD for the calling thread.
+// In principle the Variable forward dispatch in `src/autograd/ops.cpp` would
+// inspect that flag and route each op through `dispatch_jvp` directly,
+// short-circuiting the build-graph-then-walk path used by `jvp()`. Wiring that
+// interceptor into every one of the ~135 covered ops in `ops.cpp` is genuinely
+// invasive and tightly coupled to each Variable wrapper's input/attr packing,
+// so this batch lands the narrower, callable-from-anywhere interceptor below
+// (per the audit-plan fallback). The full per-op interceptor remains a
+// follow-up and can be slotted in incrementally because it just forwards to
+// `dual_apply<OpId>` once it has reconstructed `OpAttributes`.
+//
+// Contract:
+//   - `dual_apply<OpId>(primals, tangents, attrs)` invokes the registered JVP
+//     rule for `OpId` and returns {primal_out, tangent_out} in a single pass.
+//   - `dual_apply_multi<OpId>(...)` does the same for multi-output ops.
+//   - These are thin compile-time-friendly wrappers around `dispatch_jvp` /
+//     `dispatch_jvp_multi`; using them in user code reads as forward-mode AD
+//     instead of as a dispatch lookup.
+//   - Calls succeed regardless of the `is_dual_mode()` flag — the flag is
+//     advisory for graph-building code. `dual_apply` is the explicit form.
+
+/// Dual-mode interceptor for a single-output op. Equivalent to
+/// `dispatch_jvp(op, primals, tangents, attrs)` with an enum-tag template
+/// argument that documents intent at the call site.
+template <OpId Op>
+[[nodiscard]] inline JvpResult dual_apply(std::span<const Tensor> primals,
+                                          std::span<const Tensor> tangents,
+                                          const OpAttributes& attrs = {}) {
+    return dispatch_jvp(Op, primals, tangents, attrs);
+}
+
+/// Dual-mode interceptor for a multi-output op. Equivalent to
+/// `dispatch_jvp_multi(op, primals, tangents, attrs)`.
+template <OpId Op>
+[[nodiscard]] inline JvpMultiResult dual_apply_multi(
+        std::span<const Tensor> primals,
+        std::span<const Tensor> tangents,
+        const OpAttributes& attrs = {}) {
+    return dispatch_jvp_multi(Op, primals, tangents, attrs);
+}
+
+/// Non-template runtime form, useful from generic / template-bound call sites
+/// (e.g. Python bindings that receive the OpId as data). Mirrors
+/// `dispatch_jvp` but exists under the `dual_apply` name so call sites read
+/// uniformly with the template form above.
+[[nodiscard]] inline JvpResult dual_apply_dyn(OpId op,
+                                              std::span<const Tensor> primals,
+                                              std::span<const Tensor> tangents,
+                                              const OpAttributes& attrs = {}) {
+    return dispatch_jvp(op, primals, tangents, attrs);
+}
+
+[[nodiscard]] inline JvpMultiResult dual_apply_multi_dyn(
+        OpId op,
+        std::span<const Tensor> primals,
+        std::span<const Tensor> tangents,
+        const OpAttributes& attrs = {}) {
+    return dispatch_jvp_multi(op, primals, tangents, attrs);
+}
+
 } // namespace tenzor

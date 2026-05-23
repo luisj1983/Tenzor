@@ -18,6 +18,26 @@
 namespace tenzor {
 
 /**
+ * @brief Strategy selector for jvp().
+ *
+ *  - `Walker`: build the autograd graph by calling `func(input)`, then walk
+ *    the resulting `grad_fn` chain in reverse topological order invoking
+ *    `dispatch_jvp` per node. This is the existing default and works for any
+ *    composed `func` whose nodes have registered JVP rules.
+ *  - `Dual`: honour the `is_dual_mode()` TLS flag while invoking `func`. The
+ *    flag is *set* for the duration of the call so future per-op interceptors
+ *    can short-circuit the build-then-walk pipeline (see the design note in
+ *    `jvp_dispatch.hpp`). For ops whose Variable wrapper has not yet been
+ *    interceptor-converted, behaviour is identical to `Walker`. No tangent
+ *    information is lost: the function still receives a normal Variable
+ *    primal and the walker remains the source of truth.
+ */
+enum class JvpMode {
+    Walker = 0,
+    Dual   = 1,
+};
+
+/**
  * @brief Compute Jacobian-Vector Product (forward-mode AD).
  *
  * Given a function f, input x, and tangent vector v, computes:
@@ -27,11 +47,13 @@ namespace tenzor {
  * @param func Differentiable function from Variable to Variable
  * @param input Point at which to evaluate
  * @param tangent Direction vector for the JVP
+ * @param mode    Strategy (default: walker)
  * @return Pair of (output, tangent_output)
  */
 auto jvp(std::function<Variable(const Variable&)> func,
          const Variable& input,
-         const Tensor& tangent) -> std::pair<Variable, Tensor>;
+         const Tensor& tangent,
+         JvpMode mode = JvpMode::Walker) -> std::pair<Variable, Tensor>;
 
 /**
  * @brief Compute full Jacobian matrix of func at input.
