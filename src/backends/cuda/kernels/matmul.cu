@@ -128,8 +128,8 @@ static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     bool do_warn = matmul::g_warn_fp16_saturation;
 
     if (do_warn) {
-        cudaMallocAsync(&d_count, sizeof(unsigned long long), stream);
-        cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream);
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&d_count, sizeof(unsigned long long), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream));
     }
 
     dim3 grid, block;
@@ -139,10 +139,10 @@ static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
 
     if (do_warn && d_count) {
         unsigned long long h_count = 0;
-        cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        cudaFreeAsync(d_count, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
+                                          cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(d_count, stream));
         if (h_count > 0) {
             fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul saturated %llu values to +/-65504\n",
                     h_count);
@@ -2184,18 +2184,18 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
         auto inp_shape = input.shape();
         if (input.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
             Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
-            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
-                            M * N * dtype_size(mat1.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                                              M * N * dtype_size(mat1.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         } else {
             // General broadcast: expand and copy
             auto expanded = input.expand({M, N}).contiguous();
-            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
-                            M * N * dtype_size(mat1.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                                              M * N * dtype_size(mat1.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         }
     } else {
-        cudaMemsetAsync(output.data_ptr(), 0, M * N * dtype_size(mat1.dtype()), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, M * N * dtype_size(mat1.dtype()), stream));
     }
 
 #ifdef TENZOR_HAS_CUBLAS
@@ -2270,17 +2270,17 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
         auto inp_shape = input.shape();
         if (input.ndim() == 1 && inp_shape[0] == M) {
             Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
-            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
-                            M * dtype_size(mat.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                                              M * dtype_size(mat.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         } else {
             auto expanded = input.expand({M}).contiguous();
-            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
-                            M * dtype_size(mat.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                                              M * dtype_size(mat.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         }
     } else {
-        cudaMemsetAsync(output.data_ptr(), 0, M * dtype_size(mat.dtype()), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, M * dtype_size(mat.dtype()), stream));
     }
 
 #ifdef TENZOR_HAS_CUBLAS
@@ -2352,17 +2352,17 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
         auto inp_shape = input.shape();
         if (input.ndim() == 3 && inp_shape[0] == B && inp_shape[1] == M && inp_shape[2] == N) {
             Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
-            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
-                            B * M * N * dtype_size(batch1.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                                              B * M * N * dtype_size(batch1.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         } else {
             auto expanded = input.expand({B, M, N}).contiguous();
-            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
-                            B * M * N * dtype_size(batch1.dtype()),
-                            cudaMemcpyDeviceToDevice, stream);
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                                              B * M * N * dtype_size(batch1.dtype()),
+                                              cudaMemcpyDeviceToDevice, stream));
         }
     } else {
-        cudaMemsetAsync(output.data_ptr(), 0, B * M * N * dtype_size(batch1.dtype()), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, B * M * N * dtype_size(batch1.dtype()), stream));
     }
 
     int64_t stride_a = M * K;
