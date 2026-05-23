@@ -476,6 +476,16 @@ auto make_layer_norm_backward(bool elementwise_affine, double eps,
                               std::vector<::tenzor::Tensor> tensors_to_save)
     -> std::shared_ptr<::tenzor::Function>;
 
+// A.4 multi-output JVP walker: overload that captures the full
+// normalized_shape so the LayerNormBackward function's saved_attributes()
+// can expose AttrKey::NormalizedShape for the registered multi-output
+// JVP rule (which reduces over the last K=normalized_shape.size() axes).
+auto make_layer_norm_backward(bool elementwise_affine, double eps,
+                              int64_t normalized_size,
+                              std::vector<int64_t> normalized_shape,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+
 auto make_group_norm_backward(bool affine, double eps,
                               int64_t num_groups, int64_t num_channels,
                               int64_t group_size,

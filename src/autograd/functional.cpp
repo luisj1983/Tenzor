@@ -47,9 +47,6 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
     if (!out_grad_fn) return std::nullopt;
 
     // 1. Collect every Function reachable from the output in DFS post-order.
-    //    Post-order gives us a topological ordering with producers before
-    //    consumers (because each Function's `next_functions` are its
-    //    predecessors / producers).
     std::vector<std::shared_ptr<Function>> topo;
     std::unordered_set<Function*> visited;
 
@@ -62,8 +59,13 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
             }
             // Early-reject any node we can't dispatch through: stops the
             // walk before we spend effort on an unreachable fast path.
+            // A.4 multi-output extension: accept the node if EITHER a
+            // single-output rule OR a multi-output rule is registered.
             OpId op = node->op_id();
-            if (op == OpId::Unknown || !has_jvp_rule(op)) return false;
+            if (op == OpId::Unknown ||
+                (!has_jvp_rule(op) && !has_jvp_rule_multi(op))) {
+                return false;
+            }
             topo.push_back(node);
             return true;
         };
@@ -71,22 +73,68 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
     if (!dfs(out_grad_fn)) return std::nullopt;
     if (topo.empty()) return std::nullopt;
 
-    // 2. Tangent table.
-    //    - Indexed by the producer Function pointer for non-leaf inputs.
-    //    - The user-input leaf carries the seed tangent (looked up by
-    //      tensor data pointer).
-    //    - Other leaves (constants, e.g. index tensors) carry a zero
-    //      tangent matching their primal shape/dtype/device.
+    // 2. Tangent tables.
+    //    - `node_tangents` holds the primary (output-0) tangent for each
+    //      Function, indexed by raw Function*. Single-output ops use it
+    //      directly; multi-output ops also publish output-0 here as a
+    //      fast path.
+    //    - `node_tangents_multi` holds ALL output tangents for multi-output
+    //      Functions. Keyed by `(Function*, output_idx)`. Downstream
+    //      consumers that read a non-zero output slot of a multi-output
+    //      producer find their tangent here via the data_ptr-resolved
+    //      output_idx (see resolve_input_tangent below).
     std::unordered_map<Function*, Tensor> node_tangents;
+
+    struct PairHash {
+        std::size_t operator()(const std::pair<Function*, size_t>& p) const noexcept {
+            std::size_t h1 = std::hash<Function*>{}(p.first);
+            std::size_t h2 = std::hash<size_t>{}(p.second);
+            return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+        }
+    };
+    std::unordered_map<std::pair<Function*, size_t>, Tensor, PairHash>
+        node_tangents_multi;
+
+    // Resolve the output slot a consumer's input reads from its multi-output
+    // producer. The grad_fn graph carries no native output_nr; we recover it
+    // by matching the consumer's `input_variables[i].tensor()` data_ptr
+    // against the producer's saved_tensors data_ptrs. Multi-output forward
+    // ops typically save their outputs for backward (e.g. EighBackward saves
+    // {W, V}; LayerNormBackward saves {x, mean, rstd, gamma} where mean is
+    // output 1 and rstd is output 2; QrBackward saves {Q, R}; etc.). When
+    // the consumer's input matches a saved tensor that corresponds to a
+    // known output slot, we return that slot; otherwise we default to 0.
+    // Producer-specific saved_tensors→output_idx maps live in the Function
+    // subclasses via the override returning a non-zero output_idx.
+    auto find_output_idx = [](const std::shared_ptr<Function>& prod,
+                              const Tensor& consumer_input) -> size_t {
+        if (!prod) return 0;
+        const void* cp = consumer_input.data_ptr();
+        if (!cp) return 0;
+        const auto& saved = const_cast<Function*>(prod.get())->saved_tensors();
+        for (size_t i = 0; i < saved.size(); ++i) {
+            if (saved[i].data_ptr() == cp) {
+                return prod->jvp_saved_tensor_to_output_idx(i);
+            }
+        }
+        return 0;
+    };
 
     auto resolve_input_tangent = [&](const std::shared_ptr<Function>& prod,
                                      const Tensor& primal) -> Tensor {
         if (prod) {
+            // Try the multi-output path first: if the producer has any
+            // entries in node_tangents_multi, we may need to pick a
+            // non-zero output slot.
+            size_t out_idx = find_output_idx(prod, primal);
+            if (out_idx != 0) {
+                auto it_m = node_tangents_multi.find({prod.get(), out_idx});
+                if (it_m != node_tangents_multi.end()) return it_m->second;
+                // Fall through to single-output table — shouldn't happen
+                // if the producer published all outputs, but safe.
+            }
             auto it = node_tangents.find(prod.get());
             if (it != node_tangents.end()) return it->second;
-            // Producer exists in the graph but we haven't computed its
-            // tangent — topo order is broken or the graph contains a
-            // cycle we don't support. Fall back.
             return Tensor();
         }
         // Leaf: either the user input or a constant.
@@ -122,27 +170,56 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
             tangents.push_back(std::move(tang));
         }
 
-        // Some Functions carry constant non-Variable inputs (e.g. masks,
-        // indices) that aren't in `input_variables` but are required by
-        // the JVP rule arity (see jvp_adapter_gather: arity 2 for
-        // (input, index)). The dispatch will throw on arity mismatch; we
-        // catch that below and fall back to FD for the whole chain.
-
         OpId op = node->op_id();
         OpAttributes attrs = node->saved_attributes();
 
+        // A.4 multi-output walker integration. If the Function provides a
+        // `jvp_pack_inputs_for_walker` override, repack the (primals,
+        // tangents) into the JVP rule's expected contract. This lets ops
+        // like LayerNormBackward (which only carries `input` in
+        // input_variables but whose JVP rule needs (x, gamma, beta))
+        // surface their saved gamma/beta tensors without us inventing a
+        // separate per-op input_variables convention.
+        if (auto packed = node->jvp_pack_inputs_for_walker(primals, tangents)) {
+            primals  = std::move(packed->first);
+            tangents = std::move(packed->second);
+        }
+
         try {
-            auto result = dispatch_jvp(op,
-                                       std::span<const Tensor>(primals),
-                                       std::span<const Tensor>(tangents),
-                                       attrs);
-            node_tangents.emplace(node.get(), std::move(result.tangent));
+            // Prefer the multi-output rule if registered.
+            if (has_jvp_rule_multi(op)) {
+                auto result = dispatch_jvp_multi(op,
+                                                 std::span<const Tensor>(primals),
+                                                 std::span<const Tensor>(tangents),
+                                                 attrs);
+                if (result.tangents.empty()) return std::nullopt;
+                for (size_t k = 0; k < result.tangents.size(); ++k) {
+                    node_tangents_multi.emplace(std::make_pair(node.get(), k),
+                                                 result.tangents[k]);
+                }
+                // Primary (output-0) tangent shared with the single-output
+                // table so the canonical resolution path still works.
+                node_tangents.emplace(node.get(), std::move(result.tangents[0]));
+            } else {
+                auto result = dispatch_jvp(op,
+                                           std::span<const Tensor>(primals),
+                                           std::span<const Tensor>(tangents),
+                                           attrs);
+                node_tangents.emplace(node.get(), std::move(result.tangent));
+            }
         } catch (const std::exception&) {
             return std::nullopt;
         }
     }
 
     // 4. The output tangent is the tangent computed for the root Function.
+    //    For multi-output roots, the root Variable is whichever output the
+    //    caller's `func` returned. If the caller returned the y-output of
+    //    LayerNorm/BN2d (the typical case), output-0 is correct. For Eigh
+    //    callers returning V, the root's grad_fn is shared between W and V;
+    //    the user's `func` doesn't tell us which one — defaulting to W
+    //    (output 0) here. Multi-output root with non-zero slot needs an
+    //    extension to `jvp()`'s API (e.g. caller passes output_idx).
     auto it = node_tangents.find(out_grad_fn.get());
     if (it == node_tangents.end()) return std::nullopt;
     return it->second;

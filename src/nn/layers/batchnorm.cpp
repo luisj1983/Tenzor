@@ -53,243 +53,256 @@ public:
         throw std::runtime_error("BatchNorm2dBackward::forward should not be called");
     }
 
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // Ensure grad_output is contiguous
-        auto grad_output = grad_outputs[0].contiguous();
-        auto saved = saved_tensors();
-        // Ensure all saved tensors are contiguous
-        auto input = saved[0].contiguous();
-        auto mean = saved[1].contiguous();
-        auto invstd = saved[2].contiguous();  // saved_inv_var from cuDNN or computed invstd
-        auto weight = saved[3].contiguous();
-
-        // grad_output: [N, C, H, W]
-        auto shape = input.shape();
-        int64_t N = shape[0];
-        int64_t C = shape[1];
-        int64_t H = shape[2];
-        int64_t W = shape[3];
-        int64_t spatial_size = H * W;
-        int64_t batch_size = N * spatial_size;
-
-        // audit-2026-05-03 bug #3 — eval-mode backward.
-        //
-        // In eval mode the running mean/var are constants (not functions of
-        // the input), so the chain-rule correction terms `mean_grad` and
-        // `mean_grad_norm` that the train-mode kernel formula folds in are
-        // ZERO and must NOT be applied. The simplified formula:
-        //
-        //   grad_input  = grad_output * weight * invstd                  (broadcast over N, H, W)
-        //   grad_weight = sum_{N,H,W}( grad_output * normalized )         per channel
-        //   grad_bias   = sum_{N,H,W}( grad_output )                       per channel
-        //
-        // Implementing this at the autograd layer (using element-wise tensor
-        // ops) gives every backend a correct eval-mode backward without
-        // requiring kernel changes on each.
-        if (!training_) {
-            // Reshape per-channel constants for broadcasting: (C,) → (1, C, 1, 1)
-            auto reshape_chan = [&](const Tensor& t) {
-                return t.reshape({1, C, 1, 1});
-            };
-            auto inv_b = reshape_chan(invstd);
-            auto mean_b = reshape_chan(mean);
-            auto weight_b = reshape_chan(weight);
-
-            auto normalized = (input - mean_b) * inv_b;
-            auto grad_input = grad_output * weight_b * inv_b;
-
-            // Per-channel reductions across N, H, W (dims 0, 2, 3).
-            auto grad_weight_full = grad_output * normalized;
-            auto grad_weight = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
-                grad_weight_full, /*dim=*/3, /*keepdim=*/false),
-                /*dim=*/2, /*keepdim=*/false),
-                /*dim=*/0, /*keepdim=*/false);
-            auto grad_bias = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
-                grad_output, /*dim=*/3, /*keepdim=*/false),
-                /*dim=*/2, /*keepdim=*/false),
-                /*dim=*/0, /*keepdim=*/false);
-
-            return {grad_input, grad_weight, grad_bias};
-        }
-
-        // ================================================================
-        // FAST GPU PATH: Use dedicated backward kernel (single kernel launch)
-        // Works for CUDA (cuDNN) and Vulkan (compute shader)
-        // ================================================================
-        if (input.device().type != Device::Type::CPU &&
-            is_op_supported(OpId::BatchNorm2dBackward, input.device().type) &&
-            (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
-            // For Float16: upcast to Float32 before dispatch. BatchNorm
-            // statistics (mean, invstd) are computed in Float32 even for F16
-            // inputs, so the saved tensors may already be F32. Upcasting all
-            // inputs avoids dtype mismatches inside the backend kernel.
-            DType fast_orig_dtype = input.dtype();
-            bool fast_upcast = (fast_orig_dtype == DType::Float16);
-            if (fast_upcast) {
-                grad_output = grad_output.to(DType::Float32);
-                input = input.to(DType::Float32);
-                weight = weight.to(DType::Float32);
-                mean = mean.to(DType::Float32);
-                invstd = invstd.to(DType::Float32);
-            }
-
-            OpAttributes backward_attrs;
-            backward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
-
-            std::vector<Tensor> backward_inputs = {grad_output, input, weight, mean, invstd};
-            std::vector<Tensor> backward_results = dispatch(OpId::BatchNorm2dBackward, backward_inputs, backward_attrs);
-
-            if (fast_upcast) {
-                return {backward_results[0].to(fast_orig_dtype),
-                        backward_results[1].to(fast_orig_dtype),
-                        backward_results[2].to(fast_orig_dtype)};
-            }
-            return {backward_results[0], backward_results[1], backward_results[2]};
-        }
-
-        // ================================================================
-        // FALLBACK: Use tensor operations (CPU, Vulkan, etc.)
-        // ================================================================
-
-        // For Float16, upcast to Float32 to avoid overflow/precision loss
-        // (matches CUDA/cuDNN which uses FP32 internally for batchnorm backward)
-        DType orig_dtype = input.dtype();
-        bool needs_upcast = (orig_dtype == DType::Float16);
-        if (needs_upcast) {
-            grad_output = grad_output.to(DType::Float32);
-            input = input.to(DType::Float32);
-            mean = mean.to(DType::Float32);
-            invstd = invstd.to(DType::Float32);
-            weight = weight.to(DType::Float32);
-        }
-
-        // Compute normalized input for gradient computation
-        auto mean_broadcast = mean.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-        auto invstd_broadcast = invstd.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-        auto normalized = ((input - mean_broadcast) * invstd_broadcast).contiguous();
-
-        // Gradient with respect to weight: sum(grad_output * normalized, dim=[0,2,3])
-        // After first sum over dim 0: [C, spatial_size], then sum over dim 1 → [C]
-        auto grad_weight = sum(sum((grad_output * normalized)
-            .reshape({N, C, spatial_size}).contiguous(), 0, false), 1, false);
-
-        // Gradient with respect to bias: sum(grad_output, dim=[0,2,3])
-        // After first sum over dim 0: [C, spatial_size], then sum over dim 1 → [C]
-        auto grad_bias = sum(sum(grad_output
-            .reshape({N, C, spatial_size}).contiguous(), 0, false), 1, false);
-
-        // Gradient with respect to normalized input
-        auto weight_broadcast = weight.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-        auto grad_normalized = (grad_output * weight_broadcast).contiguous();
-
-        // Gradient with respect to input (using efficient batch norm backward formulation)
-        auto grad_input_normalized = grad_normalized.reshape({N, C, spatial_size}).contiguous();
-        auto normalized_reshaped = normalized.reshape({N, C, spatial_size}).contiguous();
-
-        // After first sum over dim 0: [1, C, spatial_size], then sum over dim 2 → [1, C, 1]
-        auto sum_grad = sum(sum(grad_input_normalized, 0, true), 2, true).contiguous();
-        auto sum_grad_x_norm = sum(sum((grad_input_normalized * normalized_reshaped),
-                                0, true), 2, true).contiguous();
-
-        auto invstd_expanded = invstd.unsqueeze(0).unsqueeze(-1).contiguous();
-
-        // Break down complex expression to ensure contiguity
-        auto term1 = (sum_grad / static_cast<float>(batch_size)).contiguous();
-        auto term2 = (normalized_reshaped * sum_grad_x_norm / static_cast<float>(batch_size)).contiguous();
-        auto grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
-
-        grad_input = grad_input.reshape({N, C, H, W}).contiguous();
-
-        // Downcast back to original dtype if we upcasted
-        if (needs_upcast) {
-            grad_input = grad_input.to(orig_dtype);
-            grad_weight = grad_weight.to(orig_dtype);
-            grad_bias = grad_bias.to(orig_dtype);
-        }
-
-        // Return gradients in the order of input_vars: [input, weight, bias]
-        return {grad_input, grad_weight, grad_bias};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        auto& grad_out = grad_outputs[0];
-
-        // Retrieve saved variables (with fallback to wrapped tensors)
-        Variable input_var, mean_var, invstd_var, weight_var;
-        if (has_saved_variables()) {
-            const auto& sv = saved_variables();
-            input_var = sv[0];
-            mean_var = sv[1];
-            invstd_var = sv[2];
-            weight_var = sv[3];
-        } else {
-            auto saved = saved_tensors();
-            input_var = Variable(saved[0], false);
-            mean_var = Variable(saved[1], false);
-            invstd_var = Variable(saved[2], false);
-            weight_var = Variable(saved[3], false);
-        }
-
-        // Get dimensions from input shape: [N, C, H, W]
-        auto shape = input_var.shape();
-        int64_t N = shape[0];
-        int64_t C = shape[1];
-        int64_t H = shape[2];
-        int64_t W = shape[3];
-        int64_t spatial_size = H * W;
-        int64_t batch_size = N * spatial_size;
-
-        // Broadcast mean and invstd from [C] to [1, C, 1, 1] using Variable ops
-        auto mean_bc = unsqueeze(unsqueeze(unsqueeze(mean_var, 0), 2), 3);     // [1,C,1,1]
-        auto invstd_bc = unsqueeze(unsqueeze(unsqueeze(invstd_var, 0), 2), 3); // [1,C,1,1]
-
-        // x_hat = (input - mean) * invstd  — all Variable-level
-        auto x_hat = (input_var - mean_bc) * invstd_bc;
-
-        // Broadcast weight from [C] to [1, C, 1, 1]
-        auto weight_bc = unsqueeze(unsqueeze(unsqueeze(weight_var, 0), 2), 3); // [1,C,1,1]
-
-        // grad_x_hat = grad_output * weight (broadcasted)
-        auto grad_x_hat = grad_out * weight_bc;
-
-        // Reshape to [N, C, spatial] for reduction over dims 0 and 2
-        auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial_size});
-        auto x_hat_r = reshape(x_hat, {N, C, spatial_size});
-
-        // mean_grad_x_hat = mean over batch & spatial dims (dims 0 and 2, keep dims)
-        // sum over dim 0 (keepdim), then sum over dim 2 (keepdim), divide by batch_size
-        auto sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);             // [1, C, 1]
-        auto mean_gxh = sum_grad / static_cast<float>(batch_size);
-
-        // mean(grad_x_hat * x_hat) over batch & spatial dims
-        auto sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true); // [1, C, 1]
-        auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
-
-        // grad_input = (grad_x_hat - mean(grad_x_hat) - x_hat * mean(grad_x_hat * x_hat)) * invstd
-        auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);              // [1, C, 1]
-        auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
-        auto grad_input = reshape(grad_input_r, {N, C, H, W});
-
-        // grad_gamma = sum(grad_output * x_hat, dims=[0,2,3])
-        // Reshape to [N, C, spatial], sum dim 0 (no keepdim), sum dim 1 (spatial, no keepdim) -> [C]
-        auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial_size});
-        auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);              // [C]
-
-        // grad_beta = sum(grad_output, dims=[0,2,3])
-        auto go_r = reshape(grad_out, {N, C, spatial_size});
-        auto grad_beta = sum(sum(go_r, 0, false), 1, false);                  // [C]
-
-        return {grad_input, grad_gamma, grad_beta};
-    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 
     auto supports_higher_order() const -> bool override { return true; }
     auto is_higher_order_stub() const -> bool override { return false; }
+
+    // A.4 multi-op JVP walker hooks. The multi-output JVP rule for
+    // BatchNorm2dForwardAffine expects 5 primals (x, mean, var, gamma,
+    // beta). BatchNorm2dBackward currently saves {x, mean, invstd, gamma}
+    // and only carries (input, weight, bias) in input_variables, so the
+    // walker cannot rebuild `var` (only invstd is saved) without
+    // re-squaring. Repack here so the walker can dispatch the multi-output
+    // rule: synthesise var = 1/invstd^2 - eps, and a zero-beta with zero
+    // tangents for the non-x slots (gamma/beta are treated as constants
+    // w.r.t. the JVP seed, so dgamma=dbeta=dvar=dmean=0).
+    auto op_id() const -> OpId override { return OpId::BatchNorm2dForwardAffine; }
+
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
+        return attrs;
+    }
+
+    auto jvp_pack_inputs_for_walker(
+            const std::vector<Tensor>& walker_primals,
+            const std::vector<Tensor>& walker_tangents) const
+        -> std::optional<std::pair<std::vector<Tensor>, std::vector<Tensor>>> override {
+        if (walker_primals.empty()) return std::nullopt;
+        // Saved layout (per BatchNorm2d::forward): {input, mean, invstd, weight}.
+        if (num_saved_tensors() < 4) return std::nullopt;
+        const auto& sav = const_cast<BatchNorm2dBackward*>(this)->saved_tensors();
+        const Tensor& mean   = sav[1];
+        const Tensor& invstd = sav[2];
+        const Tensor& gamma  = sav[3];
+
+        // var = 1/invstd^2 - eps  (matches `invstd = 1/sqrt(var + eps)`)
+        auto invstd_sq = tenzor::mul(invstd, invstd);
+        auto one = tenzor::ones_like(invstd_sq);
+        auto var = tenzor::sub(tenzor::div(one, invstd_sq), eps_);
+
+        std::vector<int64_t> g_shape(gamma.shape().begin(), gamma.shape().end());
+        Tensor beta = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
+
+        auto zero_like = [](const Tensor& t) {
+            std::vector<int64_t> sh(t.shape().begin(), t.shape().end());
+            return tenzor::zeros(sh, t.dtype(), t.device());
+        };
+
+        std::vector<Tensor> primals  = { walker_primals[0],  mean,            var,            gamma,            beta };
+        std::vector<Tensor> tangents = { walker_tangents[0], zero_like(mean), zero_like(var), zero_like(gamma), zero_like(beta) };
+        return std::make_pair(std::move(primals), std::move(tangents));
+    }
+
+    // BatchNorm2dBackward saves {x, mean, invstd, gamma}. The forward
+    // BatchNorm2dForwardAffine produces {y, mean, rstd}; saved[1] (mean) →
+    // out 1, saved[2] (invstd ≡ rstd) → out 2. saved[0] (x) and saved[3]
+    // (gamma) are inputs — leave at default 0.
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        switch (saved_idx) {
+            case 1: return 1;  // mean
+            case 2: return 2;  // rstd (saved as invstd)
+            default: return 0;
+        }
+    }
 
 private:
     bool affine_;
     double eps_;
     bool training_;
 };
+
+auto BatchNorm2dBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Ensure grad_output is contiguous
+    auto grad_output = grad_outputs[0].contiguous();
+    auto saved = saved_tensors();
+    // Ensure all saved tensors are contiguous
+    auto input = saved[0].contiguous();
+    auto mean = saved[1].contiguous();
+    auto invstd = saved[2].contiguous();  // saved_inv_var from cuDNN or computed invstd
+    auto weight = saved[3].contiguous();
+
+    // grad_output: [N, C, H, W]
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+    int64_t spatial_size = H * W;
+    int64_t batch_size = N * spatial_size;
+
+    // audit-2026-05-03 bug #3 — eval-mode backward.
+    if (!training_) {
+        // Reshape per-channel constants for broadcasting: (C,) → (1, C, 1, 1)
+        auto reshape_chan = [&](const Tensor& t) {
+            return t.reshape({1, C, 1, 1});
+        };
+        auto inv_b = reshape_chan(invstd);
+        auto mean_b = reshape_chan(mean);
+        auto weight_b = reshape_chan(weight);
+
+        auto normalized = (input - mean_b) * inv_b;
+        auto grad_input = grad_output * weight_b * inv_b;
+
+        // Per-channel reductions across N, H, W (dims 0, 2, 3).
+        auto grad_weight_full = grad_output * normalized;
+        auto grad_weight = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
+            grad_weight_full, /*dim=*/3, /*keepdim=*/false),
+            /*dim=*/2, /*keepdim=*/false),
+            /*dim=*/0, /*keepdim=*/false);
+        auto grad_bias = ::tenzor::sum(::tenzor::sum(::tenzor::sum(
+            grad_output, /*dim=*/3, /*keepdim=*/false),
+            /*dim=*/2, /*keepdim=*/false),
+            /*dim=*/0, /*keepdim=*/false);
+
+        return {grad_input, grad_weight, grad_bias};
+    }
+
+    // FAST GPU PATH
+    if (input.device().type != Device::Type::CPU &&
+        is_op_supported(OpId::BatchNorm2dBackward, input.device().type) &&
+        (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
+        DType fast_orig_dtype = input.dtype();
+        bool fast_upcast = (fast_orig_dtype == DType::Float16);
+        if (fast_upcast) {
+            grad_output = grad_output.to(DType::Float32);
+            input = input.to(DType::Float32);
+            weight = weight.to(DType::Float32);
+            mean = mean.to(DType::Float32);
+            invstd = invstd.to(DType::Float32);
+        }
+
+        OpAttributes backward_attrs;
+        backward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+
+        std::vector<Tensor> backward_inputs = {grad_output, input, weight, mean, invstd};
+        std::vector<Tensor> backward_results = dispatch(OpId::BatchNorm2dBackward, backward_inputs, backward_attrs);
+
+        if (fast_upcast) {
+            return {backward_results[0].to(fast_orig_dtype),
+                    backward_results[1].to(fast_orig_dtype),
+                    backward_results[2].to(fast_orig_dtype)};
+        }
+        return {backward_results[0], backward_results[1], backward_results[2]};
+    }
+
+    // FALLBACK: tensor ops
+    DType orig_dtype = input.dtype();
+    bool needs_upcast = (orig_dtype == DType::Float16);
+    if (needs_upcast) {
+        grad_output = grad_output.to(DType::Float32);
+        input = input.to(DType::Float32);
+        mean = mean.to(DType::Float32);
+        invstd = invstd.to(DType::Float32);
+        weight = weight.to(DType::Float32);
+    }
+
+    auto mean_broadcast = mean.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
+    auto invstd_broadcast = invstd.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
+    auto normalized = ((input - mean_broadcast) * invstd_broadcast).contiguous();
+
+    auto grad_weight = sum(sum((grad_output * normalized)
+        .reshape({N, C, spatial_size}).contiguous(), 0, false), 1, false);
+
+    auto grad_bias = sum(sum(grad_output
+        .reshape({N, C, spatial_size}).contiguous(), 0, false), 1, false);
+
+    auto weight_broadcast = weight.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
+    auto grad_normalized = (grad_output * weight_broadcast).contiguous();
+
+    auto grad_input_normalized = grad_normalized.reshape({N, C, spatial_size}).contiguous();
+    auto normalized_reshaped = normalized.reshape({N, C, spatial_size}).contiguous();
+
+    auto sum_grad = sum(sum(grad_input_normalized, 0, true), 2, true).contiguous();
+    auto sum_grad_x_norm = sum(sum((grad_input_normalized * normalized_reshaped),
+                            0, true), 2, true).contiguous();
+
+    auto invstd_expanded = invstd.unsqueeze(0).unsqueeze(-1).contiguous();
+
+    auto term1 = (sum_grad / static_cast<float>(batch_size)).contiguous();
+    auto term2 = (normalized_reshaped * sum_grad_x_norm / static_cast<float>(batch_size)).contiguous();
+    auto grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
+
+    grad_input = grad_input.reshape({N, C, H, W}).contiguous();
+
+    if (needs_upcast) {
+        grad_input = grad_input.to(orig_dtype);
+        grad_weight = grad_weight.to(orig_dtype);
+        grad_bias = grad_bias.to(orig_dtype);
+    }
+
+    return {grad_input, grad_weight, grad_bias};
+}
+
+auto BatchNorm2dBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto& grad_out = grad_outputs[0];
+
+    Variable input_var, mean_var, invstd_var, weight_var;
+    if (has_saved_variables()) {
+        const auto& sv = saved_variables();
+        input_var = sv[0];
+        mean_var = sv[1];
+        invstd_var = sv[2];
+        weight_var = sv[3];
+    } else {
+        auto saved = saved_tensors();
+        input_var = Variable(saved[0], false);
+        mean_var = Variable(saved[1], false);
+        invstd_var = Variable(saved[2], false);
+        weight_var = Variable(saved[3], false);
+    }
+
+    auto shape = input_var.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+    int64_t spatial_size = H * W;
+    int64_t batch_size = N * spatial_size;
+
+    auto mean_bc = unsqueeze(unsqueeze(unsqueeze(mean_var, 0), 2), 3);
+    auto invstd_bc = unsqueeze(unsqueeze(unsqueeze(invstd_var, 0), 2), 3);
+
+    auto x_hat = (input_var - mean_bc) * invstd_bc;
+
+    auto weight_bc = unsqueeze(unsqueeze(unsqueeze(weight_var, 0), 2), 3);
+
+    auto grad_x_hat = grad_out * weight_bc;
+
+    auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial_size});
+    auto x_hat_r = reshape(x_hat, {N, C, spatial_size});
+
+    auto sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
+    auto mean_gxh = sum_grad / static_cast<float>(batch_size);
+
+    auto sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+    auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
+
+    auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
+    auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+    auto grad_input = reshape(grad_input_r, {N, C, H, W});
+
+    auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial_size});
+    auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);
+
+    auto go_r = reshape(grad_out, {N, C, spatial_size});
+    auto grad_beta = sum(sum(go_r, 0, false), 1, false);
+
+    return {grad_input, grad_gamma, grad_beta};
+}
 
 BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
                         bool affine, bool track_running_stats)

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
@@ -382,6 +383,61 @@ public:
      * `src/autograd/jvp_rules.cpp` for the per-op attribute contract.
      */
     virtual auto saved_attributes() const -> OpAttributes { return {}; }
+
+    /**
+     * @brief Repack the walker's (primals, tangents) into the contract the
+     *        JVP rule for this op expects, for the A.4 multi-output walker
+     *        integration.
+     *
+     * The default forward-graph walker assembles primals/tangents from
+     * `input_variables()` parallel-paired with `next_functions()`. That
+     * works when the Function's `input_variables` exactly mirror the
+     * registered JVP rule's `primals` contract. Some ops (notably
+     * `LayerNormBackward` / `BatchNorm2dBackward`) only retain
+     * gradient-requiring inputs in `input_variables` while the multi-output
+     * JVP rule expects a fixed-arity tuple (e.g. LayerNorm needs (x, gamma,
+     * beta) even if gamma/beta are constants in this trace).
+     *
+     * Overrides return the (primals, tangents) the JVP rule should be
+     * called with. The default returns `nullopt`, meaning the walker uses
+     * its standard input_variables-based assembly.
+     *
+     * Tangents for inputs that don't participate in the seed (e.g.
+     * constant gamma/beta) are zero tensors of matching shape/dtype/device.
+     *
+     * @param walker_primals  Primals the walker assembled from input_variables.
+     * @param walker_tangents Tangents the walker resolved (one per walker_primal).
+     * @return Optional (primals, tangents) pair for the JVP rule. nullopt
+     *         keeps the walker's default behaviour.
+     */
+    virtual auto jvp_pack_inputs_for_walker(
+            const std::vector<Tensor>& walker_primals,
+            const std::vector<Tensor>& walker_tangents) const
+        -> std::optional<std::pair<std::vector<Tensor>, std::vector<Tensor>>> {
+        (void)walker_primals; (void)walker_tangents;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Map a `saved_tensors()` index back to a forward output_idx,
+     *        for the multi-output JVP walker.
+     *
+     * When the walker resolves a consumer's input back to a multi-output
+     * producer, it matches the consumer's input data_ptr against the
+     * producer's saved tensors and calls this method to translate the
+     * matched saved-tensor index into the corresponding output_idx of the
+     * forward op. Default returns 0 — appropriate for Functions whose
+     * saved_tensors are all internal (e.g. LayerNormBackward saves
+     * {x, mean, rstd, gamma}, where only mean (idx 1 → out 1) and rstd
+     * (idx 2 → out 2) correspond to forward outputs). Subclasses whose
+     * saved layout maps 1:1 to outputs (e.g. EighBackward saves {W, V} ↔
+     * outputs (0, 1)) override accordingly.
+     */
+    virtual auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t {
+        (void)saved_idx;
+        return 0;
+    }
 
     /**
      * @brief Set next functions in computation graph.
@@ -2155,11 +2211,20 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FFTBackward"; }
     auto op_id() const -> OpId override { return OpId::FFT; }
+    // A.4 multi-op JVP walker: surface the forward op's attributes so the
+    // registered JVP rule can rebuild the same op on the input tangent.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (n_.has_value()) attrs.set(AttrKey::N, n_.value());
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Norm, std::string_view(norm_));
+        return attrs;
+    }
 private:
     std::optional<int64_t> n_;
     int64_t dim_;
     std::string norm_;
-};
+};;
 
 /**
  * @brief Inverse FFT gradient function.
@@ -2177,11 +2242,18 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "IFFTBackward"; }
     auto op_id() const -> OpId override { return OpId::IFFT; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (n_.has_value()) attrs.set(AttrKey::N, n_.value());
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Norm, std::string_view(norm_));
+        return attrs;
+    }
 private:
     std::optional<int64_t> n_;
     int64_t dim_;
     std::string norm_;
-};
+};;
 
 /**
  * @brief Real FFT gradient function.
@@ -2201,11 +2273,21 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "RFFTBackward"; }
     auto op_id() const -> OpId override { return OpId::RFFT; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        // signal_length_ is the saved-for-backward `n` (forward `n` value
+        // post-default). Surface it as AttrKey::N so the JVP rule can
+        // reproduce the same RFFT on the input tangent.
+        attrs.set(AttrKey::N, signal_length_);
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Norm, std::string_view(norm_));
+        return attrs;
+    }
 private:
     int64_t signal_length_;
     int64_t dim_;
     std::string norm_;
-};
+};;
 
 /**
  * @brief Inverse real FFT gradient function.
@@ -2223,10 +2305,16 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "IRFFTBackward"; }
     auto op_id() const -> OpId override { return OpId::IRFFT; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Norm, std::string_view(norm_));
+        return attrs;
+    }
 private:
     int64_t dim_;
     std::string norm_;
-};
+};;
 
 
 // =====================================================================
@@ -2493,7 +2581,21 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "EighBackward"; }
-};
+    // A.4 multi-output JVP walker integration. eigh returns (W, V); the
+    // OpId here points at the matching forward op so the walker can look
+    // up the multi-output JVP rule.
+    auto op_id() const -> OpId override { return OpId::LinalgEigh; }
+
+    // EighBackward saves {W, V} (see `eigh` in src/autograd/ops.cpp), which
+    // maps 1:1 to outputs (0, 1) of the forward op. Walker uses this to
+    // route downstream consumers of V to output_idx=1 (so they get dV, not
+    // the default dW).
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        // saved[0] = W → output 0; saved[1] = V → output 1.
+        return saved_idx < 2 ? saved_idx : 0;
+    }
+};;;
 
 /**
  * @brief Eigenvalues-only gradient function for symmetric matrices.

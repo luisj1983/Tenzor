@@ -430,9 +430,19 @@ static void fused_rms_norm_f32(
 class LayerNormBackward : public Function {
 public:
     LayerNormBackward(bool elementwise_affine, double eps,
-                     int64_t normalized_size, std::vector<Tensor> tensors_to_save)
+                      int64_t normalized_size, std::vector<Tensor> tensors_to_save)
         : elementwise_affine_(elementwise_affine), eps_(eps),
           normalized_size_(normalized_size) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    LayerNormBackward(bool elementwise_affine, double eps,
+                      int64_t normalized_size,
+                      std::vector<int64_t> normalized_shape,
+                      std::vector<Tensor> tensors_to_save)
+        : elementwise_affine_(elementwise_affine), eps_(eps),
+          normalized_size_(normalized_size),
+          normalized_shape_(std::move(normalized_shape)) {
         save_for_backward(std::move(tensors_to_save));
     }
 
@@ -440,247 +450,255 @@ public:
         throw std::runtime_error("LayerNormBackward::forward should not be called");
     }
 
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output_orig = grad_outputs[0];
-        auto saved = saved_tensors();
-        auto& input_orig = saved[0];
-        auto& mean_orig = saved[1];
-        auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
-        auto& weight_orig = saved[3];
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
 
-        // Save original device and dtype for dispatch routing
-        Device original_device = input_orig.device();
-        DType original_dtype = grad_output_orig.dtype();
-
-        // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
-        if (original_device.type != Device::Type::CPU) {
-            auto go = grad_output_orig.contiguous();
-            auto inp = input_orig.contiguous();
-            auto mn = mean_orig.contiguous();
-            auto rs = rstd_orig.contiguous();
-            auto wt = weight_orig.contiguous();
-
-            // For Float16/BFloat16, upcast all tensors to Float32 for backward
-            // computation to prevent gradient overflow. The CUDA mixed kernel
-            // computes internally in Float32 but writes __half output, losing
-            // values > 65504 to Inf. This matches CPU backward behavior.
-            DType orig_dt = inp.dtype();
-            bool needs_upcast = (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
-            if (needs_upcast) {
-                go = go.to(DType::Float32);
-                inp = inp.to(DType::Float32);
-                mn = mn.to(DType::Float32);
-                rs = rs.to(DType::Float32);
-                wt = wt.to(DType::Float32);
-            } else {
-                // GPU backward kernels read all tensors with the same dtype as input
-                // (e.g., CUDA Float64 kernel reinterpret_casts to double*).
-                // Mixed precision (e.g. Float32 weights with Float64 input) requires
-                // converting all tensors to match input dtype before dispatch.
-                if (go.dtype() != inp.dtype()) go = go.to(inp.dtype());
-                if (mn.dtype() != inp.dtype()) mn = mn.to(inp.dtype());
-                if (rs.dtype() != inp.dtype()) rs = rs.to(inp.dtype());
-                if (wt.dtype() != inp.dtype()) wt = wt.to(inp.dtype());
-            }
-
-            NewOpAttributes attrs;
-            attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
-            // Standard order: [grad_output, input, mean, inv_std, weight]
-            std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
-            auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
-
-            // Convert grad_input back to original dtype but keep grad_weight
-            // and grad_bias in Float32.  Accumulated parameter gradients can
-            // exceed Float16 range (~65504), so downcasting them would produce
-            // Inf.  This matches CPU behavior which always stores these in F32.
-            if (needs_upcast && results.size() >= 1) {
-                results[0] = results[0].to(orig_dt);  // grad_input
-            }
-            return results;
-        }
-
-        // CPU path: pointer-based access
-        // Convert to Float32 for computation
-        auto grad_output = grad_output_orig.contiguous().to(DType::Float32);
-        auto input = input_orig.contiguous().to(DType::Float32);
-        auto mean = mean_orig.contiguous().to(DType::Float32);
-        auto rstd = rstd_orig.contiguous().to(DType::Float32);
-        auto weight = weight_orig.contiguous().to(DType::Float32);
-
-        auto shape = input.shape();
-        int64_t batch_size = 1;
-        for (size_t i = 0; i < shape.size() - 1; i++) {
-            batch_size *= shape[i];
-        }
-
-        int64_t N = normalized_size_;
-
-        // Compute normalized input: (x - mean) * rstd
-        auto* input_data = input.data<float>();
-        auto* mean_data = mean.data<float>();
-        auto* rstd_data = rstd.data<float>();
-        auto* grad_out_data = grad_output.data<float>();
-        auto* weight_data = weight.data<float>();
-
-        // Allocate gradient tensors on same device as input
-        // Use the contiguous tensor's device to ensure consistency
-        auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
-        auto grad_bias = zeros({N}, grad_output.dtype(), grad_output.device());
-
-        auto* grad_in_data = grad_input.data<float>();
-        auto* grad_weight_data = grad_weight.data<float>();
-        auto* grad_bias_data = grad_bias.data<float>();
-
-        // Compute gradients for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            float mu = mean_data[b];
-            float inv_std = rstd_data[b];
-
-            // 5th-audit A1: replace the catastrophic-cancellation form
-            // `var = E[x^2] - E[x]^2` (computed as `sum_sq*inv_n - mu*mu`)
-            // with a numerically stable two-pass algorithm in double
-            // precision. The CPU Float32 fast path is the lane every dtype
-            // downcasts through, so the precision loss here silently
-            // corrupts Float64 / Float16 / BFloat16 gradient checks. Sibling
-            // to the layer_norm_simd forward fix already on main
-            // (commit 2ee72b5b).
-            double sum_d = 0.0;
-            for (int64_t i = 0; i < N; ++i) {
-                sum_d += static_cast<double>(input_data[b * N + i]);
-            }
-            const double mu_d = sum_d / static_cast<double>(N);
-            double sum_sq_dev_d = 0.0;
-            for (int64_t i = 0; i < N; ++i) {
-                const double d = static_cast<double>(input_data[b * N + i]) - mu_d;
-                sum_sq_dev_d += d * d;
-            }
-            const double var_d = sum_sq_dev_d / static_cast<double>(N);
-            bool zero_variance = (var_d < static_cast<double>(eps_));
-
-            if (zero_variance) {
-                // With zero variance, input gradients should be zero
-                for (int64_t i = 0; i < N; i++) {
-                    grad_in_data[b * N + i] = 0.0f;
-                }
-                // Weight and bias gradients are still computed normally from output gradients
-                for (int64_t i = 0; i < N; i++) {
-                    int64_t idx = b * N + i;
-                    float x_normalized = 0.0f;  // (input - mean) * large_inv_std, but input≈mean
-                    grad_weight_data[i] += grad_out_data[idx] * x_normalized;  // Will be ~0
-                    grad_bias_data[i] += grad_out_data[idx];
-                }
-                continue;
-            }
-
-            // Normal case: compute gradients with stable variance
-            // Compute intermediate sums for this batch element
-            float sum_grad_out = 0.0f;
-            float sum_grad_out_normalized = 0.0f;
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float x_normalized = (input_data[idx] - mu) * inv_std;
-                float grad_out = grad_out_data[idx] * weight_data[i];
-
-                sum_grad_out += grad_out;
-                sum_grad_out_normalized += grad_out * x_normalized;
-
-                // Accumulate weight and bias gradients
-                grad_weight_data[i] += grad_out_data[idx] * x_normalized;
-                grad_bias_data[i] += grad_out_data[idx];
-            }
-
-            // Compute input gradients using the formula:
-            // grad_input = (grad_out - mean(grad_out) - normalized * mean(grad_out * normalized)) * rstd * weight
-            float mean_grad_out = sum_grad_out / N;
-            float mean_grad_out_normalized = sum_grad_out_normalized / N;
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float x_normalized = (input_data[idx] - mu) * inv_std;
-
-                grad_in_data[idx] = (grad_out_data[idx] * weight_data[i] - mean_grad_out -
-                                    x_normalized * mean_grad_out_normalized) * inv_std;
-            }
-        }
-
-        // Convert gradients back to original dtype (already on CPU)
-        return {grad_input.contiguous().to(original_dtype),
-                grad_weight.contiguous().to(original_dtype),
-                grad_bias.contiguous().to(original_dtype)};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Higher-order gradient support for LayerNorm.
-        // LayerNorm normalizes over the last dimension(s) of size normalized_size_.
-        auto& grad_out = grad_outputs[0];
-
-        Variable input_var, mean_var, rstd_var, weight_var;
-        if (has_saved_variables()) {
-            const auto& sv = saved_variables();
-            input_var = sv[0];
-            mean_var = sv[1];
-            rstd_var = sv[2];
-            weight_var = sv[3];
-        } else {
-            auto saved = saved_tensors();
-            input_var = Variable(saved[0], false);
-            mean_var = Variable(saved[1], false);
-            rstd_var = Variable(saved[2], false);
-            weight_var = Variable(saved[3], false);
-        }
-
-        int64_t norm_size = normalized_size_;
-
-        // Expand mean and rstd to match input shape (add trailing dim)
-        // mean/rstd shape: input_shape[:-1], need to unsqueeze last dim
-        auto mean_bc = unsqueeze(mean_var, -1);    // [..., 1]
-        auto rstd_bc = unsqueeze(rstd_var, -1);    // [..., 1]
-
-        // x_hat = (input - mean) * rstd
-        auto x_hat = (input_var - mean_bc) * rstd_bc;
-
-        // grad_x_hat = grad_output * weight
-        auto grad_x_hat = grad_out * weight_var;
-
-        // mean(grad_x_hat) over last dim
-        auto mean_gxh = sum(grad_x_hat, -1, true) / static_cast<float>(norm_size);
-
-        // mean(grad_x_hat * x_hat) over last dim
-        auto mean_gxh_xh = sum(grad_x_hat * x_hat, -1, true) / static_cast<float>(norm_size);
-
-        // grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd
-        auto grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
-
-        // grad_weight = sum(grad_output * x_hat, dims except last)
-        // Flatten batch dims and sum over all except last
-        auto go_xhat = grad_out * x_hat;
-        // Sum over all dims except the last (normalized dim)
-        auto grad_weight_var = go_xhat;
-        auto gw_shape = grad_weight_var.shape();
-        for (int d = static_cast<int>(gw_shape.size()) - 2; d >= 0; --d) {
-            grad_weight_var = sum(grad_weight_var, d, false);
-        }
-
-        // grad_bias = sum(grad_output, dims except last)
-        auto grad_bias_var = grad_out;
-        auto gb_shape = grad_bias_var.shape();
-        for (int d = static_cast<int>(gb_shape.size()) - 2; d >= 0; --d) {
-            grad_bias_var = sum(grad_bias_var, d, false);
-        }
-
-        return {grad_input, grad_weight_var, grad_bias_var};
-    }
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 
     auto supports_higher_order() const -> bool override { return true; }
     auto is_higher_order_stub() const -> bool override { return false; }
+
+    // A.4 multi-op JVP walker hooks ---------------------------------------
+    auto op_id() const -> OpId override { return OpId::LayerNorm; }
+
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
+        if (!normalized_shape_.empty()) {
+            std::string s;
+            for (size_t i = 0; i < normalized_shape_.size(); ++i) {
+                if (i > 0) s += ",";
+                s += std::to_string(normalized_shape_[i]);
+            }
+            attrs.set(AttrKey::NormalizedShape, std::string_view(s));
+        }
+        return attrs;
+    }
+
+    auto jvp_pack_inputs_for_walker(
+            const std::vector<Tensor>& walker_primals,
+            const std::vector<Tensor>& walker_tangents) const
+        -> std::optional<std::pair<std::vector<Tensor>, std::vector<Tensor>>> override {
+        if (walker_primals.empty()) return std::nullopt;
+        if (num_saved_tensors() < 4) return std::nullopt;
+        const auto& sav = const_cast<LayerNormBackward*>(this)->saved_tensors();
+        const Tensor& gamma = sav[3];
+
+        std::vector<int64_t> g_shape(gamma.shape().begin(), gamma.shape().end());
+        Tensor beta  = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
+        Tensor dgamma = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
+        Tensor dbeta  = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
+
+        std::vector<Tensor> primals  = { walker_primals[0],  gamma,  beta  };
+        std::vector<Tensor> tangents = { walker_tangents[0], dgamma, dbeta };
+        return std::make_pair(std::move(primals), std::move(tangents));
+    }
+
+    // LayerNormBackward saves {x, mean, rstd, gamma}. The forward
+    // OpId::LayerNorm produces outputs {y, mean, rstd}, so saved[1] → out 1
+    // (mean) and saved[2] → out 2 (rstd). saved[0] (x) and saved[3] (gamma)
+    // are inputs, not outputs — they don't correspond to any forward output
+    // slot and should be left at the default of 0 (which won't be hit in
+    // practice since consumers don't read x/gamma from a LayerNorm node).
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        switch (saved_idx) {
+            case 1: return 1;  // mean
+            case 2: return 2;  // rstd
+            default: return 0;
+        }
+    }
 
 private:
     bool elementwise_affine_;
     double eps_;
     int64_t normalized_size_;
-};
+    std::vector<int64_t> normalized_shape_;
+};;
+
+auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    auto& grad_output_orig = grad_outputs[0];
+    auto saved = saved_tensors();
+    auto& input_orig = saved[0];
+    auto& mean_orig = saved[1];
+    auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
+    auto& weight_orig = saved[3];
+
+    Device original_device = input_orig.device();
+    DType original_dtype = grad_output_orig.dtype();
+
+    // GPU fast path
+    if (original_device.type != Device::Type::CPU) {
+        auto go = grad_output_orig.contiguous();
+        auto inp = input_orig.contiguous();
+        auto mn = mean_orig.contiguous();
+        auto rs = rstd_orig.contiguous();
+        auto wt = weight_orig.contiguous();
+
+        DType orig_dt = inp.dtype();
+        bool needs_upcast = (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
+        if (needs_upcast) {
+            go = go.to(DType::Float32);
+            inp = inp.to(DType::Float32);
+            mn = mn.to(DType::Float32);
+            rs = rs.to(DType::Float32);
+            wt = wt.to(DType::Float32);
+        } else {
+            if (go.dtype() != inp.dtype()) go = go.to(inp.dtype());
+            if (mn.dtype() != inp.dtype()) mn = mn.to(inp.dtype());
+            if (rs.dtype() != inp.dtype()) rs = rs.to(inp.dtype());
+            if (wt.dtype() != inp.dtype()) wt = wt.to(inp.dtype());
+        }
+
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
+        std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
+        auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
+
+        if (needs_upcast && results.size() >= 1) {
+            results[0] = results[0].to(orig_dt);
+        }
+        return results;
+    }
+
+    // CPU path
+    auto grad_output = grad_output_orig.contiguous().to(DType::Float32);
+    auto input = input_orig.contiguous().to(DType::Float32);
+    auto mean = mean_orig.contiguous().to(DType::Float32);
+    auto rstd = rstd_orig.contiguous().to(DType::Float32);
+    auto weight = weight_orig.contiguous().to(DType::Float32);
+
+    auto shape = input.shape();
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 1; i++) {
+        batch_size *= shape[i];
+    }
+
+    int64_t N = normalized_size_;
+
+    auto* input_data = input.data<float>();
+    auto* mean_data = mean.data<float>();
+    auto* rstd_data = rstd.data<float>();
+    auto* grad_out_data = grad_output.data<float>();
+    auto* weight_data = weight.data<float>();
+
+    auto grad_input = zeros_like(input);
+    auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
+    auto grad_bias = zeros({N}, grad_output.dtype(), grad_output.device());
+
+    auto* grad_in_data = grad_input.data<float>();
+    auto* grad_weight_data = grad_weight.data<float>();
+    auto* grad_bias_data = grad_bias.data<float>();
+
+    for (int64_t b = 0; b < batch_size; b++) {
+        float mu = mean_data[b];
+        float inv_std = rstd_data[b];
+
+        double sum_d = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            sum_d += static_cast<double>(input_data[b * N + i]);
+        }
+        const double mu_d = sum_d / static_cast<double>(N);
+        double sum_sq_dev_d = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            const double d = static_cast<double>(input_data[b * N + i]) - mu_d;
+            sum_sq_dev_d += d * d;
+        }
+        const double var_d = sum_sq_dev_d / static_cast<double>(N);
+        bool zero_variance = (var_d < static_cast<double>(eps_));
+
+        if (zero_variance) {
+            for (int64_t i = 0; i < N; i++) {
+                grad_in_data[b * N + i] = 0.0f;
+            }
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                float x_normalized = 0.0f;
+                grad_weight_data[i] += grad_out_data[idx] * x_normalized;
+                grad_bias_data[i] += grad_out_data[idx];
+            }
+            continue;
+        }
+
+        float sum_grad_out = 0.0f;
+        float sum_grad_out_normalized = 0.0f;
+
+        for (int64_t i = 0; i < N; i++) {
+            int64_t idx = b * N + i;
+            float x_normalized = (input_data[idx] - mu) * inv_std;
+            float grad_out = grad_out_data[idx] * weight_data[i];
+
+            sum_grad_out += grad_out;
+            sum_grad_out_normalized += grad_out * x_normalized;
+
+            grad_weight_data[i] += grad_out_data[idx] * x_normalized;
+            grad_bias_data[i] += grad_out_data[idx];
+        }
+
+        float mean_grad_out = sum_grad_out / N;
+        float mean_grad_out_normalized = sum_grad_out_normalized / N;
+
+        for (int64_t i = 0; i < N; i++) {
+            int64_t idx = b * N + i;
+            float x_normalized = (input_data[idx] - mu) * inv_std;
+
+            grad_in_data[idx] = (grad_out_data[idx] * weight_data[i] - mean_grad_out -
+                                x_normalized * mean_grad_out_normalized) * inv_std;
+        }
+    }
+
+    return {grad_input.contiguous().to(original_dtype),
+            grad_weight.contiguous().to(original_dtype),
+            grad_bias.contiguous().to(original_dtype)};
+}
+
+auto LayerNormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto& grad_out = grad_outputs[0];
+
+    Variable input_var, mean_var, rstd_var, weight_var;
+    if (has_saved_variables()) {
+        const auto& sv = saved_variables();
+        input_var = sv[0];
+        mean_var = sv[1];
+        rstd_var = sv[2];
+        weight_var = sv[3];
+    } else {
+        auto saved = saved_tensors();
+        input_var = Variable(saved[0], false);
+        mean_var = Variable(saved[1], false);
+        rstd_var = Variable(saved[2], false);
+        weight_var = Variable(saved[3], false);
+    }
+
+    int64_t norm_size = normalized_size_;
+
+    auto mean_bc = unsqueeze(mean_var, -1);
+    auto rstd_bc = unsqueeze(rstd_var, -1);
+
+    auto x_hat = (input_var - mean_bc) * rstd_bc;
+
+    auto grad_x_hat = grad_out * weight_var;
+
+    auto mean_gxh = sum(grad_x_hat, -1, true) / static_cast<float>(norm_size);
+
+    auto mean_gxh_xh = sum(grad_x_hat * x_hat, -1, true) / static_cast<float>(norm_size);
+
+    auto grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
+
+    auto go_xhat = grad_out * x_hat;
+    auto grad_weight_var = go_xhat;
+    auto gw_shape = grad_weight_var.shape();
+    for (int d = static_cast<int>(gw_shape.size()) - 2; d >= 0; --d) {
+        grad_weight_var = sum(grad_weight_var, d, false);
+    }
+
+    auto grad_bias_var = grad_out;
+    auto gb_shape = grad_bias_var.shape();
+    for (int d = static_cast<int>(gb_shape.size()) - 2; d >= 0; --d) {
+        grad_bias_var = sum(grad_bias_var, d, false);
+    }
+
+    return {grad_input, grad_weight_var, grad_bias_var};
+}
 
 // Factory exposed via normalization.hpp for use by F::layer_norm in
 // functional.cpp. Phase 24-followup #38 fix.
@@ -691,6 +709,17 @@ auto make_layer_norm_backward(bool elementwise_affine, double eps,
     -> std::shared_ptr<::tenzor::Function> {
     return std::make_shared<LayerNormBackward>(elementwise_affine, eps,
                                                 normalized_size,
+                                                std::move(tensors_to_save));
+}
+
+auto make_layer_norm_backward(bool elementwise_affine, double eps,
+                              int64_t normalized_size,
+                              std::vector<int64_t> normalized_shape,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<LayerNormBackward>(elementwise_affine, eps,
+                                                normalized_size,
+                                                std::move(normalized_shape),
                                                 std::move(tensors_to_save));
 }
 }  // namespace internal
@@ -936,7 +965,9 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
                 weight_dev,
             };
             auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, std::move(tensors_to_save));
+                elementwise_affine_, eps_, N, normalized_shape_,
+                std::move(tensors_to_save)
+            );
 
             std::vector<std::shared_ptr<Function>> next_funcs;
             if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
@@ -1058,7 +1089,8 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+                elementwise_affine_, eps_, N, normalized_shape_,
+                std::move(tensors_to_save)
             );
 
             result.set_grad_fn(grad_fn);
@@ -1168,7 +1200,8 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+                elementwise_affine_, eps_, N, normalized_shape_,
+                std::move(tensors_to_save)
             );
 
             result.set_grad_fn(grad_fn);
@@ -1289,7 +1322,8 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+                elementwise_affine_, eps_, N, normalized_shape_,
+                std::move(tensors_to_save)
             );
 
             result.set_grad_fn(grad_fn);
@@ -1433,7 +1467,8 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+                elementwise_affine_, eps_, N, normalized_shape_,
+                std::move(tensors_to_save)
             );
 
             result.set_grad_fn(grad_fn);

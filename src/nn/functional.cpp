@@ -673,6 +673,7 @@ auto layer_norm(const Variable& input,
         };
         auto grad_fn = internal::make_layer_norm_backward(
             elementwise_affine, eps, normalized_size,
+            std::vector<int64_t>(normalized_shape.begin(), normalized_shape.end()),
             std::move(tensors_to_save));
         output.set_grad_fn(grad_fn);
         std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
