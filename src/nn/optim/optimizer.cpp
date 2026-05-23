@@ -116,10 +116,29 @@ auto Optimizer::clip_config() const -> const ClipConfig& {
 }
 
 auto Optimizer::add_param_group(ParamGroup group) -> void {
+    // Audit K.1: extend optimizer state buffers when new parameters
+    // are added mid-training.  Without this hook, derived optimisers
+    // (Adam / SGD / Adagrad / ...) silently OOB-read exp_avg_[i],
+    // momentum_buffer_[i], sum_[i], etc. on the next step_impl().
+    const size_t old_count = parameters_.size();
     for (auto& p : group.params) {
         parameters_.push_back(p);
     }
+    const size_t new_count = parameters_.size();
     param_groups_.push_back(std::move(group));
+    if (new_count > old_count) {
+        on_parameters_appended_(old_count, new_count);
+    }
+}
+
+auto Optimizer::on_parameters_appended_(size_t /*old_count*/, size_t /*new_count*/) -> void {
+    // Default refuses to silently no-op — every concrete optimiser is
+    // required to override and extend its state buffers.  See K.1.
+    throw std::runtime_error(
+        "Optimizer::on_parameters_appended_: derived optimizer did not "
+        "override the state-extension hook required by add_param_group(). "
+        "Without an override, the next step_impl() would OOB-read state "
+        "buffers indexed by parameter position.  See audit K.1.");
 }
 
 auto Optimizer::param_groups() -> std::vector<ParamGroup>& {

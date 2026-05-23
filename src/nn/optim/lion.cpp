@@ -87,6 +87,19 @@ auto Lion::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend momentum_ for parameters appended via add_param_group.
+auto Lion::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    momentum_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            momentum_.push_back(zeros_like(param->tensor()));
+        } else {
+            momentum_.push_back(Tensor{});
+        }
+    }
+}
+
 auto Lion::set_lr(double lr) -> void { lr_ = lr; }
 auto Lion::get_lr() const -> double { return lr_; }
 

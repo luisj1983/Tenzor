@@ -124,6 +124,24 @@ auto Rprop::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend step_sizes_ / prev_grads_ for parameters appended
+// via add_param_group.  Mirrors initialize_buffers — step_sizes start
+// at lr_ (not zero) so the first sign-comparison step makes progress.
+auto Rprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    step_sizes_.reserve(new_count);
+    prev_grads_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            step_sizes_.push_back(full_like(param->tensor(), lr_));
+            prev_grads_.push_back(zeros_like(param->tensor()));
+        } else {
+            step_sizes_.push_back(Tensor{});
+            prev_grads_.push_back(Tensor{});
+        }
+    }
+}
+
 auto Rprop::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 

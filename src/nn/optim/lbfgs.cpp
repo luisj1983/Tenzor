@@ -164,6 +164,20 @@ auto LBFGS::step_impl() -> void {
         "LBFGS requires a closure. Call step(closure) instead of step().");
 }
 
+// Audit K.1: L-BFGS operates on a single flat parameter vector and the
+// constructor enforces exactly one ParamGroup (matching PyTorch's
+// torch.optim.LBFGS).  Allowing add_param_group to silently push a
+// second group would break the two-loop recursion's single-state
+// contract — refuse explicitly.
+auto LBFGS::on_parameters_appended_(size_t /*old_count*/, size_t /*new_count*/) -> void {
+    throw std::runtime_error(
+        "LBFGS::add_param_group: L-BFGS requires exactly one ParamGroup "
+        "because its two-loop recursion operates on a single flattened "
+        "state vector. Adding a second group after construction would "
+        "violate that invariant; re-construct the optimiser with all "
+        "parameters in one group instead. See audit K.1.");
+}
+
 auto LBFGS::gather_flat_params() const -> Tensor {
     // Concatenate flattened views of every parameter into one 1D tensor.
     std::vector<Tensor> flat_parts;

@@ -160,6 +160,12 @@ public:
     auto base_optimizer() -> Optimizer& { return *base_optimizer_; }
     auto base_optimizer() const -> const Optimizer& { return *base_optimizer_; }
 
+protected:
+    // Audit K.1: extend SAM's own epsilon_ buffer and forward the new
+    // ParamGroup to the wrapped base optimiser so its state is also
+    // extended.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     std::shared_ptr<Optimizer> base_optimizer_;
     double rho_;

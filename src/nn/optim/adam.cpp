@@ -222,6 +222,28 @@ auto Adam::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend exp_avg_ / exp_avg_sq_ / max_exp_avg_sq_ when
+// add_param_group appends new parameters mid-training.
+auto Adam::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    exp_avg_.reserve(new_count);
+    exp_avg_sq_.reserve(new_count);
+    if (amsgrad_) max_exp_avg_sq_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            exp_avg_.push_back(zeros_like(param->tensor()));
+            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            if (amsgrad_) {
+                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            }
+        } else {
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
+            if (amsgrad_) max_exp_avg_sq_.push_back(Tensor{});
+        }
+    }
+}
+
 auto Adam::set_lr(double lr) -> void {
     lr_ = lr;
 }
@@ -480,6 +502,27 @@ auto AdamW::initialize_buffers() -> void {
             if (amsgrad_) {
                 max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
             }
+        }
+    }
+}
+
+// Audit K.1.
+auto AdamW::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    exp_avg_.reserve(new_count);
+    exp_avg_sq_.reserve(new_count);
+    if (amsgrad_) max_exp_avg_sq_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            exp_avg_.push_back(zeros_like(param->tensor()));
+            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            if (amsgrad_) {
+                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            }
+        } else {
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
+            if (amsgrad_) max_exp_avg_sq_.push_back(Tensor{});
         }
     }
 }

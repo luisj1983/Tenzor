@@ -107,6 +107,21 @@ auto ASGD::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend ax_buffers_ for parameters appended via
+// add_param_group.  Matches initialize_buffers — averaged params start
+// as a clone of the freshly-added parameter value.
+auto ASGD::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    ax_buffers_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            ax_buffers_.push_back(param->tensor().clone());
+        } else {
+            ax_buffers_.push_back(Tensor{});
+        }
+    }
+}
+
 auto ASGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 

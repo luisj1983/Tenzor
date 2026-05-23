@@ -96,6 +96,26 @@ auto Adagrad::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend sum_ for parameters appended via add_param_group.
+// When initial_accumulator_value_ != 0 the new slice is filled with that
+// constant on the param's own device (matches initialize_buffers).
+auto Adagrad::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    sum_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (!param) {
+            sum_.push_back(Tensor{});
+            continue;
+        }
+        const auto& param_data = param->tensor();
+        if (initial_accumulator_value_ == 0.0) {
+            sum_.push_back(zeros_like(param_data));
+        } else {
+            sum_.push_back(full_like(param_data, initial_accumulator_value_));
+        }
+    }
+}
+
 auto Adagrad::effective_lr() const -> double {
     if (lr_decay_ == 0.0 || step_count_ == 0) {
         return lr_;

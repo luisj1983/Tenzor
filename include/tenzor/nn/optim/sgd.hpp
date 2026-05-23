@@ -125,6 +125,11 @@ public:
         };
     }
 
+protected:
+    // Audit K.1: extend velocity_buffers_ when a new ParamGroup is
+    // appended via add_param_group().
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     double momentum_;

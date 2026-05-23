@@ -163,6 +163,21 @@ auto SGD::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend velocity_buffers_ when add_param_group appends new
+// params.  velocity_buffers_ is indexed by parameter position so the
+// new entries must match parameters_.size() after the append.
+auto SGD::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    velocity_buffers_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            velocity_buffers_.push_back(zeros_like(param->tensor()));
+        } else {
+            velocity_buffers_.push_back(Tensor{});
+        }
+    }
+}
+
 auto SGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
 

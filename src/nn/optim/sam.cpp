@@ -103,6 +103,28 @@ auto SAM::second_step() -> void {
     epsilon_.clear();
 }
 
+// Audit K.1: SAM's own epsilon_ buffer is rebuilt lazily inside
+// first_step(), so we just discard any stale entries here.  The
+// wrapped base optimiser, however, keeps real per-parameter state
+// (momentum / exp_avg / ...) that MUST be extended in lockstep —
+// forward the just-appended ParamGroup to it.
+auto SAM::on_parameters_appended_(size_t /*old_count*/, size_t /*new_count*/) -> void {
+    epsilon_.clear();
+    if (!base_optimizer_) {
+        throw std::runtime_error(
+            "SAM::on_parameters_appended_: base optimizer is null; "
+            "cannot extend its state buffers for the new ParamGroup.");
+    }
+    // The base class already moved the new ParamGroup into param_groups_,
+    // so the most recent entry is what we need to thread through.
+    if (param_groups_.empty()) {
+        throw std::runtime_error(
+            "SAM::on_parameters_appended_: parameter group list is empty "
+            "after append — invariant violation.");
+    }
+    base_optimizer_->add_param_group(param_groups_.back());
+}
+
 auto SAM::step_impl() -> void {
     // step_impl is only invoked by the no-closure Optimizer::step(),
     // which can't drive SAM's two-pass requirement.  Users should call

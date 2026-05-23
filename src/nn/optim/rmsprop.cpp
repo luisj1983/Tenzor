@@ -85,6 +85,34 @@ auto RMSprop::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend square_avg_ (and grad_avg_ / momentum_buffer_ when
+// the optimiser-wide centered_ / momentum_ flags request them) for
+// parameters appended via add_param_group.  Mirrors initialize_buffers
+// so the per-parameter indexing in step_impl() stays valid.
+auto RMSprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    square_avg_.reserve(new_count);
+    if (centered_) grad_avg_.reserve(new_count);
+    if (momentum_ > 0.0) momentum_buffer_.reserve(new_count);
+
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            const auto& param_data = param->tensor();
+            square_avg_.push_back(zeros_like(param_data));
+            if (centered_) {
+                grad_avg_.push_back(zeros_like(param_data));
+            }
+            if (momentum_ > 0.0) {
+                momentum_buffer_.push_back(zeros_like(param_data));
+            }
+        } else {
+            square_avg_.push_back(Tensor{});
+            if (centered_) grad_avg_.push_back(Tensor{});
+            if (momentum_ > 0.0) momentum_buffer_.push_back(Tensor{});
+        }
+    }
+}
+
 auto RMSprop::step_impl() -> void {
     // Audit D.4: resolve hyperparams per-param from the active ParamGroup
     // with optimizer-member fallback.  Flat-param constructor →

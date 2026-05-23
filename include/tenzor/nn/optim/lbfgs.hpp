@@ -113,6 +113,13 @@ public:
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+protected:
+    // Audit K.1: LBFGS treats its parameter list as a single flattened
+    // state vector and the constructor enforces exactly one ParamGroup.
+    // add_param_group after construction would silently violate that
+    // invariant, so the hook throws.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     int max_iter_;

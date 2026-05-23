@@ -102,6 +102,23 @@ auto Adamax::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend exp_avg_ / exp_inf_ for parameters appended via
+// add_param_group.  step_count_ is optimiser-wide and untouched.
+auto Adamax::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    exp_avg_.reserve(new_count);
+    exp_inf_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            exp_avg_.push_back(zeros_like(param->tensor()));
+            exp_inf_.push_back(zeros_like(param->tensor()));
+        } else {
+            exp_avg_.push_back(Tensor{});
+            exp_inf_.push_back(Tensor{});
+        }
+    }
+}
+
 auto Adamax::set_lr(double lr) -> void { lr_ = lr; }
 auto Adamax::get_lr() const -> double { return lr_; }
 

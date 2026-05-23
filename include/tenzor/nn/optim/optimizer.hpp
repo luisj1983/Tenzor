@@ -308,6 +308,24 @@ public:
     auto add_param_group(ParamGroup group) -> void;
 
     /**
+     * @brief Hook called by add_param_group() after parameters have been
+     *        appended to parameters_ and the new ParamGroup has been
+     *        recorded.  Derived optimisers MUST override this to extend
+     *        their state buffers (exp_avg_, exp_avg_sq_, momentum_buffer_,
+     *        sum_, acc_delta_, square_avg_, etc.) so the next step_impl()
+     *        does not OOB-read on the newly-added param indices.
+     *
+     * @param old_count  parameters_.size() before the append.
+     * @param new_count  parameters_.size() after the append.
+     *
+     * Default implementation throws std::runtime_error.  This is
+     * deliberately not a silent no-op — every optimizer is required to
+     * extend its state, and a default that silently did nothing would
+     * reintroduce the K.1 OOB bug (audit 2026-05-23).
+     */
+    virtual auto on_parameters_appended_(size_t old_count, size_t new_count) -> void;
+
+    /**
      * @brief Get all parameter groups.
      * @return Reference to the vector of parameter groups
      */

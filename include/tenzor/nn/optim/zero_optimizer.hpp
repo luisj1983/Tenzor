@@ -612,6 +612,12 @@ public:
     }
 
 protected:
+    // Audit K.1: forward the just-appended ParamGroup to the wrapped
+    // base optimiser so its state buffers are extended, then rebuild
+    // the partition layout to incorporate the new parameter offsets.
+    // Derived ZeROStage2/3 inherit this override.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
     /** Element-level partition layout (only populated when
      *  config_.partitioning_mode == PartitioningMode::ElementLevel).
      *

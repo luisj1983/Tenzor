@@ -120,6 +120,11 @@ public:
         };
     }
 
+protected:
+    // Audit K.1: extend exp_avg_ / exp_avg_sq_ / max_exp_avg_sq_ when
+    // add_param_group appends new params mid-training.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     double beta1_;
@@ -228,6 +233,10 @@ public:
             {"amsgrad",      amsgrad_ ? 1.0 : 0.0},
         };
     }
+
+protected:
+    // Audit K.1.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
 
 private:
     double lr_;

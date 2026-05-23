@@ -68,6 +68,24 @@ auto Adadelta::initialize_buffers() -> void {
     }
 }
 
+// Audit K.1: extend square_avg_ / acc_delta_ for parameters appended via
+// add_param_group.  Both buffers are indexed by parameter position, so
+// every new param needs a matching entry (Tensor{} placeholder for null).
+auto Adadelta::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    square_avg_.reserve(new_count);
+    acc_delta_.reserve(new_count);
+    for (size_t i = old_count; i < new_count; ++i) {
+        const auto& param = parameters_[i];
+        if (param) {
+            square_avg_.push_back(zeros_like(param->tensor()));
+            acc_delta_.push_back(zeros_like(param->tensor()));
+        } else {
+            square_avg_.push_back(Tensor{});
+            acc_delta_.push_back(Tensor{});
+        }
+    }
+}
+
 auto Adadelta::step_impl() -> void {
     // Audit D.4: per-parameter hyperparameters resolve from the
     // active ParamGroup (when one was set up) or fall through to

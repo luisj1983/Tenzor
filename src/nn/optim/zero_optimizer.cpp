@@ -886,6 +886,54 @@ auto ZeROStage1Optimizer::compute_element_partition_layout() -> void {
     }
 }
 
+// Audit K.1: thread add_param_group through to the wrapped base
+// optimiser (which owns the actual per-parameter state buffers) and
+// rebuild the partition layout so the new parameter offsets are
+// reflected.  The per-rank state buffers (momentum / variance) are
+// sized at construction from the original partition layout; the
+// extended state for the new params remains the base optimiser's
+// responsibility on its next step.  Stage 2/3 inherit this override.
+auto ZeROStage1Optimizer::on_parameters_appended_(size_t /*old_count*/,
+                                                  size_t /*new_count*/) -> void {
+    if (!base_optimizer_) {
+        throw std::runtime_error(
+            "ZeROStage1Optimizer::on_parameters_appended_: base optimizer "
+            "is null; cannot extend its state buffers for the new "
+            "ParamGroup.");
+    }
+    if (param_groups_.empty()) {
+        throw std::runtime_error(
+            "ZeROStage1Optimizer::on_parameters_appended_: parameter "
+            "group list is empty after append — invariant violation.");
+    }
+    // Forward the just-appended group to the base optimiser so its
+    // own state extension hook fires.
+    base_optimizer_->add_param_group(param_groups_.back());
+
+    // Rebuild the partition layout to incorporate the new parameter
+    // offsets / numels.  For ElementLevel mode this is structural
+    // metadata (offsets, sizes, rank starts) — it does not touch the
+    // already-allocated per-rank state buffers, which remain sized to
+    // the original slice.
+    if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
+        compute_element_partition_layout();
+    } else {
+        // ParamLevel partition_parameters() appends into partitions_[r].params
+        // without clearing, so re-running it would duplicate existing
+        // assignments.  Per-rank momentum / variance buffers are also fixed
+        // to the construction-time partition.  Refuse here — re-construct
+        // the ZeRO optimiser around the extended parameter list.
+        throw std::runtime_error(
+            "ZeROStage1Optimizer::add_param_group: ParamLevel partitioning "
+            "mode assigns parameters to ranks at construction time and "
+            "sizes each rank's momentum / variance buffers to that fixed "
+            "assignment.  Appending parameters mid-training would either "
+            "duplicate rank assignments or strand the new params' state.  "
+            "Re-construct the ZeRO optimiser with all parameters in place. "
+            "See audit K.1.");
+    }
+}
+
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
     if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
         auto& partition = local_partition();

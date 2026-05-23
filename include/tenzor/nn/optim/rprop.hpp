@@ -115,6 +115,11 @@ public:
     /** @brief Load optimizer state from dictionary */
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+protected:
+    // Audit K.1: extend step_sizes_ / prev_grads_ when add_param_group
+    // appends new parameters mid-training.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     double eta_minus_;

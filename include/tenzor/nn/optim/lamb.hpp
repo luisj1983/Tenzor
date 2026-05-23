@@ -42,6 +42,11 @@ public:
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+protected:
+    // Audit K.1: extend exp_avg_ / exp_avg_sq_ when add_param_group
+    // appends new parameters mid-training.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     double beta1_;

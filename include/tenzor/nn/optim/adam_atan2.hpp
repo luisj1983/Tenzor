@@ -150,6 +150,11 @@ public:
     };
     auto last_update_stats() const -> const UpdateStats& { return update_stats_; }
 
+protected:
+    // Audit K.1: extend exp_avg_ / exp_avg_sq_ (and max_exp_avg_sq_ when
+    // amsgrad_) when add_param_group appends new parameters mid-training.
+    auto on_parameters_appended_(size_t old_count, size_t new_count) -> void override;
+
 private:
     double lr_;
     double beta1_;
