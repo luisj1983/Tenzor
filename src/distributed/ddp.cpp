@@ -18,6 +18,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/utils/log.hpp"
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <stdexcept>
 #include <numeric>
@@ -120,6 +121,14 @@ auto DistributedDataParallel::init_comm_resources() -> void {
     // synchronize with the default (stream 0) compute stream -- the
     // only ordering enforced is via the per-bucket event recorded
     // below and waited on in sync_comm().
+    // Audit N.1: pre-size the per-bucket stream/event vectors to exactly
+    // buckets_.size() and assert that every slot is populated with a
+    // non-null handle before we leave init. The async all-reduce path
+    // (all_reduce_bucket_async) and the sync_comm() wait loop both index
+    // these vectors by bucket index; if any slot is null OR if the
+    // vector sizes don't agree, the async path silently falls back to
+    // synchronous all-reduce while sync_comm() never learns it must
+    // skip the wait, producing a stale-event hazard.
     bucket_streams_.assign(buckets_.size(), nullptr);
     bucket_events_.assign(buckets_.size(), nullptr);
     for (size_t i = 0; i < buckets_.size(); ++i) {
@@ -134,6 +143,17 @@ auto DistributedDataParallel::init_comm_resources() -> void {
         DDP_CUDA_CHECK(cudaEventCreateWithFlags(&event,
                                                  cudaEventDisableTiming));
         bucket_events_[i] = static_cast<void*>(event);
+    }
+    // Audit N.1: post-condition for the async path. The async dispatch
+    // assumes (a) sizes match and (b) every slot is non-null. If either
+    // invariant is broken we'd silently mix sync and async paths.
+    assert(bucket_streams_.size() == buckets_.size());
+    assert(bucket_events_.size() == buckets_.size());
+    for (size_t i = 0; i < buckets_.size(); ++i) {
+        assert(bucket_streams_[i] != nullptr &&
+               "DDP bucket stream init produced a null handle");
+        assert(bucket_events_[i] != nullptr &&
+               "DDP bucket event init produced a null handle");
     }
 #else
     // CPU-only build: no stream resources needed
@@ -188,7 +208,9 @@ auto DistributedDataParallel::reset_buckets() -> void {
         bucket.ready = false;
         bucket.pending_count = 0;
     }
-    pending_async_ops_.store(0, std::memory_order_relaxed);
+    // Audit N.1: release-store so a subsequent acquire-load in
+    // sync_comm()/all_reduce_bucket_async observes the reset.
+    pending_async_ops_.store(0, std::memory_order_release);
 }
 
 auto DistributedDataParallel::register_grad_hooks() -> void {
@@ -356,11 +378,39 @@ auto DistributedDataParallel::all_reduce_bucket_async(
     // Record a CUDA event on THIS bucket's stream after its
     // all-reduce(s) complete. The default compute stream will later
     // cudaStreamWaitEvent on this event before the optimizer step.
+    //
+    // Audit N.1: debug-build assertion that bucket_idx is in bounds
+    // before the async path runs. init_comm_resources() pre-sizes
+    // bucket_events_/bucket_streams_ to buckets_.size() and asserts
+    // non-null, so by the time we get here both indices must be
+    // valid; if not, the async record-and-increment guard below
+    // would be skipped while sync_comm() still iterates every event
+    // slot — exactly the silent-stale-event hazard the audit flags.
+    assert(bucket_idx < bucket_events_.size() &&
+           "DDP async path entered with out-of-bounds bucket_idx");
+    assert(bucket_events_[bucket_idx] != nullptr &&
+           "DDP async path entered with null event handle");
+
+    // Audit N.1: paired record-and-increment. The invariant for
+    // sync_comm() is "a bucket either records its event AND
+    // increments pending_async_ops_, OR it does neither" — sync_comm()
+    // uses the counter as a fast-path skip but iterates every event
+    // slot, so a recorded-but-uncounted event is harmless while a
+    // counted-but-unrecorded event would wait on a stale event from
+    // a previous step. We therefore record FIRST and only bump the
+    // counter once the record has succeeded (DDP_CUDA_CHECK throws
+    // on failure, aborting before fetch_add).
+    //
+    // The fetch_add uses memory_order_release so that the matching
+    // memory_order_acquire load in sync_comm() observes every prior
+    // bucket_events_[i] write made by the launching thread before
+    // it sees a non-zero counter — i.e. the counter is the
+    // synchronisation point that publishes the recorded events.
     if (bucket_idx < bucket_events_.size() && bucket_events_[bucket_idx]) {
         cudaEvent_t event = static_cast<cudaEvent_t>(bucket_events_[bucket_idx]);
         cudaStream_t stream = static_cast<cudaStream_t>(this_bucket_stream);
         DDP_CUDA_CHECK(cudaEventRecord(event, stream));
-        pending_async_ops_.fetch_add(1, std::memory_order_relaxed);
+        pending_async_ops_.fetch_add(1, std::memory_order_release);
     }
 
     bucket.ready = true;
@@ -377,7 +427,13 @@ auto DistributedDataParallel::sync_comm() -> void {
     }
 
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    if (pending_async_ops_.load(std::memory_order_relaxed) == 0) {
+    // Audit N.1: pair the acquire-load here with the release-fetch_add in
+    // all_reduce_bucket_async(). Acquire semantics guarantee that if we
+    // observe pending_async_ops_ > 0, we also observe every
+    // bucket_events_[i] handle that was published before the counter
+    // bump — closing the check-then-act window that a relaxed load
+    // left open against a concurrent launcher.
+    if (pending_async_ops_.load(std::memory_order_acquire) == 0) {
         return; // No async operations in flight
     }
 
@@ -400,7 +456,10 @@ auto DistributedDataParallel::sync_comm() -> void {
         }
     }
 
-    pending_async_ops_.store(0, std::memory_order_relaxed);
+    // Audit N.1: release-store pairs with any subsequent acquire-load
+    // (e.g. the next sync_comm() entry, or reset_buckets() before the
+    // next step) so observers see the just-completed event waits.
+    pending_async_ops_.store(0, std::memory_order_release);
 #endif
 }
 

@@ -200,6 +200,22 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     if (config_.world_size <= 0) {
         throw std::invalid_argument("world_size must be > 0");
     }
+    // Audit N.2: int8 state quantisation only ever runs inside the
+    // offload paths (offload_states_to_cpu / NVMe write). The scale
+    // tensors are allocated lazily as empty placeholders and then
+    // populated on the first quantise-and-offload pass. With both
+    // offload flags off that populate path is unreachable, so the
+    // first downstream consumer (quantize_buffer / dequantize on
+    // fetch) would either crash on an empty scale or silently skip
+    // and corrupt the optimiser state. Refuse the combo at construction.
+    if (config_.quantize_offloaded_states_int8 &&
+        !config_.offload_to_cpu &&
+        !config_.offload_to_nvme) {
+        throw std::invalid_argument(
+            "ZeRO: int8 state quantization requires offload_to_cpu or "
+            "offload_to_nvme; quantize_offloaded_states_int8=true with "
+            "no offload would never run the populate path");
+    }
 
     if (!config_.process_group && distributed::is_initialized()) {
         config_.process_group = distributed::DistributedContext::get_process_group();
@@ -252,6 +268,16 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     }
     if (config_.world_size <= 0) {
         throw std::invalid_argument("world_size must be > 0");
+    }
+    // Audit N.2: same int8-without-offload guard as the parameter-list
+    // constructor above — see that block for the full rationale.
+    if (config_.quantize_offloaded_states_int8 &&
+        !config_.offload_to_cpu &&
+        !config_.offload_to_nvme) {
+        throw std::invalid_argument(
+            "ZeRO: int8 state quantization requires offload_to_cpu or "
+            "offload_to_nvme; quantize_offloaded_states_int8=true with "
+            "no offload would never run the populate path");
     }
 
     if (!config_.process_group && distributed::is_initialized()) {
