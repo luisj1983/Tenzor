@@ -3194,15 +3194,31 @@ auto flash_attention_backward_cuda(
     // tensor (a single uint32) so the backward kernel can regenerate the
     // exact same dropout mask the forward used. philox_offset is the
     // counter[3] slot — fixed at 0 in our forward kernel, so unused.
+    //
+    // Audit K.4: avoid unconditional `philox_seed.to(Device::cpu()).contiguous()`
+    // — that path serialises the stream and triggers a full allocator + dispatch
+    // round-trip for what is at most an 8-byte scalar. `dtype()` is a host-side
+    // metadata query (no transfer); the actual value is fetched with a single
+    // `cudaMemcpy` D2H of the scalar, only when dropout is active.
     uint32_t rng_seed = 0;
     if (dropout_p > 0.0f && philox_seed.numel() > 0) {
-        auto seed_cpu = philox_seed.to(Device::cpu()).contiguous();
-        // Forward stores the seed as a single int64 or uint32 depending on
-        // the producer; coerce via int64 to avoid dtype-specific code.
-        Tensor seed_i64 = (seed_cpu.dtype() == DType::Int64)
-                          ? seed_cpu
-                          : seed_cpu.to(DType::Int64);
-        rng_seed = static_cast<uint32_t>(seed_i64.data<int64_t>()[0]);
+        const DType seed_dtype = philox_seed.dtype();
+        if (seed_dtype == DType::Int64) {
+            int64_t seed_host = 0;
+            cudaMemcpy(&seed_host, philox_seed.data_ptr(),
+                       sizeof(int64_t), cudaMemcpyDeviceToHost);
+            rng_seed = static_cast<uint32_t>(seed_host);
+        } else if (seed_dtype == DType::Int32) {
+            int32_t seed_host = 0;
+            cudaMemcpy(&seed_host, philox_seed.data_ptr(),
+                       sizeof(int32_t), cudaMemcpyDeviceToHost);
+            rng_seed = static_cast<uint32_t>(seed_host);
+        } else {
+            throw std::runtime_error(
+                "flash_attention_backward_cuda: philox_seed must be Int32 or "
+                "Int64 (got dtype id " +
+                std::to_string(static_cast<int>(seed_dtype)) + ").");
+        }
     }
     (void)philox_offset;  // counter[3] hardcoded to 0 in philox_uniform
     int64_t batch_heads = Q.shape()[0];
