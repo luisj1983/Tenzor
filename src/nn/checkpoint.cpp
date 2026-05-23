@@ -138,11 +138,15 @@ auto ModelCheckpoint::save(
         checkpoint.optimizer_state = optimizer->state_dict();
     }
 
-    // Add scheduler state if available and configured
+    // Add scheduler state if available and configured (audit Q.11).
+    //
+    // Prior to v3 this block wrote num_scheduler_tensors=0 even when
+    // save_scheduler was set, so LR schedules silently reset on every
+    // resume.  Now we serialise LRScheduler::state_dict() — base class
+    // captures last_lr; derived classes overlay their own counters
+    // (step_count_, epoch_, T_cur_, …).
     if (scheduler && config_.save_scheduler) {
-        // Schedulers store state as tensors in state_dict
-        // For now, we'll store basic scheduler info
-        // Full scheduler state can be added if needed
+        checkpoint.scheduler_state = scheduler->state_dict();
     }
 
     // Add metadata
@@ -273,6 +277,27 @@ auto ModelCheckpoint::load(const std::string& path) -> Checkpoint {
         }
     }
 
+    return c;
+}
+
+auto ModelCheckpoint::load_and_apply(
+    const std::string& path,
+    Module* module,
+    optim::Optimizer* optimizer,
+    optim::LRScheduler* scheduler
+) -> Checkpoint {
+    Checkpoint c = load(path);
+    if (module && !c.model_state.empty()) {
+        module->load_state_dict(c.model_state);
+    }
+    if (optimizer && !c.optimizer_state.empty()) {
+        optimizer->load_state_dict(c.optimizer_state);
+    }
+    // audit Q.11: actually apply the deserialised scheduler state — prior
+    // to v3 this map was always empty so load was a no-op.
+    if (scheduler && !c.scheduler_state.empty()) {
+        scheduler->load_state_dict(c.scheduler_state);
+    }
     return c;
 }
 

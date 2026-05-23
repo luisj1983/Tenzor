@@ -11,6 +11,8 @@
 #include "optimizer.hpp"
 #include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include <cmath>
 #include <numbers>
@@ -83,6 +85,26 @@ public:
         return {get_last_lr()};
     }
 
+    /**
+     * @brief Serialise scheduler state for checkpointing (audit Q.11).
+     *
+     * Returns scalar Tensors mirroring the optimiser state_dict convention
+     * (Float64/Int64 1-element CPU tensors). The base implementation
+     * captures @c last_lr — every derived class is expected to call the
+     * base and overlay its own counters (epoch_, step_count_, T_cur_, …).
+     *
+     * @return Map of state name to scalar Tensor on CPU.
+     */
+    virtual auto state_dict() const -> std::unordered_map<std::string, Tensor>;
+
+    /**
+     * @brief Restore scheduler state from a state_dict (audit Q.11).
+     *
+     * @param state Map produced by a previous @c state_dict call.
+     */
+    virtual auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void;
+
 protected:
     LRScheduler() = default;
 };
@@ -133,6 +155,10 @@ public:
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     Optimizer* optimizer_;
@@ -185,6 +211,10 @@ public:
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     Optimizer* optimizer_;
@@ -247,6 +277,10 @@ public:
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     Optimizer* optimizer_;
@@ -358,6 +392,10 @@ public:
 
     // Check if in cooldown
     auto in_cooldown() const -> bool { return cooldown_counter_ > 0; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     enum class OptimizerType { SGD, Adam, AdamW };
@@ -482,6 +520,10 @@ public:
 
     // Get current cycle
     auto get_cycle() const -> int64_t { return step_count_ / cycle_size_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     enum class OptimizerType { SGD, Adam, AdamW };
@@ -608,6 +650,10 @@ public:
     // Get current step
     auto get_step() const -> int64_t { return step_count_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     enum class OptimizerType { SGD, Adam, AdamW };
 
@@ -710,6 +756,10 @@ public:
     // Get current period length
     auto get_T_i() const -> int64_t { return T_i_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     enum class OptimizerType { SGD, Adam, AdamW };
 
@@ -806,6 +856,10 @@ public:
     /** @brief Get the warmup steps count. */
     auto warmup_steps() const -> int64_t { return warmup_steps_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     std::shared_ptr<LRScheduler> base_scheduler_;
@@ -838,6 +892,10 @@ public:
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     LrLambda lr_lambda_;
@@ -866,6 +924,10 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     Optimizer& optimizer_;
@@ -901,6 +963,10 @@ public:
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     int total_iters_;
@@ -924,6 +990,10 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     double factor_;
@@ -946,6 +1016,10 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     Optimizer& optimizer_;
@@ -972,6 +1046,10 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     LambdaFunc lr_lambda_;
@@ -994,6 +1072,10 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     Optimizer& optimizer_;
     std::vector<std::shared_ptr<LRScheduler>> schedulers_;
@@ -1014,6 +1096,10 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override;
+
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     std::vector<std::shared_ptr<LRScheduler>> schedulers_;

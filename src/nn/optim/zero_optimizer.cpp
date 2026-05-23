@@ -3739,36 +3739,24 @@ auto ZeROStage3Optimizer::prefetch_parameters(const std::vector<Tensor*>& params
 // Note: get_memory_stats() inherits from base class, no need to override
 
 auto ZeROStage3Optimizer::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    // Q.10: chain to the inherited Stage1/Stage2 state_dict so the base
+    // hyperparams (rank, world_size, momentum_*, variance_*) are serialised
+    // alongside Stage3's partition info. Without this overlay the
+    // Stage1/Stage2 optimiser state silently resets on load.
+    auto state = ZeROStage2Optimizer::state_dict();
+
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::unordered_map<std::string, Tensor> state;
+    // Overlay Stage3-specific keys (use stage3_ prefix to avoid clashing
+    // with any base-state keys with the same shape semantics).
+    state["stage3_stage"] = Tensor({1}, DType::Int32, Device::cpu());
+    state["stage3_stage"].fill_(3);  // Stage 3 marker
 
-    // Add partition metadata
-    state["rank"] = Tensor({1}, DType::Int32, Device::cpu());
-    state["rank"].fill_(config_.rank);
-
-    state["world_size"] = Tensor({1}, DType::Int32, Device::cpu());
-    state["world_size"].fill_(config_.world_size);
-
-    state["stage"] = Tensor({1}, DType::Int32, Device::cpu());
-    state["stage"].fill_(3);  // Stage 3
-
-    // Add optimizer states for local partition
-    const auto& partition = local_partition();
-    for (size_t i = 0; i < partition.momentum.size(); ++i) {
-        std::string key = "momentum_" + std::to_string(i);
-        state[key] = partition.momentum[i];
-    }
-
-    for (size_t i = 0; i < partition.variance.size(); ++i) {
-        std::string key = "variance_" + std::to_string(i);
-        state[key] = partition.variance[i];
-    }
-
-    // Add parameter partition info
+    // Stage3 parameter partition info (offset/size per parameter) lives
+    // in param_states_, which Stage1/Stage2 do not own — record it here.
     size_t param_idx = 0;
     for (const auto& [param, param_state] : param_states_) {
-        std::string prefix = "param_" + std::to_string(param_idx) + "_";
+        std::string prefix = "stage3_param_" + std::to_string(param_idx) + "_";
 
         state[prefix + "partition_offset"] = Tensor({1}, DType::Int64, Device::cpu());
         state[prefix + "partition_offset"].fill_(static_cast<int64_t>(param_state.partition_offset));
@@ -3779,47 +3767,45 @@ auto ZeROStage3Optimizer::state_dict() const -> std::unordered_map<std::string, 
         param_idx++;
     }
 
+    state["stage3_num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["stage3_num_params"].fill_(static_cast<int64_t>(param_idx));
+
     return state;
 }
 
 auto ZeROStage3Optimizer::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Q.10: load base (Stage1/Stage2) state first so lr/beta/eps/step_count/
+    // exp_avg/exp_avg_sq are restored, then unpack Stage3-specific keys.
+    ZeROStage2Optimizer::load_state_dict(state);
+
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Verify rank and world_size match
-    if (state.count("rank")) {
-        int saved_rank = state.at("rank").data<int32_t>()[0];
-        if (saved_rank != config_.rank) {
+    // Sanity-check the Stage3 marker if present (older checkpoints may
+    // predate the overlay and simply lack the stage3_* keys — load_base
+    // has already restored the base state in that case).
+    if (state.count("stage3_stage")) {
+        int saved_stage = state.at("stage3_stage").data<int32_t>()[0];
+        if (saved_stage != 3) {
             throw std::runtime_error(
-                "Rank mismatch: saved=" + std::to_string(saved_rank) +
-                ", current=" + std::to_string(config_.rank)
+                "ZeROStage3Optimizer::load_state_dict: stage mismatch - saved=" +
+                std::to_string(saved_stage) + ", expected=3"
             );
         }
     }
 
-    if (state.count("world_size")) {
-        int saved_world_size = state.at("world_size").data<int32_t>()[0];
-        if (saved_world_size != config_.world_size) {
+    // Stage3 partition-info keys are restored if present, but we do not
+    // forcibly rebuild param_states_ here — those are reconstructed via
+    // register_model on the live model. The saved offsets/sizes act as a
+    // consistency check.
+    if (state.count("stage3_num_params")) {
+        int64_t saved_num = state.at("stage3_num_params").data<int64_t>()[0];
+        int64_t current_num = static_cast<int64_t>(param_states_.size());
+        if (saved_num != current_num) {
             throw std::runtime_error(
-                "World size mismatch: saved=" + std::to_string(saved_world_size) +
-                ", current=" + std::to_string(config_.world_size)
+                "ZeROStage3Optimizer::load_state_dict: stage3 param count "
+                "mismatch - saved=" + std::to_string(saved_num) +
+                ", current=" + std::to_string(current_num)
             );
-        }
-    }
-
-    // Load optimizer states
-    auto& partition = local_partition();
-
-    for (size_t i = 0; i < partition.momentum.size(); ++i) {
-        std::string key = "momentum_" + std::to_string(i);
-        if (state.count(key)) {
-            partition.momentum[i] = state.at(key).to(partition.device);
-        }
-    }
-
-    for (size_t i = 0; i < partition.variance.size(); ++i) {
-        std::string key = "variance_" + std::to_string(i);
-        if (state.count(key)) {
-            partition.variance[i] = state.at(key).to(partition.device);
         }
     }
 }

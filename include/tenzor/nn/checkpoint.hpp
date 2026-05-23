@@ -30,8 +30,15 @@ namespace nn {
  * so save/load survives across the dropout / BN-noise / sampling
  * random sequence.  v1 files are read with rng_state left empty —
  * callers should treat that as "RNG was not captured".
+ *
+ * v3 (audit Q.11): the existing scheduler_state section now actually
+ * carries the LRScheduler state_dict (step_count_, last_epoch_,
+ * last_lr, plus schedule-specific scalars).  v2 files left
+ * scheduler_state empty even when save_scheduler=true; reading a v2
+ * file with num_scheduler_tensors == 0 still works since the new
+ * code reads whatever count was written.
  */
-constexpr uint32_t CHECKPOINT_VERSION = 2;
+constexpr uint32_t CHECKPOINT_VERSION = 3;
 
 /**
  * @brief Checkpoint file magic number for format identification
@@ -217,6 +224,29 @@ public:
      * @endcode
      */
     auto load(const std::string& path) -> Checkpoint;
+
+    /**
+     * @brief Load a checkpoint and apply it to live module / optimizer /
+     *        scheduler (audit Q.11).
+     *
+     * Convenience entry point that reads the file via @c load and then
+     * invokes the @c load_state_dict methods on each provided object.
+     * Any null pointer skips the corresponding section.  The fully
+     * deserialised @c Checkpoint is returned so callers can still
+     * inspect metadata / RNG state.
+     *
+     * @param path File path to load checkpoint from
+     * @param module Module to restore (optional)
+     * @param optimizer Optimizer to restore (optional)
+     * @param scheduler LRScheduler to restore (optional)
+     * @return Loaded checkpoint data
+     */
+    auto load_and_apply(
+        const std::string& path,
+        Module* module = nullptr,
+        optim::Optimizer* optimizer = nullptr,
+        optim::LRScheduler* scheduler = nullptr
+    ) -> Checkpoint;
 
     /**
      * @brief Save only model state (no optimizer/scheduler)
