@@ -2084,6 +2084,14 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TopKBackward"; }
     auto op_id() const -> OpId override { return OpId::TopK; }
+    // Audit J.1: expose k/dim so the vmap dim-shifted passthrough rule
+    // can rebuild the forward attrs with a shifted dim.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::K, k_);
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t k_;
     int64_t dim_;
@@ -2106,6 +2114,13 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SortBackward"; }
     auto op_id() const -> OpId override { return OpId::Sort; }
+    // Audit J.1: expose dim so the vmap dim-shifted passthrough rule
+    // can rebuild the forward attrs with a shifted dim.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        return attrs;
+    }
 private:
     int64_t dim_;
 };

@@ -12,6 +12,7 @@
 
 #include "variable.hpp"
 #include "../ops/op_id.hpp"
+#include "../backend/op_attributes.hpp"
 #include <functional>
 #include <cstdint>
 #include <string>
@@ -57,6 +58,36 @@ auto has_batching_rule(const std::string& op_name) -> bool;
  */
 void register_batching_rule(OpId op_id, BatchingRule rule);
 auto has_batching_rule(OpId op_id) -> bool;
+
+/**
+ * @brief Factory: build a batching rule for ops that reduce/operate along a
+ *        single `dim` attribute (Sum/Mean/Prod/Var/Std/Max/Min/TopK/Sort/…).
+ *
+ * Audit J.1. The legacy passthrough rule called `func(batched_input)`
+ * unchanged, which is incorrect for any op carrying a `dim` argument: when
+ * vmap prepends a batch axis, the user's `dim` refers to a position in the
+ * *unbatched* view, not in the batched tensor we hand to the kernel.
+ *
+ * The returned rule:
+ *   1. Probes the user function on a single batch slice to recover the
+ *      forward `OpId` and `OpAttributes` (via `Function::saved_attributes()`,
+ *      wired in audit A.4).
+ *   2. Reads the saved dim from `dim_attr_key`. Normalises a negative dim
+ *      against the *unbatched* ndim. If `dim >= batch_dim`, shifts to
+ *      `dim + 1` so the batched call hits the user's intended axis.
+ *   3. Dispatches the op directly on the full batched input with the
+ *      rebuilt attributes, returning the batched output as a `Variable`.
+ *
+ * If the saved attributes carry no dim entry (e.g. full reduction), the
+ * rule falls back to loop-and-stack — there's no single-axis shift that
+ * preserves per-sample full reductions.
+ *
+ * @param dim_attr_key The AttrKey under which the op stores its dim (the
+ *                     common case is `AttrKey::Dim`; supplied as an arg so
+ *                     future ops using a different key can reuse the
+ *                     factory without forking the body).
+ */
+auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule;
 
 /**
  * @brief Initialize built-in batching rules.

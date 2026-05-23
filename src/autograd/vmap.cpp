@@ -1,5 +1,7 @@
 #include "tenzor/autograd/vmap.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/math.hpp"
@@ -47,6 +49,94 @@ void register_batching_rule(OpId op_id, BatchingRule rule) {
 
 auto has_batching_rule(OpId op_id) -> bool {
     return batching_rules_by_opid().count(op_id) > 0;
+}
+
+// Forward decl: defined below; used as the fallback path when a
+// dim-aware passthrough rule sees no dim attribute (e.g. full reduction)
+// or otherwise can't safely shift.
+static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& func,
+                                const Variable& batched_input,
+                                int64_t batch_dim) -> Variable;
+
+auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule {
+    // Audit J.1. The legacy passthrough_rule was wrong for any op that
+    // takes a `dim` argument: with vmap prepending a batch axis, the
+    // user's `dim` indexes the *unbatched* view, but we hand the kernel
+    // the full batched tensor. Without a shift, `sum(x, dim=0)` over a
+    // (B, N) tensor reduces over the batch axis instead of N.
+    //
+    // The rule below probes the user function on a single slice to
+    // recover the forward OpId and saved OpAttributes, normalises the
+    // saved dim against the *unbatched* ndim, shifts it past batch_dim,
+    // and dispatches the op directly with the rebuilt attributes on the
+    // full batched input.
+    return [dim_attr_key](const std::function<Variable(const Variable&)>& func,
+                          const Variable& batched_input,
+                          int64_t batch_dim) -> Variable {
+        auto input_tensor = batched_input.tensor();
+        int64_t batched_ndim = static_cast<int64_t>(input_tensor.shape().size());
+        int64_t unbatched_ndim = batched_ndim - 1;
+
+        // Probe: run the user function on the first slice to discover the
+        // forward OpId / saved attributes. We don't reuse the probe result
+        // for the output — its shape is the per-element shape, not the
+        // batched shape — but it's the only generic way to recover the
+        // op identity inside a batching rule (the rule doesn't carry the
+        // OpId itself; it's installed by name/OpId from outside).
+        auto probe_slice = tenzor::select(input_tensor, batch_dim, 0);
+        Variable probe(probe_slice, batched_input.requires_grad());
+        auto probe_result = func(probe);
+        auto grad_fn = probe_result.grad_fn();
+
+        // Without a grad_fn we have nothing to inspect — fall back to
+        // loop-and-stack. This also catches the case where the user's
+        // function uses raw tensor ops (no autograd) — those naturally
+        // work via the loop fallback.
+        if (!grad_fn) {
+            return vmap_loop_and_stack(func, batched_input, batch_dim);
+        }
+
+        OpId op = grad_fn->op_id();
+        if (op == OpId::Unknown) {
+            return vmap_loop_and_stack(func, batched_input, batch_dim);
+        }
+
+        OpAttributes attrs = grad_fn->saved_attributes();
+        if (!attrs.has(dim_attr_key)) {
+            // No explicit dim recorded → full reduction (or the op was
+            // installed by an older subclass that doesn't yet override
+            // saved_attributes). Either way, there's no single-axis
+            // shift that gives per-sample results; loop-and-stack is
+            // the only correct fallback.
+            return vmap_loop_and_stack(func, batched_input, batch_dim);
+        }
+
+        int64_t dim = attrs.get_int(dim_attr_key);
+        // Normalise negative dim against the *unbatched* ndim — that's
+        // the view the user's `func` operates in.
+        if (dim < 0) {
+            dim += unbatched_ndim;
+        }
+        // Shift past the batch axis so we hit the user's intended axis
+        // in the batched tensor.
+        int64_t new_dim = (dim >= batch_dim) ? dim + 1 : dim;
+        attrs.set(dim_attr_key, new_dim);
+
+        std::vector<Tensor> inputs = {input_tensor};
+        auto outputs = dispatch(op, inputs, attrs);
+        if (outputs.empty()) {
+            return vmap_loop_and_stack(func, batched_input, batch_dim);
+        }
+        // Single-output ops (Sum/Mean/Prod/Var/Std/Max/Min): just outputs[0].
+        // Multi-output ops (TopK, Sort): the user's `func` returned one
+        // of the tuple branches; the probe's grad_fn doesn't tell us
+        // which slot. We mirror the probe's output count and pick the
+        // same slot as the probe_result. Without an output-index hook
+        // we default to slot 0 (values branch for TopK/Sort), which is
+        // the differentiable branch and matches what `func` returns in
+        // the common case.
+        return Variable(outputs[0], batched_input.requires_grad());
+    };
 }
 
 void init_builtin_batching_rules() {
@@ -167,16 +257,30 @@ void init_builtin_batching_rules() {
     register_batching_rule("ExpandBackward", shape_passthrough);
 
     // ====================================================================
-    // Reduction ops: sum, mean, etc.
-    // These reduce over a specific dim; batch dim is separate
+    // Reduction ops: sum, mean, prod, var, std, max, min
+    // Audit J.1: these all carry a `dim` attribute that must shift past
+    // the batch axis. dim_shifted_passthrough does the read-shift-redispatch
+    // dance using saved_attributes() (wired in A.4). When the saved attrs
+    // lack a dim entry (full reduction), the rule falls back to loop-and-
+    // stack so per-sample full reductions still work.
     // ====================================================================
-    register_batching_rule("SumBackward", passthrough_rule);
-    register_batching_rule("MeanBackward", passthrough_rule);
-    register_batching_rule("ProdBackward", passthrough_rule);
-    register_batching_rule("VarBackward", passthrough_rule);
-    register_batching_rule("StdBackward", passthrough_rule);
-    register_batching_rule("MaxBackward", passthrough_rule);
-    register_batching_rule("MinBackward", passthrough_rule);
+    auto reduction_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
+    register_batching_rule("SumBackward",  reduction_dim_rule);
+    register_batching_rule("MeanBackward", reduction_dim_rule);
+    register_batching_rule("ProdBackward", reduction_dim_rule);
+    register_batching_rule("VarBackward",  reduction_dim_rule);
+    register_batching_rule("StdBackward",  reduction_dim_rule);
+    register_batching_rule("MaxBackward",  reduction_dim_rule);
+    register_batching_rule("MinBackward",  reduction_dim_rule);
+    // OpId-keyed entries — these are the primary hit path now that the
+    // reduction Function subclasses opt in to op_id() (audit A.2).
+    register_batching_rule(OpId::Sum,  reduction_dim_rule);
+    register_batching_rule(OpId::Mean, reduction_dim_rule);
+    register_batching_rule(OpId::Prod, reduction_dim_rule);
+    register_batching_rule(OpId::Var,  reduction_dim_rule);
+    register_batching_rule(OpId::Std,  reduction_dim_rule);
+    register_batching_rule(OpId::Max,  reduction_dim_rule);
+    register_batching_rule(OpId::Min,  reduction_dim_rule);
 
     // ====================================================================
     // Concatenation/Indexing ops
@@ -243,11 +347,21 @@ void init_builtin_batching_rules() {
     register_batching_rule("NestedAttentionBackward", shape_passthrough);
 
     // ====================================================================
-    // TopK/Sort: operate on a specific dim, batch-independent
+    // TopK / Sort / ArgSort: operate on a specific dim.
+    // Audit J.1: same fix as the reductions above — the dim recorded by
+    // the user must be shifted past the batch axis. TopK and Sort are
+    // multi-output (values, indices); the user's `func` returns one of
+    // those branches and the rule picks output slot 0 (values branch).
+    // ArgSort is non-differentiable so its grad_fn never appears in a
+    // probe; the registration is harmless and the loop-and-stack path
+    // continues to cover argsort-as-tensor-op callers.
     // ====================================================================
-    register_batching_rule("TopKBackward", passthrough_rule);
-    register_batching_rule("SortBackward", passthrough_rule);
-    register_batching_rule("ArgsortBackward", passthrough_rule);
+    register_batching_rule("TopKBackward",    reduction_dim_rule);
+    register_batching_rule("SortBackward",    reduction_dim_rule);
+    register_batching_rule("ArgSortBackward", reduction_dim_rule);
+    register_batching_rule(OpId::TopK,    reduction_dim_rule);
+    register_batching_rule(OpId::Sort,    reduction_dim_rule);
+    register_batching_rule(OpId::ArgSort, reduction_dim_rule);
 
     // ====================================================================
     // Scatter operations
