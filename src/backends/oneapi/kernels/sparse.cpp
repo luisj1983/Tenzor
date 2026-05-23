@@ -72,7 +72,16 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
                     sum += static_cast<float>(val_ptr[j]) *
                            static_cast<float>(x_ptr[col_ptr[j]]);
                 }
-                y_ptr[row] = static_cast<sycl::half>(sum);
+                // L.2: write-back via the SYCL half ctor (round-to-nearest-even),
+                // not static_cast<sycl::half> which is permitted to truncate on
+                // PVC Gen1 and diverges from CUDA's __float2half_rn round-trip.
+                // Saturate ±Inf → ±65504 (max finite half) and propagate NaN so
+                // reductions of mixed magnitudes don't silently produce ±Inf.
+                constexpr float kHalfMax = 65504.0f;
+                float clamped = sycl::isnan(sum)
+                                    ? sum
+                                    : sycl::fmin(sycl::fmax(sum, -kHalfMax), kHalfMax);
+                y_ptr[row] = sycl::half{clamped};
             }).wait();
         return y;
     }

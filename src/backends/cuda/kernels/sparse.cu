@@ -17,9 +17,12 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "../cusparse_handle_pool.hpp"
+#include "cuda_common.cuh"  // For TENZOR_CUDA_CHECK (K.3 hygiene)
 
 #include <cusparse.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -111,6 +114,122 @@ __global__ void cast_i64_to_i32(const int64_t* __restrict__ src,
     if (i < n) dst[i] = static_cast<int32_t>(src[i]);
 }
 
+// ---------------------------------------------------------------------------
+// F16/BF16 widen kernels — used by the spmm/spmv widen-narrow path to keep
+// all temporary buffers stream-ordered (cudaMallocAsync) rather than allocated
+// via Tensor::to() (which uses the synchronous default-stream allocator and
+// races with concurrent streams operating on the same low-precision sparse
+// matrix). See audit L.1.
+// ---------------------------------------------------------------------------
+__global__ void widen_f16_to_f32(const __half* __restrict__ src,
+                                  float* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __half2float(src[i]);
+}
+
+__global__ void widen_bf16_to_f32(const __nv_bfloat16* __restrict__ src,
+                                   float* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __bfloat162float(src[i]);
+}
+
+__global__ void narrow_f32_to_f16(const float* __restrict__ src,
+                                   __half* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half(src[i]);
+}
+
+__global__ void narrow_f32_to_bf16(const float* __restrict__ src,
+                                    __nv_bfloat16* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2bfloat16(src[i]);
+}
+
+/// Widen a F16/BF16 GPU tensor to a freshly-allocated F32 tensor, with all
+/// memory and compute strictly bound to `stream` via cudaMallocAsync /
+/// cudaFreeAsync.  The returned Tensor owns the buffer via a custom deleter
+/// that releases it back to the stream-ordered pool.  Per-call allocation;
+/// no shared state — concurrent streams on the same source tensor never
+/// share temp storage.  (Audit L.1.)
+Tensor widen_to_f32_async(const Tensor& src, cudaStream_t stream) {
+    const int64_t n = src.numel();
+    float* d_buf = nullptr;
+    if (n > 0) {
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * sizeof(float), stream));
+    }
+    const int threads = 256;
+    const int blocks = static_cast<int>((n + threads - 1) / threads);
+
+    if (src.dtype() == DType::Float16) {
+        if (n > 0) {
+            widen_f16_to_f32<<<blocks, threads, 0, stream>>>(
+                reinterpret_cast<const __half*>(src.data_ptr()), d_buf, n);
+            TENZOR_CUDA_CHECK(cudaGetLastError());
+        }
+    } else if (src.dtype() == DType::BFloat16) {
+        if (n > 0) {
+            widen_bf16_to_f32<<<blocks, threads, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()), d_buf, n);
+            TENZOR_CUDA_CHECK(cudaGetLastError());
+        }
+    } else {
+        if (d_buf) cudaFreeAsync(d_buf, stream);
+        throw std::runtime_error("widen_to_f32_async: unsupported src dtype");
+    }
+
+    // Capture stream by value in the deleter so the right pool reclaims it.
+    auto deleter = [stream](void* p) {
+        if (p) cudaFreeAsync(p, stream);
+    };
+    auto shape = src.shape();
+    return Tensor::from_blob(d_buf,
+                             std::vector<int64_t>(shape.begin(), shape.end()),
+                             DType::Float32, Device::cuda(),
+                             deleter);
+}
+
+/// Narrow an F32 GPU tensor back to F16 or BF16.  Allocates the destination
+/// buffer with cudaMallocAsync(... stream) so it's safe to interleave with
+/// other operations on the same stream; the returned Tensor's storage is
+/// released via cudaFreeAsync.  (Audit L.1.)
+Tensor narrow_from_f32_async(const Tensor& src_f32, DType target,
+                              cudaStream_t stream) {
+    const int64_t n = src_f32.numel();
+    void* d_buf = nullptr;
+    size_t elem_size = (target == DType::Float16) ? sizeof(__half) : sizeof(__nv_bfloat16);
+    if (n > 0) {
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * elem_size, stream));
+    }
+    const int threads = 256;
+    const int blocks = static_cast<int>((n + threads - 1) / threads);
+
+    if (target == DType::Float16) {
+        if (n > 0) {
+            narrow_f32_to_f16<<<blocks, threads, 0, stream>>>(
+                src_f32.data<float>(), reinterpret_cast<__half*>(d_buf), n);
+            TENZOR_CUDA_CHECK(cudaGetLastError());
+        }
+    } else if (target == DType::BFloat16) {
+        if (n > 0) {
+            narrow_f32_to_bf16<<<blocks, threads, 0, stream>>>(
+                src_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(d_buf), n);
+            TENZOR_CUDA_CHECK(cudaGetLastError());
+        }
+    } else {
+        if (d_buf) cudaFreeAsync(d_buf, stream);
+        throw std::runtime_error("narrow_from_f32_async: unsupported target dtype");
+    }
+
+    auto deleter = [stream](void* p) {
+        if (p) cudaFreeAsync(p, stream);
+    };
+    auto shape = src_f32.shape();
+    return Tensor::from_blob(d_buf,
+                             std::vector<int64_t>(shape.begin(), shape.end()),
+                             target, Device::cuda(),
+                             deleter);
+}
+
 /// CUDA kernel: convert Int32 crow_indices to Int64.
 __global__ void cast_i32_to_i64(const int32_t* __restrict__ src,
                                  int64_t* __restrict__ dst, int64_t n) {
@@ -193,18 +312,19 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStr
     }
 
     DType dtype = dense.dtype();
-    // Wave E4/G6 (deferred → landed): F16/BF16 via widen-narrow.
-    // cuSPARSE supports F16, but our dispatch path keeps F32/F64 only —
-    // route half-types through F32 for correctness.
+    // Audit L.1: F16/BF16 widen-narrow uses stream-ordered allocator (cudaMallocAsync)
+    // so two concurrent streams operating on the same low-precision sparse matrix do
+    // not race on temp allocation/deallocation.  Per-call (no caching), bound to
+    // `stream` end-to-end.  No CPU fallback — widen kernels run GPU-side.
     if (dtype == DType::Float16 || dtype == DType::BFloat16) {
-        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        auto sparse_f32_vals = widen_to_f32_async(sparse.values().contiguous(), stream);
         SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
             ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
             : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
                                        sparse_f32_vals, sparse.shape());
-        auto dense_f32 = dense.to(DType::Float32);
+        auto dense_f32 = widen_to_f32_async(dense.contiguous(), stream);
         auto result_f32 = cuda_spmm_kernel(sparse_f32, dense_f32, stream);
-        return result_f32.to(dtype);
+        return narrow_from_f32_async(result_f32, dtype, stream);
     }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
         throw std::runtime_error("cuda_spmm: only Float32/Float64/Float16/BFloat16 supported, got "
@@ -329,16 +449,19 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStrea
     }
 
     DType dtype = vec.dtype();
-    // Wave E4/G6 (deferred → landed): F16/BF16 via widen-narrow.
+    // Audit L.1: F16/BF16 widen-narrow uses stream-ordered allocator (cudaMallocAsync)
+    // so two concurrent streams operating on the same low-precision sparse matrix do
+    // not race on temp allocation/deallocation.  Per-call (no caching), bound to
+    // `stream` end-to-end.  No CPU fallback — widen kernels run GPU-side.
     if (dtype == DType::Float16 || dtype == DType::BFloat16) {
-        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        auto sparse_f32_vals = widen_to_f32_async(sparse.values().contiguous(), stream);
         SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
             ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
             : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
                                        sparse_f32_vals, sparse.shape());
-        auto vec_f32 = vec.to(DType::Float32);
+        auto vec_f32 = widen_to_f32_async(vec.contiguous(), stream);
         auto result_f32 = cuda_spmv_kernel(sparse_f32, vec_f32, stream);
-        return result_f32.to(dtype);
+        return narrow_from_f32_async(result_f32, dtype, stream);
     }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
         throw std::runtime_error("cuda_spmv: only Float32/Float64/Float16/BFloat16 supported, got "
