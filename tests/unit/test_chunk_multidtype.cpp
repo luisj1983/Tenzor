@@ -29,6 +29,25 @@ class ChunkMultiDTypeTest : public MultiBackendDTypeTest {};
 // Chunk Operation Tests
 // ============================================================================
 
+// audit-3 T.1 helper: verify chunk[i] equals the corresponding slice of the
+// input by comparing flat float-cast contents (handles Int32/Float32/Float64).
+static void expect_chunks_match_input_dim0(const Tensor& original,
+                                            const std::vector<Tensor>& chunks) {
+    auto orig_cpu = original.to(Device::cpu()).to(DType::Float32);
+    const float* od = orig_cpu.data<float>();
+    int64_t row_stride = orig_cpu.numel() / orig_cpu.shape()[0];
+    int64_t offset = 0;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        auto c_cpu = chunks[i].to(Device::cpu()).to(DType::Float32);
+        const float* cd = c_cpu.data<float>();
+        for (int64_t e = 0; e < c_cpu.numel(); ++e) {
+            EXPECT_FLOAT_EQ(cd[e], od[offset * row_stride + e])
+                << "chunk " << i << " element " << e;
+        }
+        offset += c_cpu.shape()[0];
+    }
+}
+
 TEST_P(ChunkMultiDTypeTest, BasicChunkEvenDivision) {
     // Test case: Shape (12, 20), split into 4 chunks along dim=0
     // Expected: 4 tensors of shape (3, 20)
@@ -44,6 +63,8 @@ TEST_P(ChunkMultiDTypeTest, BasicChunkEvenDivision) {
         EXPECT_EQ(shape[0], 3);
         EXPECT_EQ(shape[1], 20);
     }
+    // Element-level value check: each chunk slice equals the input slice.
+    expect_chunks_match_input_dim0(x, chunks);
 }
 
 TEST_P(ChunkMultiDTypeTest, BasicChunkUnevenDivision) {
@@ -67,6 +88,7 @@ TEST_P(ChunkMultiDTypeTest, BasicChunkUnevenDivision) {
     auto last_shape = chunks[3].shape();
     EXPECT_EQ(last_shape[0], 1);
     EXPECT_EQ(last_shape[1], 20);
+    expect_chunks_match_input_dim0(x, chunks);
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkFewerThanDimensionSize) {
@@ -85,6 +107,7 @@ TEST_P(ChunkMultiDTypeTest, ChunkFewerThanDimensionSize) {
         EXPECT_EQ(shape[0], 1);
         EXPECT_EQ(shape[1], 20);
     }
+    expect_chunks_match_input_dim0(x, chunks);
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkAlongDifferentDimension) {
@@ -102,6 +125,14 @@ TEST_P(ChunkMultiDTypeTest, ChunkAlongDifferentDimension) {
         EXPECT_EQ(shape[0], 10);
         EXPECT_EQ(shape[1], 4);
     }
+    // For dim=1, value check: each chunk's flat-cast Float32 elements equal 0.
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        auto c = chunks[i].to(Device::cpu()).to(DType::Float32);
+        const float* d = c.data<float>();
+        for (int64_t e = 0; e < c.numel(); ++e) {
+            EXPECT_FLOAT_EQ(d[e], 0.0f) << "chunk " << i << " elem " << e;
+        }
+    }
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkNegativeDimension) {
@@ -118,6 +149,14 @@ TEST_P(ChunkMultiDTypeTest, ChunkNegativeDimension) {
         EXPECT_EQ(shape[0], 10);
         EXPECT_EQ(shape[1], 5);
     }
+    // Value: zero-input chunks must be zero in every element.
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        auto c = chunks[i].to(Device::cpu()).to(DType::Float32);
+        const float* d = c.data<float>();
+        for (int64_t e = 0; e < c.numel(); ++e) {
+            EXPECT_FLOAT_EQ(d[e], 0.0f);
+        }
+    }
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkSingleChunk) {
@@ -130,6 +169,7 @@ TEST_P(ChunkMultiDTypeTest, ChunkSingleChunk) {
     auto shape = chunks[0].shape();
     EXPECT_EQ(shape[0], 10);
     EXPECT_EQ(shape[1], 20);
+    expect_chunks_match_input_dim0(x, chunks);
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkInvalidChunks) {
@@ -188,6 +228,17 @@ TEST_P(ChunkMultiDTypeTest, ChunkDataCorrectness) {
         EXPECT_EQ(shape[0], 2);  // Each chunk has 2 rows
         EXPECT_EQ(shape[1], 3);  // Same number of columns
     }
+
+    // Value assertion: chunks[0] is rows 0..1 = [0..5], chunks[1] = [6..11],
+    // chunks[2] = [12..17].
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        auto c_cpu = chunks[i].to(Device::cpu()).to(DType::Float32);
+        const float* d = c_cpu.data<float>();
+        for (int e = 0; e < 6; ++e) {
+            EXPECT_FLOAT_EQ(d[e], static_cast<float>(i * 6 + e))
+                << "chunk " << i << " element " << e;
+        }
+    }
 }
 
 TEST_P(ChunkMultiDTypeTest, Chunk3DTensor) {
@@ -220,6 +271,12 @@ TEST_P(ChunkMultiDTypeTest, Chunk3DTensor) {
     EXPECT_EQ(chunks2[1].shape()[2], 2);
     // Last chunk: (8, 4, 2)
     EXPECT_EQ(chunks2[2].shape()[2], 2);
+    // Value: zero-input chunks are zero in every element.
+    for (const auto& c : chunks0) {
+        auto cc = c.to(Device::cpu()).to(DType::Float32);
+        const float* d = cc.data<float>();
+        for (int64_t e = 0; e < cc.numel(); ++e) EXPECT_FLOAT_EQ(d[e], 0.0f);
+    }
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkLargeTensor) {
@@ -233,6 +290,10 @@ TEST_P(ChunkMultiDTypeTest, ChunkLargeTensor) {
         EXPECT_EQ(c.shape()[0], 10);
         EXPECT_EQ(c.shape()[1], 50);
     }
+    // First chunk first element must be 0 (input is zeros).
+    auto c0 = chunks[0].to(Device::cpu()).to(DType::Float32);
+    EXPECT_FLOAT_EQ(c0.data<float>()[0], 0.0f);
+    EXPECT_FLOAT_EQ(c0.data<float>()[c0.numel() - 1], 0.0f);
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkDTypePreservation) {
@@ -244,6 +305,9 @@ TEST_P(ChunkMultiDTypeTest, ChunkDTypePreservation) {
     for (const auto& c : chunks) {
         EXPECT_EQ(c.dtype(), dtype()) << "Chunk dtype mismatch";
     }
+    // Element-level: a zero-input chunk is element-wise zero.
+    auto c0 = chunks[0].to(Device::cpu()).to(DType::Float32);
+    for (int64_t e = 0; e < c0.numel(); ++e) EXPECT_FLOAT_EQ(c0.data<float>()[e], 0.0f);
 }
 
 TEST_P(ChunkMultiDTypeTest, ChunkDevicePreservation) {
@@ -255,6 +319,8 @@ TEST_P(ChunkMultiDTypeTest, ChunkDevicePreservation) {
     for (const auto& c : chunks) {
         EXPECT_EQ(c.device().type, device().type) << "Chunk device mismatch";
     }
+    auto c0 = chunks[0].to(Device::cpu()).to(DType::Float32);
+    for (int64_t e = 0; e < c0.numel(); ++e) EXPECT_FLOAT_EQ(c0.data<float>()[e], 0.0f);
 }
 
 // ============================================================================

@@ -53,6 +53,156 @@ backend-agnostic infrastructure or already parity-parameterized.
 - JIT / nested / lite / serving / distributed / utils — either
   parity-parameterized themselves or not per-backend.
 
+## Machine-readable known-intentional list (audit-3 T.14)
+
+`tools/check_multidtype_coverage.py` reads the block below — every line
+between the two markers is treated as a path (relative to the repo root)
+that is known to lack a `*_multidtype.cpp` companion **on purpose**. Any
+non-multidtype `test_*.cpp` that does not appear here AND has no sibling
+multidtype companion is a NEW gap and fails CI.
+
+To accept a new gap as intentional, append it to this block with a
+one-line trailing comment justifying CPU-only coverage.
+
+<!-- KNOWN-INTENTIONAL-START -->
+# audit-3 high-value candidates (entries from the table above) — still
+# aspirational, currently grandfathered so the ratchet passes. Move out of
+# this block once a companion lands.
+tests/nn/optim/test_adamw.cpp
+tests/test_autograd_transform.cpp
+tests/nn/quantization/test_awq_quantizer.cpp
+tests/test_ciou_loss.cpp
+tests/test_contiguous_fix.cpp
+tests/integration/test_cross_backend.cpp
+tests/nn/quantization/test_gptq_quantizer.cpp
+tests/test_grad_accumulation.cpp
+tests/autograd/test_higher_order_contract.cpp
+tests/autograd/test_higher_order_stubs_regression.cpp
+tests/autograd/test_inference_mode_guard.cpp
+tests/test_linear_reshape_integration.cpp
+tests/test_mask_rcnn_losses.cpp
+tests/test_minimal_training.cpp
+tests/ops/test_new_ops.cpp
+tests/integration/test_nn.cpp
+tests/nn/quantization/test_observers_extended.cpp
+tests/test_quantization_conversion.cpp
+tests/autograd/test_strict_linalg_grad.cpp
+tests/integration/test_training.cpp
+tests/integration/test_training_loops.cpp
+
+# Grandfathered pre-existing gaps as of audit-3 baseline (2026-05-22). These
+# are either infrastructure / backend-specific / regression-guard files
+# whose surface area does not benefit from a 5-backend × dtype sweep, or
+# files awaiting a follow-up companion. Adding a companion is welcome; the
+# ratchet only blocks NEW non-multidtype tests landing without one.
+tests/autograd/test_anomaly_mode_full.cpp
+tests/autograd/test_custom_op_higher_order.cpp
+tests/autograd/test_fused_linear_relu_higher_order.cpp
+tests/autograd/test_graph_viz.cpp
+tests/autograd/test_jvp_rules.cpp
+tests/autograd/test_linalg_matrix_norm_higher_order.cpp
+tests/autograd/test_linalg_vector_norm_higher_order.cpp
+tests/autograd/test_matrix_norm_backward.cpp
+tests/autograd/test_profiler.cpp
+tests/autograd/test_requires_grad_and_detach.cpp
+tests/autograd/test_upsample_bilinear_higher_order.cpp
+tests/backend/test_oneapi_backend.cpp
+tests/backend/test_oneapi_caching_allocator.cpp
+tests/backend/test_rocm_caching_allocator.cpp
+tests/backend/test_vulkan_caching_allocator.cpp
+tests/core/test_distributions_gap_fill.cpp
+tests/core/test_offload_engine.cpp
+tests/core/test_offload_engine_diagnostic.cpp
+tests/core/test_offload_engine_stress.cpp
+tests/core/test_transfer_benchmark.cpp
+tests/core/test_transfer_engine.cpp
+tests/core/test_vulkan_flash_attention_parity.cpp
+tests/integration/test_attention_autograd.cpp
+tests/integration/test_attention_contract.cpp
+tests/integration/test_attention_parity.cpp
+tests/integration/test_attention_philox_multibackend.cpp
+tests/integration/test_cuda_training.cpp
+tests/integration/test_debug_mlp.cpp
+tests/integration/test_distributed.cpp
+tests/integration/test_eager_parity.cpp
+tests/integration/test_model_backend_parity.cpp
+tests/integration/test_multi_gpu.cpp
+tests/integration/test_program_export.cpp
+tests/integration/test_quantization_e2e.cpp
+tests/nn/layers/test_interpolate_backward.cpp
+tests/nn/optim/test_optim_grad_flow.cpp
+tests/nn/optim/test_zero_partitioning.cpp
+tests/nn/test_fsdp2.cpp
+tests/nn/test_torch_pickle.cpp
+tests/sparse/test_sparse_triangular_solve.cpp
+tests/test_backend_parity_example.cpp
+tests/test_checkpoint_leaf_fix.cpp
+tests/test_convtranspose1d_dilation.cpp
+tests/test_cuda_cat.cpp
+tests/test_cuda_scalar_debug.cpp
+tests/test_flash_attention_dropout_backward.cpp
+tests/test_function_op_id.cpp
+tests/test_graph_optimizer_op_id.cpp
+tests/test_grid_sample_bicubic.cpp
+tests/test_group_instance_norm_f64_precision.cpp
+tests/test_layer_norm_f64_precision.cpp
+tests/test_layer_norm_variance_stability.cpp
+tests/test_lazy_tensor_backward.cpp
+tests/test_median_f16_bf16.cpp
+tests/test_non_differentiable_ops.cpp
+tests/test_onnx_import.cpp
+tests/test_optimizer_step_hooks.cpp
+tests/test_param_group_contract.cpp
+tests/test_phase11_backends.cpp
+tests/test_slice_backend_parity.cpp
+tests/test_slice_debug.cpp
+tests/test_tensor_lifetime.cpp
+tests/test_training_callbacks_lifecycle.cpp
+tests/test_vmap_opid_dispatch.cpp
+tests/test_vulkan_complete_ops.cpp
+tests/test_vulkan_layer_norm_saved_stats.cpp
+tests/unit/test_bf16_mkl_gemm.cpp
+tests/unit/test_cat_slice_negative_dim.cpp
+tests/unit/test_color_jitter.cpp
+tests/unit/test_complex_matmul_mkl.cpp
+tests/unit/test_cpu_kernels.cpp
+tests/unit/test_creation_dtype_coverage.cpp
+tests/unit/test_deterministic_mode.cpp
+tests/unit/test_distributions_samplers.cpp
+tests/unit/test_fill_kernel_dtype_coverage.cpp
+tests/unit/test_foreach_ops.cpp
+tests/unit/test_fp8_quantize_grad.cpp
+tests/unit/test_fused_layer_norm_backward_f64.cpp
+tests/unit/test_fusion_optimizer_math.cpp
+tests/unit/test_int8_mkl_gemm.cpp
+tests/unit/test_int8_overflow_semantics.cpp
+tests/unit/test_linalg_complex.cpp
+tests/unit/test_lstm_cuda_forward_regression.cpp
+tests/unit/test_lstm_proj_size.cpp
+tests/unit/test_masked_tensor.cpp
+tests/unit/test_math_dtype_coverage.cpp
+tests/unit/test_metrics_extended.cpp
+tests/unit/test_mkl_vml.cpp
+tests/unit/test_model_hub.cpp
+tests/unit/test_norm_eps_cache.cpp
+tests/unit/test_oneapi_backend_loading.cpp
+tests/unit/test_oneapi_operations.cpp
+tests/unit/test_onednn_format_any.cpp
+tests/unit/test_onnx_audit_fixes.cpp
+tests/unit/test_onnx_export.cpp
+tests/unit/test_onnx_exporter_coverage.cpp
+tests/unit/test_onnx_roundtrip.cpp
+tests/unit/test_philox_dropout.cpp
+tests/unit/test_philox_reproducibility.cpp
+tests/unit/test_reduction_half_dtype.cpp
+tests/unit/test_reduction_numerical_fixes.cpp
+tests/unit/test_reductions_dtype_coverage.cpp
+tests/unit/test_scatter_add_dtype_coverage.cpp
+tests/unit/test_simd.cpp
+tests/unit/test_softmax_stride_audit.cpp
+tests/unit/test_strided_fill_dtype_coverage.cpp
+<!-- KNOWN-INTENTIONAL-END -->
+
 ## How to add a companion
 
 Copy `tests/nn/layers/test_batchnorm1d_multidtype.cpp` as a template,

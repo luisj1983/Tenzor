@@ -68,6 +68,9 @@ TEST_P(ZeROStage1MultiDTypeTest, PartitionCount) {
 }
 
 TEST_P(ZeROStage1MultiDTypeTest, Step) {
+    // audit T.1: assert parameter trajectory matches a CPU+Float32 plain-Adam
+    // reference (world_size=1 ZeRO Stage1 collapses to a single-process Adam
+    // step). atol_ comes from the fixture's per-dtype tolerance.
     auto params = create_test_params(2, {16, 16});
     // Set gradients
     for (auto& p : params) {
@@ -78,6 +81,22 @@ TEST_P(ZeROStage1MultiDTypeTest, Step) {
     ZeROStage1Optimizer optimizer(std::move(adam), default_config);
 
     EXPECT_NO_THROW(optimizer.step());
+
+    // Build a CPU+Float32 reference with identical hyperparams and inputs.
+    std::vector<std::shared_ptr<Variable>> ref_params;
+    for (size_t i = 0; i < 2; ++i) {
+        auto t = tenzor::ones({16, 16}, DType::Float32, Device::cpu());
+        ref_params.push_back(std::make_shared<Variable>(t, true));
+    }
+    for (auto& p : ref_params) {
+        p->set_grad(tenzor::ones({16, 16}, DType::Float32, Device::cpu()) * 0.1f);
+    }
+    Adam ref_adam(ref_params, 1e-3);
+    ref_adam.step();
+
+    for (size_t i = 0; i < params.size(); ++i) {
+        expectTensorNear(params[i]->tensor(), ref_params[i]->tensor(), atol_);
+    }
 }
 
 TEST_P(ZeROStage1MultiDTypeTest, ZeroGrad) {
@@ -90,9 +109,17 @@ TEST_P(ZeROStage1MultiDTypeTest, ZeroGrad) {
     ZeROStage1Optimizer optimizer(std::move(adam), default_config);
 
     EXPECT_NO_THROW(optimizer.zero_grad());
+
+    // audit T.1: assert grads were actually zeroed (not just no-throw).
+    for (auto& p : params) {
+        auto zeros_ref = tenzor::zeros({16, 16}, DType::Float32, Device::cpu());
+        ASSERT_TRUE(p->grad().has_value()) << "grad pointer reset to nullopt instead of zeroed";
+        expectTensorNear(*p->grad(), zeros_ref, atol_);
+    }
 }
 
 TEST_P(ZeROStage1MultiDTypeTest, WithSGD) {
+    // audit T.1: assert SGD step trajectory matches CPU+Float32 reference.
     auto params = create_test_params(2, {16, 16});
     for (auto& p : params) {
         p->set_grad(tenzor::ones({16, 16}, dtype(), device()) * 0.1f);
@@ -102,6 +129,69 @@ TEST_P(ZeROStage1MultiDTypeTest, WithSGD) {
     ZeROStage1Optimizer optimizer(std::move(sgd), default_config);
 
     EXPECT_NO_THROW(optimizer.step());
+
+    // Reference: plain SGD on CPU+Float32. SGD update: p = p - lr*g
+    // = 1.0 - 0.01*0.1 = 0.999.
+    auto expected = tenzor::full({16, 16}, 0.999, DType::Float32, Device::cpu());
+    for (auto& p : params) {
+        expectTensorNear(p->tensor(), expected, atol_);
+    }
+}
+
+TEST_P(ZeROStage1MultiDTypeTest, MultipleStepsTrajectory) {
+    // audit T.1: capture 3-step parameter trajectory and compare to CPU+F32
+    // reference. Exercises bias correction across multiple step_count_ values.
+    auto params = create_test_params(1, {8, 8});
+    auto adam = std::make_unique<Adam>(params, 1e-2);
+    ZeROStage1Optimizer optimizer(std::move(adam), default_config);
+
+    std::vector<std::shared_ptr<Variable>> ref_params;
+    {
+        auto t = tenzor::ones({8, 8}, DType::Float32, Device::cpu());
+        ref_params.push_back(std::make_shared<Variable>(t, true));
+    }
+    Adam ref_adam(ref_params, 1e-2);
+
+    for (int s = 0; s < 3; ++s) {
+        params[0]->set_grad(tenzor::ones({8, 8}, dtype(), device()) * 0.05f);
+        ref_params[0]->set_grad(tenzor::ones({8, 8}, DType::Float32, Device::cpu()) * 0.05f);
+        optimizer.step();
+        ref_adam.step();
+        expectTensorNear(params[0]->tensor(), ref_params[0]->tensor(), atol_);
+    }
+}
+
+TEST_P(ZeROStage1MultiDTypeTest, StateDictRoundtrip) {
+    // audit T.1: save state after N steps, restore into a fresh optimizer,
+    // run one more step, verify resulting params match continued original.
+    auto params = create_test_params(1, {8, 8});
+    auto adam = std::make_unique<Adam>(params, 1e-2);
+    ZeROStage1Optimizer optimizer(std::move(adam), default_config);
+
+    for (int s = 0; s < 2; ++s) {
+        params[0]->set_grad(tenzor::ones({8, 8}, dtype(), device()) * 0.05f);
+        optimizer.step();
+    }
+
+    auto state = optimizer.state_dict();
+
+    // Snapshot current params, then take one more step on the original.
+    auto pre_extra_step = params[0]->tensor().to(Device::cpu()).to(DType::Float32);
+    params[0]->set_grad(tenzor::ones({8, 8}, dtype(), device()) * 0.05f);
+    optimizer.step();
+    auto after_extra_step = params[0]->tensor().to(Device::cpu()).to(DType::Float32);
+
+    // Build a fresh optimizer, restore state, set the param to the pre-extra
+    // snapshot value, then run the same extra step.
+    auto fresh_params = create_test_params(1, {8, 8});
+    fresh_params[0]->tensor() = pre_extra_step.to(dtype()).to(device());
+    auto fresh_adam = std::make_unique<Adam>(fresh_params, 1e-2);
+    ZeROStage1Optimizer fresh_opt(std::move(fresh_adam), default_config);
+    fresh_opt.load_state_dict(state);
+    fresh_params[0]->set_grad(tenzor::ones({8, 8}, dtype(), device()) * 0.05f);
+    fresh_opt.step();
+
+    expectTensorNear(fresh_params[0]->tensor(), after_extra_step, atol_);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ZeROStage1MultiDTypeTest);

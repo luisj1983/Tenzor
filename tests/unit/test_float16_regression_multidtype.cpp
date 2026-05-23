@@ -32,6 +32,19 @@ using namespace tenzor::testing;
 // mask the regression assertion.
 class Float16RegressionMultiBackendTest : public BackendTest {};
 
+// audit-3 T.1: per-element finiteness + at-least-one non-zero (BackendTest
+// has no expectFiniteNonZero — local copy).
+static void expect_finite_nonzero(const Tensor& t) {
+    auto cpu = t.to(Device::cpu()).to(DType::Float32);
+    const float* d = cpu.data<float>();
+    bool any_nonzero = false;
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        ASSERT_TRUE(std::isfinite(d[i])) << "Non-finite at " << i;
+        if (std::fabs(d[i]) > 1e-4f) any_nonzero = true;
+    }
+    EXPECT_TRUE(any_nonzero);
+}
+
 // Validates weight initialization doesn't underflow to zero in Float16
 TEST_P(Float16RegressionMultiBackendTest, LinearWeightsNonZero) {
     auto linear = nn::Linear(768, 768);
@@ -60,6 +73,7 @@ TEST_P(Float16RegressionMultiBackendTest, LinearForward) {
     EXPECT_EQ(output.tensor().dtype(), DType::Float16);
     EXPECT_EQ(output.shape()[0], 2);
     EXPECT_EQ(output.shape()[1], 3);
+    expect_finite_nonzero(output.tensor());
 }
 
 // Linear backward pass computes gradients without crashing
@@ -75,6 +89,7 @@ TEST_P(Float16RegressionMultiBackendTest, LinearBackward) {
 
     EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad().value().dtype(), DType::Float16);
+    expect_finite_nonzero(input.grad().value());
 }
 
 // MatMul with Float16 accumulates in Float32 correctly
@@ -86,6 +101,7 @@ TEST_P(Float16RegressionMultiBackendTest, MatMul) {
     EXPECT_EQ(c.dtype(), DType::Float16);
     EXPECT_EQ(c.shape()[0], 128);
     EXPECT_EQ(c.shape()[1], 256);
+    expect_finite_nonzero(c);
 }
 
 // Softmax backward in Float16
@@ -96,6 +112,7 @@ TEST_P(Float16RegressionMultiBackendTest, SoftmaxBackward) {
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
+    expect_finite_nonzero(input.grad().value());
 }
 
 // Mean backward in Float16
@@ -105,6 +122,7 @@ TEST_P(Float16RegressionMultiBackendTest, MeanBackward) {
     output.backward();
 
     EXPECT_GRAD_FLOWS(input);
+    expect_finite_nonzero(input.grad().value());
 }
 
 // Reshape backward in Float16
@@ -115,6 +133,7 @@ TEST_P(Float16RegressionMultiBackendTest, ReshapeBackward) {
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
+    expect_finite_nonzero(input.grad().value());
 }
 
 // Permute backward in Float16
@@ -125,6 +144,7 @@ TEST_P(Float16RegressionMultiBackendTest, PermuteBackward) {
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
+    expect_finite_nonzero(input.grad().value());
 }
 
 // Embedding forward/backward in Float16
@@ -139,6 +159,16 @@ TEST_P(Float16RegressionMultiBackendTest, EmbeddingBackward) {
     auto output = embed.forward(input_var);
     auto loss = sum(output);
     loss.backward();
+    // Embedding weights must receive a non-zero gradient; embedding output
+    // must be finite (Float16 underflow has historically zeroed the weight
+    // grad on this backend).
+    expect_finite_nonzero(output.tensor());
+    auto params = embed.parameters();
+    ASSERT_FALSE(params.empty());
+    EXPECT_TRUE(params[0]->has_grad());
+    if (params[0]->has_grad()) {
+        expect_finite_nonzero(params[0]->grad().value());
+    }
 }
 
 // LSTM cell with Float16
@@ -155,6 +185,8 @@ TEST_P(Float16RegressionMultiBackendTest, LSTMCellFloat16) {
 
     EXPECT_EQ(h_new.tensor().dtype(), DType::Float16);
     EXPECT_EQ(c_new.tensor().dtype(), DType::Float16);
+    expect_finite_nonzero(h_new.tensor());
+    expect_finite_nonzero(c_new.tensor());
 }
 
 // Bmm backward in Float16
@@ -167,6 +199,8 @@ TEST_P(Float16RegressionMultiBackendTest, BmmBackward) {
 
     EXPECT_GRAD_FLOWS(a);
     EXPECT_GRAD_FLOWS(b);
+    expect_finite_nonzero(a.grad().value());
+    expect_finite_nonzero(b.grad().value());
 }
 
 INSTANTIATE_BACKEND_TESTS(Float16RegressionMultiBackendTest);

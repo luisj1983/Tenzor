@@ -4,7 +4,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/creation.hpp"  // tenzor::manual_seed / get_global_seed / detail::*
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/omp_thresholds.hpp"
 #include "tenzor/utils/log.hpp"
@@ -46,8 +46,44 @@
 namespace tenzor {
 namespace cpu {
 
-// Thread-local RNG for dropout
-static thread_local std::mt19937 tl_rng(std::random_device{}());
+// Thread-local RNG for dropout.
+//
+// audit-3 T.19: this RNG used to seed unconditionally from `std::random_device`
+// once per thread, so `tenzor::manual_seed(...)` had no effect on dropout
+// reproducibility. Reproducibility now flows through `tenzor::get_global_seed()`
+// — which returns the manual seed when set (incrementing per call so successive
+// callers get distinct, deterministic seeds) and falls back to a time-based
+// seed otherwise. We track the last seed value we consumed per thread so a
+// fresh `manual_seed(...)` call mid-run re-seeds this generator on the next
+// dropout invocation.
+//
+// `std::srand()` does NOT affect this generator. See TESTING.md "Reproducibility"
+// for the public contract.
+inline std::mt19937& tl_rng() {
+    static thread_local std::mt19937 rng(std::random_device{}());
+    static thread_local bool initialised_from_manual_seed = false;
+    static thread_local uint64_t last_manual_seed_value = 0;
+
+    const bool manual_set = ::tenzor::detail::get_global_manual_seed_set();
+    if (manual_set) {
+        const uint64_t cur = ::tenzor::detail::get_global_manual_seed_value();
+        if (!initialised_from_manual_seed || cur != last_manual_seed_value) {
+            // Pull one value through the public seed API so dropout shares the
+            // same incrementing stream as rand/randn (each consumer gets a
+            // distinct deterministic seed). get_global_seed() increments the
+            // counter, which is the documented contract.
+            const uint64_t s = ::tenzor::get_global_seed();
+            rng.seed(static_cast<std::mt19937::result_type>(s));
+            initialised_from_manual_seed = true;
+            last_manual_seed_value = ::tenzor::detail::get_global_manual_seed_value();
+        }
+    } else if (initialised_from_manual_seed) {
+        // Operator switched off manual mode — fall back to nondeterministic.
+        rng.seed(std::random_device{}());
+        initialised_from_manual_seed = false;
+    }
+    return rng;
+}
 
 // Delegate to single source of truth for OMP thread count.
 inline void configure_threads() {
@@ -697,7 +733,10 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
         using T = std::remove_pointer_t<decltype(in_data)>;
         #pragma omp parallel
         {
-            std::mt19937 local_rng(tl_rng());
+            // audit-3 T.19: tl_rng() now returns a reference to the
+            // thread-local generator (function form); invoke it to draw a
+            // seed value for the per-OMP-thread local_rng.
+            std::mt19937 local_rng(tl_rng()());
             #pragma omp for
             for (int64_t i = 0; i < n; ++i) {
                 float r = dist(local_rng);
@@ -716,7 +755,10 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
         using T = std::remove_pointer_t<decltype(in_data)>;
         #pragma omp parallel
         {
-            std::mt19937 local_rng(tl_rng());
+            // audit-3 T.19: tl_rng() now returns a reference to the
+            // thread-local generator (function form); invoke it to draw a
+            // seed value for the per-OMP-thread local_rng.
+            std::mt19937 local_rng(tl_rng()());
             #pragma omp for
             for (int64_t i = 0; i < n; ++i) {
                 float r = dist(local_rng);

@@ -86,6 +86,7 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignBasicForwardShape) {
     // Output should be (num_rois, C, pool_h, pool_w)
     expectShape(output.tensor(), {10, 512, 7, 7});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, ROIAlignGradientFlow) {
@@ -101,6 +102,7 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignGradientFlow) {
     // Verify gradient exists and has correct dtype
     EXPECT_GRAD_FLOWS(features);
     EXPECT_EQ(features.grad()->dtype(), dtype());
+    expectFiniteNonZero(*features.grad());
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentPoolSizes) {
@@ -113,10 +115,12 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentPoolSizes) {
     Variable output_7 = roi_align_7.forward(features, rois);
     expectShape(output_7.tensor(), {3, 512, 7, 7});
     expectDType(output_7.tensor());
+    expectFiniteNonZero(output_7.tensor());
 
     Variable output_14 = roi_align_14.forward(features, rois);
     expectShape(output_14.tensor(), {3, 512, 14, 14});
     expectDType(output_14.tensor());
+    expectFiniteNonZero(output_14.tensor());
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentSamplingRatios) {
@@ -139,6 +143,8 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentSamplingRatios) {
     // Verify dtypes preserved
     expectDType(output_2.tensor());
     expectDType(output_4.tensor());
+    expectFiniteNonZero(output_2.tensor());
+    expectFiniteNonZero(output_4.tensor());
 }
 
 // ============================================================================
@@ -244,6 +250,7 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxIOUComputation) {
     // IOU matrix should be (5, 5)
     expectShape(ious, {5, 5});
     expectDType(ious);
+    expectFiniteNonZero(ious);
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingDecoding) {
@@ -287,6 +294,8 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingDecoding) {
 
     // Decoded boxes should match original boxes shape
     expectShape(decoded, {10, 4});
+    // The decoded boxes should match the original boxes (encode then decode is identity).
+    expectTensorNear(decoded, boxes, std::max(atol_, 1e-3f));
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingShape) {
@@ -298,6 +307,7 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingShape) {
     // Encoded should have same shape as input
     expectShape(encoded, {20, 4});
     expectDType(encoded);
+    expectFiniteNonZero(encoded);
 }
 
 // ============================================================================
@@ -319,6 +329,7 @@ TEST_P(DetectionOpsMultiDTypeTest, AnchorGeneratorSizes) {
 
     // Anchors are generated on the specified device
     EXPECT_EQ(anchors.device().type, device().type);
+    expectFiniteNonZero(anchors);
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, AnchorGeneratorDifferentScales) {
@@ -340,6 +351,8 @@ TEST_P(DetectionOpsMultiDTypeTest, AnchorGeneratorDifferentScales) {
     // Verify device placement
     EXPECT_EQ(anchors_small.device().type, device().type);
     EXPECT_EQ(anchors_large.device().type, device().type);
+    expectFiniteNonZero(anchors_small);
+    expectFiniteNonZero(anchors_large);
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, AnchorGeneratorNumAnchorsPerLocation) {

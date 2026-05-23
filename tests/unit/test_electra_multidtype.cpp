@@ -143,6 +143,7 @@ TEST_P(ElectraMultiDTypeTest, GeneratorDifferentSequenceLengths) {
 
         // Verify output shape adapts to sequence length
         convertAndVerifyOutput(logits, {batch_size, seq_len, config.vocab_size});
+        expectFiniteNonZero(logits.tensor());
     }
 }
 
@@ -204,6 +205,7 @@ TEST_P(ElectraMultiDTypeTest, DiscriminatorDifferentSequenceLengths) {
 
         // Output should have same sequence length
         convertAndVerifyOutput(logits, {batch_size, seq_len});
+        expectFiniteNonZero(logits.tensor());
     }
 }
 
@@ -269,6 +271,8 @@ TEST_P(ElectraMultiDTypeTest, PreTrainingReplacedTokenDetection) {
     // Verify is_replaced tensor exists and has correct shape
     EXPECT_EQ(outputs.is_replaced.shape()[0], batch_size);
     EXPECT_EQ(outputs.is_replaced.shape()[1], seq_len);
+    expectFiniteNonZero(outputs.gen_logits.tensor());
+    expectFiniteNonZero(outputs.disc_logits.tensor());
 }
 
 TEST_P(ElectraMultiDTypeTest, PreTrainingAllTokensUsed) {
@@ -314,6 +318,8 @@ TEST_P(ElectraMultiDTypeTest, PreTrainingAllTokensUsed) {
     // Verify all positions have predictions (key ELECTRA feature)
     EXPECT_EQ(disc_output.shape()[1], seq_len)
         << "All tokens should have discriminator predictions on " << device().to_string();
+    expectFiniteNonZero(outputs.gen_logits.tensor());
+    expectFiniteNonZero(outputs.disc_logits.tensor());
 }
 
 TEST_P(ElectraMultiDTypeTest, PreTrainingLossComputation) {
@@ -453,6 +459,7 @@ TEST_P(ElectraMultiDTypeTest, SequenceClassificationForward) {
 
     // Verify output shape: [batch_size, num_labels]
     convertAndVerifyOutput(logits, {batch_size, num_labels});
+    expectFiniteNonZero(logits.tensor());
 }
 
 TEST_P(ElectraMultiDTypeTest, SequenceClassificationGradientFlow) {
@@ -510,6 +517,7 @@ TEST_P(ElectraMultiDTypeTest, TokenClassificationForward) {
 
     // Verify output shape: [batch_size, seq_len, num_labels]
     convertAndVerifyOutput(logits, {batch_size, seq_len, num_labels});
+    expectFiniteNonZero(logits.tensor());
 }
 
 // ============================================================================
@@ -533,6 +541,8 @@ TEST_P(ElectraMultiDTypeTest, QuestionAnsweringForward) {
     // Verify start and end logits
     convertAndVerifyOutput(outputs.start_logits, {batch_size, seq_len});
     convertAndVerifyOutput(outputs.end_logits, {batch_size, seq_len});
+    expectFiniteNonZero(outputs.start_logits.tensor());
+    expectFiniteNonZero(outputs.end_logits.tensor());
 }
 
 // ============================================================================

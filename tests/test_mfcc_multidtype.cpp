@@ -24,6 +24,19 @@ using namespace tenzor::testing;
 // expose Float64 / Float16 paths.
 class MFCCTest : public BackendTest {};
 
+// audit-3 T.1 helper: float-tensor element comparison against a CPU reference.
+static void expect_tensors_near(const Tensor& actual, const Tensor& expected,
+                                float tol = 1e-3f) {
+    ASSERT_EQ(actual.numel(), expected.numel());
+    auto a = actual.to(Device::cpu()).to(DType::Float32);
+    auto b = expected.to(Device::cpu()).to(DType::Float32);
+    const float* ad = a.data<float>();
+    const float* bd = b.data<float>();
+    for (int64_t i = 0; i < a.numel(); ++i) {
+        EXPECT_NEAR(ad[i], bd[i], tol) << "Mismatch at " << i;
+    }
+}
+
 // MelScale: verify output shape matches (batch, n_mels, time_frames)
 TEST_P(MFCCTest, MelScaleOutputShape) {
     const int64_t n_fft = 512;
@@ -32,12 +45,16 @@ TEST_P(MFCCTest, MelScaleOutputShape) {
     const int64_t n_mels = 40;
 
     // Create a fake spectrogram: shape (n_freqs, time_frames)
+    auto spec_cpu = tenzor::ones({n_freqs, time_frames}, DType::Float32, Device::cpu());
+    auto ref = fft::mel_scale(spec_cpu, n_mels, 0.0, 8000.0, 16000);
+
     auto spec = tenzor::ones({n_freqs, time_frames}, DType::Float32, device);
     auto result = fft::mel_scale(spec, n_mels, 0.0, 8000.0, 16000);
 
     ASSERT_EQ(result.ndim(), 2);
     EXPECT_EQ(result.shape()[0], n_mels);
     EXPECT_EQ(result.shape()[1], time_frames);
+    expect_tensors_near(result, ref);
 }
 
 // MelScale: batched input shape
@@ -48,6 +65,8 @@ TEST_P(MFCCTest, MelScaleBatchedShape) {
     const int64_t time_frames = 8;
     const int64_t n_mels = 64;
 
+    auto spec_cpu = tenzor::ones({batch, n_freqs, time_frames}, DType::Float32, Device::cpu());
+    auto ref = fft::mel_scale(spec_cpu, n_mels, 0.0, 8000.0, 16000);
     auto spec = tenzor::ones({batch, n_freqs, time_frames}, DType::Float32, device);
     auto result = fft::mel_scale(spec, n_mels, 0.0, 8000.0, 16000);
 
@@ -55,6 +74,7 @@ TEST_P(MFCCTest, MelScaleBatchedShape) {
     EXPECT_EQ(result.shape()[0], batch);
     EXPECT_EQ(result.shape()[1], n_mels);
     EXPECT_EQ(result.shape()[2], time_frames);
+    expect_tensors_near(result, ref);
 }
 
 // MelScale: output values should be non-negative for non-negative input
@@ -80,12 +100,15 @@ TEST_P(MFCCTest, MelScaleDefaultFMax) {
     const int64_t n_mels = 40;
 
     // f_max=0.0 should default to sample_rate/2
+    auto spec_cpu = tenzor::ones({n_freqs, time_frames}, DType::Float32, Device::cpu());
+    auto ref = fft::mel_scale(spec_cpu, n_mels, 0.0, 0.0, 16000);
     auto spec = tenzor::ones({n_freqs, time_frames}, DType::Float32, device);
     auto result = fft::mel_scale(spec, n_mels, 0.0, 0.0, 16000);
 
     ASSERT_EQ(result.ndim(), 2);
     EXPECT_EQ(result.shape()[0], n_mels);
     EXPECT_EQ(result.shape()[1], time_frames);
+    expect_tensors_near(result, ref);
 }
 
 // MFCC: verify output shape
@@ -97,15 +120,16 @@ TEST_P(MFCCTest, MFCCOutputShape) {
     const int64_t n_mels = 40;
     const int64_t sample_rate = 16000;
 
-    // Create a simple waveform
-    auto waveform = tenzor::zeros({signal_length}, DType::Float32, device);
-
+    // Use a non-zero waveform for a meaningful value comparison.
+    auto wf_cpu = tenzor::ones({signal_length}, DType::Float32, Device::cpu());
+    auto ref = fft::mfcc(wf_cpu, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
+    auto waveform = tenzor::ones({signal_length}, DType::Float32, device);
     auto result = fft::mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
 
     ASSERT_EQ(result.ndim(), 2);
     EXPECT_EQ(result.shape()[0], n_mfcc);
-    // Time frames should be > 0
     EXPECT_GT(result.shape()[1], 0);
+    expect_tensors_near(result, ref, 1e-2f);
 }
 
 // MFCC: batched waveform
@@ -118,14 +142,16 @@ TEST_P(MFCCTest, MFCCBatchedShape) {
     const int64_t n_mels = 64;
     const int64_t sample_rate = 16000;
 
-    auto waveform = tenzor::zeros({batch, signal_length}, DType::Float32, device);
-
+    auto wf_cpu = tenzor::ones({batch, signal_length}, DType::Float32, Device::cpu());
+    auto ref = fft::mfcc(wf_cpu, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
+    auto waveform = tenzor::ones({batch, signal_length}, DType::Float32, device);
     auto result = fft::mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
 
     ASSERT_EQ(result.ndim(), 3);
     EXPECT_EQ(result.shape()[0], batch);
     EXPECT_EQ(result.shape()[1], n_mfcc);
     EXPECT_GT(result.shape()[2], 0);
+    expect_tensors_near(result, ref, 1e-2f);
 }
 
 // MFCC: n_mfcc must be <= n_mels

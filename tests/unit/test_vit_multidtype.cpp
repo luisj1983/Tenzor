@@ -13,6 +13,8 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/ops/reduction.hpp>
+#include <tenzor/ops/math.hpp>
 #include "../../include/tenzor/models/vit.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
@@ -20,6 +22,7 @@
 #include "../multi_backend_dtype_fixture.hpp"
 #include <tuple>
 #include <vector>
+#include <cmath>
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
@@ -119,6 +122,69 @@ protected:
         }
         return default_batch;
     }
+
+    // Audit-T.1: cheap "the backend produced something meaningful" check
+    // that's safe to apply to every ViT/PatchEmbedding forward output —
+    // even the 600M-param ones where running a CPU reference would be
+    // prohibitively expensive. We assert:
+    //   * no NaN/Inf anywhere
+    //   * not all-zero (would silently pass on an uninitialised buffer)
+    //   * absolute max under a generous ceiling (catches garbage 1e20 values)
+    void expectOutputSane(const Tensor& output, float max_ceiling = 1.0e6f) {
+        auto cpu = output.to(Device::cpu());
+        if (cpu.dtype() != DType::Float32) cpu = cpu.to(DType::Float32);
+        cpu = cpu.contiguous();
+        const float* p = cpu.data<float>();
+        bool any_finite_nonzero = false;
+        float max_abs = 0.0f;
+        for (int64_t i = 0; i < cpu.numel(); ++i) {
+            float v = p[i];
+            ASSERT_FALSE(std::isnan(v))
+                << "NaN at index " << i << " on " << device().to_string()
+                << " / dtype " << static_cast<int>(dtype());
+            ASSERT_FALSE(std::isinf(v))
+                << "Inf at index " << i << " on " << device().to_string()
+                << " / dtype " << static_cast<int>(dtype());
+            if (v != 0.0f) any_finite_nonzero = true;
+            max_abs = std::max(max_abs, std::abs(v));
+        }
+        EXPECT_TRUE(any_finite_nonzero)
+            << "Output is identically zero on " << device().to_string()
+            << " — uninitialised buffer?";
+        EXPECT_LT(max_abs, max_ceiling)
+            << "Output has absurd magnitude " << max_abs
+            << " on " << device().to_string()
+            << " — likely uninitialised or NaN-poisoned buffer";
+    }
+
+    // Audit-T.1: stricter check — match a CPU reference computed by
+    // running the same op on a Float32 CPU clone of the input.
+    void expectMatchesCpu(const Tensor& actual, const Tensor& cpu_ref,
+                          float tol) {
+        auto actual_cpu = actual.to(Device::cpu()).to(DType::Float32).contiguous();
+        auto ref = cpu_ref.to(DType::Float32).contiguous();
+        ASSERT_EQ(actual_cpu.numel(), ref.numel());
+        const float* a = actual_cpu.data<float>();
+        const float* r = ref.data<float>();
+        for (int64_t i = 0; i < actual_cpu.numel(); ++i)
+            EXPECT_NEAR(a[i], r[i], tol)
+                << "Mismatch at index " << i
+                << " on " << device().to_string();
+    }
+
+    // Audit-T.1: tolerance picked per dtype for the device-vs-CPU
+    // PatchEmbedding diff after the Float32 round-trip.
+    float vitAtol() const {
+        switch (dtype()) {
+            case DType::Float16:
+            case DType::BFloat16:
+                return 1.0e-1f;
+            case DType::Float64:
+                return 1.0e-5f;
+            default:
+                return 5.0e-3f;
+        }
+    }
 };
 
 // ============================================================================
@@ -142,6 +208,8 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingForwardShape) {
     // num_patches = (224/16) * (224/16) = 196
     expectShape(output.tensor(), {2, 196, 768});
     expectDType(output.tensor());
+    // Audit-T.1: sanity-check values (no NaN/Inf, not all-zero, sane scale).
+    expectOutputSane(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, PatchEmbeddingGradientFlow) {
@@ -187,6 +255,7 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingDifferentPatchSizes) {
 
     expectShape(output_14.tensor(), {1, 256, 1280});
     expectDType(output_14.tensor());
+    expectOutputSane(output_14.tensor());  // audit-T.1
 
     // Test patch size 32
     auto patch_embed_32 = std::make_shared<PatchEmbedding>(224, 32, 3, 768);
@@ -196,6 +265,7 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingDifferentPatchSizes) {
 
     expectShape(output_32.tensor(), {1, 49, 768});
     expectDType(output_32.tensor());
+    expectOutputSane(output_32.tensor());  // audit-T.1
 }
 
 // ============================================================================
@@ -214,6 +284,7 @@ TEST_P(ViTMultiDtypeTest, ViTEmbeddingsForwardShape) {
     // num_patches = 196, so seq_len = 197
     expectShape(output.tensor(), {2, 197, 768});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTEmbeddingsGradientFlow) {
@@ -242,6 +313,23 @@ TEST_P(ViTMultiDtypeTest, ViTEmbeddingsClassToken) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[1], 197);  // 196 patches + 1 class token
     expectDType(output.tensor());
+
+    // Audit-T.1: the prepended CLS token row (position 0 in dim 1) must
+    // not be identically zero — a backend that silently allocates an
+    // empty CLS slot would pass shape checks but produce useless
+    // downstream features. Pull row 0 out and assert it has any nonzero
+    // entry.
+    auto cls_row = output.tensor().to(Device::cpu()).to(DType::Float32)
+        .contiguous();
+    const float* p = cls_row.data<float>();
+    // Layout (B=2, S=197, H=768): the CLS row of sample 0 occupies the
+    // first 768 floats.
+    bool any_nonzero = false;
+    for (int i = 0; i < 768; ++i)
+        if (p[i] != 0.0f) { any_nonzero = true; break; }
+    EXPECT_TRUE(any_nonzero) << "CLS token row is identically zero on "
+                             << device().to_string();
+    expectOutputSane(output.tensor());
 }
 
 // ============================================================================
@@ -270,6 +358,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16GradientFlow) {
@@ -311,6 +400,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16BatchSizeOne) {
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16CustomClasses) {
@@ -322,6 +412,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16CustomClasses) {
 
     expectShape(output.tensor(), {2, 100});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 // ============================================================================
@@ -345,6 +436,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch32ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch32GradientFlow) {
@@ -391,6 +483,7 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch16ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16GradientFlow) {
@@ -436,6 +529,7 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch32ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 // ============================================================================
@@ -467,6 +561,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
@@ -535,6 +630,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 // ============================================================================
@@ -551,6 +647,7 @@ TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize384) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
@@ -565,6 +662,7 @@ TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 
     // Verify number of patches based on image size
     auto config = ViTConfig::base_patch16(img_size);
@@ -604,6 +702,7 @@ TEST_P(ViTMultiDtypeTest, ViTBaseLargeBatchSize) {
 
     expectShape(output.tensor(), {batch, 10});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseSingleChannel) {
@@ -616,6 +715,7 @@ TEST_P(ViTMultiDtypeTest, ViTBaseSingleChannel) {
 
     expectShape(output.tensor(), {2, 196, 768});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseMultiChannel) {
@@ -628,6 +728,7 @@ TEST_P(ViTMultiDtypeTest, ViTBaseMultiChannel) {
 
     expectShape(output.tensor(), {2, 196, 768});
     expectDType(output.tensor());
+    expectOutputSane(output.tensor());  // audit-T.1
 }
 
 // ============================================================================
@@ -644,11 +745,13 @@ TEST_P(ViTMultiDtypeTest, ViTBaseTrainEvalMode) {
     model->train();
     auto output_train = model->forward(input);
     expectDType(output_train.tensor());
+    expectOutputSane(output_train.tensor());  // audit-T.1
 
     // Test in evaluation mode
     model->eval();
     auto output_eval = model->forward(input);
     expectDType(output_eval.tensor());
+    expectOutputSane(output_eval.tensor());  // audit-T.1
 
     // Both should have same shape
     auto shape_train = output_train.tensor().shape();

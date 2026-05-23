@@ -289,7 +289,57 @@ ninja -C build run_disabled_perf_benchmarks # run the DISABLED_ perf gtests
 ```
 
 To re-enable one as a regular ctest (e.g. while iterating on it), drop the
-`DISABLED_` prefix in the test name in its source file. The CTest wiring
-in `tests/test_simd_ops[1]_tests.cmake` already passes
-`--gtest_also_run_disabled_tests`, so the test will run via ctest as soon
-as it's not skipped by name.
+`DISABLED_` prefix in the test name in its source file.
+
+### DISABLED_ semantics in this project (audit-3 T.16)
+
+`tests/CMakeLists.txt::tenzor_discover_tests` invokes
+`gtest_discover_tests`, which in turn registers each generated `add_test()`
+line in the per-target `*_tests.cmake` files with
+`--gtest_also_run_disabled_tests`. That flag applies to **every** target
+discovered through `tenzor_discover_tests`, not just the SIMD / perf
+benchmarks — `grep -l gtest_also_run_disabled_tests tests/*_tests.cmake`
+shows the full list.
+
+The practical contract:
+
+- `DISABLED_` in this project means **"performance-ceiling assertion test"**,
+  not "skipped". The test runs by default; the `DISABLED_` prefix is a
+  documentation tag indicating it asserts a regression-guard threshold
+  (typically `EXPECT_LT(latency_ms, ceiling_ms)` per audit-3 T.9), rather
+  than a per-call correctness invariant.
+- Tests prefixed `DISABLED_` that do NOT contain at least one `EXPECT_*`
+  assertion are a bug — they will always pass even when the performance
+  characteristic they exist to monitor has regressed. See audit-3 T.9 for
+  the regression-guard assertion pattern that every DISABLED_ test must
+  carry.
+- To truly skip a test (e.g. while debugging an unrelated bug), use
+  `GTEST_SKIP() << "reason"` inside the test body — the `DISABLED_` prefix
+  no longer provides that effect in this build.
+
+## Reproducibility — the global generator seed (audit-3 T.19)
+
+Stochastic ops (`rand`, `randn`, `randint`, `dropout`, `bernoulli`, etc.)
+on every backend pull from a single thread-local generator state managed
+by `tenzor::manual_seed(uint64_t)`. To make a test reproducible:
+
+```cpp
+tenzor::manual_seed(42);            // once per test fixture SetUp()
+auto x = tenzor::randn({4, 4});     // deterministic given the seed above
+auto y = tenzor::nn::dropout(x, 0.5);  // also deterministic — same stream
+```
+
+Critical: **`std::srand()` does NOT affect tenzor RNG.** The C library's
+PRNG and tenzor's generator are independent. Tests that seed `std::srand`
+and then call `tenzor::randn` (or any backend kernel that pulls
+`get_global_seed()`) will appear nondeterministic across runs. The audit-3
+T.19 fix wires the CPU `dropout` kernel's thread-local `mt19937` into the
+same `tenzor::detail::get_global_manual_seed_*` accessors that `rand` and
+`randn` use, so `manual_seed` now genuinely controls every CPU stochastic
+path. The other backends (CUDA, ROCm, Vulkan, OneAPI) already routed
+through `get_global_seed()` and were unaffected.
+
+If a test does not call `manual_seed`, the generator falls back to a
+`std::random_device`-derived seed and the run is intentionally
+non-reproducible. Prefer `manual_seed(42)` (or another fixed value) in
+every fixture's `SetUp()` — see audit-3 T.7 for the pattern.

@@ -233,12 +233,15 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, HardswishDoubleBackwardFinite) {
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::hardswish(x);
     auto loss = tenzor::sum(y);
-    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    ASSERT_TRUE(x.grad().has_value());
+    // audit-3 T.15: EXPECT_NO_THROW(...backward...) passes for severed grad_fn.
+    // EXPECT_GRAD_FLOWS asserts the gradient actually propagated.
+    loss.backward(std::nullopt, false, true);
+    EXPECT_GRAD_FLOWS(x);
 
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);
-    EXPECT_NO_THROW(grad_norm.backward());
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(grad_var);
 }
 
 TEST_P(HigherOrderActivationsMultiDTypeTest, HardsigmoidDoubleBackwardFinite) {
@@ -254,12 +257,14 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, HardsigmoidDoubleBackwardFinite) {
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::hardsigmoid(x);
     auto loss = tenzor::sum(y);
-    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    ASSERT_TRUE(x.grad().has_value());
+    // audit-3 T.15: replace EXPECT_NO_THROW with EXPECT_GRAD_FLOWS.
+    loss.backward(std::nullopt, false, true);
+    EXPECT_GRAD_FLOWS(x);
 
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);
-    EXPECT_NO_THROW(grad_norm.backward());
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(grad_var);
 }
 
 TEST_P(HigherOrderActivationsMultiDTypeTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
@@ -275,8 +280,11 @@ TEST_P(HigherOrderActivationsMultiDTypeTest, LeakyReLUDoubleBackwardPiecewiseLin
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::leaky_relu(x, 0.1);
     auto loss = tenzor::sum(y);
-    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    EXPECT_TRUE(x.grad().has_value());
+    // audit-3 T.15: replace EXPECT_NO_THROW with EXPECT_GRAD_FLOWS — the
+    // leaky_relu gradient is piecewise-constant non-zero across the chosen
+    // sample points (-0.7, -0.1, 0.4, 1.5) so a real grad must flow.
+    loss.backward(std::nullopt, false, true);
+    EXPECT_GRAD_FLOWS(x);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(HigherOrderActivationsMultiDTypeTest);

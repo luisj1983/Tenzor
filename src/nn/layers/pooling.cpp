@@ -1441,12 +1441,12 @@ auto LPPool1d::forward_impl(const Variable& input) -> Variable {
     // called input.tensor() up front and re-wrapped intermediate Variables
     // with requires_grad=false, severing the graph.
     auto x_abs = ::tenzor::abs(input);
-    auto x_pow = ::tenzor::pow(x_abs, static_cast<float>(norm_type_));
+    auto x_pow = ::tenzor::pow(x_abs, static_cast<double>(norm_type_));
 
     AvgPool1d avg_pool(kernel_size_, stride_, /*padding=*/0);
     auto pooled = avg_pool.forward(x_pow);
 
-    float inv_p = 1.0f / static_cast<float>(norm_type_);
+    double inv_p = 1.0 / static_cast<double>(norm_type_);
     return ::tenzor::pow(pooled, inv_p);
 }
 
@@ -1474,12 +1474,12 @@ auto LPPool2d::forward_impl(const Variable& input) -> Variable {
 
     // LPPool: (avg_pool(|x|^p))^(1/p) — Variable-level (see LPPool1d comment).
     auto x_abs = ::tenzor::abs(input);
-    auto x_pow = ::tenzor::pow(x_abs, static_cast<float>(norm_type_));
+    auto x_pow = ::tenzor::pow(x_abs, static_cast<double>(norm_type_));
 
     AvgPool2d avg_pool(kernel_size_.first, stride_.first, /*padding=*/0);
     auto pooled = avg_pool.forward(x_pow);
 
-    float inv_p = 1.0f / static_cast<float>(norm_type_);
+    double inv_p = 1.0 / static_cast<double>(norm_type_);
     return ::tenzor::pow(pooled, inv_p);
 }
 

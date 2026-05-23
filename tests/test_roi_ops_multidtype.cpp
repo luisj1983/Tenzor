@@ -67,15 +67,20 @@ TEST_P(ROIOpsMultiDTypeTest, OutputShape) {
     const int64_t output_w = 7;
 
     ROIAlign roi_align(output_h, output_w, 1.0 / 16.0, 2);
-    convert_model(roi_align);
 
-    Variable features = createInput({1, C, 16, 16}, false);
+    auto feats_cpu = tenzor::randn({1, C, 16, 16}, DType::Float32, Device::cpu());
+    auto rois_cpu_full = createROIs(num_rois, 0).to(Device::cpu());
+    auto ref = roi_align.forward(Variable(feats_cpu, false), rois_cpu_full);
+
+    convert_model(roi_align);
+    Variable features = Variable(feats_cpu.to(dtype_).to(device_), false);
     auto rois = createROIs(num_rois, 0);
 
     auto output = roi_align.forward(features, rois);
 
     expectShape(output.tensor(), {num_rois, C, output_h, output_w});
     expectDType(output.tensor());
+    expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 }
 
 // ============================================================================
@@ -86,14 +91,21 @@ TEST_P(ROIOpsMultiDTypeTest, GradientFlow) {
     const int64_t output_h = 7;
     const int64_t output_w = 7;
 
+    ROIAlign roi_ref(output_h, output_w, 1.0 / 16.0, 2);
+    auto feats_cpu = tenzor::randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+    auto rois_cpu_full = createROIs(3, 0).to(Device::cpu());
+    auto feats_ref = Variable(feats_cpu, true);
+    auto out_ref = roi_ref.forward(feats_ref, rois_cpu_full);
+    auto out_ref_shape = out_ref.shape();
+    std::vector<int64_t> out_ref_shape_vec(out_ref_shape.begin(), out_ref_shape.end());
+    out_ref.backward(tenzor::ones(out_ref_shape_vec, DType::Float32, Device::cpu()));
+
     ROIAlign roi_align(output_h, output_w, 1.0 / 16.0, 2);
     convert_model(roi_align);
-
-    Variable features = createInput({1, 3, 16, 16}, true);
+    Variable features = Variable(feats_cpu.to(dtype_).to(device_), true);
     auto rois = createROIs(3, 0);
 
     auto output = roi_align.forward(features, rois);
-
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
@@ -110,6 +122,10 @@ TEST_P(ROIOpsMultiDTypeTest, GradientFlow) {
         EXPECT_FALSE(std::isnan(grad_data[i]));
         EXPECT_FALSE(std::isinf(grad_data[i]));
     }
+    // Cross-check forward and input gradient against CPU reference.
+    expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
+    expectTensorNear(*features.grad(), *feats_ref.grad(),
+                     std::max(atol_, 5e-2f));
 }
 
 // ============================================================================
@@ -122,17 +138,22 @@ TEST_P(ROIOpsMultiDTypeTest, SpatialScale) {
 
     std::vector<double> scales = {1.0 / 4.0, 1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0};
 
-    Variable features = createInput({1, 3, 16, 16}, false);
+    auto feats_cpu = tenzor::randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+    auto rois_cpu_full = createROIs(2, 0).to(Device::cpu());
+    Variable features = Variable(feats_cpu.to(dtype_).to(device_), false);
     auto rois = createROIs(2, 0);
 
     for (double scale : scales) {
+        ROIAlign roi_ref(output_h, output_w, scale, 2);
+        auto ref = roi_ref.forward(Variable(feats_cpu, false), rois_cpu_full);
+
         ROIAlign roi_align(output_h, output_w, scale, 2);
         convert_model(roi_align);
-
         auto output = roi_align.forward(features, rois);
 
         expectShape(output.tensor(), {2, 3, output_h, output_w});
         expectDType(output.tensor());
+        expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 
         // Verify output contains finite values
         auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
@@ -152,16 +173,22 @@ TEST_P(ROIOpsMultiDTypeTest, SingleROI) {
     const int64_t output_h = 7;
     const int64_t output_w = 7;
 
+    ROIAlign roi_ref(output_h, output_w, 1.0 / 16.0, 2);
+    auto feats_cpu = tenzor::randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+    auto rois_cpu_full = createROIs(1, 0).to(Device::cpu());
+    auto ref = roi_ref.forward(Variable(feats_cpu, false), rois_cpu_full);
+
     ROIAlign roi_align(output_h, output_w, 1.0 / 16.0, 2);
     convert_model(roi_align);
 
-    Variable features = createInput({1, 3, 16, 16}, false);
+    Variable features = Variable(feats_cpu.to(dtype_).to(device_), false);
     auto rois = createROIs(1, 0);
 
     auto output = roi_align.forward(features, rois);
 
     expectShape(output.tensor(), {1, 3, output_h, output_w});
     expectDType(output.tensor());
+    expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 
     // Verify output contains finite values
     auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);

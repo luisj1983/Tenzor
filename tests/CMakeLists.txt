@@ -559,7 +559,9 @@ tenzor_discover_tests(test_quantization DISCOVERY_TIMEOUT 60)
 # ============================================================================
 add_executable(test_phase11_backends test_phase11_backends.cpp)
 target_link_libraries(test_phase11_backends PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 60)
+# audit-3 T.12: exercises OneAPI + Vulkan — label as `multi` for consistency
+# with T.6's other multi-backend root tests (root-level multidtype/parity).
+tenzor_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # CIoU Loss Tests
 add_executable(test_ciou_loss test_ciou_loss.cpp)

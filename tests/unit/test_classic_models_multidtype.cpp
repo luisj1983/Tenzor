@@ -63,8 +63,10 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11ForwardShape) {
 
     expectShape(output.tensor(), {2, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
+// Note: TEST_P helper duplicate prefix matcher landing position.
 TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
     auto model = vgg11(10, true, false);
     convert_model(model);
@@ -91,6 +93,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
         }
     }
     EXPECT_GT(params_with_grad, 0);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG13ForwardShape) {
@@ -103,6 +106,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG13ForwardShape) {
 
     expectShape(output.tensor(), {2, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG16ForwardShape) {
@@ -115,6 +119,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG16ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG16GradientFlow) {
@@ -141,6 +146,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG16GradientFlow) {
         }
     }
     EXPECT_GT(params_with_grad, 0);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG19ForwardShape) {
@@ -153,6 +159,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG19ForwardShape) {
 
     expectShape(output.tensor(), {4, 100});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGGWithoutBatchNorm) {
@@ -165,6 +172,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGGWithoutBatchNorm) {
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, VGGCustomDropout) {
@@ -176,6 +184,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGGCustomDropout) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -192,6 +201,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
@@ -206,6 +216,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
 
     EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
@@ -217,6 +228,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
@@ -229,6 +241,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
 
     expectShape(output.tensor(), {8, 100});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomDropout) {
@@ -240,6 +253,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomDropout) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -270,6 +284,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetGradientFlow) {
 
     EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetWithAuxiliaryClassifiers) {
@@ -291,6 +306,9 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetWithAuxiliaryClassifiers) {
     expectShape(aux2_out.tensor(), {2, 10});
     expectDType(aux1_out.tensor());
     expectDType(aux2_out.tensor());
+    expectFiniteNonZero(main_out.tensor());
+    expectFiniteNonZero(aux1_out.tensor());
+    expectFiniteNonZero(aux2_out.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetInferenceMode) {
@@ -302,6 +320,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetInferenceMode) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, InceptionModuleForward) {
@@ -320,6 +339,7 @@ TEST_P(ClassicModelsMultiDTypeTest, InceptionModuleForward) {
     // Output channels: 64 + 128 + 32 + 32 = 256
     expectShape(output.tensor(), {1, 256, 28, 28});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetCustomDropout) {
@@ -331,6 +351,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetCustomDropout) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -390,6 +411,7 @@ TEST_P(ClassicModelsMultiDTypeTest, LargeBatchVGG) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {16, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, SmallBatchGoogLeNet) {
@@ -401,6 +423,7 @@ TEST_P(ClassicModelsMultiDTypeTest, SmallBatchGoogLeNet) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(ClassicModelsMultiDTypeTest, MultipleBatchSizes) {
@@ -413,6 +436,7 @@ TEST_P(ClassicModelsMultiDTypeTest, MultipleBatchSizes) {
         Variable output = model->forward(input);
 
         expectShape(output.tensor(), {batch_size, 10});
+        expectFiniteNonZero(output.tensor());
     }
 }
 

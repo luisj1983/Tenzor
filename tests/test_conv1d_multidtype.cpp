@@ -15,43 +15,56 @@ class Conv1dMultiDTypeTest : public MultiBackendDTypeTest {};
 
 TEST_P(Conv1dMultiDTypeTest, BasicForwardShape) {
     auto conv = nn::Conv1d(2, 3, 3, 1, 0, 1, 1, false);
-    convert_model(conv);
+    // CPU reference forward (conv is on CPU before convert_model)
+    auto input_cpu = tenzor::randn({1, 2, 5}, DType::Float32, Device::cpu());
+    auto ref = conv.forward(Variable(input_cpu, false));
 
-    auto input = createInput({1, 2, 5}, false);
+    convert_model(conv);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), false);
     auto output = conv.forward(input);
     expectShape(output.tensor(), {1, 3, 3});
     expectDevice(output.tensor());
     expectDType(output.tensor());
+    expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 }
 
 TEST_P(Conv1dMultiDTypeTest, WithBias) {
     auto conv = nn::Conv1d(4, 8, 3, 1, 1, 1, 1, true);
-    convert_model(conv);
+    auto input_cpu = tenzor::randn({2, 4, 10}, DType::Float32, Device::cpu());
+    auto ref = conv.forward(Variable(input_cpu, false));
 
-    auto input = createInput({2, 4, 10}, false);
+    convert_model(conv);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), false);
     auto output = conv.forward(input);
     expectShape(output.tensor(), {2, 8, 10});
+    expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 }
 
 TEST_P(Conv1dMultiDTypeTest, WithStridePadding) {
     auto conv = nn::Conv1d(3, 6, 5, 2, 2);
-    convert_model(conv);
+    auto input_cpu = tenzor::randn({1, 3, 16}, DType::Float32, Device::cpu());
+    auto ref = conv.forward(Variable(input_cpu, false));
 
-    auto input = createInput({1, 3, 16}, false);
+    convert_model(conv);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), false);
     auto output = conv.forward(input);
     // L_out = floor((16 + 2*2 - 5) / 2) + 1 = floor(15/2) + 1 = 8
     expectShape(output.tensor(), {1, 6, 8});
+    expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
 }
 
 TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
     for (int64_t k : {1, 3, 5, 7}) {
         auto conv = nn::Conv1d(2, 4, k, 1, k / 2);
-        convert_model(conv);
+        auto input_cpu = tenzor::randn({1, 2, 16}, DType::Float32, Device::cpu());
+        auto ref = conv.forward(Variable(input_cpu, false));
 
-        auto input = createInput({1, 2, 16}, false);
+        convert_model(conv);
+        auto input = Variable(input_cpu.to(dtype_).to(device_), false);
         auto output = conv.forward(input);
         EXPECT_EQ(output.tensor().shape()[0], 1);
         EXPECT_EQ(output.tensor().shape()[1], 4);
+        expectTensorNear(output.tensor(), ref.tensor(), std::max(atol_, 5e-2f));
     }
 }
 
@@ -59,10 +72,16 @@ TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
 // Conv1dBackwardBias kernels. The optimizer-style sum().backward() pattern
 // populates .grad() on the input tensor and the conv's parameters.
 TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
+    // CPU reference: same conv config, same input, run on CPU.
+    auto conv_ref = nn::Conv1d(2, 4, 3, 1, 1, 1, 1, /*bias=*/true);
+    auto input_cpu = tenzor::randn({1, 2, 8}, DType::Float32, Device::cpu());
+    auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
+    auto out_ref = conv_ref.forward(in_ref);
+    tenzor::sum(out_ref).backward();
+
     auto conv = nn::Conv1d(2, 4, 3, 1, 1, 1, 1, /*bias=*/true);
     convert_model(conv);
-
-    auto input = createInput({1, 2, 8}, /*requires_grad=*/true);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);
     auto output = conv.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -74,6 +93,11 @@ TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
     EXPECT_EQ(g.shape()[2], 8);
     expectDevice(g);
 
+    // Forward output equals CPU reference (weights identical via per-test seed)
+    expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
+    // Input gradient matches CPU reference
+    expectTensorNear(g, in_ref.grad().value(), std::max(atol_, 5e-2f));
+
     // Both weight and bias parameters should see gradients
     for (const auto& [name, p] : conv.named_parameters()) {
         ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
@@ -81,10 +105,15 @@ TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
 }
 
 TEST_P(Conv1dMultiDTypeTest, BackwardWithStridePadding) {
+    auto conv_ref = nn::Conv1d(3, 6, 5, 2, 2);
+    auto input_cpu = tenzor::randn({2, 3, 12}, DType::Float32, Device::cpu());
+    auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
+    auto out_ref = conv_ref.forward(in_ref);
+    tenzor::sum(out_ref).backward();
+
     auto conv = nn::Conv1d(3, 6, 5, 2, 2);
     convert_model(conv);
-
-    auto input = createInput({2, 3, 12}, /*requires_grad=*/true);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);
     auto output = conv.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -93,6 +122,9 @@ TEST_P(Conv1dMultiDTypeTest, BackwardWithStridePadding) {
     EXPECT_EQ(input.grad().value().shape()[0], 2);
     EXPECT_EQ(input.grad().value().shape()[1], 3);
     EXPECT_EQ(input.grad().value().shape()[2], 12);
+    expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
+    expectTensorNear(input.grad().value(), in_ref.grad().value(),
+                     std::max(atol_, 5e-2f));
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(Conv1dMultiDTypeTest);

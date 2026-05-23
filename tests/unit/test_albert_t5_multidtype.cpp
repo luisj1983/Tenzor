@@ -44,6 +44,7 @@ protected:
 
         return Variable(input_ids, true);
     }
+
 };
 
 // ============================================================================
@@ -77,6 +78,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseForwardShape) {
 
     expectShape(output.sequence_output.tensor(), {batch_size, seq_len, 768});
     expectDType(output.sequence_output.tensor());
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseGradientFlow) {
@@ -96,11 +98,19 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseGradientFlow) {
     EXPECT_GT(params.size(), 0);
 
     // Verify gradient exists and has correct dtype
+    bool any_grad_seen = false;
     for (const auto& p : params) {
         if (p->grad()) {
             EXPECT_EQ(p->grad()->dtype(), dtype());
+            // At least one parameter gradient should be finite + non-zero.
+            if (!any_grad_seen) {
+                expectFiniteNonZero(*p->grad());
+                any_grad_seen = true;
+            }
         }
     }
+    EXPECT_TRUE(any_grad_seen) << "no parameter received a gradient";
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseParameterCount) {
@@ -148,6 +158,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTLargeForwardShape) {
 
     expectShape(output.sequence_output.tensor(), {batch_size, seq_len, 1024});
     expectDType(output.sequence_output.tensor());
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, ALBERTLargeGradientFlow) {
@@ -165,6 +176,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTLargeGradientFlow) {
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 // ============================================================================
@@ -188,6 +200,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTXLargeForwardShape) {
 
     expectShape(output.sequence_output.tensor(), {batch_size, seq_len, 2048});
     expectDType(output.sequence_output.tensor());
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 // ============================================================================
@@ -211,6 +224,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTXXLargeForwardShape) {
 
     expectShape(output.sequence_output.tensor(), {batch_size, seq_len, 4096});
     expectDType(output.sequence_output.tensor());
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 // ============================================================================
@@ -245,6 +259,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5SmallForwardShape) {
 
     expectShape(output.decoder_output.tensor(), {batch_size, seq_len, 512});
     expectDType(output.decoder_output.tensor());
+    expectFiniteNonZero(output.decoder_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, T5SmallGradientFlow) {
@@ -264,6 +279,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5SmallGradientFlow) {
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
+    expectFiniteNonZero(output.decoder_output.tensor());
 }
 
 // ============================================================================
@@ -298,6 +314,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5BaseForwardShape) {
 
     expectShape(output.decoder_output.tensor(), {batch_size, seq_len, 768});
     expectDType(output.decoder_output.tensor());
+    expectFiniteNonZero(output.decoder_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, T5BaseGradientFlow) {
@@ -326,6 +343,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5BaseGradientFlow) {
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
+    expectFiniteNonZero(output.decoder_output.tensor());
 }
 
 // ============================================================================
@@ -359,6 +377,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5LargeForwardShape) {
 
     expectShape(output.decoder_output.tensor(), {batch_size, seq_len, 1024});
     expectDType(output.decoder_output.tensor());
+    expectFiniteNonZero(output.decoder_output.tensor());
 }
 
 // ============================================================================
@@ -379,6 +398,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBatchSizeOne) {
 
     expectShape(output.sequence_output.tensor(), {1, 64, 768});
     expectDType(output.sequence_output.tensor());
+    expectFiniteNonZero(output.sequence_output.tensor());
 }
 
 TEST_P(ALBERTandT5MultiDTypeTest, T5VariableSequenceLength) {
@@ -397,6 +417,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5VariableSequenceLength) {
 
     expectShape(output_32.decoder_output.tensor(), {2, 32, 512});
     expectDType(output_32.decoder_output.tensor());
+    expectFiniteNonZero(output_32.decoder_output.tensor());
 }
 
 // ============================================================================

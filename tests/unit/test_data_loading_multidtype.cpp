@@ -65,6 +65,15 @@ TEST_P(DataLoadingMultiDTypeTest, TensorDatasetSingleElement) {
 
     auto [input, target] = dataset.get(0);
     expectShape(input, {3, 4});
+    // Value check: dataset.get(0) returns the row whose flat values come from
+    // createTestInputs at index 0: 0.0, 0.1, 0.2, ... (i % 100) / 10.0f.
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    const float* p = input_cpu.data<float>();
+    EXPECT_NEAR(p[0], 0.0f, std::max(atol_, 1e-2f));
+    EXPECT_NEAR(p[1], 0.1f, std::max(atol_, 1e-2f));
+    // Target for sample 0 is 0 (i % 10).
+    auto target_cpu = target.to(Device::cpu()).to(DType::Float32);
+    EXPECT_NEAR(target_cpu.data<float>()[0], 0.0f, std::max(atol_, 1e-2f));
 }
 
 TEST_P(DataLoadingMultiDTypeTest, TensorDatasetGetElement) {
@@ -75,6 +84,14 @@ TEST_P(DataLoadingMultiDTypeTest, TensorDatasetGetElement) {
 
     auto [input, target] = dataset.get(10);
     expectShape(input, {5, 5});
+    // Sample 10 starts at flat index 10*25 = 250 in the source tensor.
+    // createTestInputs sets data[i] = (i % 100) / 10.0f, so position 250 → 250%100=50 → 5.0.
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    const float* p = input_cpu.data<float>();
+    EXPECT_NEAR(p[0], 5.0f, std::max(atol_, 5e-2f));
+    // Target for sample 10 is 0 (10 % 10).
+    auto target_cpu = target.to(Device::cpu()).to(DType::Float32);
+    EXPECT_NEAR(target_cpu.data<float>()[0], 0.0f, std::max(atol_, 1e-2f));
 }
 
 TEST_P(DataLoadingMultiDTypeTest, TensorDatasetOutOfRangeThrows) {

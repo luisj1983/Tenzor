@@ -8,6 +8,13 @@
  * - BFloat16 mixed precision
  * - Nested autocast contexts with different dtypes
  * - Operation-specific casting rules per dtype
+ *
+ * audit-3 T.1: every TEST_F here is on the Autocast state-machine API
+ * (is_enabled / get_dtype / should_autocast / get_autocast_dtype) and already
+ * has element-level EXPECT_TRUE / EXPECT_EQ / EXPECT_FALSE assertions on the
+ * returned DType / bool values. No tensor compute happens, so a CPU-tensor
+ * reference cross-check is not applicable; the existing equality checks ARE
+ * the value assertions.
  */
 
 #include <gtest/gtest.h>

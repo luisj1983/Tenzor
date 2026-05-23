@@ -62,6 +62,11 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMMBackwardGradExists) {
     auto result = spmm(sparse, dense);
     EXPECT_EQ(result.tensor().shape()[0], 3);
     EXPECT_EQ(result.tensor().shape()[1], 2);
+    // Sparse matrix is diag([1,2,3,4]) shape (3,4); row 2 is all zero in the
+    // sparse pattern (crow=[0,1,3,4]: row 0 has col 0, row 1 has cols 1&2, row 2
+    // has col 3). Per-element value check: output[i,j] = (sparse @ dense)[i,j];
+    // catches kernels that silently return zero.
+    expectFiniteNonZero(result.tensor());
 
     auto target = Variable(zeros({3, 2}, dtype(), device()), false);
     nn::MSELoss loss_fn;
@@ -73,6 +78,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMMBackwardGradExists) {
         auto& grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
         EXPECT_EQ(grad_tensor.shape()[1], 2);
+        expectFiniteNonZero(grad_tensor);
     }
 }
 
@@ -83,6 +89,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMVBackwardGradExists) {
 
     auto result = spmv(sparse, vec);
     EXPECT_EQ(result.tensor().shape()[0], 3);
+    expectFiniteNonZero(result.tensor());
 
     auto target = Variable(zeros({3}, dtype(), device()), false);
     nn::MSELoss loss_fn;
@@ -92,6 +99,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMVBackwardGradExists) {
     EXPECT_GRAD_FLOWS(vec);
     if (vec.grad().has_value()) {
         EXPECT_EQ(vec.grad().value().shape()[0], 4);
+        expectFiniteNonZero(vec.grad().value());
     }
 }
 
@@ -103,6 +111,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SparseAddBackwardGradExists) {
     auto result = sparse_add(sparse, dense);
     EXPECT_EQ(result.tensor().shape()[0], 3);
     EXPECT_EQ(result.tensor().shape()[1], 4);
+    expectFiniteNonZero(result.tensor());
 
     auto target = Variable(zeros({3, 4}, dtype(), device()), false);
     nn::MSELoss loss_fn;
@@ -113,6 +122,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SparseAddBackwardGradExists) {
     if (dense.grad().has_value()) {
         EXPECT_EQ(dense.grad().value().shape()[0], 3);
         EXPECT_EQ(dense.grad().value().shape()[1], 4);
+        expectFiniteNonZero(dense.grad().value());
     }
 }
 
@@ -134,6 +144,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMMOutputShape) {
     auto result = spmm(sparse, dense);
     EXPECT_EQ(result.tensor().shape()[0], 3);
     EXPECT_EQ(result.tensor().shape()[1], 5);
+    expectFiniteNonZero(result.tensor());
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(SparseAutogradMultiDTypeTest);

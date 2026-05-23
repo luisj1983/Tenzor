@@ -9,6 +9,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include <cmath>
+#include <complex>
 #include <cstring>
 
 using namespace tenzor;
@@ -70,6 +71,59 @@ TEST_P(LinalgLstsqPinvMatexpMultiDTypeTest, PinvReconstructsA) {
     auto* r = r_cpu.data<float>();
     for (int i = 0; i < 8; ++i) {
         EXPECT_NEAR(r[i], a[i], 1e-4f);
+    }
+}
+
+// audit-3 T.13: Complex64 pinv coverage. Build identity directly in Complex64
+// storage (interleaved real/imag pairs). pinv(I) == I.
+TEST_P(LinalgLstsqPinvMatexpMultiDTypeTest, PinvIdentity_Complex64) {
+    // The dtype() parameter doesn't drive the matrix dtype here — we cover the
+    // explicit Complex64 path that the parametrised Float32/Float64/Float16
+    // sweep does not reach. Run once per backend (gated on dtype param to
+    // avoid 3x redundant work).
+    if (dtype() != DType::Float32) GTEST_SKIP() << "Complex64 cover runs in Float32 slot";
+
+    auto A = zeros({3, 3}, DType::Complex64, Device::cpu());
+    auto* a = A.data<std::complex<float>>();
+    a[0] = {1.0f, 0.0f};
+    a[4] = {1.0f, 0.0f};
+    a[8] = {1.0f, 0.0f};
+    A = A.to(device());
+
+    auto Ap = linalg::pinv(A);
+    auto ap_cpu = Ap.to(Device::cpu());
+    auto* ap = ap_cpu.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            float expected_re = (i == j) ? 1.0f : 0.0f;
+            EXPECT_NEAR(ap[i * 3 + j].real(), expected_re, 1e-4f);
+            EXPECT_NEAR(ap[i * 3 + j].imag(), 0.0f, 1e-4f);
+        }
+    }
+}
+
+// audit-3 T.13: rank-deficient pinv coverage — row 2 = row 0 + row 1, so the
+// 3x3 matrix has rank 2. Moore–Penrose property 1: A @ pinv(A) @ A ≈ A.
+TEST_P(LinalgLstsqPinvMatexpMultiDTypeTest, PinvRankDeficient) {
+    SKIP_IF_FLOAT16();
+
+    auto A = zeros({3, 3}, DType::Float64, Device::cpu());
+    double A_data[9] = {
+        1.0,  2.0, 3.0,
+        4.0,  5.0, 6.0,
+        5.0,  7.0, 9.0,  // = row0 + row1
+    };
+    std::memcpy(A.data<double>(), A_data, sizeof(A_data));
+    A = A.to(device());
+
+    auto Ap = linalg::pinv(A);
+    auto reconstructed = matmul(matmul(A, Ap), A);
+    auto a_cpu = A.to(Device::cpu()).to(DType::Float32);
+    auto r_cpu = reconstructed.to(Device::cpu()).to(DType::Float32);
+    auto* a = a_cpu.data<float>();
+    auto* r = r_cpu.data<float>();
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_NEAR(r[i], a[i], 1e-3f) << "Moore–Penrose property 1 fails at " << i;
     }
 }
 

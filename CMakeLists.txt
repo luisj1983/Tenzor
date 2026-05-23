@@ -626,6 +626,18 @@ if(TENZOR_BUILD_TESTS)
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         )
         set_tests_properties(TensorboardWireFormat PROPERTIES LABELS "lint")
+
+        # audit-3 T.14: ratchet for multi-dtype companion coverage. Errors on
+        # any new test_*.cpp that lacks a sibling test_*_multidtype.cpp and is
+        # not on the known-intentional allowlist in
+        # tests/backend_parity/MULTIDTYPE_COVERAGE_GAPS.md.
+        add_test(
+            NAME MultidtypeCoverage
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/check_multidtype_coverage.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(MultidtypeCoverage PROPERTIES LABELS "lint")
     endif()
 endif()
 

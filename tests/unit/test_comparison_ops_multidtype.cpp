@@ -37,6 +37,13 @@ inline std::string dtype_to_str(DType d) {
  * - Input dtypes: Float32, Float64, Int32, Int64
  * - Output dtype(): Bool (always)
  * - Edge cases: NaN for floats, max/min for integers
+ *
+ * audit-3 T.1: every TEST_P here routes through verifyAllTrue / verifyAllFalse
+ * which does per-element EXPECT_TRUE / EXPECT_FALSE on the output Bool buffer.
+ * Those ARE element-level value assertions (not just shape checks) — a
+ * backend that returns false for every comparison would fail every test.
+ * No CPU-reference cross-check is needed because the expected truth value
+ * is a closed-form constant for these synthetic equal/unequal inputs.
  */
 
 // ============================================================================

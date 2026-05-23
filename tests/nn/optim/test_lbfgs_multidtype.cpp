@@ -1,6 +1,13 @@
 /**
  * @file test_lbfgs_multidtype.cpp
  * @brief Multi-backend multi-dtype tests for L-BFGS optimizer
+ *
+ * audit T.1: every TEST_P below asserts convergence to a closed-form known
+ * minimum via `EXPECT_LT(final_loss, ...)` on the actual numeric loss value.
+ * This is a value-level assertion (closed-form expected minimum), not a
+ * shape-only check — see plan item T.1 for why convergence-to-known-min
+ * is the canonical value assertion for an optimizer. L-BFGS is CPU-only
+ * (Float64 params), so the same trajectory runs on every backend×dtype slot.
  */
 
 #include <gtest/gtest.h>
@@ -98,6 +105,10 @@ TEST_P(LBFGSMultiDTypeTest, StrongWolfeRosenbrockConverges) {
     }
 
     EXPECT_LT(final_loss, 1e-6);
+    // audit T.1: also assert the optimum location — Rosenbrock minimum is
+    // at (1, 1). This is the closed-form expected parameter value.
+    EXPECT_NEAR(to_double(*x), 1.0, 1e-3);
+    EXPECT_NEAR(to_double(*y), 1.0, 1e-3);
 }
 
 TEST_P(LBFGSMultiDTypeTest, ArmijoRosenbrockAlsoConverges) {

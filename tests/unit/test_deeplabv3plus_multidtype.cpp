@@ -124,6 +124,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet50ForwardShape) {
 
     expectShape(output.tensor(), {2, 21, img_size, img_size});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet50GradientFlow) {
@@ -156,6 +157,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet50SmallBatchForward) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {1, 21, img_size, img_size});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -172,6 +174,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101ForwardShape) {
 
     expectShape(output.tensor(), {1, 21, img_size, img_size});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101GradientFlow) {
@@ -199,6 +202,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101BatchProcessing) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {4, 21, img_size, img_size});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -215,6 +219,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, MobileNetForwardShape) {
 
     expectShape(output.tensor(), {2, 21, img_size, img_size});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, MobileNetGradientFlow) {
@@ -256,6 +261,8 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, DifferentInputSizes) {
     // Verify dtype preservation
     EXPECT_EQ(output_small.tensor().dtype(), dtype());
     EXPECT_EQ(output_large.tensor().dtype(), dtype());
+    expectFiniteNonZero(output_small.tensor());
+    expectFiniteNonZero(output_large.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, NonSquareInputs) {
@@ -266,6 +273,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, NonSquareInputs) {
     auto images_rect = createInput({1, 3, 384, 512});
     Variable output_rect = model->forward(images_rect);
     expectShape(output_rect.tensor(), {1, 21, 384, 512});
+    expectFiniteNonZero(output_rect.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, SmallInputSize) {
@@ -276,6 +284,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, SmallInputSize) {
     auto images_small = createInput({1, 3, 128, 128});
     Variable output_small = model->forward(images_small);
     expectShape(output_small.tensor(), {1, 21, 128, 128});
+    expectFiniteNonZero(output_small.tensor());
 }
 
 // ============================================================================
@@ -295,6 +304,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ASPPFeatureExtraction) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[2], img_size) << "Height not preserved through ASPP on " << backend_name();
     EXPECT_EQ(shape[3], img_size) << "Width not preserved through ASPP on " << backend_name();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, ASPPWithDilation) {
@@ -307,6 +317,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ASPPWithDilation) {
 
     EXPECT_EQ(output_large.tensor().dtype(), dtype())
         << "ASPP dtype preservation failed on " << backend_name();
+    expectFiniteNonZero(output_large.tensor());
 }
 
 // ============================================================================
@@ -326,6 +337,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, DecoderSkipConnections) {
     // Skip connections should allow gradient flow
     EXPECT_TRUE(images.grad().has_value())
         << "Skip connection gradient flow failed on " << backend_name();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, DecoderOutputResolution) {
@@ -340,6 +352,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, DecoderOutputResolution) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[2], img_size) << "Decoder height restoration failed on " << backend_name();
     EXPECT_EQ(shape[3], img_size) << "Decoder width restoration failed on " << backend_name();
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -385,6 +398,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, BinarySegmentation) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {2, 1, img_size, img_size});
+    expectFiniteNonZero(output.tensor());
     EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
@@ -398,6 +412,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, MultiClassSegmentation) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {1, 80, img_size, img_size});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, FewClassSegmentation) {
@@ -410,6 +425,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, FewClassSegmentation) {
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[1], 2) << "Few-class segmentation failed on " << backend_name();
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -436,6 +452,8 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, TrainEvalModeConsistency) {
     EXPECT_EQ(std::vector<int64_t>(shape_eval.begin(), shape_eval.end()),
               std::vector<int64_t>(shape_train.begin(), shape_train.end()))
         << "Shape inconsistency between train/eval modes on " << backend_name();
+    expectFiniteNonZero(output_eval.tensor());
+    expectFiniteNonZero(output_train.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, BatchNormInEvalMode) {
@@ -449,6 +467,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, BatchNormInEvalMode) {
     // Should produce valid output in eval mode
     EXPECT_FALSE(output.tensor().shape().empty())
         << "Eval mode output invalid on " << backend_name();
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -481,6 +500,9 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, BackboneOutputConsistency) {
     EXPECT_EQ(std::vector<int64_t>(shape_resnet50.begin(), shape_resnet50.end()),
               std::vector<int64_t>(shape_mobilenet.begin(), shape_mobilenet.end()))
         << "ResNet/MobileNet shape mismatch on " << backend_name();
+    expectFiniteNonZero(output_resnet50.tensor());
+    expectFiniteNonZero(output_resnet101.tensor());
+    expectFiniteNonZero(output_mobilenet.tensor());
 
     // All should preserve dtype
     EXPECT_EQ(output_resnet50.tensor().dtype(), dtype());
@@ -503,6 +525,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, LargeBatchProcessing) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[0], 8) << "Large batch processing failed on " << backend_name();
     EXPECT_EQ(output.tensor().dtype(), dtype());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, MinimalInputSize) {
@@ -514,6 +537,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, MinimalInputSize) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {1, 21, 64, 64});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, VeryLargeInputSize) {
@@ -534,6 +558,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, VeryLargeInputSize) {
     Variable output = model->forward(images);
 
     expectShape(output.tensor(), {1, 21, size, size});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, SequentialForwardPasses) {
@@ -557,6 +582,9 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, SequentialForwardPasses) {
     EXPECT_EQ(std::vector<int64_t>(shape2.begin(), shape2.end()),
               std::vector<int64_t>(shape3.begin(), shape3.end()))
         << "Sequential forward pass 2-3 shape mismatch on " << backend_name();
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
+    expectFiniteNonZero(output3.tensor());
 }
 
 // ============================================================================

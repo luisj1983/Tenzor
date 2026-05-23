@@ -197,6 +197,7 @@ TEST_P(BertMultiDtypeTest, BertEmbeddingsForwardShape) {
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertEmbeddingsWithTokenTypes) {
@@ -212,6 +213,7 @@ TEST_P(BertMultiDtypeTest, BertEmbeddingsWithTokenTypes) {
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertEmbeddingsGradientFlow) {
@@ -271,6 +273,7 @@ TEST_P(BertMultiDtypeTest, BertEncoderForwardShape) {
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertEncoderWithMask) {
@@ -284,6 +287,7 @@ TEST_P(BertMultiDtypeTest, BertEncoderWithMask) {
 
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertEncoderGradientFlow) {
@@ -339,6 +343,7 @@ TEST_P(BertMultiDtypeTest, BertPoolerForwardShape) {
     EXPECT_EQ(output.tensor().ndim(), 2);
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], config_.hidden_size);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertPoolerTanhActivation) {
@@ -367,6 +372,7 @@ TEST_P(BertMultiDtypeTest, BertPoolerCLSExtraction) {
 
     // Should extract from first token (CLS)
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -389,6 +395,8 @@ TEST_P(BertMultiDtypeTest, BertModelForwardShape) {
     // pooled_output: [batch, hidden_size]
     EXPECT_EQ(pooled_output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(pooled_output.tensor().shape()[1], config_.hidden_size);
+    expectFiniteNonZero(sequence_output.tensor());
+    expectFiniteNonZero(pooled_output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelWithAllInputs) {
@@ -405,6 +413,8 @@ TEST_P(BertMultiDtypeTest, BertModelWithAllInputs) {
 
     EXPECT_EQ(sequence_output.tensor().ndim(), 3);
     EXPECT_EQ(pooled_output.tensor().ndim(), 2);
+    expectFiniteNonZero(sequence_output.tensor());
+    expectFiniteNonZero(pooled_output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelGradientFlow) {
@@ -444,6 +454,8 @@ TEST_P(BertMultiDtypeTest, BertModelTrainEvalMode) {
     model.eval();
     auto [eval_seq, eval_pool] = model.forward(input_ids);
     EXPECT_EQ(eval_seq.tensor().dtype(), dtype());
+    expectFiniteNonZero(train_seq.tensor());
+    expectFiniteNonZero(eval_seq.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelDifferentSequenceLengths) {
@@ -465,6 +477,7 @@ TEST_P(BertMultiDtypeTest, BertModelDifferentSequenceLengths) {
     auto [short_seq, short_pool] = model.forward(short_input);
 
     EXPECT_EQ(short_seq.tensor().shape()[1], short_seq_len);
+    expectFiniteNonZero(short_seq.tensor());
 }
 
 // ============================================================================
@@ -482,6 +495,7 @@ TEST_P(BertMultiDtypeTest, SequenceClassificationBinary) {
     // Output: [batch, num_labels]
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], 2);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, SequenceClassificationMultiClass) {
@@ -494,6 +508,7 @@ TEST_P(BertMultiDtypeTest, SequenceClassificationMultiClass) {
     auto output = model.forward(input_ids);
 
     EXPECT_EQ(output.tensor().shape()[1], num_classes);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, SequenceClassificationGradientFlow) {
@@ -526,6 +541,7 @@ TEST_P(BertMultiDtypeTest, SequenceClassificationWithMask) {
 
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], 2);
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -545,6 +561,7 @@ TEST_P(BertMultiDtypeTest, TokenClassificationForwardShape) {
     EXPECT_EQ(output.tensor().shape()[0], batch_size_);
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], num_labels);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, TokenClassificationWithMask) {
@@ -558,6 +575,7 @@ TEST_P(BertMultiDtypeTest, TokenClassificationWithMask) {
     auto output = model.forward(input_ids, attention_mask);
 
     EXPECT_EQ(output.tensor().ndim(), 3);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, TokenClassificationGradientFlow) {
@@ -589,6 +607,7 @@ TEST_P(BertMultiDtypeTest, TokenClassificationPerTokenPrediction) {
 
     // Each token should have prediction scores for all labels
     EXPECT_EQ(output.tensor().shape()[2], num_labels);
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -608,6 +627,8 @@ TEST_P(BertMultiDtypeTest, QuestionAnsweringForwardShape) {
     EXPECT_EQ(start_logits.tensor().shape()[1], seq_len_);
     EXPECT_EQ(end_logits.tensor().shape()[0], batch_size_);
     EXPECT_EQ(end_logits.tensor().shape()[1], seq_len_);
+    expectFiniteNonZero(start_logits.tensor());
+    expectFiniteNonZero(end_logits.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, QuestionAnsweringWithTokenTypes) {
@@ -623,6 +644,8 @@ TEST_P(BertMultiDtypeTest, QuestionAnsweringWithTokenTypes) {
 
     EXPECT_EQ(start_logits.tensor().ndim(), 2);
     EXPECT_EQ(end_logits.tensor().ndim(), 2);
+    expectFiniteNonZero(start_logits.tensor());
+    expectFiniteNonZero(end_logits.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, QuestionAnsweringGradientFlow) {
@@ -721,6 +744,7 @@ TEST_P(BertMultiDtypeTest, BertModelShortSequence) {
     auto [seq_out, pool_out] = model.forward(input);
 
     EXPECT_EQ(seq_out.tensor().shape()[1], short_seq);
+    expectFiniteNonZero(seq_out.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelBatchSizeOne) {
@@ -739,6 +763,8 @@ TEST_P(BertMultiDtypeTest, BertModelBatchSizeOne) {
 
     EXPECT_EQ(seq_out.tensor().shape()[0], 1);
     EXPECT_EQ(pool_out.tensor().shape()[0], 1);
+    expectFiniteNonZero(seq_out.tensor());
+    expectFiniteNonZero(pool_out.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelLargeBatch) {
@@ -758,6 +784,7 @@ TEST_P(BertMultiDtypeTest, BertModelLargeBatch) {
     auto [seq_out, pool_out] = model.forward(input);
 
     EXPECT_EQ(seq_out.tensor().shape()[0], large_batch);
+    expectFiniteNonZero(seq_out.tensor());
 }
 
 TEST_P(BertMultiDtypeTest, BertModelParameterCount) {

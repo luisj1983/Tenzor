@@ -62,6 +62,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorBasic) {
     EXPECT_EQ(shape[0], 36);
     EXPECT_EQ(shape[1], 4);
     EXPECT_EQ(boxes.dtype(), dtype());
+    expectFiniteNonZero(boxes);
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorNumAnchors) {
@@ -83,6 +84,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, AnchorGeneratorDifferentStrides) {
     EXPECT_EQ(boxes_16.shape()[0], 4);   // 2*2*1*1
     EXPECT_EQ(boxes_8.dtype(), dtype());
     EXPECT_EQ(boxes_16.dtype(), dtype());
+    expectFiniteNonZero(boxes_8);
+    expectFiniteNonZero(boxes_16);
 }
 
 // ============================================================================
@@ -227,6 +230,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignBasic) {
     EXPECT_EQ(shape[2], 3);   // output_h
     EXPECT_EQ(shape[3], 3);   // output_w
     EXPECT_EQ(aligned.tensor().dtype(), dtype());
+    expectFiniteNonZero(aligned.tensor());
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignMultipleROIs) {
@@ -264,6 +268,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignMultipleROIs) {
     EXPECT_EQ(shape[2], 7);   // output_h
     EXPECT_EQ(shape[3], 7);   // output_w
     EXPECT_EQ(aligned.tensor().dtype(), dtype());
+    expectFiniteNonZero(aligned.tensor());
 }
 
 TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignGradient) {
@@ -334,6 +339,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignDifferentOutputSizes) {
         EXPECT_EQ(shape[2], size);
         EXPECT_EQ(shape[3], size);
         EXPECT_EQ(aligned.tensor().dtype(), dtype());
+        expectFiniteNonZero(aligned.tensor());
     }
 }
 

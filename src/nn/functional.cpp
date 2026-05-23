@@ -1262,9 +1262,9 @@ auto normalize(const Variable& input, double p, int64_t dim,
     // alternate "softer" normalize formula and is identical to clamp_min
     // for nonzero norms (the only relevant case at runtime).
     Variable abs_x = tenzor::abs(input);
-    Variable powered = tenzor::pow(abs_x, static_cast<float>(p));
+    Variable powered = tenzor::pow(abs_x, static_cast<double>(p));
     Variable summed = tenzor::sum(powered, dim, /*keepdim=*/true);
-    Variable norm_v = tenzor::pow(summed, static_cast<float>(1.0 / p));
+    Variable norm_v = tenzor::pow(summed, 1.0 / static_cast<double>(p));
     return input / (norm_v + static_cast<float>(eps));
 }
 

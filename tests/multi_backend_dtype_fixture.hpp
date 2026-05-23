@@ -662,6 +662,36 @@ protected:
     }
 
     /**
+     * @brief audit-3 T.1: per-element finiteness + at-least-one non-zero check.
+     *
+     * For large NN-model tests (BERT, T5, ALBERT, Mask-RCNN etc.), running a
+     * full CPU-reference forward to cross-check values doubles the test cost.
+     * This helper catches the common backend bug modes — all-NaN, all-Inf,
+     * all-zero (e.g. a kernel that silently drops its output buffer) — at
+     * O(numel) instead.
+     *
+     * For op-level / small-layer tests, prefer `expectTensorNear` with a CPU
+     * reference; this method is for model-level forwards where the CPU path
+     * is prohibitively slow.
+     */
+    void expectFiniteNonZero(const Tensor& t) {
+        auto cpu = t.to(Device::cpu());
+        if (cpu.dtype() != DType::Float32) cpu = cpu.to(DType::Float32);
+        const float* data = cpu.data<float>();
+        bool any_nonzero = false;
+        for (int64_t i = 0; i < cpu.numel(); ++i) {
+            ASSERT_TRUE(std::isfinite(data[i]))
+                << "Non-finite value at index " << i << ": " << data[i]
+                << " on device " << device_.to_string()
+                << " with dtype " << static_cast<int>(dtype_);
+            if (std::fabs(data[i]) > 1e-6f) any_nonzero = true;
+        }
+        EXPECT_TRUE(any_nonzero)
+            << "Tensor is all-zero on device " << device_.to_string()
+            << " — backend likely dropped the output buffer";
+    }
+
+    /**
      * @brief Check that tensor has expected shape
      */
     void expectShape(const Tensor& tensor,

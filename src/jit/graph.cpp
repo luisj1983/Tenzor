@@ -1832,8 +1832,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Clamp:
             if (!input_vars.empty()) {
-                float min_val = node->get_attr("min");
-                float max_val = node->get_attr("max");
+                double min_val = static_cast<double>(static_cast<float>(node->get_attr("min")));
+                double max_val = static_cast<double>(static_cast<float>(node->get_attr("max")));
                 outputs.push_back(tenzor::clamp(input_vars[0], min_val, max_val));
             }
             break;

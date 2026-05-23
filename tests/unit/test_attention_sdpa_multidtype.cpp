@@ -125,6 +125,18 @@ TEST_P(SDPAMultiDTypeTest, CrossAttention_Forward) {
     auto [out, _w] = attn.forward(q, k, v, Tensor{}, Tensor{}, /*need_weights=*/false);
     expectShape(out.tensor(), {batch, q_seq, embed});
     expectDType(out.tensor());
+
+    // Per-element finiteness + at least one non-zero output value.
+    auto out_cpu = out.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* p = out_cpu.data<float>();
+    bool any_nonzero = false;
+    for (int64_t i = 0; i < out_cpu.numel(); ++i) {
+        ASSERT_TRUE(std::isfinite(p[i]))
+            << "CrossAttention output non-finite on " << device_.to_string();
+        if (std::fabs(p[i]) > 1e-6f) any_nonzero = true;
+    }
+    EXPECT_TRUE(any_nonzero)
+        << "CrossAttention output is all-zero on " << device_.to_string();
 }
 
 // ============================================================================

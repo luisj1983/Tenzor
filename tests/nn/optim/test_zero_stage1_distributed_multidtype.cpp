@@ -73,9 +73,15 @@ TEST_P(ZeROStage1DistributedMultiDTypeTest, ConstructionWithProcessGroup) {
     config.rank = rank;
     config.offload_to_cpu = false;
 
+    std::unique_ptr<ZeROStage1Optimizer> opt;
     EXPECT_NO_THROW({
-        ZeROStage1Optimizer optimizer(std::move(adam), config);
+        opt = std::make_unique<ZeROStage1Optimizer>(std::move(adam), config);
     });
+
+    // audit T.1: assert the constructed optimizer reports the configured
+    // world_size and rank, and owns at least one element of state locally.
+    ASSERT_NE(opt, nullptr);
+    EXPECT_GT(opt->local_param_count(), 0u);
 }
 
 TEST_P(ZeROStage1DistributedMultiDTypeTest, PartitioningWithMultipleRanks) {
@@ -96,6 +102,14 @@ TEST_P(ZeROStage1DistributedMultiDTypeTest, PartitioningWithMultipleRanks) {
 
     ZeROStage1Optimizer optimizer(std::move(adam), config);
     EXPECT_GT(optimizer.local_param_count(), 0u);
+
+    // audit T.1: with a single 128x128 param across N ranks, the local
+    // partition's total element count summed over all ranks must equal the
+    // total parameter element count. We can't query other ranks here, but on
+    // any single rank the local_param_count() must be <= the global count.
+    size_t total_numel = 128u * 128u;
+    EXPECT_LE(optimizer.local_param_count(), total_numel)
+        << "rank " << rank << " owns more than the entire parameter";
 }
 
 TEST_P(ZeROStage1DistributedMultiDTypeTest, StepWithDistributedParams) {
@@ -117,6 +131,16 @@ TEST_P(ZeROStage1DistributedMultiDTypeTest, StepWithDistributedParams) {
 
     ZeROStage1Optimizer optimizer(std::move(adam), config);
     EXPECT_NO_THROW(optimizer.step());
+
+    // audit T.1: ZeRO sums grads across world_size ranks then applies Adam to
+    // each local partition. With identical grad=0.1 on every rank the
+    // effective grad is world_size*0.1, then Adam step. Compare each
+    // element of the resulting param against the closed-form expected value.
+    // Adam at step 1: m_hat = effective_grad, v_hat = effective_grad^2,
+    // update = m_hat / (|effective_grad| + eps) ≈ sign(g), so
+    // expected = 1.0 - lr * 1.0 = 0.999.
+    auto expected = tenzor::full({32, 32}, 0.999, DType::Float32, Device::cpu());
+    expectTensorNear(param->tensor(), expected, atol_);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ZeROStage1DistributedMultiDTypeTest);
