@@ -1,15 +1,29 @@
-// Minimal subset of TensorFlow protobuf schema needed to emit a TensorBoard
-// graph visualisation (GraphDef containing NodeDef messages walked from the
-// Tenzor autograd computation graph).
+// =============================================================================
+// REFERENCE SPECIFICATION — NOT A COMPILED SCHEMA
+// =============================================================================
 //
-// This file is *documentation only* — the encoder in
-// `src/utils/tensorboard.cpp` hand-writes the wire format using the existing
-// varint / length-delimited helpers, so we do not invoke `protoc` and do not
-// take a build-time dependency on libprotobuf.
+// This file is a *reference spec* describing the subset of the TensorFlow
+// protobuf wire format that Tenzor's TensorBoard exporter targets. It is NOT
+// fed to `protoc`, there is no generated C++/Python code, and there is no
+// CMake target that consumes it. It exists purely as human-readable
+// documentation of the byte layout that `src/utils/tensorboard.cpp` hand-rolls
+// via its varint / length-delimited helpers.
 //
-// The wire format follows the standard Google protobuf v2 encoding:
-//   tag = (field_number << 3) | wire_type
-//   wire_type 0 = varint, 1 = 64-bit, 2 = length-delimited, 5 = 32-bit
+// To prevent silent drift between this spec and the encoder, the script
+// `tools/check_tensorboard_wire_format.py` parses both this file and the
+// `write_field_header(buf, N, W)` / `write_string_field(buf, N, ...)` /
+// `write_length_delimited(buf, N, ...)` call sites inside the
+// `encode_node_def` / `build_graph_def` helpers in `tensorboard.cpp`, and
+// fails if any field number / wire-type pair disagrees.
+//
+// Editors: if you change a field number or wire type here, run
+//     python tools/check_tensorboard_wire_format.py
+// and update the encoder in lock-step (or vice versa).
+//
+// -----------------------------------------------------------------------------
+// Wire format (Google protobuf v2/v3):
+//   tag        = (field_number << 3) | wire_type
+//   wire_type  = 0 (varint) | 1 (64-bit) | 2 (length-delimited) | 5 (32-bit)
 //
 // Sources cross-referenced against tensorflow/core/framework in the upstream
 // TF repository (Apache 2.0). Only the fields actually consumed by
