@@ -288,10 +288,28 @@ auto Adam::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
     }
 
+    // P.2: num_params guard so load_state_dict can reject mismatched models
+    // before any tensor is overwritten (mirrors SGD::state_dict).
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // P.2: param-count guard up front. Mirrors SGD::load_state_dict so a
+    // restore against the wrong model fails loudly instead of partially
+    // populating per-parameter buffers and then succeeding silently.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "Adam::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
+
     // Load optimizer configuration
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];
@@ -563,10 +581,24 @@ auto AdamW::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
     }
 
+    // P.2: num_params guard (see Adam::state_dict).
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // P.2: param-count guard up front.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "AdamW::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
     // Audit item D.5: buffer-count guard matching Adam::load_state_dict.
     // Without this, a checkpoint with N exp_avg slots would silently
     // load into an AdamW with M ≠ N parameters and mis-align every

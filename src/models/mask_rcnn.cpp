@@ -476,6 +476,19 @@ auto MaskRCNN::forward_train(const Variable& images,
     // 4. Select training samples (positive and negative ROIs)
     auto sampled_rois = select_training_samples(proposals, gt_boxes, gt_labels);
 
+    // P.6: empty-batch guard. If the proposal sampler returned zero rows
+    // (no positives *and* no negatives — typically a degenerate image / no
+    // GT overlap), downstream RoIAlign + head forwards trip on shape[0]==0
+    // tensors. Bail out early with zero head-losses (RPN losses already
+    // computed above are kept) so the training loop just contributes
+    // nothing for this batch instead of tearing down the whole step.
+    if (sampled_rois.shape().size() == 0 || sampled_rois.shape()[0] == 0) {
+        auto device = images.tensor().device();
+        auto zero_loss = Variable(tenzor::zeros({}, DType::Float32, device),
+                                  /*requires_grad=*/false);
+        return {rpn_cls_loss, rpn_bbox_loss, zero_loss, zero_loss, zero_loss};
+    }
+
     // 5. ROI Align for box head (7×7)
     auto roi_features_box = roi_align_box_->forward(features, sampled_rois);
 

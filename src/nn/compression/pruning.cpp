@@ -8,7 +8,9 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -666,8 +668,31 @@ auto register_pruning_auto_reapply(
     // config object don't change what the hook applies — semantically
     // the masks are snapshotted at registration time), and dispatches
     // through the existing apply_pruning_masks entry point.
+    //
+    // P.7: hook idempotence. The lambda keeps its own atomic
+    // last_applied_iter_ counter and skips re-application if the masks
+    // have already been re-applied in this iteration. This is defensive
+    // against (a) double-registration of the same hook (e.g. caller
+    // calls register_pruning_auto_reapply twice with overlapping configs)
+    // and (b) explicit apply_pruning_masks() calls in user code in the
+    // same iteration. We can't safely query the concrete optimizer's
+    // step_count_ field from the type-erased hook, so we maintain a
+    // local monotonic counter that ticks once per hook invocation.
+    auto last_applied_iter = std::make_shared<std::atomic<uint64_t>>(0);
+    auto current_iter = std::make_shared<std::atomic<uint64_t>>(0);
     return optimizer.register_post_step_hook(
-        [module, config = std::move(config)]() mutable {
+        [module, config = std::move(config),
+         last_applied_iter, current_iter]() mutable {
+            const uint64_t iter = current_iter->fetch_add(1) + 1;
+            uint64_t prev = last_applied_iter->load();
+            if (prev >= iter) {
+                // Already re-applied at this (or a later) step — skip.
+                return;
+            }
+            // CAS so re-entrant invocations in the same step coalesce.
+            if (!last_applied_iter->compare_exchange_strong(prev, iter)) {
+                return;
+            }
             apply_pruning_masks(module, config);
         });
 }

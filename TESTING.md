@@ -266,3 +266,30 @@ TENZOR_PERF_REGRESSION_RTOL=2.0 TENZOR_PERF_REGRESSION_P99_RTOL=5.0 \
 
 Baselines are hardware-specific — the check skips with a clear message
 when the recorded `host` field doesn't match the current machine.
+
+## Re-enabling DISABLED_ benchmark tests (P.8)
+
+Two perf-only gtests are intentionally prefixed `DISABLED_` so they don't
+slow down or destabilise normal `ctest` runs:
+
+- `SIMDOpsTest.DISABLED_AddPerformance`
+  (`tests/unit/test_simd_ops.cpp`) — measures the SIMD `add` throughput
+  ceiling on the current host.
+- `PerformanceRegression.DISABLED_BaselineRegressionCheck_MatMul512`
+  (`tests/backend_parity/test_performance_regression.cpp`) — compares
+  current matmul latency against the recorded host baseline.
+
+Both are exercised via the `tenzor_benchmarks` umbrella target which is
+only emitted when CMake is configured with `-DTENZOR_BUILD_BENCHMARKS=ON`:
+
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTENZOR_BUILD_BENCHMARKS=ON
+ninja -C build tenzor_benchmarks            # build all benchmarks + perf gtests
+ninja -C build run_disabled_perf_benchmarks # run the DISABLED_ perf gtests
+```
+
+To re-enable one as a regular ctest (e.g. while iterating on it), drop the
+`DISABLED_` prefix in the test name in its source file. The CTest wiring
+in `tests/test_simd_ops[1]_tests.cmake` already passes
+`--gtest_also_run_disabled_tests`, so the test will run via ctest as soon
+as it's not skipped by name.

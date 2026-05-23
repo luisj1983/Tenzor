@@ -309,6 +309,17 @@ BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
     : num_features_(num_features), eps_(eps), momentum_(momentum),
       affine_(affine), track_running_stats_(track_running_stats) {
 
+    // P.1: Reject the incoherent training=true / track_running_stats=false
+    // combination at construction. Modules start in train mode (training_=true),
+    // so the only way the user *intends* training-without-running-stats is by
+    // explicitly disabling track_running_stats — which BN cannot honour because
+    // the eval path falls back to running stats. PyTorch raises here.
+    if (training_ && !track_running_stats) {
+        throw std::invalid_argument(
+            "BatchNorm: training=true with track_running_stats=false is "
+            "incompatible — running stats are required during training");
+    }
+
     if (affine) {
         weight_ = Variable(ones({num_features}), true);
         bias_ = Variable(zeros({num_features}), true);
@@ -1041,6 +1052,13 @@ BatchNorm1d::BatchNorm1d(int64_t num_features, double eps, double momentum,
     : num_features_(num_features), eps_(eps), momentum_(momentum),
       affine_(affine), track_running_stats_(track_running_stats) {
 
+    // P.1: see BatchNorm2d ctor for rationale.
+    if (training_ && !track_running_stats) {
+        throw std::invalid_argument(
+            "BatchNorm: training=true with track_running_stats=false is "
+            "incompatible — running stats are required during training");
+    }
+
     if (affine) {
         weight_ = Variable(ones({num_features}), true);
         bias_ = Variable(zeros({num_features}), true);
@@ -1271,9 +1289,23 @@ auto BatchNorm1d::reset_parameters() -> void {
 // BatchNorm3d — reshape 5D to 4D, delegate to BatchNorm2d
 // ============================================================================
 
+// P.1: validation helper for BatchNorm3d's init-list (cannot run statements
+// before bn2d_ is constructed otherwise). Returns num_features unchanged so
+// the call expression remains usable in the init list; throws on bad combo.
+static int64_t bn3d_check_training_and_track(int64_t num_features,
+                                              bool training,
+                                              bool track_running_stats) {
+    if (training && !track_running_stats) {
+        throw std::invalid_argument(
+            "BatchNorm: training=true with track_running_stats=false is "
+            "incompatible — running stats are required during training");
+    }
+    return num_features;
+}
+
 BatchNorm3d::BatchNorm3d(int64_t num_features, double eps, double momentum,
                          bool affine, bool track_running_stats)
-    : num_features_(num_features),
+    : num_features_(bn3d_check_training_and_track(num_features, /*training=*/true, track_running_stats)),
       bn2d_(num_features, eps, momentum, affine, track_running_stats) {
     // Register bn2d_ sub-module so its parameters are visible
     auto bn2d_ptr = std::shared_ptr<BatchNorm2d>(&bn2d_, [](BatchNorm2d*) {});

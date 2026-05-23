@@ -218,3 +218,53 @@ add_custom_target(run_rnn_benchmark
 message(STATUS "Configured ${CMAKE_CURRENT_LIST_DIR} with ${BENCHMARK_TARGETS}")
 message(STATUS "Use 'make run_benchmarks' to run all benchmarks")
 message(STATUS "Individual targets: run_ops_benchmark, run_conv_benchmark, run_attention_benchmark, etc.")
+
+# ============================================================================
+# P.8 — umbrella target wiring the DISABLED_ benchmark-style gtests into a
+# convenient `tenzor_benchmarks` build/run target. These tests are prefixed
+# DISABLED_ in the source so they don't run during normal `ctest` (they're
+# timing-only, not correctness checks), but we still want a one-command
+# entry point to exercise them when -DTENZOR_BUILD_BENCHMARKS=ON.
+#
+#   DISABLED_AddPerformance         — tests/unit/test_simd_ops.cpp
+#   DISABLED_BaselineRegressionCheck_MatMul512
+#                                   — tests/backend_parity/test_performance_regression.cpp
+#
+# Re-enable workflow is documented in TESTING.md (P.8 section).
+# ============================================================================
+
+# Only wire the umbrella if the underlying test executables exist (they do
+# when TENZOR_BUILD_TESTS=ON, which is the default).
+set(_tenzor_bench_deps "")
+if(TARGET test_simd_ops)
+    list(APPEND _tenzor_bench_deps test_simd_ops)
+endif()
+if(TARGET test_performance_regression)
+    list(APPEND _tenzor_bench_deps test_performance_regression)
+endif()
+
+if(_tenzor_bench_deps)
+    add_custom_target(tenzor_benchmarks
+        DEPENDS ${_tenzor_bench_deps} ${BENCHMARK_TARGETS}
+        COMMENT "Built tenzor_benchmarks umbrella (including DISABLED_ perf gtests)"
+    )
+
+    add_custom_target(run_disabled_perf_benchmarks
+        DEPENDS ${_tenzor_bench_deps}
+        # --gtest_also_run_disabled_tests turns on the DISABLED_ prefixed tests
+        # so the perf baselines actually execute. We filter to the two perf
+        # targets so we don't drag in the rest of test_simd_ops' correctness
+        # tests (those already run under normal ctest).
+        COMMAND $<TARGET_FILE:test_simd_ops>
+                --gtest_also_run_disabled_tests
+                --gtest_filter=*DISABLED_AddPerformance*:*DISABLED_BaselineRegressionCheck*
+        COMMAND $<TARGET_FILE:test_performance_regression>
+                --gtest_also_run_disabled_tests
+                --gtest_filter=*DISABLED_BaselineRegressionCheck_MatMul512*
+        COMMENT "Running disabled-by-default benchmark/regression gtests"
+        VERBATIM
+    )
+else()
+    message(STATUS "tenzor_benchmarks umbrella: test_simd_ops / test_performance_regression "
+                   "not built (TENZOR_BUILD_TESTS=OFF?); skipping.")
+endif()

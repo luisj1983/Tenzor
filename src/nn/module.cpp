@@ -111,6 +111,12 @@ auto Module::to(Device device) -> void {
         module->to(device);
     }
 
+    // P.3: re-propagate train/eval mode to submodules after the device move.
+    // Some submodules (e.g. Dropout) may have been reconstructed during
+    // device transfer; without this, a freshly-recreated child can revert
+    // to its default training_=true even though the parent is in eval mode.
+    train(training_);
+
     // std::cerr << "[DEBUG] Module::to() completed successfully" << std::endl;
 }
 

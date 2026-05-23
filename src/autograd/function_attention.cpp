@@ -34,7 +34,9 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/philox_dropout.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/log.hpp"
 
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -485,7 +487,21 @@ auto FlashAttentionBackward::backward_with_variables(std::vector<Variable> grad_
     TENZOR_CHECK(saved.size() >= 4,
                  "FlashAttentionBackward::backward_with_variables: not enough saved tensors");
     if (dropout_p_ > 0.0f) {
-        return passthrough_stub_backward(std::move(grad_outputs));
+        // P.5: higher-order backward through FlashAttention with dropout>0
+        // is currently a stub — the composed-ops path can't reproduce the
+        // exact per-element dropout mask that the fused forward sampled
+        // (Philox seed/offset aren't yet plumbed back into the Variable
+        // graph), so a real 2nd-derivative would silently disagree with
+        // the 1st-order kernel. Warn once and raise the structural-zero
+        // error so the caller sees the unsupported configuration loudly.
+        static std::once_flag warned;
+        std::call_once(warned, []{
+            TENZOR_LOG_WARN("FlashAttention higher-order backward with dropout>0 is currently a stub — "
+                            "raising structural-zero error so this is not silently miscomputed");
+        });
+        TENZOR_CHECK(false,
+                     "FlashAttentionBackward::backward_with_variables: higher-order backward "
+                     "with dropout_p > 0 is not supported (structural zero stub).");
     }
     Variable dO = grad_outputs[0];
     Variable Q(saved[0], false);
