@@ -50,6 +50,104 @@ namespace py = pybind11;
 
 namespace tenzor::python {
 
+namespace {
+
+// ----------------------------------------------------------------------------
+// Audit Q.14: Variable.__mod__ / __floordiv__ stop-gradient Function nodes.
+//
+// fmod and floor-div are non-differentiable, but a Variable that flows into
+// them and then through a downstream differentiable op (e.g. `(x % 1) + b`)
+// still needs the result to carry requires_grad so the chain rule survives.
+// We attach a Function whose backward returns `zeros_like(grad_output)` for
+// each input — matching PyTorch's "stop-gradient" semantics — instead of the
+// previous behaviour of returning a fresh Variable with requires_grad=false
+// (which detached the rest of the graph).
+// ----------------------------------------------------------------------------
+
+class ModBackward : public tenzor::Function {
+public:
+    explicit ModBackward(std::size_t n_inputs) : n_inputs_(n_inputs) {}
+    auto forward(std::vector<tenzor::Variable> /*inputs*/)
+        -> std::vector<tenzor::Variable> override {
+        throw std::runtime_error("ModBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<tenzor::Tensor> grad_outputs)
+        -> std::vector<tenzor::Tensor> override {
+        std::vector<tenzor::Tensor> grads;
+        grads.reserve(n_inputs_);
+        const auto& g0 = grad_outputs.empty() ? tenzor::Tensor{} : grad_outputs[0];
+        for (std::size_t i = 0; i < n_inputs_; ++i) {
+            grads.push_back(tenzor::zeros_like(g0));
+        }
+        return grads;
+    }
+    auto name() const -> std::string override { return "ModBackward"; }
+
+private:
+    std::size_t n_inputs_;
+};
+
+class FloorDivBackward : public tenzor::Function {
+public:
+    explicit FloorDivBackward(std::size_t n_inputs) : n_inputs_(n_inputs) {}
+    auto forward(std::vector<tenzor::Variable> /*inputs*/)
+        -> std::vector<tenzor::Variable> override {
+        throw std::runtime_error("FloorDivBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<tenzor::Tensor> grad_outputs)
+        -> std::vector<tenzor::Tensor> override {
+        std::vector<tenzor::Tensor> grads;
+        grads.reserve(n_inputs_);
+        const auto& g0 = grad_outputs.empty() ? tenzor::Tensor{} : grad_outputs[0];
+        for (std::size_t i = 0; i < n_inputs_; ++i) {
+            grads.push_back(tenzor::zeros_like(g0));
+        }
+        return grads;
+    }
+    auto name() const -> std::string override { return "FloorDivBackward"; }
+
+private:
+    std::size_t n_inputs_;
+};
+
+// Wrap a freshly computed Tensor result of a non-differentiable Variable op
+// in a Variable that preserves requires_grad through the active inputs but
+// stops gradient flow at this node. If no input requires grad, returns a
+// plain non-grad Variable (matches the original behaviour).
+template <typename BackwardT, typename... Inputs>
+auto make_stop_gradient_variable(tenzor::Tensor result, const Inputs&... inputs)
+    -> tenzor::Variable {
+    const tenzor::Variable* arr[] = { &inputs... };
+    bool any_requires = false;
+    for (auto* v : arr) {
+        if (v->requires_grad()) { any_requires = true; break; }
+    }
+    if (!any_requires || !tenzor::is_grad_enabled()) {
+        return tenzor::Variable(std::move(result), false);
+    }
+    auto grad_fn = std::make_shared<BackwardT>(sizeof...(Inputs));
+    std::vector<std::shared_ptr<tenzor::Function>> next_funcs;
+    next_funcs.reserve(sizeof...(Inputs));
+    std::vector<tenzor::Variable> input_vars;
+    input_vars.reserve(sizeof...(Inputs));
+    for (auto* v : arr) {
+        // next_functions always carries one slot per input (nullptr for
+        // leaves / non-grad inputs) — matches the convention used by
+        // src/autograd/ops.cpp.
+        next_funcs.push_back(v->grad_fn());
+        if (v->requires_grad()) {
+            input_vars.push_back(*v);
+        }
+    }
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables(std::move(input_vars));
+    tenzor::Variable out(std::move(result), true);
+    out.set_grad_fn(grad_fn);
+    return out;
+}
+
+} // namespace
+
 void register_core(py::module_& m) {
     // Device availability checks
     m.def("cuda_is_available", []() {
@@ -3792,36 +3890,39 @@ Returns:
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
             return tenzor::pow(a, exp);
         }, py::is_operator())
-        // Modulo and floor division (operate on underlying tensors)
+        // Modulo and floor division — non-differentiable, but Q.14 requires
+        // they propagate requires_grad with a zero-cotangent stop-gradient
+        // backward so downstream differentiable ops in `(x % c) + b` still
+        // see a Variable with grad_fn instead of a detached one.
         .def("__mod__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             auto result = tenzor::fmod(a.tensor(), b.tensor());
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<ModBackward>(std::move(result), a, b);
         }, py::is_operator())
         .def("__mod__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::fmod(a.tensor(), b_tensor);
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<ModBackward>(std::move(result), a);
         }, py::is_operator())
         .def("__rmod__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::fmod(b_tensor, a.tensor());
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<ModBackward>(std::move(result), a);
         }, py::is_operator())
         .def("__floordiv__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             auto result = tenzor::floor(a.tensor() / b.tensor());
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<FloorDivBackward>(std::move(result), a, b);
         }, py::is_operator())
         .def("__floordiv__", [](const tenzor::Variable& a, float b) {
             auto result = tenzor::floor(a.tensor() / static_cast<double>(b));
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<FloorDivBackward>(std::move(result), a);
         }, py::is_operator())
         .def("__rfloordiv__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::floor(b_tensor / a.tensor());
-            return tenzor::Variable(result, false);
+            return make_stop_gradient_variable<FloorDivBackward>(std::move(result), a);
         }, py::is_operator())
         // Comparison operators (return Tensors, not Variables — no grad needed)
         .def("__eq__", [](const tenzor::Variable& a, const tenzor::Variable& b) {

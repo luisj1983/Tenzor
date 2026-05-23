@@ -55,7 +55,8 @@ void register_distributed(py::module_& m) {
         "Check if distributed training is initialized");
 
     distributed.def("barrier", &tenzor::distributed::barrier,
-        "Barrier synchronization across all processes");
+        "Barrier synchronization across all processes",
+        py::call_guard<py::gil_scoped_release>());
 
     distributed.def("get_process_group", []() {
         return tenzor::distributed::DistributedContext::get_process_group();
@@ -63,11 +64,13 @@ void register_distributed(py::module_& m) {
 
     distributed.def("all_reduce", &tenzor::distributed::all_reduce,
         "All-reduce operation on tensor",
-        py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM);
+        py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM,
+        py::call_guard<py::gil_scoped_release>());
 
     distributed.def("broadcast", &tenzor::distributed::broadcast,
         "Broadcast tensor from source rank",
-        py::arg("tensor"), py::arg("src_rank") = 0);
+        py::arg("tensor"), py::arg("src_rank") = 0,
+        py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::distributed::ProcessGroup, std::shared_ptr<tenzor::distributed::ProcessGroup>>(
         distributed, "ProcessGroup")
@@ -77,14 +80,17 @@ void register_distributed(py::module_& m) {
             "Get world size")
         .def("broadcast", &tenzor::distributed::ProcessGroup::broadcast,
             "Broadcast tensor from source rank",
-            py::arg("tensor"), py::arg("src_rank") = 0)
+            py::arg("tensor"), py::arg("src_rank") = 0,
+            py::call_guard<py::gil_scoped_release>())
         .def("all_reduce", &tenzor::distributed::ProcessGroup::all_reduce,
             "All-reduce operation",
-            py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM)
+            py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM,
+            py::call_guard<py::gil_scoped_release>())
         .def("reduce", &tenzor::distributed::ProcessGroup::reduce,
             "Reduce tensor to a single destination rank",
             py::arg("tensor"), py::arg("dst_rank"),
-            py::arg("op") = tenzor::distributed::ReduceOp::SUM)
+            py::arg("op") = tenzor::distributed::ReduceOp::SUM,
+            py::call_guard<py::gil_scoped_release>())
         // gather / all_gather / reduce_scatter: the underlying C++ signatures
         // take `std::vector<Tensor>&` for the output. pybind11's default STL
         // caster copies that list at entry and does NOT propagate C++-side
@@ -109,7 +115,13 @@ void register_distributed(py::module_& m) {
             for (auto item : output_list) {
                 output.push_back(item.cast<tenzor::Tensor>());
             }
-            self.gather(tensor, output, dst_rank);
+            {
+                // Q.15: release the GIL across the actual collective so
+                // other Python threads (DataLoader workers, NCCL streams)
+                // make progress while we're blocked in Gloo.
+                py::gil_scoped_release release;
+                self.gather(tensor, output, dst_rank);
+            }
             if (self.rank() == dst_rank) {
                 for (size_t i = 0; i < output.size(); ++i) {
                     output_list[i] = py::cast(output[i]);
@@ -122,12 +134,17 @@ void register_distributed(py::module_& m) {
            "Returns None — matches torch.distributed.gather semantics.")
         .def("scatter", &tenzor::distributed::ProcessGroup::scatter,
             "Scatter per-rank tensors from a source rank to each rank",
-            py::arg("tensors"), py::arg("output"), py::arg("src_rank"))
+            py::arg("tensors"), py::arg("output"), py::arg("src_rank"),
+            py::call_guard<py::gil_scoped_release>())
         .def("all_gather", [](tenzor::distributed::ProcessGroup& self,
                                const tenzor::Tensor& tensor,
                                std::vector<tenzor::Tensor> output)
                                -> std::vector<tenzor::Tensor> {
-            self.all_gather(tensor, output);
+            {
+                // Q.15: release the GIL across the actual collective.
+                py::gil_scoped_release release;
+                self.all_gather(tensor, output);
+            }
             return output;
         }, py::arg("tensor"), py::arg("output"),
            "All-gather: returns the filled output list (Python callers must "
@@ -135,9 +152,11 @@ void register_distributed(py::module_& m) {
         .def("reduce_scatter", &tenzor::distributed::ProcessGroup::reduce_scatter,
             "Reduce-scatter: each rank ends up with one slice of the reduction",
             py::arg("tensors"), py::arg("output"),
-            py::arg("op") = tenzor::distributed::ReduceOp::SUM)
+            py::arg("op") = tenzor::distributed::ReduceOp::SUM,
+            py::call_guard<py::gil_scoped_release>())
         .def("barrier", &tenzor::distributed::ProcessGroup::barrier,
-            "Barrier synchronization");
+            "Barrier synchronization",
+            py::call_guard<py::gil_scoped_release>());
 
     // --- Tensor-parallel linear layers ---
     // Split Linear by column (output features) or row (input features)
@@ -220,7 +239,8 @@ void register_distributed(py::module_& m) {
             py::arg("input"),
             py::call_guard<py::gil_scoped_release>())
         .def("synchronize_gradients", &tenzor::distributed::DistributedDataParallel::synchronize_gradients,
-            "Synchronize gradients across all processes")
+            "Synchronize gradients across all processes",
+            py::call_guard<py::gil_scoped_release>())
         .def("sync_comm", &tenzor::distributed::DistributedDataParallel::sync_comm,
             "Wait for pending async all-reduce operations")
         .def("auto_sync_gradients", &tenzor::distributed::DistributedDataParallel::auto_sync_gradients,
@@ -250,7 +270,8 @@ void register_distributed(py::module_& m) {
              py::arg("module"), py::arg("process_group"),
              py::arg("config") = tenzor::distributed::FSDPConfig{})
         .def("forward", &tenzor::distributed::FullyShardedDataParallel::forward,
-             py::arg("input"))
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>())
         .def("finalize_backward", &tenzor::distributed::FullyShardedDataParallel::finalize_backward)
         .def("summon_full_params", &tenzor::distributed::FullyShardedDataParallel::summon_full_params)
         .def("release_full_params", &tenzor::distributed::FullyShardedDataParallel::release_full_params)

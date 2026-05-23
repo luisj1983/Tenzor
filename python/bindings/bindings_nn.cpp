@@ -2384,6 +2384,37 @@ void register_nn(py::module_& m) {
            "Functional 2D convolution",
            py::call_guard<py::gil_scoped_release>());
 
+    nn.def("functional_conv1d", &tenzor::nn::functional::conv1d,
+           py::arg("input"), py::arg("weight"),
+           py::arg("bias") = std::nullopt,
+           py::arg("stride") = 1,
+           py::arg("padding") = 0,
+           py::arg("dilation") = 1,
+           py::arg("groups") = 1,
+           "Functional 1D convolution",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_conv3d", &tenzor::nn::functional::conv3d,
+           py::arg("input"), py::arg("weight"),
+           py::arg("bias") = std::nullopt,
+           py::arg("stride") = std::make_tuple(1LL, 1LL, 1LL),
+           py::arg("padding") = std::make_tuple(0LL, 0LL, 0LL),
+           py::arg("dilation") = std::make_tuple(1LL, 1LL, 1LL),
+           py::arg("groups") = 1,
+           "Functional 3D convolution",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_conv_transpose2d", &tenzor::nn::functional::conv_transpose2d,
+           py::arg("input"), py::arg("weight"),
+           py::arg("bias") = std::nullopt,
+           py::arg("stride") = std::make_pair(1LL, 1LL),
+           py::arg("padding") = std::make_pair(0LL, 0LL),
+           py::arg("output_padding") = std::make_pair(0LL, 0LL),
+           py::arg("groups") = 1,
+           py::arg("dilation") = std::make_pair(1LL, 1LL),
+           "Functional 2D transposed convolution",
+           py::call_guard<py::gil_scoped_release>());
+
     nn.def("functional_normalize", &tenzor::nn::functional::normalize,
            py::arg("input"), py::arg("p") = 2.0, py::arg("dim") = 1,
            py::arg("eps") = 1e-12,

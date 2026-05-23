@@ -2016,50 +2016,62 @@ def prelu(input: Variable, weight: Variable) -> Variable:
 def conv1d(input: Variable, weight: Variable, bias=None,
            stride: int = 1, padding: int = 0, dilation: int = 1,
            groups: int = 1) -> Variable:
-    """Functional 1-D convolution wrapping nn.Conv1d (audit E.8)."""
-    in_channels = int(weight.tensor().shape()[1] * groups)
-    out_channels = int(weight.tensor().shape()[0])
-    kernel_size = int(weight.tensor().shape()[2])
-    layer = _nn.Conv1d(in_channels, out_channels, kernel_size,
-                        stride=stride, padding=padding, dilation=dilation,
-                        groups=groups, bias=(bias is not None))
-    layer.weight.tensor().copy_(weight.tensor())
-    if bias is not None:
-        layer.bias.tensor().copy_(bias.tensor())
-    return layer(input)
+    """Functional 1-D convolution (audit E.8 / Q.12).
+
+    Routes through the C++ autograd-aware free function so gradients
+    flow back into the caller's ``weight``/``bias`` Variables instead
+    of a throwaway ``nn.Conv1d`` layer's internal parameters.
+    """
+    return _nn.functional_conv1d(input, weight, bias,
+                                 int(stride), int(padding), int(dilation),
+                                 int(groups))
 
 
 def conv3d(input: Variable, weight: Variable, bias=None,
            stride=1, padding=0, dilation=1, groups: int = 1) -> Variable:
-    """Functional 3-D convolution wrapping nn.Conv3d (audit E.8)."""
-    in_channels = int(weight.tensor().shape()[1] * groups)
-    out_channels = int(weight.tensor().shape()[0])
-    kernel_size = tuple(weight.tensor().shape()[2:])
-    layer = _nn.Conv3d(in_channels, out_channels, kernel_size,
-                        stride=stride, padding=padding, dilation=dilation,
-                        groups=groups, bias=(bias is not None))
-    layer.weight.tensor().copy_(weight.tensor())
-    if bias is not None:
-        layer.bias.tensor().copy_(bias.tensor())
-    return layer(input)
+    """Functional 3-D convolution (audit E.8 / Q.12).
+
+    Routes through the C++ autograd-aware free function so gradients
+    flow back into the caller's ``weight``/``bias`` Variables instead
+    of a throwaway ``nn.Conv3d`` layer's internal parameters.
+    """
+    if isinstance(stride, int):
+        stride = (stride, stride, stride)
+    if isinstance(padding, int):
+        padding = (padding, padding, padding)
+    if isinstance(dilation, int):
+        dilation = (dilation, dilation, dilation)
+    return _nn.functional_conv3d(input, weight, bias,
+                                 tuple(int(v) for v in stride),
+                                 tuple(int(v) for v in padding),
+                                 tuple(int(v) for v in dilation),
+                                 int(groups))
 
 
 def conv_transpose2d(input: Variable, weight: Variable, bias=None,
                      stride=1, padding=0, output_padding=0,
                      groups: int = 1, dilation: int = 1) -> Variable:
-    """Functional 2-D transposed convolution wrapping nn.ConvTranspose2d."""
-    in_channels = int(weight.tensor().shape()[0])
-    out_channels = int(weight.tensor().shape()[1] * groups)
-    kernel_size = tuple(weight.tensor().shape()[2:])
-    layer = _nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
-                                 stride=stride, padding=padding,
-                                 output_padding=output_padding,
-                                 groups=groups, dilation=dilation,
-                                 bias=(bias is not None))
-    layer.weight.tensor().copy_(weight.tensor())
-    if bias is not None:
-        layer.bias.tensor().copy_(bias.tensor())
-    return layer(input)
+    """Functional 2-D transposed convolution (audit E.8 / Q.12).
+
+    Routes through the C++ autograd-aware free function so gradients
+    flow back into the caller's ``weight``/``bias`` Variables instead
+    of a throwaway ``nn.ConvTranspose2d`` layer's internal parameters.
+    """
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    if isinstance(output_padding, int):
+        output_padding = (output_padding, output_padding)
+    if isinstance(dilation, int):
+        dilation = (dilation, dilation)
+    return _nn.functional_conv_transpose2d(
+        input, weight, bias,
+        tuple(int(v) for v in stride),
+        tuple(int(v) for v in padding),
+        tuple(int(v) for v in output_padding),
+        int(groups),
+        tuple(int(v) for v in dilation))
 
 
 def max_pool1d(input: Variable, kernel_size: int,
@@ -2136,8 +2148,10 @@ def dropout2d(input: Variable, p: float = 0.5,
     n, c = shape[0], shape[1]
     mask = (tz.rand([n, c, 1, 1], dtype=input.tensor().dtype()) >= p).to(input.tensor().dtype())
     scale = 1.0 / (1.0 - p)
-    return Variable(input.tensor() * mask * scale,
-                    requires_grad=input.requires_grad())
+    # Q.13 / J.3: multiply at Variable level so autograd records the
+    # dropout mask as a constant cotangent multiplier (grad_fn survives).
+    scaled_mask = Variable(mask * scale, requires_grad=False)
+    return tz.mul(input, scaled_mask)
 
 
 def alpha_dropout(input: Variable, p: float = 0.5,
@@ -2160,10 +2174,17 @@ def alpha_dropout(input: Variable, p: float = 0.5,
     # Affine constants: a * (mask * x + (1 - mask) * alpha) + b.
     a = ((1 - p) * (1 + p * alpha * alpha)) ** -0.5
     b = -a * alpha * p
-    x = input.tensor()
-    one_minus_keep = tz.full(list(x.shape()), 1.0, dtype=x.dtype()) - keep
-    out = a * (keep * x + one_minus_keep * alpha) + b
-    return Variable(out, requires_grad=input.requires_grad())
+    x_dtype = input.tensor().dtype()
+    x_shape = list(input.tensor().shape())
+    # The closed-form is:
+    #   out = (a * keep) * x  +  (a * (1 - keep) * alpha + b)
+    # The first term is the only one that depends on the input. Route the
+    # multiplication through tz.mul so autograd records the dropout mask
+    # as a constant cotangent multiplier (Q.13 / J.3).
+    one_minus_keep = tz.full(x_shape, 1.0, dtype=x_dtype) - keep
+    mul_coeff = Variable(a * keep, requires_grad=False)
+    bias_term = Variable(a * (one_minus_keep * alpha) + b, requires_grad=False)
+    return tz.add(tz.mul(input, mul_coeff), bias_term)
 
 
 def focal_loss(input: Variable, target: Variable, alpha: float = 0.25,
