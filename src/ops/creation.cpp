@@ -1357,17 +1357,42 @@ auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
         throw std::invalid_argument("complex: real and imag must be on the same device");
     }
 
-    // Dispatch through backend for GPU tensors
+    // Dispatch through backend for GPU tensors (backends already cover both
+    // Float32→Complex64 and Float64→Complex128 paths).
     if (real.device().type != Device::Type::CPU) {
         std::array<Tensor, 2> inputs = {real, imag};
         return dispatch_single(OpId::ComplexTensor, inputs);
     }
 
-    // CPU path: interleave real and imag into Complex64 storage
-    auto r = real.to(DType::Float32).contiguous();
-    auto im = imag.to(DType::Float32).contiguous();
+    // CPU path: decide output dtype from the inputs.  Float64 inputs build a
+    // Complex128 tensor (required by audit item A.10 so the EigBackward
+    // complex pullback retains Float64 precision).  Everything else widens
+    // through Float32 → Complex64.
+    const bool use_double =
+        (real.dtype() == DType::Float64) || (imag.dtype() == DType::Float64);
 
     std::vector<int64_t> shape_vec(real_shape.begin(), real_shape.end());
+
+    if (use_double) {
+        auto r = real.to(DType::Float64).contiguous();
+        auto im = imag.to(DType::Float64).contiguous();
+        auto result = empty(shape_vec, DType::Complex128, Device::cpu());
+
+        const double* r_data = r.data<double>();
+        const double* i_data = im.data<double>();
+        auto* c_data = reinterpret_cast<std::complex<double>*>(result.storage()->data());
+        int64_t offset = result.offset();
+
+        int64_t numel = r.numel();
+        for (int64_t idx = 0; idx < numel; ++idx) {
+            c_data[offset + idx] = std::complex<double>(r_data[idx], i_data[idx]);
+        }
+        return result;
+    }
+
+    // Float32 (and any lower-precision dtype) → Complex64.
+    auto r = real.to(DType::Float32).contiguous();
+    auto im = imag.to(DType::Float32).contiguous();
     auto result = empty(shape_vec, DType::Complex64, Device::cpu());
 
     const float* r_data = r.data<float>();

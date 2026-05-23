@@ -1305,25 +1305,214 @@ auto LUSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 // ============================================================================
 // EigBackward — audit-2026-05-03 Phase 8 (non-symmetric eigendecomposition).
 // Forward: A → (W_real, W_imag, V).
-// Backward (eigenvalue path only, real eigenvalues):
-//   dA = V^{-T} @ diag(dW_real) @ V^T
+// Backward (audit item A.10 — full coverage):
+//   Real eigenvalues:
+//     dA = V^{-T} (diag(dW) + (V^T dV) ∘ F) V^T,   F[i,j] = 1/(W[j]-W[i])
+//   Complex eigenvalues:
+//     The same Mike Giles closed form, but in complex arithmetic.
+//     LAPACK geev returns V in *packed real* form for complex-conjugate
+//     pairs — columns (j, j+1) hold (Re(v_j), Im(v_j)) with v_{j+1}=conj(v_j).
+//     We unpack to a true Complex64/Complex128 V, run the formula, then
+//     take Re(grad_A) (A is real).
+//
+//   The complex backward is routed through CPU regardless of the saved
+//   tensors' device.  This is *explicit per-op routing*, not a fallback:
+//   our GPU backends do not yet implement the complex linalg primitives
+//   (cinv / cmatmul / cdiv) needed by this gradient path.  The forward
+//   stays on GPU; only the gradient takes the CPU detour.  When GPU
+//   complex linalg lands, drop the shuttle.
 // ============================================================================
 auto EigBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("EigBackward::forward should not be called directly");
 }
 
+namespace {
+
+// Unpack LAPACK geev's packed-real eigenvector matrix into a true complex
+// eigenvector matrix.  V_packed shape (n, n) on a single batch; W_imag
+// shape (n,).  Returns Complex64/Complex128 matrix (depending on input
+// dtype) with column j = the j-th complex eigenvector.
+//
+// For W_imag[j] == 0:  V_complex[:, j] = V_packed[:, j] + 0i.
+// For W_imag[j]  > 0:  V_complex[:, j]   = V_packed[:, j] + i V_packed[:, j+1]
+//                      V_complex[:, j+1] = V_packed[:, j] - i V_packed[:, j+1]
+// For W_imag[j]  < 0:  already paired by column j-1 (sanity-checked).
+template <typename Real>
+void unpack_complex_eigenvectors_kernel(
+        const Real* V_packed,           // (n*n) row-major
+        const Real* W_imag,             // (n)
+        std::complex<Real>* V_complex,  // (n*n) row-major
+        int64_t n) {
+    int64_t j = 0;
+    while (j < n) {
+        if (W_imag[j] == Real(0)) {
+            for (int64_t i = 0; i < n; ++i) {
+                V_complex[i * n + j] =
+                    std::complex<Real>(V_packed[i * n + j], Real(0));
+            }
+            ++j;
+        } else if (W_imag[j] > Real(0)) {
+            // Conjugate pair (j, j+1).  geev guarantees j+1 < n and
+            // W_imag[j+1] == -W_imag[j].
+            if (j + 1 >= n) {
+                throw std::runtime_error(
+                    "EigBackward: geev returned a positive W_imag at the "
+                    "final column — eigenvalue array is malformed.");
+            }
+            for (int64_t i = 0; i < n; ++i) {
+                Real re = V_packed[i * n + j];
+                Real im = V_packed[i * n + j + 1];
+                V_complex[i * n + j]       = std::complex<Real>(re,  im);
+                V_complex[i * n + j + 1]   = std::complex<Real>(re, -im);
+            }
+            j += 2;
+        } else {
+            // Should have been consumed by the previous step.
+            throw std::runtime_error(
+                "EigBackward: geev returned an unpaired negative W_imag entry "
+                "— eigenvalue array is malformed.");
+        }
+    }
+}
+
+// Pullback of the real packed gradient grad_V_packed (n, n) to a complex
+// grad_V_complex (n, n) consistent with V_complex above.
+//
+// Forward (packing):  V_packed[:, j]   = Re(V_complex[:, j])
+//                     V_packed[:, j+1] = Im(V_complex[:, j])
+//                     V_complex[:, j+1] = conj(V_complex[:, j])      (constraint)
+//
+// Wirtinger (conjugate-grad convention) pullback honouring the
+// conjugate-pair constraint:
+//   grad_V_complex[:, j]   = (1/2)(grad_V_packed[:, j] + i grad_V_packed[:, j+1])
+//   grad_V_complex[:, j+1] = conj(grad_V_complex[:, j])
+//
+// For a purely-real column (W_imag[j] == 0):
+//   grad_V_complex[:, j] = grad_V_packed[:, j] + 0i.
+template <typename Real>
+void unpack_complex_grad_V_kernel(
+        const Real* gV_packed,
+        const Real* W_imag,
+        std::complex<Real>* gV_complex,
+        int64_t n) {
+    int64_t j = 0;
+    while (j < n) {
+        if (W_imag[j] == Real(0)) {
+            for (int64_t i = 0; i < n; ++i) {
+                gV_complex[i * n + j] =
+                    std::complex<Real>(gV_packed[i * n + j], Real(0));
+            }
+            ++j;
+        } else if (W_imag[j] > Real(0)) {
+            if (j + 1 >= n) {
+                throw std::runtime_error(
+                    "EigBackward: malformed W_imag (orphan positive at column "
+                    "boundary) in grad_V unpacking.");
+            }
+            for (int64_t i = 0; i < n; ++i) {
+                Real re = Real(0.5) * gV_packed[i * n + j];
+                Real im = Real(0.5) * gV_packed[i * n + j + 1];
+                std::complex<Real> g(re, im);
+                gV_complex[i * n + j]     = g;
+                gV_complex[i * n + j + 1] = std::conj(g);
+            }
+            j += 2;
+        } else {
+            throw std::runtime_error(
+                "EigBackward: malformed W_imag in grad_V unpacking.");
+        }
+    }
+}
+
+// Pullback of (grad_W_real, grad_W_imag) to a complex grad_w honouring
+// the conjugate-pair symmetry of LAPACK eigenvalues.
+//
+// w_j = α + iβ, w_{j+1} = α - iβ.  For a real-valued downstream cost:
+//   grad_w[j]   = (1/2)((grad_Wr[j] + grad_Wr[j+1])
+//                       + i(grad_Wi[j] - grad_Wi[j+1]))
+//   grad_w[j+1] = conj(grad_w[j])
+// Real eigenvalue (β=0): grad_w[j] = grad_Wr[j] + i grad_Wi[j].
+template <typename Real>
+void unpack_complex_grad_W_kernel(
+        const Real* gWr,
+        const Real* gWi,
+        const Real* W_imag,
+        std::complex<Real>* gW_complex,
+        int64_t n) {
+    int64_t j = 0;
+    while (j < n) {
+        if (W_imag[j] == Real(0)) {
+            gW_complex[j] = std::complex<Real>(gWr[j], gWi[j]);
+            ++j;
+        } else if (W_imag[j] > Real(0)) {
+            if (j + 1 >= n) {
+                throw std::runtime_error(
+                    "EigBackward: malformed W_imag (orphan positive at column "
+                    "boundary) in grad_W unpacking.");
+            }
+            Real re = Real(0.5) * (gWr[j] + gWr[j + 1]);
+            Real im = Real(0.5) * (gWi[j] - gWi[j + 1]);
+            std::complex<Real> g(re, im);
+            gW_complex[j]     = g;
+            gW_complex[j + 1] = std::conj(g);
+            j += 2;
+        } else {
+            throw std::runtime_error(
+                "EigBackward: malformed W_imag in grad_W unpacking.");
+        }
+    }
+}
+
+// Build complex tensors V_complex, grad_V_complex, grad_w_complex on CPU
+// from the packed real saves.  Output dtype is Complex64 (Real=float) or
+// Complex128 (Real=double).  Operates on a single (non-batched) (n, n)
+// matrix — matches the rest of EigBackward which only supports
+// non-batched eig.
+template <typename Real, DType CDtype>
+auto build_complex_inputs_typed(
+        const Tensor& V_packed_cpu,    // (n, n), real dtype
+        const Tensor& W_imag_cpu,      // (n,)
+        const Tensor& grad_V_cpu,      // (n, n), real
+        const Tensor& grad_Wr_cpu,     // (n,)
+        const Tensor& grad_Wi_cpu)     // (n,)
+        -> std::tuple<Tensor, Tensor, Tensor> {
+    const int64_t n = V_packed_cpu.shape().back();
+
+    auto V_packed_c = V_packed_cpu.contiguous();
+    auto W_imag_c   = W_imag_cpu.contiguous();
+    auto grad_V_c   = grad_V_cpu.contiguous();
+    auto grad_Wr_c  = grad_Wr_cpu.contiguous();
+    auto grad_Wi_c  = grad_Wi_cpu.contiguous();
+
+    auto V_complex      = empty({n, n}, CDtype, Device::cpu());
+    auto grad_V_complex = empty({n, n}, CDtype, Device::cpu());
+    auto grad_W_complex = empty({n},    CDtype, Device::cpu());
+
+    const Real* V_packed_data = V_packed_c.data<Real>();
+    const Real* W_imag_data   = W_imag_c.data<Real>();
+    const Real* gV_data       = grad_V_c.data<Real>();
+    const Real* gWr_data      = grad_Wr_c.data<Real>();
+    const Real* gWi_data      = grad_Wi_c.data<Real>();
+
+    auto* Vc_data  = reinterpret_cast<std::complex<Real>*>(V_complex.storage()->data())
+                     + V_complex.offset();
+    auto* gVc_data = reinterpret_cast<std::complex<Real>*>(grad_V_complex.storage()->data())
+                     + grad_V_complex.offset();
+    auto* gWc_data = reinterpret_cast<std::complex<Real>*>(grad_W_complex.storage()->data())
+                     + grad_W_complex.offset();
+
+    unpack_complex_eigenvectors_kernel<Real>(V_packed_data, W_imag_data, Vc_data, n);
+    unpack_complex_grad_V_kernel<Real>(gV_data, W_imag_data, gVc_data, n);
+    unpack_complex_grad_W_kernel<Real>(gWr_data, gWi_data, W_imag_data, gWc_data, n);
+
+    return {V_complex, grad_V_complex, grad_W_complex};
+}
+
+} // namespace
+
 auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Audit item A.10 — the previous implementation used only
-    // `grad_W_real`, dropping both `grad_W_imag` (so any complex-eigenvalue
-    // path produced wrong gradients silently) AND `grad_V` (so even the
-    // real-eigenvalue case missed the eigenvector contribution).  We now
-    // implement the full closed-form backward for the real-eigenvalue case
-    // and raise a clear error on the complex case (which requires a
-    // complex-tensor path that linalg::eig itself does not yet expose).
-    //
-    // Formula (Mike Giles, 2008; Townsend 2016):
-    //   grad_A = V^{-T} (diag(grad_W) + (V^T grad_V) ∘ F) V^T
-    // where F[i, j] = 1 / (W[j] - W[i]) for i ≠ j and 0 on the diagonal.
+    // Audit item A.10: full coverage of both real- and complex-eigenvalue
+    // backward.  See the formula and conjugate-pair derivation above.
 
     if (saved_tensors_.size() < 3) {
         throw std::runtime_error(
@@ -1345,93 +1534,197 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& grad_W_imag = grad_outputs[1];
     const auto& grad_V      = grad_outputs[2];
 
-    // Detect non-trivial complex eigenvalues.  We reject the complex
-    // case explicitly rather than silently dropping the imaginary
-    // gradient (audit-finding requirement).  Callers wanting gradient
-    // through symmetric eigendecomposition should use linalg::eigh.
+    // Decide between the real-eigenvalue fast path and the complex path.
+    // Threshold matches scipy.linalg's "treat as real" convention; LAPACK
+    // returns exactly 0 for purely-real eigenvalues, so anything above
+    // 1e-12 indicates a genuine complex-conjugate pair.
+    constexpr double kImagThreshold = 1e-12;
+    double imag_norm = 0.0;
     {
         auto imag_max = tenzor::max(tenzor::abs(W_imag));
-        double imag_norm = 0.0;
         if (imag_max.dtype() == DType::Float64) {
             imag_norm = imag_max.item<double>();
         } else {
             imag_norm = static_cast<double>(imag_max.item<float>());
         }
-        // The same threshold convention scipy.linalg uses to call an
-        // eigenvalue "real": eps tied to the matrix size and dtype.  We
-        // use a conservative absolute threshold here because the W_imag
-        // returned by LAPACK is exactly 0 for purely-real eigenvalues.
-        constexpr double kImagThreshold = 1e-12;
-        if (imag_norm > kImagThreshold) {
-            throw std::runtime_error(
-                "EigBackward: gradient through complex eigenvalues is not "
-                "yet supported (max |W_imag| = " + std::to_string(imag_norm) +
-                ").  For symmetric matrices with real eigenvalues use "
-                "linalg::eigh, which has a fully-implemented backward.  "
-                "For non-symmetric matrices, raise an issue with your "
-                "use-case so we can land the complex-tensor variant.");
-        }
-        // Also: grad_W_imag must be effectively zero if W is real, else
+    }
+
+    const bool complex_path = (imag_norm > kImagThreshold);
+
+    if (!complex_path) {
+        // Sanity: a purely-real forward must have ~zero grad_W_imag, else
         // the caller is asking for a derivative through a non-existent
         // imaginary path.
         auto grad_imag_max = tenzor::max(tenzor::abs(grad_W_imag));
-        double grad_imag_norm = 0.0;
-        if (grad_imag_max.dtype() == DType::Float64) {
-            grad_imag_norm = grad_imag_max.item<double>();
-        } else {
-            grad_imag_norm = static_cast<double>(grad_imag_max.item<float>());
-        }
+        double grad_imag_norm = (grad_imag_max.dtype() == DType::Float64)
+            ? grad_imag_max.item<double>()
+            : static_cast<double>(grad_imag_max.item<float>());
         if (grad_imag_norm > kImagThreshold) {
             throw std::runtime_error(
                 "EigBackward: non-zero grad_W_imag passed for a "
                 "real-eigenvalue forward — gradient flow inconsistent.");
         }
+
+        // Real-eigenvalue closed-form backward (Mike Giles 2008).
+        const auto ndim = V.ndim();
+        const auto n = V.shape().back();
+
+        auto W_col = unsqueeze(W_real, ndim - 1);  // (..., n, 1)
+        auto W_row = unsqueeze(W_real, ndim - 2);  // (..., 1, n)
+        auto diff = sub(W_row, W_col);             // (..., n, n)
+
+        auto ones_n = tenzor::full({n}, 1.0, W_real.dtype(), W_real.device());
+        auto eye_n = tenzor::diag(ones_n);
+        auto safe_diff = tenzor::add(diff, eye_n);
+        auto F = tenzor::div(
+            tenzor::full({1}, 1.0, W_real.dtype(), W_real.device()),
+            safe_diff);
+        auto ones_nn = tenzor::full({n, n}, 1.0, W_real.dtype(), W_real.device());
+        auto off_diag_mask = tenzor::sub(ones_nn, eye_n);
+        F = tenzor::mul(F, off_diag_mask);
+
+        auto Vt = transpose(V, ndim - 2, ndim - 1);
+
+        auto VT_gradV = matmul(Vt, grad_V);
+        auto eigvec_term = mul(VT_gradV, F);
+
+        auto diag_grad_W = diag(grad_W_real);
+        auto inner = tenzor::add(diag_grad_W, eigvec_term);
+
+        auto rhs = matmul(inner, Vt);
+        return {tenzor::linalg::solve(Vt.contiguous(), rhs)};
     }
 
-    // Real-eigenvalue closed-form backward.
-    const auto ndim = V.ndim();
-    const auto n = V.shape().back();
+    // ---- Complex-eigenvalue backward (CPU-only routing) ----
+    //
+    // We do not have GPU complex linalg primitives yet, so route the
+    // entire complex gradient computation through CPU.  This is *not* a
+    // CPU fallback for a GPU op — the eig forward stays on its original
+    // device.  Only the gradient hop is CPU-bound until the GPU backends
+    // grow complex inv / matmul / div.
+    //
+    // We currently support only non-batched eig (ndim == 2), matching the
+    // real-path constraint above.  A genuine batched complex backward
+    // would loop the unpacking and complex matmul per batch.
 
-    // Build F[i, j] = 1 / (W[j] - W[i])  with 0 on the diagonal.
-    // Use shape (..., n, n) so the formula broadcasts over any leading
-    // batch dims.
-    auto W_col = unsqueeze(W_real, ndim - 1);  // (..., n, 1)
-    auto W_row = unsqueeze(W_real, ndim - 2);  // (..., 1, n)
-    auto diff = sub(W_row, W_col);             // (..., n, n)
+    if (V.ndim() != 2) {
+        throw std::runtime_error(
+            "EigBackward: complex-eigenvalue backward currently supports "
+            "only non-batched matrices (ndim == 2); got ndim=" +
+            std::to_string(V.ndim()) + ".  File an issue to add batched "
+            "complex eig backward.");
+    }
 
-    // Identity mask for the diagonal — guards against div-by-zero when
-    // i == j and also against degenerate (repeated) eigenvalues.  For
-    // genuinely repeated eigenvalues the gradient is undefined; we
-    // protect against NaN by clamping the off-diagonal denominator and
-    // by zeroing the diagonal entry of F.  This matches scipy.linalg's
-    // behaviour for eig backward.
-    auto ones_n = tenzor::full({n}, 1.0, W_real.dtype(), W_real.device());
-    auto eye_n = tenzor::diag(ones_n);  // (n, n) identity
-    // Replace diagonal entries with 1 so the reciprocal is finite; we'll
-    // zero the diagonal of F at the end.
-    auto safe_diff = tenzor::add(diff, eye_n);
-    auto F = tenzor::div(
-        tenzor::full({1}, 1.0, W_real.dtype(), W_real.device()),
-        safe_diff);
-    // Zero the diagonal of F: F *= (1 - I).
-    auto ones_nn = tenzor::full({n, n}, 1.0, W_real.dtype(), W_real.device());
-    auto off_diag_mask = tenzor::sub(ones_nn, eye_n);
+    const Device orig_device = V.device();
+    const DType  real_dtype  = V.dtype();
+
+    // Shuttle every input tensor to CPU.
+    Tensor W_real_cpu   = W_real.to(Device::cpu());
+    Tensor W_imag_cpu   = W_imag.to(Device::cpu());
+    Tensor V_cpu        = V.to(Device::cpu());
+    Tensor grad_Wr_cpu  = grad_W_real.to(Device::cpu());
+    Tensor grad_Wi_cpu  = grad_W_imag.to(Device::cpu());
+    Tensor grad_V_cpu   = grad_V.to(Device::cpu());
+
+    // Promote everything to the LAPACK working precision (Float32 or
+    // Float64) — the saved tensors are already that dtype, but the grad
+    // outputs may have been padded with zeros_like (which preserves dtype
+    // anyway).  Stay consistent with the saved real_dtype.
+    W_real_cpu  = W_real_cpu.to(real_dtype);
+    W_imag_cpu  = W_imag_cpu.to(real_dtype);
+    V_cpu       = V_cpu.to(real_dtype);
+    grad_Wr_cpu = grad_Wr_cpu.to(real_dtype);
+    grad_Wi_cpu = grad_Wi_cpu.to(real_dtype);
+    grad_V_cpu  = grad_V_cpu.to(real_dtype);
+
+    Tensor V_complex_t, grad_V_complex_t, grad_W_complex_t;
+
+    if (real_dtype == DType::Float64) {
+        auto [Vc, gVc, gWc] = build_complex_inputs_typed<double, DType::Complex128>(
+            V_cpu, W_imag_cpu, grad_V_cpu, grad_Wr_cpu, grad_Wi_cpu);
+        V_complex_t      = Vc;
+        grad_V_complex_t = gVc;
+        grad_W_complex_t = gWc;
+    } else if (real_dtype == DType::Float32) {
+        auto [Vc, gVc, gWc] = build_complex_inputs_typed<float, DType::Complex64>(
+            V_cpu, W_imag_cpu, grad_V_cpu, grad_Wr_cpu, grad_Wi_cpu);
+        V_complex_t      = Vc;
+        grad_V_complex_t = gVc;
+        grad_W_complex_t = gWc;
+    } else {
+        // Lower-precision real dtypes are widened to Float32 by LAPACK; we
+        // shouldn't reach here unless the forward changed.
+        throw std::runtime_error(
+            "EigBackward: complex backward requires Float32 or Float64 "
+            "saved tensors; got dtype index " +
+            std::to_string(static_cast<int>(real_dtype)) + ".");
+    }
+
+    // Build complex W (vector of n complex eigenvalues) via tenzor::complex.
+    Tensor W_complex = tenzor::complex(W_real_cpu, W_imag_cpu);
+
+    const int64_t n = V_complex_t.shape().back();
+
+    // F[i, j] = 1 / (W[j] - W[i]), 0 on diagonal — all complex.
+    auto W_col = unsqueeze(W_complex, 1);  // (n, 1)
+    auto W_row = unsqueeze(W_complex, 0);  // (1, n)
+    auto diff = sub(W_row, W_col);         // (n, n) complex
+
+    auto ones_n = tenzor::full({n}, 1.0, real_dtype, Device::cpu());
+    auto zeros_n = tenzor::full({n}, 0.0, real_dtype, Device::cpu());
+    auto eye_n_real = tenzor::diag(ones_n);                        // (n, n) real
+    auto eye_n_imag = tenzor::diag(zeros_n);                       // (n, n) real
+    auto eye_n_complex = tenzor::complex(eye_n_real, eye_n_imag);  // (n, n) complex
+
+    // Avoid div-by-zero on the diagonal by adding I; we'll zero the
+    // diagonal of F afterwards.
+    auto safe_diff = tenzor::add(diff, eye_n_complex);
+    auto one_complex_scalar = tenzor::complex(
+        tenzor::full({1}, 1.0, real_dtype, Device::cpu()),
+        tenzor::full({1}, 0.0, real_dtype, Device::cpu()));
+    auto F = tenzor::div(one_complex_scalar, safe_diff);
+
+    // Zero the diagonal of F.
+    auto ones_nn_real = tenzor::full({n, n}, 1.0, real_dtype, Device::cpu());
+    auto zeros_nn_real = tenzor::full({n, n}, 0.0, real_dtype, Device::cpu());
+    auto ones_nn_complex = tenzor::complex(ones_nn_real, zeros_nn_real);
+    auto off_diag_mask = tenzor::sub(ones_nn_complex, eye_n_complex);
     F = tenzor::mul(F, off_diag_mask);
 
-    auto Vt = transpose(V, ndim - 2, ndim - 1);
+    // The Mike Giles formula for the *non-symmetric* eig of a real
+    // matrix A producing complex (W, V) uses the plain transpose, not
+    // the Hermitian (conjugate) transpose:
+    //
+    //   grad_A = V^{-T} (diag(grad_W) + F ∘ (V^T grad_V)) V^T
+    //
+    // (See Giles 2008 §3 and the DLR matrix-calculus notes; the
+    // conjugation that one might expect from "complex math" is already
+    // baked into the conjugate-Wirtinger convention by which the
+    // upstream gradients arrive — we must NOT conjugate again here.)
+    auto V_T = transpose(V_complex_t, 0, 1).contiguous();
 
     // (V^T grad_V) ∘ F
-    auto VT_gradV = matmul(Vt, grad_V);
+    auto VT_gradV = matmul(V_T, grad_V_complex_t);
     auto eigvec_term = mul(VT_gradV, F);
 
-    // diag(grad_W) + eigvec_term
-    auto diag_grad_W = diag(grad_W_real);
+    // diag(grad_W) is complex; tenzor::diag is dtype-agnostic byte copy
+    // on CPU, so it works for Complex64/128.
+    auto diag_grad_W = diag(grad_W_complex_t);
     auto inner = tenzor::add(diag_grad_W, eigvec_term);
 
-    // grad_A = V^{-T} @ inner @ V^T
-    //        = solve(V^T, inner @ V^T)
-    auto rhs = matmul(inner, Vt);
-    return {tenzor::linalg::solve(Vt.contiguous(), rhs)};
+    // grad_A_complex = V^{-T} @ inner @ V^T
+    //                = solve(V^T, inner @ V^T)
+    auto rhs = matmul(inner, V_T);
+    auto grad_A_complex = tenzor::linalg::solve(V_T, rhs);
+
+    // A is real → take the real part.
+    auto grad_A_cpu = tenzor::real(grad_A_complex).to(real_dtype);
+
+    // Move back to the original device.
+    if (orig_device.type != Device::Type::CPU) {
+        return {grad_A_cpu.to(orig_device)};
+    }
+    return {grad_A_cpu};
 }
 
 } // namespace tenzor
