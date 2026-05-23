@@ -122,21 +122,33 @@ namespace oneapi {
                              const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
                              -> std::tuple<Tensor, Tensor, Tensor>;
 
-    // Conv2d operations
+    // Conv2d operations (Audit J.2: per-axis stride/padding/dilation)
     auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       int64_t groups, sycl::queue& queue) -> Tensor;
     auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-                        int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                        int64_t stride_h, int64_t stride_w,
+                        int64_t padding_h, int64_t padding_w,
+                        int64_t dilation_h, int64_t dilation_w,
+                        int64_t groups,
                         bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                         sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     // Separate backward operations (matching CPU API)
     auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                                const std::vector<int64_t>& input_shape,
-                               int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                               int64_t stride_h, int64_t stride_w,
+                               int64_t padding_h, int64_t padding_w,
+                               int64_t dilation_h, int64_t dilation_w,
+                               int64_t groups,
                                sycl::queue& queue) -> Tensor;
     auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                                 const std::vector<int64_t>& weight_shape,
-                                int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                int64_t stride_h, int64_t stride_w,
+                                int64_t padding_h, int64_t padding_w,
+                                int64_t dilation_h, int64_t dilation_w,
+                                int64_t groups,
                                 sycl::queue& queue) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
 

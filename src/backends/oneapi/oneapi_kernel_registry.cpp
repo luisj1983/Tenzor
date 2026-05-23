@@ -475,74 +475,37 @@ namespace oneapi {
                                     sycl::queue& queue) -> std::vector<Tensor>;
 
     // ---- Conv2d operations (kernels/conv2d.cpp) ----
+    // Audit J.2: per-axis stride/padding/dilation. oneDNN's memory::dims and
+    // the im2col+GEMM fallback both natively honour H/W asymmetric values;
+    // no symmetric collapse, no inline wrappers.
     auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                        int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                        int64_t stride_h, int64_t stride_w,
+                        int64_t padding_h, int64_t padding_w,
+                        int64_t dilation_h, int64_t dilation_w,
+                        int64_t groups,
                         sycl::queue& queue) -> Tensor;
     auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-                         int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                         int64_t stride_h, int64_t stride_w,
+                         int64_t padding_h, int64_t padding_w,
+                         int64_t dilation_h, int64_t dilation_w,
+                         int64_t groups,
                          bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                          sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                                const std::vector<int64_t>& input_shape,
-                               int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                               int64_t stride_h, int64_t stride_w,
+                               int64_t padding_h, int64_t padding_w,
+                               int64_t dilation_h, int64_t dilation_w,
+                               int64_t groups,
                                sycl::queue& queue) -> Tensor;
     auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                                 const std::vector<int64_t>& weight_shape,
-                                int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                int64_t stride_h, int64_t stride_w,
+                                int64_t padding_h, int64_t padding_w,
+                                int64_t dilation_h, int64_t dilation_w,
+                                int64_t groups,
                                 sycl::queue& queue) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
-    // Audit E3: per-axis honest contract on OneAPI. Symmetric runs delegate
-    // to the scalar kernels above (zero behavior change). Asymmetric runs
-    // throw cleanly — eliminating the previous silent miscompute where the
-    // scalar Stride/Padding/Dilation attrs were used regardless of any
-    // per-axis values set by the autograd Function. The oneDNN inner kernel
-    // refactor (oneDNN supports `memory::dims` per-axis natively) is
-    // tracked as E3-followup.
-    inline auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                int64_t stride_h, int64_t stride_w,
-                                int64_t pad_h, int64_t pad_w,
-                                int64_t dil_h, int64_t dil_w,
-                                int64_t groups, sycl::queue& queue) -> Tensor {
-        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
-            return conv2d_forward(input, weight, bias, stride_h, pad_h, dil_h, groups, queue);
-        }
-        throw std::runtime_error(
-            "OneAPI conv2d_forward: asymmetric stride/padding/dilation "
-            "(stride " + std::to_string(stride_h) + "x" + std::to_string(stride_w) +
-            ", pad " + std::to_string(pad_h) + "x" + std::to_string(pad_w) +
-            ", dil " + std::to_string(dil_h) + "x" + std::to_string(dil_w) +
-            ") is not yet supported on OneAPI — the oneDNN-descriptor / SYCL "
-            "kernel refactor is tracked as E3-followup. Use the CUDA backend "
-            "for asymmetric convolutions.");
-    }
-    inline auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
-                                        const std::vector<int64_t>& input_shape,
-                                        int64_t stride_h, int64_t stride_w,
-                                        int64_t pad_h, int64_t pad_w,
-                                        int64_t dil_h, int64_t dil_w,
-                                        int64_t groups, sycl::queue& queue) -> Tensor {
-        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
-            return conv2d_backward_input(grad_output, weight, input_shape,
-                                          stride_h, pad_h, dil_h, groups, queue);
-        }
-        throw std::runtime_error(
-            "OneAPI conv2d_backward_input: asymmetric stride/padding/dilation "
-            "is not yet supported on OneAPI (E3-followup).");
-    }
-    inline auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
-                                        const std::vector<int64_t>& weight_shape,
-                                        int64_t stride_h, int64_t stride_w,
-                                        int64_t pad_h, int64_t pad_w,
-                                        int64_t dil_h, int64_t dil_w,
-                                        int64_t groups, sycl::queue& queue) -> Tensor {
-        if (stride_h == stride_w && pad_h == pad_w && dil_h == dil_w) {
-            return conv2d_backward_weight(grad_output, input, weight_shape,
-                                           stride_h, pad_h, dil_h, groups, queue);
-        }
-        throw std::runtime_error(
-            "OneAPI conv2d_backward_weight: asymmetric stride/padding/dilation "
-            "is not yet supported on OneAPI (E3-followup).");
-    }
     auto conv_transpose2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                   int64_t stride, int64_t padding, int64_t output_padding,
                                   int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;

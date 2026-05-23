@@ -41,9 +41,15 @@ static auto to_dnnl_dtype(DType dt) -> dnnl::memory::data_type {
     }
 }
 
-// Conv2d forward using oneDNN
+// Conv2d forward using oneDNN.
+// Audit J.2: per-axis stride/padding/dilation — oneDNN's memory::dims
+// natively supports asymmetric H/W values; the previous scalar signature
+// silently dropped the W-axis value.
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                    int64_t stride_h, int64_t stride_w,
+                    int64_t padding_h, int64_t padding_w,
+                    int64_t dilation_h, int64_t dilation_w,
+                    int64_t groups,
                     sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
@@ -63,9 +69,9 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     const int64_t K_h = weight_shape[2];   // Kernel height
     const int64_t K_w = weight_shape[3];   // Kernel width
 
-    // Calculate output dimensions
-    const int64_t H_out = (H_in + 2 * padding - dilation * (K_h - 1) - 1) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - dilation * (K_w - 1) - 1) / stride + 1;
+    // Calculate output dimensions (per-axis)
+    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (K_h - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (K_w - 1) - 1) / stride_w + 1;
 
     Tensor output({N, C_out, H_out, W_out}, input.dtype(), input.device());
 
@@ -77,9 +83,9 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     memory::dims src_dims = {N, C_in, H_in, W_in};
     memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
     memory::dims dst_dims = {N, C_out, H_out, W_out};
-    memory::dims strides_dims = {stride, stride};
-    memory::dims padding_dims = {padding, padding};
-    memory::dims dilation_dims = {dilation - 1, dilation - 1};
+    memory::dims strides_dims = {stride_h, stride_w};
+    memory::dims padding_dims = {padding_h, padding_w};
+    memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
 
     auto dt = to_dnnl_dtype(input.dtype());
     auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
@@ -155,9 +161,12 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     return output;
 }
 
-// Conv2d backward using oneDNN
+// Conv2d backward using oneDNN. Audit J.2: per-axis stride/padding/dilation.
 auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-                     int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                     int64_t stride_h, int64_t stride_w,
+                     int64_t padding_h, int64_t padding_w,
+                     int64_t dilation_h, int64_t dilation_w,
+                     int64_t groups,
                      bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                      sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     using namespace dnnl;
@@ -184,9 +193,9 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
     memory::dims dst_dims = {grad_output_shape[0], grad_output_shape[1],
                              grad_output_shape[2], grad_output_shape[3]};
-    memory::dims strides_dims = {stride, stride};
-    memory::dims padding_dims = {padding, padding};
-    memory::dims dilation_dims = {dilation - 1, dilation - 1};
+    memory::dims strides_dims = {stride_h, stride_w};
+    memory::dims padding_dims = {padding_h, padding_w};
+    memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
 
     auto dt = to_dnnl_dtype(input.dtype());
     auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
@@ -373,13 +382,16 @@ class Conv2dGroupedForwardGemmFallbackFloat16;
 class Conv2dGroupedBackwardInputGemmFallbackFloat16;
 class Conv2dGroupedBackwardWeightGemmFallbackFloat16;
 
-// Im2col transformation for convolution
+// Im2col transformation for convolution (per-axis pad/stride/dilation)
 template<typename T>
 void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t width,
-                   int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                   int64_t dilation, T* data_col, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                   int64_t kernel_h, int64_t kernel_w,
+                   int64_t pad_h, int64_t pad_w,
+                   int64_t stride_h, int64_t stride_w,
+                   int64_t dilation_h, int64_t dilation_w,
+                   T* data_col, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     const int64_t col_size = channels * kernel_h * kernel_w * output_h * output_w;
 
     queue.parallel_for<Conv2dIm2colKernel>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
@@ -392,21 +404,24 @@ void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t w
         int64_t kh = idx % kernel_h;
         int64_t c = idx / kernel_h;
 
-        int64_t h_in = h_out * stride - pad + kh * dilation;
-        int64_t w_in = w_out * stride - pad + kw * dilation;
+        int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+        int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
 
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c * height + h_in) * width + w_in] : T(0);
     });
 }
 
-// Col2im transformation (inverse of im2col)
+// Col2im transformation (inverse of im2col, per-axis pad/stride/dilation)
 template<typename T>
 void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t width,
-                   int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                   int64_t dilation, T* data_im, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                   int64_t kernel_h, int64_t kernel_w,
+                   int64_t pad_h, int64_t pad_w,
+                   int64_t stride_h, int64_t stride_w,
+                   int64_t dilation_h, int64_t dilation_w,
+                   T* data_im, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     const int64_t im_size = channels * height * width;
 
     // Initialize grad_input to zero
@@ -424,8 +439,8 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
         int64_t kh = idx % kernel_h;
         int64_t c = idx / kernel_h;
 
-        int64_t h_in = h_out * stride - pad + kh * dilation;
-        int64_t w_in = w_out * stride - pad + kw * dilation;
+        int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+        int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
 
         if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
             int64_t im_idx = (c * height + h_in) * width + w_in;
@@ -437,14 +452,19 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
     });
 }
 
-// Grouped im2col - type-specific overloads for SYCL kernel naming
+// Grouped im2col - type-specific overloads for SYCL kernel naming.
+// Audit J.2: per-axis pad/stride/dilation so asymmetric Conv2d
+// (e.g., stride={2,1}) lowers to the correct sliding window.
 // Float32 version
 void im2col_grouped_kernel(const float* data_im, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, float* data_col, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           float* data_col, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     const int64_t col_size = channels_per_group * kernel_h * kernel_w * output_h * output_w;
 
     queue.parallel_for<Conv2dGroupedIm2colKernel>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
@@ -457,8 +477,8 @@ void im2col_grouped_kernel(const float* data_im, int64_t total_channels, int64_t
         int64_t kh = idx % kernel_h;
         int64_t c_local = idx / kernel_h;
         int64_t c_global = channel_offset + c_local;
-        int64_t h_in = h_out * stride - pad + kh * dilation;
-        int64_t w_in = w_out * stride - pad + kw * dilation;
+        int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+        int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : 0.0f;
     });
@@ -467,10 +487,13 @@ void im2col_grouped_kernel(const float* data_im, int64_t total_channels, int64_t
 // Float64 version
 void im2col_grouped_kernel(const double* data_im, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, double* data_col, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           double* data_col, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     const int64_t col_size = channels_per_group * kernel_h * kernel_w * output_h * output_w;
 
     queue.parallel_for<Conv2dGroupedIm2colKernelFloat64>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
@@ -483,8 +506,8 @@ void im2col_grouped_kernel(const double* data_im, int64_t total_channels, int64_
         int64_t kh = idx % kernel_h;
         int64_t c_local = idx / kernel_h;
         int64_t c_global = channel_offset + c_local;
-        int64_t h_in = h_out * stride - pad + kh * dilation;
-        int64_t w_in = w_out * stride - pad + kw * dilation;
+        int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+        int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : 0.0;
     });
@@ -493,10 +516,13 @@ void im2col_grouped_kernel(const double* data_im, int64_t total_channels, int64_
 // Float16 version
 void im2col_grouped_kernel(const sycl::half* data_im, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, sycl::half* data_col, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           sycl::half* data_col, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     const int64_t col_size = channels_per_group * kernel_h * kernel_w * output_h * output_w;
 
     queue.parallel_for<Conv2dGroupedIm2colKernelFloat16>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
@@ -509,21 +535,26 @@ void im2col_grouped_kernel(const sycl::half* data_im, int64_t total_channels, in
         int64_t kh = idx % kernel_h;
         int64_t c_local = idx / kernel_h;
         int64_t c_global = channel_offset + c_local;
-        int64_t h_in = h_out * stride - pad + kh * dilation;
-        int64_t w_in = w_out * stride - pad + kw * dilation;
+        int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+        int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : sycl::half(0.0f);
     });
 }
 
-// Grouped col2im - type-specific overloads
+// Grouped col2im - type-specific overloads. Audit J.2: per-axis
+// pad/stride/dilation so asymmetric Conv2d backward maps gradients back
+// to the correct input locations.
 // Float32 version
 void col2im_grouped_kernel(const float* data_col, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, float* data_im, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           float* data_im, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     queue.parallel_for<Conv2dGroupedCol2imKernel>(
         sycl::range<1>(channels_per_group * kernel_h * kernel_w * output_h * output_w),
@@ -537,8 +568,8 @@ void col2im_grouped_kernel(const float* data_col, int64_t total_channels, int64_
             int64_t kh = idx % kernel_h;
             int64_t c_local = idx / kernel_h;
             int64_t c_global = channel_offset + c_local;
-            int64_t h_in = h_out * stride - pad + kh * dilation;
-            int64_t w_in = w_out * stride - pad + kw * dilation;
+            int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+            int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
             if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
                 int64_t im_idx = (c_global * height + h_in) * width + w_in;
                 sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
@@ -551,10 +582,13 @@ void col2im_grouped_kernel(const float* data_col, int64_t total_channels, int64_
 // Float64 version
 void col2im_grouped_kernel(const double* data_col, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, double* data_im, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           double* data_im, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     queue.parallel_for<Conv2dGroupedCol2imKernelFloat64>(
         sycl::range<1>(channels_per_group * kernel_h * kernel_w * output_h * output_w),
@@ -568,8 +602,8 @@ void col2im_grouped_kernel(const double* data_col, int64_t total_channels, int64
             int64_t kh = idx % kernel_h;
             int64_t c_local = idx / kernel_h;
             int64_t c_global = channel_offset + c_local;
-            int64_t h_in = h_out * stride - pad + kh * dilation;
-            int64_t w_in = w_out * stride - pad + kw * dilation;
+            int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+            int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
             if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
                 int64_t im_idx = (c_global * height + h_in) * width + w_in;
                 sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
@@ -582,10 +616,13 @@ void col2im_grouped_kernel(const double* data_col, int64_t total_channels, int64
 // Float16 version - uses float accumulation for atomics (half atomics may not be supported)
 void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, int64_t channels_per_group,
                            int64_t channel_offset, int64_t height, int64_t width,
-                           int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                           int64_t dilation, sycl::half* data_im, sycl::queue& queue) {
-    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
-    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+                           int64_t kernel_h, int64_t kernel_w,
+                           int64_t pad_h, int64_t pad_w,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           sycl::half* data_im, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     // Audit F10: atomic accumulation into a Float32 USM scratch buffer, then
     // narrowed back into the existing Float16 grad-input buffer at the end.
@@ -625,8 +662,8 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
             int64_t kh = idx % kernel_h;
             int64_t c_local = idx / kernel_h;
             int64_t c_global = channel_offset + c_local;
-            int64_t h_in = h_out * stride - pad + kh * dilation;
-            int64_t w_in = w_out * stride - pad + kw * dilation;
+            int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+            int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
             if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
                 int64_t im_idx = (c_global * height + h_in) * width + w_in;
                 float val = static_cast<float>(data_col[index]);
@@ -642,8 +679,12 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
     }).wait();
 }
 
+// Audit J.2: per-axis stride/padding/dilation for the im2col+GEMM fallback path.
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                    int64_t stride_h, int64_t stride_w,
+                    int64_t padding_h, int64_t padding_w,
+                    int64_t dilation_h, int64_t dilation_w,
+                    int64_t groups,
                     sycl::queue& queue) -> Tensor {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -660,8 +701,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
     const int64_t C_out_per_group = C_out / groups;
 
-    const int64_t H_out = (H_in + 2 * padding - dilation * (K_h - 1) - 1) / stride + 1;
-    const int64_t W_out = (W_in + 2 * padding - dilation * (K_w - 1) - 1) / stride + 1;
+    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (K_h - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (K_w - 1) - 1) / stride_w + 1;
 
     Tensor output({N, C_out, H_out, W_out}, input.dtype(), input.device());
 
@@ -688,7 +729,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                 im2col_grouped_kernel(
                     input_ptr + n * C_in * H_in * W_in,
                     C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -734,7 +776,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                 im2col_grouped_kernel(
                     input_ptr + n * C_in * H_in * W_in,
                     C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -780,7 +823,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                 im2col_grouped_kernel(
                     input_ptr + n * C_in * H_in * W_in,
                     C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -820,8 +864,12 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     return output;
 }
 
+// Audit J.2: per-axis stride/padding/dilation for the im2col+GEMM fallback path.
 auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
-                     int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                     int64_t stride_h, int64_t stride_w,
+                     int64_t padding_h, int64_t padding_w,
+                     int64_t dilation_h, int64_t dilation_w,
+                     int64_t groups,
                      bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                      sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     Tensor grad_input, grad_weight, grad_bias;
@@ -902,7 +950,8 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                 // Col2im for this group - accumulates into grad_input
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     grad_in_batch, queue
                 );
             }
@@ -939,7 +988,8 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                 // Im2col for this group's input channels
                 im2col_grouped_kernel(
                     input_batch, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -1013,11 +1063,14 @@ class Conv2dBackwardInputSeparateGemmFloat16;
 class Conv2dBackwardWeightSeparateGemmFloat16;
 class Conv2dBackwardBiasSeparateReductionFloat16;
 
-// Separate conv2d_backward_input that takes input_shape instead of input tensor
-// This matches the CPU backend API
+// Separate conv2d_backward_input that takes input_shape instead of input tensor.
+// Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
 auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                            const std::vector<int64_t>& input_shape,
-                           int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t padding_h, int64_t padding_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           int64_t groups,
                            sycl::queue& queue) -> Tensor {
     auto weight_shape = weight.shape();
     auto grad_output_shape = grad_output.shape();
@@ -1079,7 +1132,8 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     grad_in_batch, queue
                 );
             }
@@ -1124,7 +1178,8 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     grad_in_batch, queue
                 );
             }
@@ -1174,7 +1229,8 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     grad_in_batch, queue
                 );
             }
@@ -1187,11 +1243,14 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
     return grad_input;
 }
 
-// Separate conv2d_backward_weight that takes weight_shape instead of weight tensor
-// This matches the CPU backend API
+// Separate conv2d_backward_weight that takes weight_shape instead of weight tensor.
+// Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
 auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                             const std::vector<int64_t>& weight_shape,
-                            int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                            int64_t stride_h, int64_t stride_w,
+                            int64_t padding_h, int64_t padding_w,
+                            int64_t dilation_h, int64_t dilation_w,
+                            int64_t groups,
                             sycl::queue& queue) -> Tensor {
     auto input_shape = input.shape();
     auto grad_output_shape = grad_output.shape();
@@ -1238,7 +1297,8 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
                 im2col_grouped_kernel(
                     input_batch, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -1286,7 +1346,8 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
                 im2col_grouped_kernel(
                     input_batch, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
@@ -1342,7 +1403,8 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
                 im2col_grouped_kernel(
                     input_batch, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    H_in, W_in, K_h, K_w,
+                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
                     col_ptr, queue
                 );
 
