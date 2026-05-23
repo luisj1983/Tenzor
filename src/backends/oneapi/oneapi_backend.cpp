@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <typeinfo>
 
 #ifdef __x86_64__
 #include <cpuid.h>
@@ -604,7 +605,40 @@ public:
             if (!sub_group_sizes.empty()) {
                 info.warp_size = static_cast<int>(sub_group_sizes.front());
             }
-        } catch (...) {
+        }
+#ifdef TENZOR_HAS_ONEMKL
+        catch (const ::oneapi::mkl::exception& e) {
+            // Audit L.4: surface specific MKL error info instead of folding into
+            // the generic catch-all. The oneMKL exception type currently only
+            // exposes what(); the encoded domain::function::info is part of the
+            // message string.
+            TENZOR_LOG_WARNING(
+                std::string("[OneAPI get_device_info] oneMKL exception querying sub-group sizes: ")
+                + e.what());
+            info.warp_size = 32;  // Default
+        }
+#endif
+        catch (const sycl::exception& e) {
+            // Audit L.4: name the SYCL exception type so the actual error code
+            // is preserved in logs rather than mapped to a generic string.
+            TENZOR_LOG_WARNING(
+                std::string("[OneAPI get_device_info] SYCL exception querying sub-group sizes: ")
+                + e.what());
+            info.warp_size = 32;  // Default
+        }
+        catch (const std::exception& e) {
+            // Audit L.4: any other std-derived exception still gets its type/msg
+            // logged rather than being silently mapped to the default.
+            TENZOR_LOG_WARNING(
+                std::string("[OneAPI get_device_info] non-SYCL exception (type=")
+                + typeid(e).name() + ") querying sub-group sizes: " + e.what());
+            info.warp_size = 32;  // Default
+        }
+        catch (...) {
+            // Audit L.4: unknown exception type — keep default but log loudly.
+            TENZOR_LOG_WARNING(
+                "[OneAPI get_device_info] unknown exception type querying sub-group sizes; "
+                "using default warp_size=32");
             info.warp_size = 32;  // Default
         }
 

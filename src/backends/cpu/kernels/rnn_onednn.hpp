@@ -30,6 +30,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <typeinfo>
 #include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -366,15 +367,19 @@ inline bool lstm_forward_onednn(
         TENZOR_LOG_WARN("[LSTM single-layer oneDNN] forward failed ({}); using scalar fallback",
                         e.what());
         return false;
-    } catch (...) {
-        // Audit F.4: surface unexpected non-dnnl exceptions. The
-        // outer dnnl::error catch above already handles primitive-
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected non-dnnl exceptions with type+message.
+        // The outer dnnl::error catch above already handles primitive-
         // descriptor failures with a documented scalar fallback;
         // anything reaching this branch is a non-oneDNN exception
         // (bad_alloc, logic_error from our wrappers, etc.) and
         // should not be silently swallowed.
-        TENZOR_LOG_ERROR("[LSTM single-layer oneDNN] unexpected non-dnnl exception "
-                         "in fast path; rethrowing");
+        TENZOR_LOG_ERROR("[LSTM single-layer oneDNN] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
+    } catch (...) {
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[LSTM single-layer oneDNN] unknown exception type in fast path; rethrowing");
         throw;
     }
 }
@@ -529,11 +534,16 @@ inline bool lstm_forward_onednn_with_cache(
         stream.wait();
         return true;
 
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected exceptions with type+message instead
+        // of silently returning false; the caller's fallback should kick in
+        // only on a documented dnnl::error path.
+        TENZOR_LOG_ERROR("[LSTM oneDNN cached-primitive] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
     } catch (...) {
-        // Audit F.4: surface unexpected exceptions instead of silently
-        // returning false; the caller's fallback should kick in only on a
-        // documented dnnl::error path.
-        TENZOR_LOG_ERROR("[LSTM oneDNN cached-primitive] unexpected exception; rethrowing");
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[LSTM oneDNN cached-primitive] unknown exception type; rethrowing");
         throw;
     }
 }
@@ -646,12 +656,17 @@ inline bool bilstm_forward_onednn(
 
         return true;
 
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected exceptions in the BiLSTM stitch
+        // path with type+message. The fwd/bwd direction calls each handle
+        // their own dnnl::error fallback; reaching this catch means
+        // something else broke.
+        TENZOR_LOG_ERROR("[BiLSTM oneDNN stitch] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
     } catch (...) {
-        // Audit F.4: surface unexpected exceptions in the BiLSTM stitch
-        // path. The fwd/bwd direction calls each handle their own
-        // dnnl::error fallback; reaching this catch means something else
-        // broke.
-        TENZOR_LOG_ERROR("[BiLSTM oneDNN stitch] unexpected exception; rethrowing");
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[BiLSTM oneDNN stitch] unknown exception type; rethrowing");
         throw;
     }
 }
@@ -880,11 +895,15 @@ inline bool gru_forward_onednn(
         TENZOR_LOG_WARN("[GRU single-layer oneDNN] forward failed ({}); using scalar fallback",
                         e.what());
         return false;
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected non-dnnl exceptions in the GRU
+        // single-layer fast path with type+message.
+        TENZOR_LOG_ERROR("[GRU single-layer oneDNN] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
     } catch (...) {
-        // Audit F.4: surface unexpected non-dnnl exceptions in the GRU
-        // single-layer fast path.
-        TENZOR_LOG_ERROR("[GRU single-layer oneDNN] unexpected non-dnnl exception "
-                         "in fast path; rethrowing");
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[GRU single-layer oneDNN] unknown exception type in fast path; rethrowing");
         throw;
     }
 }
@@ -1068,12 +1087,17 @@ inline bool lstm_multilayer_forward_onednn(
         }
 
         return true;
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected exceptions in the multi-layer
+        // LSTM fast path with type+message. Per-layer fast paths already
+        // handle dnnl::error with documented scalar fallbacks; anything
+        // reaching this catch is a non-dnnl exception worth surfacing.
+        TENZOR_LOG_ERROR("[LSTM multi-layer oneDNN] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
     } catch (...) {
-        // Audit F.4: surface unexpected exceptions in the multi-layer
-        // LSTM fast path. Per-layer fast paths already handle dnnl::error
-        // with documented scalar fallbacks; anything reaching this catch
-        // is a non-dnnl exception worth surfacing.
-        TENZOR_LOG_ERROR("[LSTM multi-layer oneDNN] unexpected exception; rethrowing");
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[LSTM multi-layer oneDNN] unknown exception type; rethrowing");
         throw;
     }
 
@@ -1419,11 +1443,15 @@ inline bool gru_multilayer_forward_onednn(
         TENZOR_LOG_WARN("[GRU multi-layer oneDNN] forward failed ({}); using scalar fallback",
                         e.what());
         return false;
+    } catch (const std::exception& e) {
+        // Audit L.3: surface unexpected non-dnnl exceptions in the GRU
+        // multi-layer fast path with type+message.
+        TENZOR_LOG_ERROR("[GRU multi-layer oneDNN] non-dnnl exception: type={} msg={}",
+                         typeid(e).name(), e.what());
+        throw;
     } catch (...) {
-        // Audit F.4: surface unexpected non-dnnl exceptions in the GRU
-        // multi-layer fast path.
-        TENZOR_LOG_ERROR("[GRU multi-layer oneDNN] unexpected non-dnnl exception "
-                         "in fast path; rethrowing");
+        // Audit L.3: unknown exception type (not derived from std::exception).
+        TENZOR_LOG_ERROR("[GRU multi-layer oneDNN] unknown exception type in fast path; rethrowing");
         throw;
     }
 }
