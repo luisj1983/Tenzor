@@ -3128,6 +3128,14 @@ JvpMultiResult jvp_adapter_layer_norm(std::span<const Tensor> primals,
 // Degenerate eigenvalues produce non-finite F entries; the standard
 // approach is to clip / mask, but for symmetric matrices with distinct
 // spectra this formula is exact.
+//
+// Audit J.4: batched (>2D) support. All ops below broadcast / batch
+// naturally on the trailing (N, N) / (N) axes, so the same expression
+// works for any number of leading batch dimensions:
+//   - matmul: routes to bmm for ndim > 2
+//   - unsqueeze(-2)/unsqueeze(-1): operate on the trailing axis only
+//   - eq/where/div/mul/sub/zeros_like/ones_like: broadcast elementwise
+//   - sum(dim=last): collapses the last column-axis after masking with eye
 JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
                                        std::span<const Tensor> tangents,
                                        const OpAttributes&) {
@@ -3135,10 +3143,10 @@ JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_linalg_eigh: expected 1 input");
     }
     const Tensor& A = primals[0];
-    if (A.ndim() != 2) {
+    if (A.ndim() < 2) {
         throw std::runtime_error(
-            "jvp_adapter_linalg_eigh: batched (>2D) eigh JVP not supported; "
-            "got ndim=" + std::to_string(A.ndim()));
+            "jvp_adapter_linalg_eigh: input must be at least 2D, got ndim=" +
+            std::to_string(A.ndim()));
     }
     Tensor dA = tangents[0];
     if (dA.numel() == 0) {
@@ -3148,17 +3156,27 @@ JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
 
     auto [W, V] = tenzor::linalg::eigh(A);
 
-    // E = V^T @ dA @ V
+    const int64_t N      = A.shape()[A.ndim() - 1];
+    const int64_t E_ndim = A.ndim();           // E has same rank as A
+    const int64_t last   = E_ndim - 1;         // trailing column axis
+
+    // E = V^T @ dA @ V  (batched matmul handles leading batch dims)
     auto Vt = tenzor::transpose(V, -2, -1);
     auto E  = tenzor::matmul(Vt, tenzor::matmul(dA, V));
 
-    // dW = diag(E) — extract main diagonal of the 2D matrix E.
-    auto dW = tenzor::diag(E, /*diagonal=*/0);
+    // dW = diag(E):  per-batch main diagonal -> shape (..., N).
+    // Use eye-mask * E then sum over the last axis. eye broadcasts over
+    // all leading batch dims of E so this works for any rank >= 2.
+    auto eye_mat   = tenzor::eye(N, /*m=*/std::nullopt, A.dtype(), A.device());
+    auto E_diag    = tenzor::mul(E, eye_mat);
+    auto dW        = tenzor::sum(E_diag, /*dim=*/last, /*keepdim=*/false);
 
     // Build F mask: F_{ij} = 1/(W_j - W_i) for i ≠ j, 0 on diagonal.
-    auto W_col = tenzor::unsqueeze(W, -1);  // (N, 1)
-    auto W_row = tenzor::unsqueeze(W, -2);  // (1, N)
-    auto denom = tenzor::sub(W_row, W_col);
+    // W has shape (..., N); unsqueeze on the last two axes to broadcast
+    // into a (..., N, N) pairwise-difference table.
+    auto W_col = tenzor::unsqueeze(W, -1);  // (..., N, 1)  varies over i
+    auto W_row = tenzor::unsqueeze(W, -2);  // (..., 1, N)  varies over j
+    auto denom = tenzor::sub(W_row, W_col); // (..., N, N)
     // Avoid divide-by-zero on the diagonal; replace zeros with 1, then zero
     // the diagonal of F afterwards via masking.
     auto zero_tensor  = tenzor::zeros_like(denom);
@@ -3168,7 +3186,7 @@ JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
     auto F            = tenzor::div(one_tensor, safe_denom);
     F                 = tenzor::where(is_zero_mask, zero_tensor, F);
 
-    // dV = V @ (F * E)
+    // dV = V @ (F * E)  (batched)
     auto dV = tenzor::matmul(V, tenzor::mul(F, E));
 
     JvpMultiResult result;
