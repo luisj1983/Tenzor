@@ -16,6 +16,11 @@ using namespace tenzor;
 using namespace tenzor::testing;
 
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Each TEST_P case below encodes a specific dtype in its name
+// (e.g. Add_Float16, MatMul_BFloat16). The dtype is part of the
+// test semantic; parameterising would obscure the per-dtype
+// assertion bands.
 class MultiDTypeParity : public BackendTest {};
 // ============================================================================
 // Float16 Parity

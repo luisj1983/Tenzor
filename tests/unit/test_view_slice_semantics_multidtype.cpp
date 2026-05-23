@@ -18,6 +18,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: View / slice / contiguous() semantics are byte-level shape
+// operations — independent of element dtype. Coverage across
+// dtypes is provided by the per-op multidtype tests.
 class ViewSliceMultiBackendTest : public BackendTest {};
 
 // ============================================================================

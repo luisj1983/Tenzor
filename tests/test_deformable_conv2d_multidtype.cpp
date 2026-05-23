@@ -20,6 +20,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: deformable_conv2d kernel registers only on Float32 across all
+// backends. Tests cover stride / offset / mask / gradient-flow
+// semantics under the single supported dtype.
 class DeformableConv2dTest : public BackendTest {};
 
 // ============================================================================

@@ -20,6 +20,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Empty-tensor (zero-dim) shape preservation is dtype-agnostic.
+// One TEST_P case explicitly iterates over a hardcoded dtype list
+// to confirm dtype is preserved across the empty-shape construct.
 class EmptyTensorMultiBackendTest : public BackendTest {};
 
 // ============================================================================

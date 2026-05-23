@@ -44,6 +44,10 @@ public:
 /**
  * @brief Multi-backend test fixture for GraphOptimizer tests
  */
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Graph-optimiser pass semantics (fuse Linear+ReLU, dead-code
+// elimination) operate on the Function graph structure, not the
+// tensor element type. Dtype parameterisation would not add coverage.
 class GraphOptimizerMultiBackendTest : public BackendTest {
 protected:
     void SetUp() override {

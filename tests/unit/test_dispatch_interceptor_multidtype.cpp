@@ -15,6 +15,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Dispatch-interceptor stack semantics (push/pop, RAII guard,
+// counting) are independent of the operation's dtype. The
+// interceptor sees Tensors but does not inspect their dtype.
 class DispatchInterceptorMultiBackendTest : public BackendTest {
 protected:
     void SetUp() override {

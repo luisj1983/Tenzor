@@ -16,6 +16,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: NaN / Inf propagation tests rely on Float32 special values
+// (the integer dtypes have no NaN representation). Float16 /
+// BFloat16 NaN handling is covered in the per-op multidtype tests.
 class EdgeCaseMultiBackendTest : public BackendTest {};
 
 // ============================================================================

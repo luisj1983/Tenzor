@@ -17,6 +17,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Broadcasting rules are shape-driven; the underlying element-
+// wise ops are dtype-covered by their own multidtype tests.
+// Parameterising here would add no semantic coverage.
 class BroadcastingEdgeCaseMultiBackendTest : public BackendTest {};
 
 // ============================================================================

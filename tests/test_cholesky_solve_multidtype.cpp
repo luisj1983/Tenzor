@@ -13,6 +13,12 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: linalg::cholesky_solve is exercised on Float32 (the
+// default for the parity inputs constructed below) and the kernel
+// already widens to Float32 on backends without a Float64 path. The
+// behaviour under test (numerical solve correctness, upper-triangular
+// path, vector RHS) is backend-parameterised, not dtype-parameterised.
 class CholeskySolveTest : public BackendTest {};
 
 TEST_P(CholeskySolveTest, SolvesCorrectly) {

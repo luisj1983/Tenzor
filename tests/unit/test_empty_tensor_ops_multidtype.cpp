@@ -27,6 +27,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Same rationale as test_empty_tensors_multidtype.cpp — empty-
+// tensor add/mul/dispatch is shape-driven; the embedded
+// CreationPreservesDtype case iterates dtypes inline.
 class EmptyTensorOpsMultiBackendTest : public BackendTest {};
 
 // ============================================================================

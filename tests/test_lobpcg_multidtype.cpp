@@ -15,6 +15,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: linalg::lobpcg is exercised on Float32 (kernel widens internally
+// on backends without Float64). Tests assert eigenvalue ordering
+// and convergence — backend-parameterised, not dtype-parameterised.
 class LOBPCGTest : public BackendTest {};
 
 TEST_P(LOBPCGTest, TridiagonalSmallestEigenvalues) {

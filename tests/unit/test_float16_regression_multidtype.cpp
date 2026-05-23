@@ -25,6 +25,11 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Float16 regression tests are dtype-specific by design — every
+// case exercises a known Float16 numerical issue caught in
+// audit-1 phase F. Parameterising over Float32/Float64 would
+// mask the regression assertion.
 class Float16RegressionMultiBackendTest : public BackendTest {};
 
 // Validates weight initialization doesn't underflow to zero in Float16

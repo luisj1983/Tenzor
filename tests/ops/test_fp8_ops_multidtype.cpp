@@ -22,6 +22,11 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: FP8 promotion / output-dtype tests are dtype-specific by
+// design (E4M3 vs E5M2 vs Float32 mixing). Each TEST_P encodes
+// the dtype combination; parameterising would mis-match the
+// promotion-rule table being asserted.
 class FP8OpsMultiBackendTest : public BackendTest {};
 
 // --- Type Promotion Tests ---

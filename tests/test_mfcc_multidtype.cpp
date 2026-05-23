@@ -18,6 +18,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: MFCC / Mel-scale tests cover shape, batching, and sign
+// invariants — Float32 only. The audio-feature kernels do not
+// expose Float64 / Float16 paths.
 class MFCCTest : public BackendTest {};
 
 // MelScale: verify output shape matches (batch, n_mels, time_frames)

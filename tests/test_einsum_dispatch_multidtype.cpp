@@ -16,6 +16,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: Einsum dispatch tests exercise the equation-parser and the
+// optimiser planner — both are dtype-agnostic. The underlying
+// matmul/permute kernels are covered by their own multidtype tests.
 class EinsumDispatchTest : public BackendTest {};
 
 // ij,jk->ik  (matrix multiply)

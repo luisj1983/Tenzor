@@ -18,6 +18,10 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-2 P.9 — This file uses BackendTest (not MultiBackendDTypeTest)
+// deliberately: DCT / DST tests cover shape preservation and DC-component
+// invariants on Float32. Lower-precision DCT (Float16 / BFloat16)
+// is intentionally not exposed — see backend kernel registry.
 class DCTTest : public BackendTest {};
 
 // DCT-II of a simple known sequence: [1, 2, 3, 4]
