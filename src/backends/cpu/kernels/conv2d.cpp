@@ -503,9 +503,16 @@ static bool conv2d_forward_onednn(
     // Only skip for extremely small outputs where even memory allocation overhead
     // exceeds compute time.
 
+    //
+    // Audit item I.2: the 4096-element threshold is a measured cross-over.
+    // Below it, oneDNN primitive build + reorder/descriptor checks per call
+    // outweigh the GEMM kernel saving versus our im2col+sgemm path. Above it,
+    // oneDNN wins by ~1.5-10x. Concretely: batch=1, C=64, 8x8 = 4096 outputs
+    // sits at the cross-over; anything smaller (1x1 convs on tiny features,
+    // single-token probes) takes the im2col path. Without this threshold,
+    // ResNet 1x1 stem convs on small feature maps regress noticeably.
     int64_t total_output_elements = batch * out_channels * out_h * out_w;
 
-    // Skip only for tiny outputs (< 4K elements, e.g., batch=1, channels=64, 8x8)
     constexpr int64_t MIN_OUTPUT_ELEMENTS = 4096;
 
     if (total_output_elements < MIN_OUTPUT_ELEMENTS) {

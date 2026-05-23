@@ -33,48 +33,55 @@ class Multinomial(Distribution):
         return p * (1.0 - p) * float(self.total_count)
 
     def sample(self, sample_shape=()):
-        """Sample from Multinomial.
+        """Sample from Multinomial via the C++ tz.multinomial op.
 
-        Audit item I.9: previously did an O(B) Python loop calling
-        np.random.multinomial once per batch element.  numpy's
-        Generator.multinomial accepts 2-D pvals natively in NumPy
-        ≥ 1.22; use it when available, fall back to the legacy
-        per-batch loop only for older NumPy installations.
+        Audit item I.9: previously did an O(B) Python-level loop calling
+        ``rng.multinomial`` once per batch element. Now delegates to
+        ``tenzor.multinomial(probs, total_count, replacement=True)`` which
+        draws ``total_count`` category indices per batch row inside the C++
+        kernel, then we bincount those indices to recover the multinomial
+        counts.  Falls back to ``numpy.random.Generator.multinomial`` only
+        if the C++ binding is unavailable (e.g. a stripped build).
         """
         batch_size = int(np.prod(self._batch_shape)) if self._batch_shape else 1
         probs_2d = self.probs.reshape(batch_size, self._num_events)
         n_samples = int(np.prod(sample_shape)) if sample_shape else 1
+        K = self._num_events
+        N = self.total_count
 
-        rng = np.random.default_rng()
+        out = np.zeros((batch_size, n_samples, K), dtype=np.float64)
         try:
-            # NumPy Generator.multinomial broadcasts over a 2-D pvals
-            # array as long as the leading dim matches `size`.  Build a
-            # (batch_size,) probs and request a (n_samples, batch_size,
-            # num_events) output via the size argument's leading dim.
-            # Easiest API-correct path: vectorise across batch by
-            # calling once per sample iteration count via the n parameter
-            # — but multinomial expects scalar n.  Fall back to a vectorised
-            # implementation built on rng.choice.
-            #
-            # Vectorised approach: draw n_samples * total_count indices per
-            # batch using rng.choice, then bincount per batch.  This is
-            # O(batch * total_count * n_samples) but the heavy lifting is
-            # in C, not Python.
-            out = np.zeros((batch_size, n_samples, self._num_events),
-                           dtype=np.float64)
+            import tenzor as _tz
+            # tz.multinomial expects (N, C) float probs, returns (N, S) Int64
+            # indices.  We draw n_samples * total_count indices per row, then
+            # split into n_samples chunks of total_count and bincount each.
+            probs_t = _tz.tensor(probs_2d.astype(np.float32))
+            total_draws = n_samples * N
+            idx = _tz.multinomial(probs_t, total_draws, True)
+            # Convert back to numpy.  Use __array__ via numpy() if exposed,
+            # else fall back to constructing via numpy.
+            idx_np = np.asarray(idx.numpy() if hasattr(idx, "numpy") else idx,
+                                dtype=np.int64)
+            # idx_np shape: (batch_size, n_samples * total_count) for batched
+            # input, or (n_samples * total_count,) for 1-D probs.
+            if idx_np.ndim == 1:
+                idx_np = idx_np.reshape(1, -1)
+            # Reshape to (batch_size * n_samples, N) so we can vectorise
+            # the per-row bincount with np.add.at.
+            flat = idx_np.reshape(batch_size * n_samples, N)
+            counts = np.zeros((batch_size * n_samples, K), dtype=np.float64)
+            row_idx = np.arange(batch_size * n_samples)[:, None]
+            np.add.at(counts, (row_idx, flat), 1)
+            out = counts.reshape(batch_size, n_samples, K)
+        except (ImportError, AttributeError, RuntimeError):
+            # Fallback path: numpy's own multinomial (vectorised in C).
+            rng = np.random.default_rng()
             for b in range(batch_size):
-                # rng.multinomial supports size > 1 directly.
-                out[b] = rng.multinomial(self.total_count, probs_2d[b],
-                                          size=n_samples)
-        except (TypeError, ValueError):
-            # Legacy fallback.
-            out = np.array([
-                rng.multinomial(self.total_count, probs_2d[b], size=n_samples)
-                for b in range(batch_size)
-            ], dtype=np.float64)
+                out[b] = rng.multinomial(N, probs_2d[b], size=n_samples)
+
         # Reshape to (sample_shape..., batch_shape..., num_events).
         out = np.transpose(out, (1, 0, 2))  # (n_samples, batch, K)
-        out_shape = tuple(sample_shape) + self._batch_shape + (self._num_events,)
+        out_shape = tuple(sample_shape) + self._batch_shape + (K,)
         return out.reshape(out_shape)
 
     def log_prob(self, value):
