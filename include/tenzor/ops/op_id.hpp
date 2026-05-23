@@ -266,6 +266,12 @@ enum class OpId : uint16_t {
     // AffineGrid is pinned to 692 so it does not collide with
     // FusedLinearReLU=210; auto-incrementing here would have collided.
     AffineGrid = 692,          // F.affine_grid for grid generation
+    // GridSampleBackward / AffineGridBackward are pinned at 700/701 to avoid
+    // a collision with FlexAttentionBackward (auto-increments to 694 from
+    // FlexAttention=693) and to leave headroom past Unknown=697 / OP_COUNT.
+    // audit Q.4.
+    GridSampleBackward = 700,  // audit Q.4: backward of F.grid_sample
+    AffineGridBackward = 701,  // audit Q.4: backward of F.affine_grid
 
     // =========================================================================
     // Fused Operations (210-229)
@@ -769,8 +775,14 @@ enum class OpId : uint16_t {
 
     // =========================================================================
     // Sentinel (MUST BE LAST)
+    //
+    // OP_COUNT is pinned to 702 (audit Q.4) to accommodate the explicit
+    // GridSampleBackward=700 / AffineGridBackward=701 IDs that live in the
+    // earlier vision-ops block; without the pin, OP_COUNT would auto-
+    // increment to 698 from `Unknown=697` and the dispatch table arrays
+    // would be too small for those backward kernels.
     // =========================================================================
-    OP_COUNT
+    OP_COUNT = 702
 };
 
 /// Compile-time constant for dispatch table sizing

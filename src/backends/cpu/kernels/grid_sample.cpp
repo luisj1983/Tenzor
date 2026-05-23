@@ -326,5 +326,344 @@ auto affine_grid_kernel(const Tensor& theta,
     return grid;
 }
 
+// ============================================================================
+// Backward kernels (audit Q.4)
+// ============================================================================
+
+namespace {
+
+// Templated cubic weights + derivatives, kept private to this TU.
+template <typename T>
+inline void cubic_weights_T(T t, T w[4]) {
+    constexpr T a = T(-0.5);
+    const T t2 = t * t;
+    const T t3 = t2 * t;
+    w[0] = ((a * t - T(2) * a) * t + a) * t;
+    w[1] = ((a + T(2)) * t3 - (a + T(3)) * t2 + T(1));
+    const T u = T(1) - t;
+    const T u2 = u * u;
+    const T u3 = u2 * u;
+    w[2] = ((a + T(2)) * u3 - (a + T(3)) * u2 + T(1));
+    w[3] = ((a * u - T(2) * a) * u + a) * u;
+}
+
+template <typename T>
+inline void cubic_dweights_T(T t, T dw[4]) {
+    constexpr T a = T(-0.5);
+    const T u = T(1) - t;
+    dw[0] = (T(3) * a * t * t - T(4) * a * t + a);
+    dw[1] = (T(3) * (a + T(2)) * t * t - T(2) * (a + T(3)) * t);
+    dw[2] = -(T(3) * (a + T(2)) * u * u - T(2) * (a + T(3)) * u);
+    dw[3] = -(T(3) * a * u * u - T(4) * a * u + a);
+}
+
+// Padding helpers used for bicubic neighbour fetch (border/reflection clamp
+// past the edge, zeros leaves the neighbour out of bounds).
+template <typename T>
+inline T denormalize_T(T coord, int64_t size, bool align_corners) {
+    if (align_corners) {
+        return (coord + T(1)) * T(0.5) * static_cast<T>(size - 1);
+    }
+    return ((coord + T(1)) * static_cast<T>(size) - T(1)) * T(0.5);
+}
+
+template <typename T>
+inline T reflect_coord_T(T coord, int64_t size) {
+    if (size <= 1) return T(0);
+    T max_val = static_cast<T>(size - 1);
+    coord = std::fabs(coord);
+    T period = T(2) * max_val;
+    coord = std::fmod(coord, period);
+    if (coord > max_val) coord = period - coord;
+    return coord;
+}
+
+// Full backward implementation for one dtype. Computes grad_input AND
+// grad_grid in a single scalar pass — both have the same access pattern,
+// just differing in how they accumulate.
+//
+// For the 'zeros' / 'border' / 'reflection' padding modes the math
+// matches PyTorch's CPU reference: padding affects the coordinate
+// transform but only `zeros` zeroes out the grad_grid where the
+// transformed sample landed out of bounds.
+template <typename T>
+void grid_sample_backward_impl(
+    const Tensor& grad_output, const Tensor& input, const Tensor& grid,
+    const std::string& mode, const std::string& padding_mode, bool align_corners,
+    Tensor& grad_input, Tensor& grad_grid)
+{
+    auto in_shape = input.shape();
+    auto grid_shape = grid.shape();
+    const int64_t N = in_shape[0];
+    const int64_t C = in_shape[1];
+    const int64_t H_in = in_shape[2];
+    const int64_t W_in = in_shape[3];
+    const int64_t H_out = grid_shape[1];
+    const int64_t W_out = grid_shape[2];
+
+    const T* in_data   = input.data<T>();
+    const T* grid_data = grid.data<T>();
+    const T* go_data   = grad_output.data<T>();
+    T* gi_data         = grad_input.data<T>();
+    T* gg_data         = grad_grid.data<T>();
+
+    // Zero outputs.
+    std::fill(gi_data, gi_data + grad_input.numel(), T(0));
+    std::fill(gg_data, gg_data + grad_grid.numel(),  T(0));
+
+    auto clamp_idx = [](int64_t v, int64_t lo, int64_t hi) -> int64_t {
+        return std::max(lo, std::min(v, hi));
+    };
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t h = 0; h < H_out; ++h) {
+            for (int64_t w = 0; w < W_out; ++w) {
+                const int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
+                const T gx = grid_data[grid_idx];
+                const T gy = grid_data[grid_idx + 1];
+
+                T ix = denormalize_T<T>(gx, W_in, align_corners);
+                T iy = denormalize_T<T>(gy, H_in, align_corners);
+
+                // For bilinear/nearest we track whether the sample fell
+                // inside the *unpadded* domain (so grad_grid is zero
+                // outside under 'zeros' padding — matches PyTorch).
+                bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
+                bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
+
+                if (padding_mode == "border") {
+                    ix = std::min(std::max(ix, T(0)), static_cast<T>(W_in - 1));
+                    iy = std::min(std::max(iy, T(0)), static_cast<T>(H_in - 1));
+                } else if (padding_mode == "reflection") {
+                    ix = reflect_coord_T<T>(ix, W_in);
+                    iy = reflect_coord_T<T>(iy, H_in);
+                }
+
+                // d(ix)/d(gx), d(iy)/d(gy) — chain back to normalised grid.
+                T dix_dgx, diy_dgy;
+                if (align_corners) {
+                    dix_dgx = T(0.5) * static_cast<T>(W_in - 1);
+                    diy_dgy = T(0.5) * static_cast<T>(H_in - 1);
+                } else {
+                    dix_dgx = T(0.5) * static_cast<T>(W_in);
+                    diy_dgy = T(0.5) * static_cast<T>(H_in);
+                }
+
+                if (mode == "bilinear") {
+                    const int64_t x0 = static_cast<int64_t>(std::floor(ix));
+                    const int64_t y0 = static_cast<int64_t>(std::floor(iy));
+                    const int64_t x1 = x0 + 1;
+                    const int64_t y1 = y0 + 1;
+
+                    const T wx1 = ix - static_cast<T>(x0);
+                    const T wy1 = iy - static_cast<T>(y0);
+                    const T wx0 = T(1) - wx1;
+                    const T wy0 = T(1) - wy1;
+
+                    T sum_dx = T(0);
+                    T sum_dy = T(0);
+                    for (int64_t c = 0; c < C; ++c) {
+                        const T go = go_data[((n * C + c) * H_out + h) * W_out + w];
+                        const T* ch_in = in_data + (n * C + c) * H_in * W_in;
+                        T* ch_gi       = gi_data + (n * C + c) * H_in * W_in;
+
+                        auto scatter = [&](int64_t y, int64_t x, T weight) {
+                            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
+                                ch_gi[y * W_in + x] += go * weight;
+                            }
+                        };
+                        auto fetch = [&](int64_t y, int64_t x) -> T {
+                            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
+                                return ch_in[y * W_in + x];
+                            }
+                            return T(0);
+                        };
+
+                        scatter(y0, x0, wy0 * wx0);
+                        scatter(y0, x1, wy0 * wx1);
+                        scatter(y1, x0, wy1 * wx0);
+                        scatter(y1, x1, wy1 * wx1);
+
+                        const T dx = go * (wy0 * (-fetch(y0, x0) + fetch(y0, x1)) +
+                                           wy1 * (-fetch(y1, x0) + fetch(y1, x1)));
+                        const T dy = go * (wx0 * (-fetch(y0, x0) + fetch(y1, x0)) +
+                                           wx1 * (-fetch(y0, x1) + fetch(y1, x1)));
+                        sum_dx += dx;
+                        sum_dy += dy;
+                    }
+
+                    // 'zeros' padding zeros grad_grid where the (un-clamped)
+                    // sample fell outside, since the value was 0 independent
+                    // of grid coordinate.
+                    T scale_x = (padding_mode == "zeros" && !in_bounds_ix) ? T(0) : dix_dgx;
+                    T scale_y = (padding_mode == "zeros" && !in_bounds_iy) ? T(0) : diy_dgy;
+                    gg_data[grid_idx]     += sum_dx * scale_x;
+                    gg_data[grid_idx + 1] += sum_dy * scale_y;
+                } else if (mode == "nearest") {
+                    const int64_t nx = static_cast<int64_t>(std::round(ix));
+                    const int64_t ny = static_cast<int64_t>(std::round(iy));
+                    if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
+                        for (int64_t c = 0; c < C; ++c) {
+                            const T go = go_data[((n * C + c) * H_out + h) * W_out + w];
+                            gi_data[((n * C + c) * H_in + ny) * W_in + nx] += go;
+                        }
+                    }
+                    // nearest: grad w.r.t. grid is 0 (non-differentiable).
+                } else if (mode == "bicubic") {
+                    const int64_t ix_floor = static_cast<int64_t>(std::floor(ix));
+                    const int64_t iy_floor = static_cast<int64_t>(std::floor(iy));
+                    const T tx = ix - static_cast<T>(ix_floor);
+                    const T ty = iy - static_cast<T>(iy_floor);
+                    T wx[4], wy[4], dwx[4], dwy[4];
+                    cubic_weights_T<T>(tx, wx);
+                    cubic_weights_T<T>(ty, wy);
+                    cubic_dweights_T<T>(tx, dwx);
+                    cubic_dweights_T<T>(ty, dwy);
+
+                    auto fetch = [&](int64_t c, int64_t y, int64_t x) -> T {
+                        if (padding_mode == "zeros") {
+                            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
+                            return in_data[((n * C + c) * H_in + y) * W_in + x];
+                        }
+                        y = clamp_idx(y, 0, H_in - 1);
+                        x = clamp_idx(x, 0, W_in - 1);
+                        return in_data[((n * C + c) * H_in + y) * W_in + x];
+                    };
+                    auto scatter = [&](int64_t c, int64_t y, int64_t x, T weight) {
+                        if (padding_mode == "zeros") {
+                            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
+                                gi_data[((n * C + c) * H_in + y) * W_in + x] += weight;
+                            }
+                            return;
+                        }
+                        y = clamp_idx(y, 0, H_in - 1);
+                        x = clamp_idx(x, 0, W_in - 1);
+                        gi_data[((n * C + c) * H_in + y) * W_in + x] += weight;
+                    };
+
+                    T sum_dx = T(0);
+                    T sum_dy = T(0);
+                    for (int64_t c = 0; c < C; ++c) {
+                        const T go = go_data[((n * C + c) * H_out + h) * W_out + w];
+                        T dval_dix = T(0);
+                        T dval_diy = T(0);
+                        for (int dy = -1; dy <= 2; ++dy) {
+                            for (int dx = -1; dx <= 2; ++dx) {
+                                const T weight = wy[dy + 1] * wx[dx + 1];
+                                scatter(c, iy_floor + dy, ix_floor + dx, go * weight);
+                                const T v = fetch(c, iy_floor + dy, ix_floor + dx);
+                                dval_dix += wy[dy + 1] * dwx[dx + 1] * v;
+                                dval_diy += dwy[dy + 1] * wx[dx + 1] * v;
+                            }
+                        }
+                        sum_dx += go * dval_dix;
+                        sum_dy += go * dval_diy;
+                    }
+                    gg_data[grid_idx]     += sum_dx * dix_dgx;
+                    gg_data[grid_idx + 1] += sum_dy * diy_dgy;
+                } else {
+                    throw std::invalid_argument(
+                        "grid_sample_backward: unknown mode '" + mode +
+                        "'. Supported: bilinear, nearest, bicubic.");
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+void affine_grid_backward_impl(const Tensor& grad_grid,
+                               int64_t N, int64_t H, int64_t W,
+                               bool align_corners, Tensor& grad_theta) {
+    const T* gg_data = grad_grid.data<T>();
+    T* gt_data = grad_theta.data<T>();
+    std::fill(gt_data, gt_data + grad_theta.numel(), T(0));
+
+    for (int64_t n = 0; n < N; ++n) {
+        T* t = gt_data + n * 6;
+        for (int64_t h = 0; h < H; ++h) {
+            for (int64_t w = 0; w < W; ++w) {
+                T x_norm, y_norm;
+                if (align_corners) {
+                    x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+                    y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
+                } else {
+                    x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+                    y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
+                }
+                const int64_t idx = ((n * H + h) * W + w) * 2;
+                const T dg_x = gg_data[idx];
+                const T dg_y = gg_data[idx + 1];
+                t[0] += dg_x * x_norm;
+                t[1] += dg_x * y_norm;
+                t[2] += dg_x;
+                t[3] += dg_y * x_norm;
+                t[4] += dg_y * y_norm;
+                t[5] += dg_y;
+            }
+        }
+    }
+}
+
+} // anonymous namespace
+
+auto grid_sample_backward_kernel(const Tensor& grad_output,
+                                 const Tensor& input, const Tensor& grid,
+                                 const std::string& mode,
+                                 const std::string& padding_mode,
+                                 bool align_corners)
+    -> std::pair<Tensor, Tensor>
+{
+    auto in_shape_span = input.shape();
+    auto gr_shape_span = grid.shape();
+    std::vector<int64_t> in_shape_v(in_shape_span.begin(), in_shape_span.end());
+    std::vector<int64_t> gr_shape_v(gr_shape_span.begin(), gr_shape_span.end());
+
+    // Promote inputs to the common compute dtype. CPU kernel supports
+    // native F32 and F64; F16/BF16 widen to F32 then narrow back.
+    const DType in_dt = input.dtype();
+    const DType gr_dt = grid.dtype();
+    DType compute = (in_dt == DType::Float64 || gr_dt == DType::Float64)
+        ? DType::Float64 : DType::Float32;
+
+    Tensor inp_c = input.to(compute);
+    Tensor grid_c = grid.to(compute);
+    Tensor go_c = grad_output.to(compute);
+    Tensor gi_c(in_shape_v, compute, input.device());
+    Tensor gg_c(gr_shape_v, compute, grid.device());
+
+    if (compute == DType::Float64) {
+        grid_sample_backward_impl<double>(go_c, inp_c, grid_c,
+            mode, padding_mode, align_corners, gi_c, gg_c);
+    } else {
+        grid_sample_backward_impl<float>(go_c, inp_c, grid_c,
+            mode, padding_mode, align_corners, gi_c, gg_c);
+    }
+
+    return {gi_c.to(in_dt), gg_c.to(gr_dt)};
+}
+
+auto affine_grid_backward_kernel(const Tensor& grad_grid,
+                                 const std::vector<int64_t>& size,
+                                 bool align_corners) -> Tensor
+{
+    const int64_t N = size[0];
+    const int64_t H = size[2];
+    const int64_t W = size[3];
+
+    DType gr_dt = grad_grid.dtype();
+    DType compute = (gr_dt == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor gg_c = grad_grid.to(compute);
+    Tensor gt_c({N, 2, 3}, compute, grad_grid.device());
+
+    if (compute == DType::Float64) {
+        affine_grid_backward_impl<double>(gg_c, N, H, W, align_corners, gt_c);
+    } else {
+        affine_grid_backward_impl<float>(gg_c, N, H, W, align_corners, gt_c);
+    }
+    return gt_c.to(gr_dt);
+}
+
 } // namespace cpu
 } // namespace tenzor

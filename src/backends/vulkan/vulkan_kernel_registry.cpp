@@ -990,6 +990,25 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchAffineGrid(inputs[0], size, align_corners);
     });
 
+    // audit Q.4: grid_sample / affine_grid backward (Vulkan compute shaders).
+    table.register_kernel(OpId::GridSampleBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            auto [gi, gg] = get_vulkan_backend()->dispatchGridSampleBackward(
+                inputs[2], inputs[0], inputs[1], mode, padding_mode, align_corners);
+            return {gi, gg};
+        });
+    table.register_single_output_kernel(OpId::AffineGridBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto size_span = attrs.get_int_list(AttrKey::OutputSize);
+            std::vector<int64_t> size(size_span.begin(), size_span.end());
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            return get_vulkan_backend()->dispatchAffineGridBackward(
+                inputs[0], size, align_corners);
+        });
+
     table.register_kernel(OpId::GatherRelativePositionBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchGatherRelativePositionBias(
             inputs[0], inputs[1],

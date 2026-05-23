@@ -517,6 +517,15 @@ namespace cpu {
                             bool align_corners) -> Tensor;
     auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
                             bool align_corners) -> Tensor;
+    auto grid_sample_backward_kernel(const Tensor& grad_output,
+                                     const Tensor& input, const Tensor& grid,
+                                     const std::string& mode,
+                                     const std::string& padding_mode,
+                                     bool align_corners)
+        -> std::pair<Tensor, Tensor>;
+    auto affine_grid_backward_kernel(const Tensor& grad_grid,
+                                     const std::vector<int64_t>& size,
+                                     bool align_corners) -> Tensor;
     auto unfold_kernel(const Tensor& input, int64_t kernel_size,
                        int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
@@ -2429,6 +2438,27 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return cpu::affine_grid_kernel(inputs[0], size, align_corners);
     });
+
+    // audit Q.4: backward kernels for grid_sample / affine_grid. Replaces
+    // the previous CPU shuttle in src/autograd/function_vision.cpp.
+    // Inputs (GridSampleBackward): [input, grid, grad_output]. Outputs: [grad_input, grad_grid].
+    table.register_kernel(OpId::GridSampleBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            auto [gi, gg] = cpu::grid_sample_backward_kernel(
+                inputs[2], inputs[0], inputs[1], mode, padding_mode, align_corners);
+            return {gi, gg};
+        });
+
+    // Inputs (AffineGridBackward): [grad_grid]. Attrs: OutputSize, AlignCorners.
+    table.register_single_output_kernel(OpId::AffineGridBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto size = attrs.get_int_list(AttrKey::OutputSize);
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+            return cpu::affine_grid_backward_kernel(inputs[0], size, align_corners);
+        });
 
     // =========================================================================
     // Unfold / Fold Operations

@@ -299,6 +299,14 @@ public:
                             const std::string& mode_str, const std::string& padding_mode_str,
                             bool align_corners) -> Tensor;
     auto dispatchAffineGrid(const Tensor& theta, const std::vector<int64_t>& size, bool align_corners) -> Tensor;
+    auto dispatchGridSampleBackward(const Tensor& grad_output,
+                                    const Tensor& input, const Tensor& grid,
+                                    const std::string& mode_str,
+                                    const std::string& padding_mode_str,
+                                    bool align_corners) -> std::pair<Tensor, Tensor>;
+    auto dispatchAffineGridBackward(const Tensor& grad_grid,
+                                    const std::vector<int64_t>& size,
+                                    bool align_corners) -> Tensor;
     // Advanced (fancy) indexing (vulkan_ops_advanced_index.cpp)
     auto dispatchAdvancedIndex(const Tensor& src, const std::vector<Tensor>& indices,
                                int64_t num_indices) -> Tensor;

@@ -1,0 +1,51 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Affine grid backward. Audit Q.4: replaces the previous CPU shuttle in
+// function_vision.cpp. Float32 only.
+//
+// One thread per (n, h, w). Each thread computes its (x_norm, y_norm) and
+// scatters six contributions into grad_theta[n, 0:2, 0:3] via atomicAdd.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradGridBuf  { float grad_grid[]; };   // (N,H,W,2)
+layout(binding = 1) buffer GradThetaBuf { float grad_theta[]; };  // (N,2,3)
+
+layout(push_constant) uniform PushConstants {
+    int N;
+    int H;
+    int W;
+    int align_corners;
+    int total;          // N*H*W
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.total) return;
+
+    int w = idx % params.W;
+    int h = (idx / params.W) % params.H;
+    int n = idx / (params.W * params.H);
+
+    float x_norm, y_norm;
+    if (params.align_corners != 0) {
+        x_norm = (params.W > 1) ? (2.0 * float(w) / float(params.W - 1) - 1.0) : 0.0;
+        y_norm = (params.H > 1) ? (2.0 * float(h) / float(params.H - 1) - 1.0) : 0.0;
+    } else {
+        x_norm = (2.0 * float(w) + 1.0) / float(params.W) - 1.0;
+        y_norm = (2.0 * float(h) + 1.0) / float(params.H) - 1.0;
+    }
+
+    int gg_idx = ((n * params.H + h) * params.W + w) * 2;
+    float dg_x = grad_grid[gg_idx];
+    float dg_y = grad_grid[gg_idx + 1];
+
+    int base = n * 6;
+    atomicAdd(grad_theta[base + 0], dg_x * x_norm);
+    atomicAdd(grad_theta[base + 1], dg_x * y_norm);
+    atomicAdd(grad_theta[base + 2], dg_x);
+    atomicAdd(grad_theta[base + 3], dg_y * x_norm);
+    atomicAdd(grad_theta[base + 4], dg_y * y_norm);
+    atomicAdd(grad_theta[base + 5], dg_y);
+}
