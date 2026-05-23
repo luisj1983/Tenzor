@@ -228,7 +228,9 @@ TEST_F(DTypeConversionTest, FP8E4M3ToFloat16) {
     ASSERT_EQ(t_f16.dtype(), DType::Float16);
 
     auto t_f32 = t_f16.to(DType::Float32);
+    // reason: F16 representation precision (FP8 E4M3 → F16 → F32 round-trip)
     EXPECT_NEAR(t_f32.data<float>()[0], 2.0f, 0.1f);
+    // reason: FP8 E4M3 representation precision (4-bit mantissa, 3-bit exponent)
     EXPECT_NEAR(t_f32.data<float>()[1], -3.0f, 0.5f);
 }
 
@@ -243,7 +245,9 @@ TEST_F(DTypeConversionTest, Int32ToFP8E4M3) {
 
     auto t_back = t_fp8.to(DType::Float32);
     EXPECT_FLOAT_EQ(t_back.data<float>()[0], 0.0f);
+    // reason: FP8 E4M3 representation precision (5 → nearest representable)
     EXPECT_NEAR(t_back.data<float>()[1], 5.0f, 1.0f);
+    // reason: FP8 E4M3 representation precision (|x|=10 spans an exponent bucket)
     EXPECT_NEAR(t_back.data<float>()[2], -10.0f, 2.0f);
 }
 
@@ -282,7 +286,9 @@ TEST_F(DTypeConversionTest, FP8CrossConversion) {
     ASSERT_EQ(t_e5m2.dtype(), DType::FP8_E5M2);
 
     auto t_back = t_e5m2.to(DType::Float32);
+    // reason: FP8 E5M2 representation precision (2-bit mantissa, 5-bit exponent)
     EXPECT_NEAR(t_back.data<float>()[0], 1.5f, 0.5f);
+    // reason: FP8 E5M2 representation precision (E4M3 → E5M2 narrowing)
     EXPECT_NEAR(t_back.data<float>()[1], -4.0f, 1.0f);
 }
 

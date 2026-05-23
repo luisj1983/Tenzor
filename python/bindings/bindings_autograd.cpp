@@ -135,7 +135,17 @@ void register_autograd(py::module_& m) {
 
     func_mod.def("grad", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
-            tenzor::Variable x_copy(x.tensor().clone(), true);
+            // S.21: clone preserves the input's requires_grad flag instead
+            // of unconditionally overriding it to true. Differentiation
+            // through f only works when the input was created with
+            // requires_grad=True; silently flipping it for the user
+            // masked the common mistake of feeding a detached/leaf-only
+            // tensor and getting back a graph that nominally tracked
+            // grads but referenced no upstream variables. Callers who
+            // want a non-grad probe should pass a non-grad input — the
+            // resulting "no gradient computed" diagnostic below makes the
+            // mismatch obvious.
+            tenzor::Variable x_copy(x.tensor().clone(), x.requires_grad());
             py::object result = f(x_copy);
             tenzor::Variable output = result.cast<tenzor::Variable>();
             // R.22: release the GIL across the C++ backward traversal.

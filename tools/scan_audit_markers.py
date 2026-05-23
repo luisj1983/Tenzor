@@ -37,6 +37,14 @@ EXCLUDED_DIRS = {
 
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".cu", ".hip", ".comp", ".py"}
 
+# Files whose basename matches any entry here are skipped regardless of the
+# directory they live in. The scanner itself defines the marker literals it
+# searches for, so scanning it would always produce false positives on a clean
+# tree. Keep this set tiny and only add genuinely self-referential tools.
+EXCLUDED_FILENAMES = {
+    "scan_audit_markers.py",
+}
+
 # Case-insensitive match: bare words for TODO/FIXME/HACK, phrase matches for
 # the "soft" markers that show up in comments or strings.
 MARKER_PATTERN = re.compile(
@@ -54,6 +62,8 @@ def iter_source_files(root: Path) -> Iterable[Path]:
         # Prune excluded directories in-place so os.walk doesn't descend.
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for fname in filenames:
+            if fname in EXCLUDED_FILENAMES:
+                continue
             p = Path(dirpath) / fname
             if p.suffix in SOURCE_SUFFIXES:
                 yield p

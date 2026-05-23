@@ -26,6 +26,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <typeinfo>
 #include <vector>
 
 // Include embedded shaders
@@ -1127,13 +1128,23 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
     auto& allocator = backend::VulkanCachingAllocator::get();
 
     // First try direct lookup in caching allocator
-    // Find which device this allocation belongs to
+    // Find which device this allocation belongs to.
+    //
+    // S.5: catch the *typed* std::out_of_range that the allocator raises
+    // for the expected "ptr lives on a different device" / "ptr not tracked"
+    // miss path. Any other exception type indicates an internal allocator
+    // failure (mutex poisoning, container invariant break, driver crash) —
+    // log + rethrow so the diagnostic isn't silently swallowed. Mirrors L.3.
     for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
         try {
             VkBuffer buffer = allocator.get_buffer(const_cast<void*>(ptr), device_id);
             return {buffer, 0};
-        } catch (...) {
-            // Not found on this device, try next
+        } catch (const std::out_of_range&) {
+            // Expected: not found on this device, try next.
+        } catch (const std::exception& e) {
+            TENZOR_LOG_ERROR("[VulkanCachingAllocator::get_buffer] unexpected exception {} ({}); rethrowing",
+                             typeid(e).name(), e.what());
+            throw;
         }
     }
 
@@ -1268,6 +1279,25 @@ void ensure_fp64_supported(int32_t device_id, const char* op_name) {
         throw std::runtime_error(
             std::string("[Vulkan ") + (op_name ? op_name : "?") +
             "] requires shaderFloat64 (not supported on this device)");
+    }
+}
+
+// S.4: Shared FP16 capability gate for vulkan_ops_*.cpp dispatch sites.
+// Mirrors ensure_fp64_supported (R.13). BFloat16 dispatch paths reuse
+// shaderFloat16 lowering on Vulkan, so they share this gate.
+void ensure_fp16_supported(int32_t device_id, const char* op_name) {
+    auto* backend = DispatchTableRegistry::get_backend(Device::Type::Vulkan);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] Vulkan backend is not initialised; cannot query shaderFloat16");
+    }
+    auto* vk = static_cast<VulkanBackend*>(backend);
+    DeviceInfo dev_info = vk->get_device_info(device_id);
+    if (!dev_info.supports_fp16) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] requires shaderFloat16 (VK_KHR_shader_float16_int8 not supported on this device)");
     }
 }
 

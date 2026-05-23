@@ -591,6 +591,41 @@ if(TENZOR_BUILD_TESTS)
                 --baseline ${CMAKE_SOURCE_DIR}/tools/lint_test_contract_baseline.txt
         )
         set_tests_properties(lint_test_contract PROPERTIES LABELS "lint")
+
+        # audit-3 T.4: wire the four standalone audit scripts into ctest so
+        # they execute under `ctest -L lint`. Each script exits non-zero on
+        # drift; AuditMarkersScan reports lingering TODO/FIXME/"for now" etc.
+        add_test(
+            NAME AuditMarkersScan
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/scan_audit_markers.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(AuditMarkersScan PROPERTIES LABELS "lint")
+
+        add_test(
+            NAME PyiDrift
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/check_pyi_drift.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(PyiDrift PROPERTIES LABELS "lint")
+
+        add_test(
+            NAME ParamGroupSerialization
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/check_param_group_serialization.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(ParamGroupSerialization PROPERTIES LABELS "lint")
+
+        add_test(
+            NAME TensorboardWireFormat
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/check_tensorboard_wire_format.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(TensorboardWireFormat PROPERTIES LABELS "lint")
     endif()
 endif()
 

@@ -41,6 +41,10 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     if (is_float64) {
         vulkan::ensure_fp64_supported(device_id, "Full");
     }
+    // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support.
+    if (is_float16 || is_bfloat16) {
+        vulkan::ensure_fp16_supported(device_id, "Full");
+    }
 
     std::string shader_name;
     if (is_float64) {
@@ -357,6 +361,11 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     bool is_int8 = (dtype == DType::Int8);
     std::string shader_name = is_float16 ? "ones_f16" : (is_int8 ? "ones_i8" : "ones");
 
+    // S.4: gate FP16 dispatch on shaderFloat16 device support.
+    if (is_float16) {
+        vulkan::ensure_fp16_supported(device_id, "Ones");
+    }
+
     auto* pipeline = getPipeline(shader_name, device_id);
 
     const void* buffer_out = output.data_ptr();
@@ -491,6 +500,10 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     if (dtype == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "Rand");
     }
+    // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        vulkan::ensure_fp16_supported(device_id, "Rand");
+    }
 
     // Select shader based on dtype
     std::string shader_name = "random";
@@ -565,6 +578,10 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (dtype == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "Randn");
+    }
+    // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        vulkan::ensure_fp16_supported(device_id, "Randn");
     }
 
     // Select shader based on dtype
@@ -759,6 +776,10 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (input.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(input.device().index, "MaskedSelect");
+    }
+    // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        vulkan::ensure_fp16_supported(input.device().index, "MaskedSelect");
     }
 
     // Determine gather shader based on dtype
@@ -1053,6 +1074,10 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     if (is_float64) {
         vulkan::ensure_fp64_supported(device_id, "Interpolate");
     }
+    // S.4: gate FP16 dispatch on shaderFloat16 device support.
+    if (is_float16) {
+        vulkan::ensure_fp16_supported(device_id, "Interpolate");
+    }
 
     // Select shader based on mode and dtype
     std::string shader_name;
@@ -1160,6 +1185,10 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     if (features.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "ROIAlignForward");
     }
+    // S.4: gate FP16 dispatch on shaderFloat16 device support.
+    if (features.dtype() == DType::Float16) {
+        vulkan::ensure_fp16_supported(device_id, "ROIAlignForward");
+    }
 
     // Select shader based on dtype
     std::string shader_name = "roi_align";
@@ -1265,6 +1294,10 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     if (grad_output.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "ROIAlignBackward");
     }
+    // S.4: gate FP16 dispatch on shaderFloat16 device support.
+    if (grad_output.dtype() == DType::Float16) {
+        vulkan::ensure_fp16_supported(device_id, "ROIAlignBackward");
+    }
 
     // Select shader based on dtype
     std::string shader_name = "roi_align_backward";
@@ -1366,6 +1399,11 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (input.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(input.device().index, "ArgSort");
+    }
+    // S.4: gate FP16 dispatch on shaderFloat16 device support.
+    // (BFloat16 routes via Float32 below, so it doesn't need a gate here.)
+    if (input.dtype() == DType::Float16) {
+        vulkan::ensure_fp16_supported(input.device().index, "ArgSort");
     }
 
     // Determine shader based on dtype
@@ -1625,6 +1663,17 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
                        (target_dtype == DType::Complex128);
     if (needs_fp64) {
         vulkan::ensure_fp64_supported(device_id, "Cast");
+    }
+    // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support. Any cast
+    // involving Float16 or BFloat16 routes through an FP16-aware SPIR-V shader
+    // (packed uint32 / bit-twiddle conversions); without shaderFloat16 the
+    // driver hits a validation error instead of a clean exception.
+    bool needs_fp16 = (src_dtype == DType::Float16) ||
+                      (target_dtype == DType::Float16) ||
+                      (src_dtype == DType::BFloat16) ||
+                      (target_dtype == DType::BFloat16);
+    if (needs_fp16) {
+        vulkan::ensure_fp16_supported(device_id, "Cast");
     }
 
     // Complex casts: real↔complex64 and real↔complex128 use native Vulkan shaders.
@@ -1913,8 +1962,26 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
 
     // Two-step casts via Float32 intermediate
     if (two_step) {
+        // S.9: the inner `dispatchCast(input, DType::Float32)` may leave its
+        // command buffer batched (vulkan_commands.cpp:33 endSingleTimeCommands
+        // routes through recordOperationToBatch under USE_COMMAND_BATCHING).
+        // If we return the second cast immediately, the function's stack frame
+        // unwinds and `intermediate` is destroyed before the batched commands
+        // that read intermediate.data_ptr() have been submitted to the queue —
+        // the VkBuffer can be returned to the caching allocator and reused,
+        // creating a use-after-free on the GPU side.
+        //
+        // Two fixes are required:
+        //  (a) submit any pending batch on this device so the GPU has a
+        //      hardware reference to the intermediate buffer before the
+        //      stack frame unwinds;
+        //  (b) bind the second cast's result to a local so `intermediate`
+        //      stays alive across the call.
         Tensor intermediate = dispatchCast(input, DType::Float32);
-        return dispatchCast(intermediate, target_dtype);
+        submitBatchIfNeeded(device_id, /*force=*/true);
+        Tensor result = dispatchCast(intermediate, target_dtype);
+        submitBatchIfNeeded(device_id, /*force=*/true);
+        return result;
     }
 
     // Single-step GPU cast using compute shader

@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
 
 namespace tenzor::optim {
 
@@ -149,10 +150,28 @@ auto ASGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["ax_" + std::to_string(i)] = ax_buffers_[i].clone();
     }
 
+    // S.12 / P.2: num_params guard so load_state_dict can reject mismatched
+    // models before any tensor is overwritten (mirrors Adam::state_dict).
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto ASGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // S.12 / P.2: param-count guard up front. Reject a restore against the
+    // wrong model loudly instead of partially populating per-parameter
+    // buffers and then succeeding silently.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "ASGD::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
+
     // Load optimizer configuration
     if (state.count("lr")) {
         lr_ = state.at("lr").data<double>()[0];

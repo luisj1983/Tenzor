@@ -2987,10 +2987,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Conv3d / ConvTranspose3d fallback registrations (no cuDNN).
     // Direct-convolution kernels in src/backends/cuda/kernels/conv3d.cu.
     // -------------------------------------------------------------------------
-    // Wave B4 + F.11: non-cuDNN Conv3d fallback. The kernel functions accept
-    // std::array signatures (with internal iso-assert until the device kernels
-    // gain per-axis index math as a separate refactor). Reads per-axis attrs
-    // via the shared attr_macros helpers.
+    // Wave B4 + F.11 + S.6: non-cuDNN Conv3d fallback. The kernel functions
+    // accept std::array signatures and read per-axis attrs via the shared
+    // attr_macros helpers, but the underlying device kernel uses scalar index
+    // math — it throws std::runtime_error on asymmetric stride/padding/
+    // dilation rather than silently collapsing to symmetric (see
+    // conv3d.cu:780-786). Build with TENZOR_HAS_CUDNN=ON for true per-axis
+    // support, or pass isotropic params; the previous registry comment
+    // ("iso-assert") was misleading because the throw is in the kernel, not
+    // an assert here.
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         TENZOR_READ_CONV3D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -3065,6 +3070,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Dropout Operations (Phase 1B - CRITICAL)
     // =========================================================================
+    // S.7: Dropout is a scalar-probability elementwise op. There is no spatial
+    // dimensionality to make per-axis, so the float `p` and bool `training`
+    // attrs are the only inputs the kernel takes — this scalar API is
+    // structurally correct, not a per-axis collapse.
     table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
         bool training = attrs.get_bool(AttrKey::Training, true);
@@ -5104,6 +5113,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Phase 9: Fractional Max Pool 3D
     // =========================================================================
+    // S.7: FractionalMaxPool3d / MaxUnpool*d below already take per-axis
+    // OutputSizeD/H/W and the underlying CUDA kernels accept (out_d, out_h,
+    // out_w) as separate parameters. No stride/padding attrs apply — fractional
+    // pool computes stride from input/output ratio internally, and unpool uses
+    // the saved index map. No per-axis collapse here.
     table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
         int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);

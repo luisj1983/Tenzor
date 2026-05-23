@@ -14,6 +14,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -23,6 +24,11 @@ class MinimalTraining : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
         tenzor::initialize();
+    }
+
+    void SetUp() override {
+        // Fixed seed to keep std::rand()-driven test inputs reproducible.
+        std::srand(42);
     }
 };
 

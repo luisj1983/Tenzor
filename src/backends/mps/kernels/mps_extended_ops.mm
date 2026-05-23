@@ -41,16 +41,22 @@ id<MTLBuffer> get_buffer(const Tensor& tensor);
 
 Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
                                   int64_t sd, int64_t sh, int64_t sw,
-                                  int64_t pd, int64_t ph, int64_t pw, int64_t groups) {
+                                  int64_t pd, int64_t ph, int64_t pw,
+                                  int64_t dd, int64_t dh, int64_t dw,
+                                  int64_t groups) {
     ensure_initialized();
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
     int64_t batch = in_shape[0], in_c = in_shape[1];
     int64_t in_d = in_shape[2], in_h = in_shape[3], in_w = in_shape[4];
     int64_t out_c = w_shape[0], kd = w_shape[2], kh = w_shape[3], kw = w_shape[4];
-    int64_t o_d = (in_d + 2*pd - kd) / sd + 1;
-    int64_t o_h = (in_h + 2*ph - kh) / sh + 1;
-    int64_t o_w = (in_w + 2*pw - kw) / sw + 1;
+    // S.11: dilation-aware output-shape formula (PyTorch parity). The Metal
+    // shader (conv3d_im2col_kernel) was updated in parallel to read
+    // dd_dil/dh_dil/dw_dil; we forward the per-axis dilation values to it
+    // below.
+    int64_t o_d = (in_d + 2*pd - dd*(kd-1) - 1) / sd + 1;
+    int64_t o_h = (in_h + 2*ph - dh*(kh-1) - 1) / sh + 1;
+    int64_t o_w = (in_w + 2*pw - dw*(kw-1) - 1) / sw + 1;
 
     // im2col + matmul approach
     int64_t col_rows = (in_c / groups) * kd * kh * kw;
@@ -62,12 +68,14 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_col = get_buffer(col);
 
-    uint32_t params[19] = {
+    // S.11: extended to 20 entries — last three are dd_dil/dh_dil/dw_dil.
+    uint32_t params[20] = {
         (uint32_t)batch, (uint32_t)in_c, (uint32_t)in_d, (uint32_t)in_h, (uint32_t)in_w,
         (uint32_t)o_d, (uint32_t)o_h, (uint32_t)o_w,
         (uint32_t)kd, (uint32_t)kh, (uint32_t)kw,
         (uint32_t)sd, (uint32_t)sh, (uint32_t)sw,
-        (uint32_t)pd, (uint32_t)ph, (uint32_t)pw
+        (uint32_t)pd, (uint32_t)ph, (uint32_t)pw,
+        (uint32_t)dd, (uint32_t)dh, (uint32_t)dw
     };
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -75,7 +83,7 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:buf_in offset:0 atIndex:0];
     [encoder setBuffer:buf_col offset:0 atIndex:1];
-    for (int i = 0; i < 17; ++i) {
+    for (int i = 0; i < 20; ++i) {
         [encoder setBytes:&params[i] length:sizeof(uint32_t) atIndex:i + 2];
     }
 
@@ -111,14 +119,18 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
 Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh, int64_t kw,
                                      int64_t sd, int64_t sh, int64_t sw,
                                      int64_t pd, int64_t ph, int64_t pw,
+                                     int64_t dd, int64_t dh, int64_t dw,
                                      Tensor& indices_out) {
     ensure_initialized();
     auto s = input.shape();
     int64_t batch = s[0], channels = s[1];
     int64_t in_d = s[2], in_h = s[3], in_w = s[4];
-    int64_t o_d = (in_d + 2*pd - kd) / sd + 1;
-    int64_t o_h = (in_h + 2*ph - kh) / sh + 1;
-    int64_t o_w = (in_w + 2*pw - kw) / sw + 1;
+    // S.11: dilation-aware output-shape formula. The Metal shader was
+    // updated in parallel to read dd_dil/dh_dil/dw_dil; we forward the
+    // per-axis dilation values to it below.
+    int64_t o_d = (in_d + 2*pd - dd*(kd-1) - 1) / sd + 1;
+    int64_t o_h = (in_h + 2*ph - dh*(kh-1) - 1) / sh + 1;
+    int64_t o_w = (in_w + 2*pw - dw*(kw-1) - 1) / sw + 1;
 
     Tensor output({batch, channels, o_d, o_h, o_w}, input.dtype(), input.device());
     indices_out = Tensor({batch, channels, o_d, o_h, o_w}, DType::Int32, input.device());
@@ -128,6 +140,7 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     id<MTLBuffer> buf_out = get_buffer(output);
     id<MTLBuffer> buf_idx = get_buffer(indices_out);
 
+    // S.11: extended to 20 entries — last three are dd_dil/dh_dil/dw_dil.
     uint32_t p[20];
     p[0]=(uint32_t)batch; p[1]=(uint32_t)channels;
     p[2]=(uint32_t)in_d; p[3]=(uint32_t)in_h; p[4]=(uint32_t)in_w;
@@ -135,6 +148,7 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     p[8]=(uint32_t)kd; p[9]=(uint32_t)kh; p[10]=(uint32_t)kw;
     p[11]=(uint32_t)sd; p[12]=(uint32_t)sh; p[13]=(uint32_t)sw;
     p[14]=(uint32_t)pd; p[15]=(uint32_t)ph; p[16]=(uint32_t)pw;
+    p[17]=(uint32_t)dd; p[18]=(uint32_t)dh; p[19]=(uint32_t)dw;
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
@@ -142,7 +156,7 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     [enc setBuffer:buf_in offset:0 atIndex:0];
     [enc setBuffer:buf_out offset:0 atIndex:1];
     [enc setBuffer:buf_idx offset:0 atIndex:2];
-    for (int i = 0; i < 17; ++i) [enc setBytes:&p[i] length:sizeof(uint32_t) atIndex:i+3];
+    for (int i = 0; i < 20; ++i) [enc setBytes:&p[i] length:sizeof(uint32_t) atIndex:i+3];
 
     size_t total = output.numel();
     MTLSize grid = MTLSizeMake(total, 1, 1);
@@ -156,14 +170,17 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
 Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh, int64_t kw,
                                      int64_t sd, int64_t sh, int64_t sw,
                                      int64_t pd, int64_t ph, int64_t pw,
+                                     int64_t dd, int64_t dh, int64_t dw,
                                      bool count_include_pad) {
     ensure_initialized();
     auto s = input.shape();
     int64_t batch = s[0], channels = s[1];
     int64_t in_d = s[2], in_h = s[3], in_w = s[4];
-    int64_t o_d = (in_d + 2*pd - kd) / sd + 1;
-    int64_t o_h = (in_h + 2*ph - kh) / sh + 1;
-    int64_t o_w = (in_w + 2*pw - kw) / sw + 1;
+    // S.11: dilation-aware output-shape formula. The Metal shader was
+    // updated in parallel to read dd_dil/dh_dil/dw_dil.
+    int64_t o_d = (in_d + 2*pd - dd*(kd-1) - 1) / sd + 1;
+    int64_t o_h = (in_h + 2*ph - dh*(kh-1) - 1) / sh + 1;
+    int64_t o_w = (in_w + 2*pw - dw*(kw-1) - 1) / sw + 1;
 
     Tensor output({batch, channels, o_d, o_h, o_w}, input.dtype(), input.device());
 
@@ -171,7 +188,8 @@ Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_out = get_buffer(output);
 
-    uint32_t p[20];
+    // S.11: extended to 21 entries — entries 18-20 are dd_dil/dh_dil/dw_dil.
+    uint32_t p[21];
     p[0]=(uint32_t)batch; p[1]=(uint32_t)channels;
     p[2]=(uint32_t)in_d; p[3]=(uint32_t)in_h; p[4]=(uint32_t)in_w;
     p[5]=(uint32_t)o_d; p[6]=(uint32_t)o_h; p[7]=(uint32_t)o_w;
@@ -179,13 +197,14 @@ Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
     p[11]=(uint32_t)sd; p[12]=(uint32_t)sh; p[13]=(uint32_t)sw;
     p[14]=(uint32_t)pd; p[15]=(uint32_t)ph; p[16]=(uint32_t)pw;
     p[17]=(uint32_t)(count_include_pad ? 1 : 0);
+    p[18]=(uint32_t)dd; p[19]=(uint32_t)dh; p[20]=(uint32_t)dw;
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:pipeline];
     [enc setBuffer:buf_in offset:0 atIndex:0];
     [enc setBuffer:buf_out offset:0 atIndex:1];
-    for (int i = 0; i < 18; ++i) [enc setBytes:&p[i] length:sizeof(uint32_t) atIndex:i+2];
+    for (int i = 0; i < 21; ++i) [enc setBytes:&p[i] length:sizeof(uint32_t) atIndex:i+2];
 
     size_t total = output.numel();
     MTLSize grid = MTLSizeMake(total, 1, 1);

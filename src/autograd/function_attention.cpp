@@ -418,7 +418,22 @@ auto composed_attention_backward_variable(const Variable& dO,
     auto V3 = reshape_3d(V);
     auto dO3 = reshape_3d(dO);
 
-    auto Kt = tenzor::transpose(K3, -1, -2);
+    // S.1 — defensive negative-dim normalisation. Q3/K3/V3 are always rank-3
+    // (post reshape_3d). `transpose(-1, -2)` and `sum(dim=-1)` would underflow
+    // if any caller ever fed a < 2D tensor through the higher-order path; the
+    // explicit normalised dims below match what the underlying op does and
+    // make the intent obvious at the call site.
+    auto Q3_ndim = static_cast<int64_t>(Q3.tensor().shape().size());
+    auto K3_ndim = static_cast<int64_t>(K3.tensor().shape().size());
+    auto V3_ndim = static_cast<int64_t>(V3.tensor().shape().size());
+    if (Q3_ndim < 2 || K3_ndim < 2 || V3_ndim < 2) {
+        throw std::runtime_error(
+            "composed_attention_backward_variable: Q/K/V must be at least 2D after reshape_3d");
+    }
+    int64_t K_t_dim0 = K3_ndim - 1;
+    int64_t K_t_dim1 = K3_ndim - 2;
+
+    auto Kt = tenzor::transpose(K3, K_t_dim0, K_t_dim1);
     auto S = tenzor::bmm(Q3, Kt);
     {
         Variable scale_v(::tenzor::full({1}, static_cast<double>(scale),
@@ -445,23 +460,29 @@ auto composed_attention_backward_variable(const Variable& dO,
         S = tenzor::where(mask_v, neg_inf_v, S);
     }
 
-    auto P = tenzor::softmax(S, -1);
+    auto S_ndim = static_cast<int64_t>(S.tensor().shape().size());
+    int64_t softmax_dim = S_ndim - 1;
+    auto P = tenzor::softmax(S, softmax_dim);
 
-    auto Pt = tenzor::transpose(P, -1, -2);
+    auto P_ndim = static_cast<int64_t>(P.tensor().shape().size());
+    auto Pt = tenzor::transpose(P, P_ndim - 1, P_ndim - 2);
     auto dV3 = tenzor::bmm(Pt, dO3);
 
-    auto Vt = tenzor::transpose(V3, -1, -2);
+    auto Vt = tenzor::transpose(V3, V3_ndim - 1, V3_ndim - 2);
     auto dP = tenzor::bmm(dO3, Vt);
 
     auto dPP = dP * P;
-    auto row_sum = tenzor::sum(dPP, std::optional<int64_t>{-1}, /*keepdim=*/true);
+    auto dPP_ndim = static_cast<int64_t>(dPP.tensor().shape().size());
+    int64_t row_sum_dim = dPP_ndim - 1;
+    auto row_sum = tenzor::sum(dPP, std::optional<int64_t>{row_sum_dim}, /*keepdim=*/true);
     auto dS = P * (dP - row_sum);
 
     Variable scale_v(::tenzor::full({1}, static_cast<double>(scale),
                                      dS.tensor().dtype(), dS.tensor().device()),
                       false);
     auto dQ3 = tenzor::bmm(dS, K3) * scale_v;
-    auto dSt = tenzor::transpose(dS, -1, -2);
+    auto dS_ndim = static_cast<int64_t>(dS.tensor().shape().size());
+    auto dSt = tenzor::transpose(dS, dS_ndim - 1, dS_ndim - 2);
     auto dK3 = tenzor::bmm(dSt, Q3) * scale_v;
 
     if (is_4d) {

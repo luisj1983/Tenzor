@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cmath>
+#include <unistd.h>  // getpid()
 
 namespace fs = std::filesystem;
 
@@ -41,8 +42,15 @@ static ::testing::Environment* const onnx_import_env =
 class ONNXImportTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create temporary directory for test files
-        test_dir_ = fs::temp_directory_path() / "tenzor_onnx_import_test";
+        // T.11 — make the temp directory unique per process *and* per test
+        // case so parallel ctest workers don't race on empty.onnx /
+        // corrupted.onnx fixture writes.
+        const auto* test_info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        std::string unique_name = std::string("tenzor_onnx_") +
+            std::to_string(getpid()) + "_" +
+            (test_info ? test_info->name() : "unknown");
+        test_dir_ = fs::temp_directory_path() / unique_name;
         fs::create_directories(test_dir_);
         std::srand(42); // For reproducibility
     }

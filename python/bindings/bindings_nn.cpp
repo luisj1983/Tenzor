@@ -1250,8 +1250,12 @@ void register_nn(py::module_& m) {
                std::shared_ptr<tenzor::nn::ParameterList>>(nn, "ParameterList")
         .def(py::init<>())
         .def("append", &tenzor::nn::ParameterList::append, py::arg("param"))
+        // S.23: return the shared_ptr<Variable> directly so mutations on
+        // the returned object propagate to the container. The previous
+        // `*self.at(idx)` dereferenced and returned by value, breaking
+        // params[i] = ... style updates that PyTorch users expect.
         .def("__getitem__", [](const tenzor::nn::ParameterList& self, size_t idx) {
-            return *self.at(idx);
+            return self.at(idx);
         })
         .def("__len__", &tenzor::nn::ParameterList::size)
         .def("__repr__", [](const tenzor::nn::ParameterList& self) {
@@ -1262,8 +1266,9 @@ void register_nn(py::module_& m) {
                std::shared_ptr<tenzor::nn::ParameterDict>>(nn, "ParameterDict")
         .def(py::init<>())
         .def("insert", &tenzor::nn::ParameterDict::insert, py::arg("key"), py::arg("param"))
+        // S.23: see ParameterList::__getitem__ above.
         .def("__getitem__", [](const tenzor::nn::ParameterDict& self, const std::string& key) {
-            return *self.at(key);
+            return self.at(key);
         })
         .def("__contains__", &tenzor::nn::ParameterDict::contains)
         .def("__len__", &tenzor::nn::ParameterDict::size)

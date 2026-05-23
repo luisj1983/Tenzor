@@ -74,6 +74,8 @@ TEST_P(StatisticsMultiDTypeTest, CovPerfectCorrelation) {
     auto* d = C.data<float>();
     // All four entries should be equal (same variance)
     float expected = 2.5f;  // var([1,2,3,4,5]) = 10/4 = 2.5
+    // reason: median/quantile/cov reduction noise — F16/BF16 widen-narrow
+    // path accumulates relative error proportional to M
     EXPECT_NEAR(d[0], expected, 0.1f);
     EXPECT_NEAR(d[1], expected, 0.1f);
     EXPECT_NEAR(d[2], expected, 0.1f);
@@ -88,6 +90,7 @@ TEST_P(StatisticsMultiDTypeTest, CovZeroCorrection) {
     float biased = *C_biased.data<float>();
     float unbiased = *C_unbiased.data<float>();
     // unbiased = biased * M / (M - 1) => biased = unbiased * 3/4
+    // reason: median/quantile/cov reduction noise (Bessel correction factor)
     EXPECT_NEAR(biased, unbiased * 3.0f / 4.0f, 0.1f);
 }
 

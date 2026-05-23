@@ -1036,6 +1036,21 @@ namespace vulkan {
  */
 void ensure_fp64_supported(int32_t device_id, const char* op_name);
 
+/**
+ * @brief S.4: Throw a typed runtime_error with a uniform message if the
+ *        requested Vulkan device does not advertise shaderFloat16 support.
+ *
+ * Same pattern as ensure_fp64_supported (R.13), but for the
+ * VK_KHR_shader_float16_int8 capability. Float16 / BFloat16 dispatch paths
+ * in vulkan_ops_*.cpp call this at entry so that consumer GPUs missing the
+ * feature fail with a readable diagnostic instead of an opaque SPIR-V
+ * validation error.
+ *
+ * BFloat16 reuses the same SPIR-V FP16 lowering on Vulkan (no native BF16
+ * extension across consumer hardware yet), so this gate covers both dtypes.
+ */
+void ensure_fp16_supported(int32_t device_id, const char* op_name);
+
 } // namespace vulkan
 
 } // namespace tenzor

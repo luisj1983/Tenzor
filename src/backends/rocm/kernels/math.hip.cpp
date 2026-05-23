@@ -11,6 +11,7 @@
 #include <hipcub/hipcub.hpp>
 #include <cmath>
 #include "rocm_nan_helpers.hip.h"  // F7/F8: IEEE-754 bit-pattern NaN check
+#include "bfloat16_helpers.hpp"   // S.10 / R.11: f32_to_bf16_rne
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -413,8 +414,10 @@ __global__ void broadcast_div_kernel_f16(
  */
 __global__ void div_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* c, int64_t n) {
     // IEEE 754 hardware divide: 0/0 → NaN, x/0 → ±Inf for x ≠ 0.
+    // S.10: RNE rounding on the float32 quotient → bfloat16 cast (the
+    // truncating ctor systematically biased BF16 element-wise division).
     HIP_KERNEL_LOOP(idx, n) {
-        c[idx] = hip_bfloat16(static_cast<float>(a[idx]) / static_cast<float>(b[idx]));
+        c[idx] = tenzor::rocm::f32_to_bf16_rne(static_cast<float>(a[idx]) / static_cast<float>(b[idx]));
     }
 }
 
@@ -439,9 +442,10 @@ __global__ void broadcast_div_kernel_bf16(
         }
 
         // IEEE 754 div semantics handled by hardware (0/0 → NaN, x/0 → ±Inf).
+        // S.10: RNE-round on the float32 → bfloat16 narrowing.
         {
             float result = static_cast<float>(a[idx_a]) / static_cast<float>(b[idx_b]);
-            c[out_idx] = hip_bfloat16(result);
+            c[out_idx] = tenzor::rocm::f32_to_bf16_rne(result);
         }
     }
 }
@@ -3311,7 +3315,7 @@ auto fill_kernel(const Tensor& tensor, double value, hipStream_t stream) -> Tens
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(value)), n);
     } else if (tensor.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
-            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)), n);
     } else {
         throw std::runtime_error("Unsupported dtype for fill operation");
     }
@@ -3365,7 +3369,7 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(0.0f), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
-            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(0.0f), n);
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(0.0f), n);
     } else if (dtype == DType::Complex64) {
         // Complex64 storage is interleaved (re, im) pairs of float.
         // Zero both parts by filling 2*n floats with 0.
@@ -3431,7 +3435,7 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(1.0f), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
-            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(1.0f), n);
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(1.0f), n);
     } else if (dtype == DType::Complex64) {
         // ones of Complex64 = (1, 0). Zero-fill the full 2n-float buffer then
         // stamp real components to 1.0.
@@ -3504,7 +3508,7 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(value)), n);
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
-            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)), n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }
@@ -3883,8 +3887,8 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
         case DType::BFloat16:
             hipLaunchKernelGGL(linspace_kernel_impl<hip_bfloat16>, grid, block, 0, stream,
                 reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
-                hip_bfloat16(static_cast<float>(start)),
-                hip_bfloat16(static_cast<float>(step)), steps);
+                tenzor::rocm::f32_to_bf16_rne(static_cast<float>(start)),
+                tenzor::rocm::f32_to_bf16_rne(static_cast<float>(step)), steps);
             break;
         default:
             throw std::runtime_error("linspace_kernel: only Float32, Float64, Float16, BFloat16 supported");
@@ -5957,7 +5961,8 @@ __device__ inline double betainc_dev_f64(double a, double b, double x) {
     __global__ void NAME##_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) { \
         HIP_KERNEL_LOOP(idx, n) {                                                             \
             float x = static_cast<float>(in[idx]);                                            \
-            out[idx] = hip_bfloat16(FN_F32_EXPR);                                             \
+            /* S.10 / R.11: RNE round on float32 → bf16 narrowing. */                         \
+            out[idx] = tenzor::rocm::f32_to_bf16_rne(FN_F32_EXPR);                            \
         }                                                                                     \
     }                                                                                         \
     auto NAME##_kernel(const Tensor& input, hipStream_t stream) -> Tensor {                  \
@@ -6062,7 +6067,7 @@ __global__ void multigammaln_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* o
         float val = log_pi_coeff;
         for (int j = 0; j < d; ++j)
             val += lgammaf(x - static_cast<float>(j) * 0.5f);
-        out[idx] = hip_bfloat16(val);
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(val);
     }
 }
 auto multigammaln_kernel(const Tensor& input, int d, hipStream_t stream) -> Tensor {
@@ -6114,7 +6119,7 @@ __global__ void beta_kernel_f16(const __half* a, const __half* b, __half* out, i
 }
 __global__ void beta_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        out[idx] = hip_bfloat16(beta_dev_f32(static_cast<float>(a[idx]), static_cast<float>(b[idx])));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(beta_dev_f32(static_cast<float>(a[idx]), static_cast<float>(b[idx])));
     }
 }
 auto beta_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
@@ -6160,7 +6165,7 @@ __global__ void zeta_kernel_f16(const __half* s, const __half* q, __half* out, i
 }
 __global__ void zeta_kernel_bf16(const hip_bfloat16* s, const hip_bfloat16* q, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        out[idx] = hip_bfloat16(zeta_dev_f32(static_cast<float>(s[idx]), static_cast<float>(q[idx])));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(zeta_dev_f32(static_cast<float>(s[idx]), static_cast<float>(q[idx])));
     }
 }
 auto zeta_kernel(const Tensor& s, const Tensor& q, hipStream_t stream) -> Tensor {
@@ -6206,7 +6211,7 @@ __global__ void polygamma_kernel_f16(int n, const __half* in, __half* out, int64
 }
 __global__ void polygamma_kernel_bf16(int n, const hip_bfloat16* in, hip_bfloat16* out, int64_t numel) {
     HIP_KERNEL_LOOP(idx, numel) {
-        out[idx] = hip_bfloat16(polygamma_dev_f32(n, static_cast<float>(in[idx])));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(polygamma_dev_f32(n, static_cast<float>(in[idx])));
     }
 }
 auto polygamma_kernel(int64_t n, const Tensor& input, hipStream_t stream) -> Tensor {
@@ -6266,7 +6271,7 @@ __global__ void betainc_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b
             static_cast<double>(static_cast<float>(a[idx])),
             static_cast<double>(static_cast<float>(b[idx])),
             static_cast<double>(static_cast<float>(x[idx])));
-        out[idx] = hip_bfloat16(static_cast<float>(r));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(static_cast<float>(r));
     }
 }
 auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream_t stream) -> Tensor {
@@ -8435,7 +8440,7 @@ __global__ void deg2rad_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void deg2rad_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(in[idx]);
-        out[idx] = hip_bfloat16(x * (3.14159265358979323846f / 180.0f));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(x * (3.14159265358979323846f / 180.0f));
     }
 }
 
@@ -8481,7 +8486,7 @@ __global__ void rad2deg_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void rad2deg_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(in[idx]);
-        out[idx] = hip_bfloat16(x * (180.0f / 3.14159265358979323846f));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(x * (180.0f / 3.14159265358979323846f));
     }
 }
 
@@ -8545,7 +8550,7 @@ __global__ void logit_kernel_f16(const __half* in, __half* out, int64_t n, float
 __global__ void logit_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n, float eps) {
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(in[idx]);
-        out[idx] = hip_bfloat16(logit_dev_f32(x, eps));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(logit_dev_f32(x, eps));
     }
 }
 
@@ -9081,7 +9086,7 @@ __global__ void logaddexp_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16*
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(a[idx]), y = static_cast<float>(b[idx]);
         float m = fmaxf(x, y);
-        out[idx] = hip_bfloat16(m + log1pf(expf(-fabsf(x - y))));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(m + log1pf(expf(-fabsf(x - y))));
     }
 }
 auto logaddexp_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
@@ -9141,7 +9146,7 @@ __global__ void logaddexp2_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(a[idx]), y = static_cast<float>(b[idx]);
         float m = fmaxf(x, y);
-        out[idx] = hip_bfloat16(m + log2f(1.0f + exp2f(-fabsf(x - y))));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(m + log2f(1.0f + exp2f(-fabsf(x - y))));
     }
 }
 auto logaddexp2_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
@@ -9197,7 +9202,7 @@ __global__ void xlogy_kernel_f16(const __half* x, const __half* y, __half* out, 
 __global__ void xlogy_kernel_bf16(const hip_bfloat16* x, const hip_bfloat16* y, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float xv = static_cast<float>(x[idx]);
-        out[idx] = hip_bfloat16((xv == 0.0f) ? 0.0f : xv * logf(static_cast<float>(y[idx])));
+        out[idx] = tenzor::rocm::f32_to_bf16_rne((xv == 0.0f) ? 0.0f : xv * logf(static_cast<float>(y[idx])));
     }
 }
 auto xlogy_kernel(const Tensor& x, const Tensor& y, hipStream_t stream) -> Tensor {
@@ -9272,7 +9277,7 @@ __global__ void i0e_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::safe_f2h(i0e_dev_f32(tenzor::rocm::safe_h2f(in[idx]))); }
 }
 __global__ void i0e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i0e_dev_f32(static_cast<float>(in[idx]))); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::f32_to_bf16_rne(i0e_dev_f32(static_cast<float>(in[idx]))); }
 }
 auto i0e_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
@@ -9350,7 +9355,7 @@ __global__ void i1e_kernel_f16(const __half* in, __half* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::safe_f2h(i1e_dev_f32(tenzor::rocm::safe_h2f(in[idx]))); }
 }
 __global__ void i1e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i1e_dev_f32(static_cast<float>(in[idx]))); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = tenzor::rocm::f32_to_bf16_rne(i1e_dev_f32(static_cast<float>(in[idx]))); }
 }
 auto i1e_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
@@ -9415,7 +9420,7 @@ __global__ void entr_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int6
         if (x > 0.0f) r = -x * logf(x);
         else if (x == 0.0f) r = 0.0f;
         else r = -HUGE_VALF;
-        out[idx] = hip_bfloat16(r);
+        out[idx] = tenzor::rocm::f32_to_bf16_rne(r);
     }
 }
 auto entr_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
@@ -9469,7 +9474,7 @@ __global__ void spherical_bessel_j0_kernel_f16(const __half* in, __half* out, in
 __global__ void spherical_bessel_j0_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float x = static_cast<float>(in[idx]);
-        out[idx] = hip_bfloat16((x == 0.0f) ? 1.0f : sinf(x) / x);
+        out[idx] = tenzor::rocm::f32_to_bf16_rne((x == 0.0f) ? 1.0f : sinf(x) / x);
     }
 }
 auto spherical_bessel_j0_kernel(const Tensor& input, hipStream_t stream) -> Tensor {

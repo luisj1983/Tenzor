@@ -619,30 +619,42 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
             continue;
         }
 
-        float sum_grad_out = 0.0f;
-        float sum_grad_out_normalized = 0.0f;
+        // S.15: promote reduction accumulators to double to match the
+        // double-precision variance computation above. Mixing float reductions
+        // with a double mean/var gives 4–7% drift on F32 LayerNorm gradchecks.
+        double sum_grad_out = 0.0;
+        double sum_grad_out_normalized = 0.0;
 
         for (int64_t i = 0; i < N; i++) {
             int64_t idx = b * N + i;
             float x_normalized = (input_data[idx] - mu) * inv_std;
             float grad_out = grad_out_data[idx] * weight_data[i];
 
-            sum_grad_out += grad_out;
-            sum_grad_out_normalized += grad_out * x_normalized;
+            sum_grad_out += static_cast<double>(grad_out);
+            sum_grad_out_normalized += static_cast<double>(grad_out) *
+                                       static_cast<double>(x_normalized);
 
             grad_weight_data[i] += grad_out_data[idx] * x_normalized;
             grad_bias_data[i] += grad_out_data[idx];
         }
 
-        float mean_grad_out = sum_grad_out / N;
-        float mean_grad_out_normalized = sum_grad_out_normalized / N;
+        const double mean_grad_out = sum_grad_out / static_cast<double>(N);
+        const double mean_grad_out_normalized =
+            sum_grad_out_normalized / static_cast<double>(N);
 
         for (int64_t i = 0; i < N; i++) {
             int64_t idx = b * N + i;
-            float x_normalized = (input_data[idx] - mu) * inv_std;
+            const double x_normalized =
+                (static_cast<double>(input_data[idx]) - static_cast<double>(mu)) *
+                static_cast<double>(inv_std);
 
-            grad_in_data[idx] = (grad_out_data[idx] * weight_data[i] - mean_grad_out -
-                                x_normalized * mean_grad_out_normalized) * inv_std;
+            const double grad_out_w =
+                static_cast<double>(grad_out_data[idx]) *
+                static_cast<double>(weight_data[i]);
+            const double gi = (grad_out_w - mean_grad_out -
+                               x_normalized * mean_grad_out_normalized) *
+                              static_cast<double>(inv_std);
+            grad_in_data[idx] = static_cast<float>(gi);
         }
     }
 
@@ -676,13 +688,26 @@ auto LayerNormBackward::backward_with_variables(std::vector<Variable> grad_outpu
 
     auto x_hat = (input_var - mean_bc) * rstd_bc;
 
-    auto grad_x_hat = grad_out * weight_var;
+    // S.18: when elementwise_affine_ is false, weight is a placeholder ones
+    // tensor — skip multiplying by it and short-circuit weight/bias grads.
+    Variable grad_x_hat;
+    if (elementwise_affine_) {
+        grad_x_hat = grad_out * weight_var;
+    } else {
+        grad_x_hat = grad_out;
+    }
 
     auto mean_gxh = sum(grad_x_hat, -1, true) / static_cast<float>(norm_size);
 
     auto mean_gxh_xh = sum(grad_x_hat * x_hat, -1, true) / static_cast<float>(norm_size);
 
     auto grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
+
+    if (!elementwise_affine_) {
+        // No weight/bias parameters — the autograd framework expects a
+        // single grad-input slot when affine is off.
+        return {grad_input};
+    }
 
     auto go_xhat = grad_out * x_hat;
     auto grad_weight_var = go_xhat;

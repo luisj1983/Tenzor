@@ -325,6 +325,9 @@ TEST_F(RobertaTest, DISABLED_BenchmarkInference) {
 
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << "Average inference time: " << duration.count() / num_iterations << " ms" << std::endl;
+
+    // reason: regression-guard ceiling; tighten when baseline is established
+    EXPECT_LT(duration.count(), 10000);
 }
 
 // ============================================================================

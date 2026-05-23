@@ -95,6 +95,8 @@ TEST_F(FuncTest, JacrevLinear) {
     ASSERT_EQ(jac_tensor.shape()[1], 2);
 
     auto* jp = static_cast<const float*>(jac_tensor.data_ptr());
+    // reason: JVP/VJP probe noise — Jacobian assembled via repeated
+    // forward-mode JVP probes accumulates Float32 cancellation error
     EXPECT_NEAR(jp[0], 2.0f, 0.1f);  // J[0,0]
     EXPECT_NEAR(jp[1], 1.0f, 0.1f);  // J[0,1]
     EXPECT_NEAR(jp[2], 1.0f, 0.1f);  // J[1,0]

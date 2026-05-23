@@ -550,6 +550,10 @@ TEST(AsyncOpsTest, DISABLED_PerformanceBenchmark) {
     // drop the failing assertion. A real perf regression should be
     // caught by `tests/backend_parity/test_performance_regression.cpp`
     // which compares against a recorded baseline on a controlled host.
+
+    // reason: regression-guard ceiling; tighten when baseline is established
+    EXPECT_LT(sync_duration, 10000);
+    EXPECT_LT(async_duration, 10000);
 }
 
 // ============================================================================

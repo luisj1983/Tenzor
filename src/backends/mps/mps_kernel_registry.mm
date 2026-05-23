@@ -369,15 +369,25 @@ Tensor mps_bucketize_kernel(const Tensor& boundaries, const Tensor& input, bool 
 // ============================================================================
 // Forward declarations — Native extended ops (mps_extended_ops.mm)
 // ============================================================================
+// S.11: per-axis dilation_d/h/w added to Conv3d / MaxPool3d / AvgPool3d.
+// Previously the dispatch dropped DilationD/H/W on the floor and the
+// underlying MPSGraph descriptors used the default value of 1 — dilated
+// 3D convs / pools on Apple Silicon silently produced wrong outputs.
 Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
                                   int64_t sd, int64_t sh, int64_t sw,
-                                  int64_t pd, int64_t ph, int64_t pw, int64_t groups);
+                                  int64_t pd, int64_t ph, int64_t pw,
+                                  int64_t dd, int64_t dh, int64_t dw,
+                                  int64_t groups);
 Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh, int64_t kw,
                                      int64_t sd, int64_t sh, int64_t sw,
-                                     int64_t pd, int64_t ph, int64_t pw, Tensor& indices);
+                                     int64_t pd, int64_t ph, int64_t pw,
+                                     int64_t dd, int64_t dh, int64_t dw,
+                                     Tensor& indices);
 Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh, int64_t kw,
                                      int64_t sd, int64_t sh, int64_t sw,
-                                     int64_t pd, int64_t ph, int64_t pw, bool count_include_pad);
+                                     int64_t pd, int64_t ph, int64_t pw,
+                                     int64_t dd, int64_t dh, int64_t dw,
+                                     bool count_include_pad);
 Tensor mps_cdist_kernel(const Tensor& x1, const Tensor& x2, float p);
 std::vector<Tensor> mps_sort_kernel(const Tensor& input, int64_t dim, bool descending);
 Tensor mps_argsort_kernel(const Tensor& input, int64_t dim, bool descending);
@@ -1052,8 +1062,12 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             int64_t pd = attrs.get_int(AttrKey::PaddingD, 0);
             int64_t ph = attrs.get_int(AttrKey::PaddingH, 0);
             int64_t pw = attrs.get_int(AttrKey::PaddingW, 0);
+            // S.11: per-axis dilation (was previously dropped — MPSGraph defaulted to 1).
+            int64_t dd = attrs.get_int(AttrKey::DilationD, 1);
+            int64_t dh = attrs.get_int(AttrKey::DilationH, 1);
+            int64_t dw = attrs.get_int(AttrKey::DilationW, 1);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            return {mps_conv3d_forward_kernel(inputs[0], inputs[1], sd, sh, sw, pd, ph, pw, groups)};
+            return {mps_conv3d_forward_kernel(inputs[0], inputs[1], sd, sh, sw, pd, ph, pw, dd, dh, dw, groups)};
         });
 
     table.register_kernel(OpId::MaxPool3dForward,
@@ -1074,8 +1088,13 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             const int64_t pd = attrs.get_int(AttrKey::PaddingD, p_scalar);
             const int64_t ph = attrs.get_int(AttrKey::PaddingH, p_scalar);
             const int64_t pw = attrs.get_int(AttrKey::PaddingW, p_scalar);
+            // S.11: per-axis dilation (PyTorch MaxPool3d supports dilation > 1).
+            const int64_t d_scalar = attrs.get_int(AttrKey::Dilation, 1);
+            const int64_t dd = attrs.get_int(AttrKey::DilationD, d_scalar);
+            const int64_t dh = attrs.get_int(AttrKey::DilationH, d_scalar);
+            const int64_t dw = attrs.get_int(AttrKey::DilationW, d_scalar);
             Tensor indices;
-            auto output = mps_maxpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, indices);
+            auto output = mps_maxpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, dd, dh, dw, indices);
             return {output, indices};
         });
 
@@ -1093,8 +1112,16 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             const int64_t pd = attrs.get_int(AttrKey::PaddingD, p_scalar);
             const int64_t ph = attrs.get_int(AttrKey::PaddingH, p_scalar);
             const int64_t pw = attrs.get_int(AttrKey::PaddingW, p_scalar);
+            // S.11: per-axis dilation. AvgPool dilation > 1 is rare but PyTorch
+            // doesn't currently expose it for AvgPool3d; we honour the per-axis
+            // attrs (default 1) for consistency with Conv3d / MaxPool3d so a
+            // future PyTorch parity gap doesn't require another sweep.
+            const int64_t d_scalar = attrs.get_int(AttrKey::Dilation, 1);
+            const int64_t dd = attrs.get_int(AttrKey::DilationD, d_scalar);
+            const int64_t dh = attrs.get_int(AttrKey::DilationH, d_scalar);
+            const int64_t dw = attrs.get_int(AttrKey::DilationW, d_scalar);
             bool count_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
-            return mps_avgpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, count_pad);
+            return mps_avgpool3d_forward_kernel(inputs[0], kd, kh, kw, sd, sh, sw, pd, ph, pw, dd, dh, dw, count_pad);
         });
 
     // Native CDist

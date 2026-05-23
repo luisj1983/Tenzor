@@ -229,6 +229,11 @@ message(STATUS "Individual targets: run_ops_benchmark, run_conv_benchmark, run_a
 #   DISABLED_AddPerformance         — tests/unit/test_simd_ops.cpp
 #   DISABLED_BaselineRegressionCheck_MatMul512
 #                                   — tests/backend_parity/test_performance_regression.cpp
+#   DISABLED_BenchmarkInference     — tests/unit/test_roberta.cpp,
+#                                     tests/unit/test_electra.cpp (T.9)
+#   DISABLED_PerformanceBenchmark   — tests/unit/test_async_ops.cpp (T.9)
+#   DISABLED_BenchmarkLargeConv2d /
+#   DISABLED_BenchmarkLargeMatmul   — tests/test_vulkan_complete_ops.cpp (T.9)
 #
 # Re-enable workflow is documented in TESTING.md (P.8 section).
 # ============================================================================
@@ -242,6 +247,19 @@ endif()
 if(TARGET test_performance_regression)
     list(APPEND _tenzor_bench_deps test_performance_regression)
 endif()
+# T.9 — additional DISABLED_ perf tests with regression-guard ceilings.
+if(TARGET test_roberta)
+    list(APPEND _tenzor_bench_deps test_roberta)
+endif()
+if(TARGET test_electra)
+    list(APPEND _tenzor_bench_deps test_electra)
+endif()
+if(TARGET test_async_ops)
+    list(APPEND _tenzor_bench_deps test_async_ops)
+endif()
+if(TARGET test_vulkan_complete_ops)
+    list(APPEND _tenzor_bench_deps test_vulkan_complete_ops)
+endif()
 
 if(_tenzor_bench_deps)
     add_custom_target(tenzor_benchmarks
@@ -249,18 +267,49 @@ if(_tenzor_bench_deps)
         COMMENT "Built tenzor_benchmarks umbrella (including DISABLED_ perf gtests)"
     )
 
+    # T.9 — build per-target run commands conditionally so the umbrella
+    # still works when only some test executables exist.
+    set(_run_disabled_perf_cmds "")
+    if(TARGET test_simd_ops)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_simd_ops>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_AddPerformance*:*DISABLED_BaselineRegressionCheck*)
+    endif()
+    if(TARGET test_performance_regression)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_performance_regression>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_BaselineRegressionCheck_MatMul512*)
+    endif()
+    if(TARGET test_roberta)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_roberta>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_BenchmarkInference*)
+    endif()
+    if(TARGET test_electra)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_electra>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_BenchmarkInference*)
+    endif()
+    if(TARGET test_async_ops)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_async_ops>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_PerformanceBenchmark*)
+    endif()
+    if(TARGET test_vulkan_complete_ops)
+        list(APPEND _run_disabled_perf_cmds
+            COMMAND $<TARGET_FILE:test_vulkan_complete_ops>
+                    --gtest_also_run_disabled_tests
+                    --gtest_filter=*DISABLED_BenchmarkLargeConv2d*:*DISABLED_BenchmarkLargeMatmul*)
+    endif()
+
     add_custom_target(run_disabled_perf_benchmarks
         DEPENDS ${_tenzor_bench_deps}
-        # --gtest_also_run_disabled_tests turns on the DISABLED_ prefixed tests
-        # so the perf baselines actually execute. We filter to the two perf
-        # targets so we don't drag in the rest of test_simd_ops' correctness
-        # tests (those already run under normal ctest).
-        COMMAND $<TARGET_FILE:test_simd_ops>
-                --gtest_also_run_disabled_tests
-                --gtest_filter=*DISABLED_AddPerformance*:*DISABLED_BaselineRegressionCheck*
-        COMMAND $<TARGET_FILE:test_performance_regression>
-                --gtest_also_run_disabled_tests
-                --gtest_filter=*DISABLED_BaselineRegressionCheck_MatMul512*
+        ${_run_disabled_perf_cmds}
         COMMENT "Running disabled-by-default benchmark/regression gtests"
         VERBATIM
     )

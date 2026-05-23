@@ -3,6 +3,9 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/indexing.hpp"
 
+#include <stdexcept>
+#include <string>
+
 namespace tenzor::optim {
 
 Rprop::Rprop(std::vector<std::shared_ptr<Variable>> params, double lr, double eta_minus,
@@ -172,10 +175,28 @@ auto Rprop::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["prev_grad_" + std::to_string(i)] = prev_grads_[i].clone();
     }
 
+    // S.12 / P.2: num_params guard so load_state_dict can reject mismatched
+    // models before any tensor is overwritten (mirrors Adam::state_dict).
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto Rprop::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // S.12 / P.2: param-count guard up front. Reject a restore against the
+    // wrong model loudly instead of partially populating per-parameter
+    // buffers and then succeeding silently.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "Rprop::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
+
     if (state.count("lr")) {
         lr_ = state.at("lr").data<double>()[0];
     }

@@ -1,4 +1,5 @@
 #include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
+#include "bfloat16_helpers.hpp"   // S.10 / R.11: f32_to_bf16_rne
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -1301,10 +1302,13 @@ __global__ void cast_bf16_to_fp8_e5m2_kernel(const hip_bfloat16* input, uint8_t*
     HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx])); }
 }
 __global__ void cast_fp8_e4m3_to_bf16_kernel(const uint8_t* input, hip_bfloat16* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = hip_bfloat16(fp8_e4m3_to_float(input[idx])); }
+    // S.10: RNE-round on float32 → bf16 (FP8 dequant can produce values
+    // requiring more than 7 mantissa bits to represent without bias).
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = tenzor::rocm::f32_to_bf16_rne(fp8_e4m3_to_float(input[idx])); }
 }
 __global__ void cast_fp8_e5m2_to_bf16_kernel(const uint8_t* input, hip_bfloat16* output, int64_t n) {
-    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = hip_bfloat16(fp8_e5m2_to_float(input[idx])); }
+    // S.10: same RNE round as the FP8_E4M3 path above.
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = tenzor::rocm::f32_to_bf16_rne(fp8_e5m2_to_float(input[idx])); }
 }
 
 // FP8 <-> FP8 cross-format

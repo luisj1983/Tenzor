@@ -160,15 +160,20 @@ auto FSDP2::backward_hook() -> void {
         // Cast gradient to reduction dtype if needed
         auto reduce_grad = maybe_cast(grad, config_.mixed_precision.reduce_dtype);
 
-        // Reduce-scatter the gradient: sum across shard group, each rank
-        // gets its shard of the averaged gradient.
-        // Build a DTensor with Partial(Sum) placement, then redistribute
-        // to Shard(0) to get the local gradient shard.
+        // S.16: Use Partial{Mean} so the Partial -> Shard redistribute
+        // averages across the shard group internally (all_reduce(AVG) +
+        // narrow). The previous implementation used Partial{Sum} (native
+        // reduce_scatter) and then divided the local shard by
+        // shard_world_size_ — semantically equivalent on a SUM reduce-
+        // scatter today, but a quiet double-average if a future backend
+        // ever wires reduce_scatter to honour the placement's reduce op
+        // directly. Picking Mean here keeps the averaging concern inside
+        // the placement layer instead of duplicating it on the caller.
         auto shard_dim_idx = config_.mesh->get_dim(config_.shard_mesh_dim);
         std::vector<Placement> partial_placements;
         for (int64_t d = 0; d < config_.mesh->ndim(); ++d) {
             if (d == shard_dim_idx) {
-                partial_placements.emplace_back(Partial{DTensorReduceOp::Sum});
+                partial_placements.emplace_back(Partial{DTensorReduceOp::Mean});
             } else {
                 partial_placements.emplace_back(Replicate{});
             }
@@ -176,7 +181,9 @@ auto FSDP2::backward_hook() -> void {
 
         DTensor grad_dt(reduce_grad, config_.mesh, std::move(partial_placements));
 
-        // Redistribute: Partial -> Shard(0) is a reduce-scatter
+        // Redistribute: Partial(Mean) -> Shard(0). For Mean the redistribute
+        // takes the all_reduce(AVG)+narrow path which averages across the
+        // shard group internally — no further divide needed.
         std::vector<Placement> shard_placements;
         for (int64_t d = 0; d < config_.mesh->ndim(); ++d) {
             if (d == shard_dim_idx) {
@@ -187,10 +194,7 @@ auto FSDP2::backward_hook() -> void {
         }
 
         auto sharded_grad = grad_dt.redistribute(shard_placements);
-
-        // Divide by world size to average
         auto local_grad = sharded_grad.local_tensor();
-        local_grad = local_grad / static_cast<float>(shard_world_size_);
 
         // Write back the sharded gradient
         param->set_grad(maybe_cast(local_grad, param->tensor().dtype()));

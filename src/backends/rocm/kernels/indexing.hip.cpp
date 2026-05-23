@@ -1,4 +1,5 @@
 #include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
+#include "bfloat16_helpers.hpp"   // S.10 / R.11: f32_to_bf16_rne
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -57,6 +58,12 @@ __device__ __forceinline__ __half atomicAddHelper<__half>(__half* address, __hal
 }
 
 // Specialization for hip_bfloat16
+// R.11 / S.10: the previous `hip_bfloat16 new_bf16(new_f)` truncating ctor
+// dropped the low 16 bits of the float32 sum on every CAS retry. Under
+// contention (multiple gradients into the same embedding row) the truncation
+// bias compounds — scatter/index_add BF16 grads diverged systematically from
+// the Float32 reference. We now route through the shared
+// f32_to_bf16_rne(...) helper so accumulation uses round-to-nearest-even.
 template<>
 __device__ __forceinline__ hip_bfloat16 atomicAddHelper<hip_bfloat16>(hip_bfloat16* address, hip_bfloat16 val) {
     unsigned short int* address_as_ushort = (unsigned short int*)address;
@@ -65,7 +72,7 @@ __device__ __forceinline__ hip_bfloat16 atomicAddHelper<hip_bfloat16>(hip_bfloat
         assumed = old;
         float assumed_f = static_cast<float>(*reinterpret_cast<hip_bfloat16*>(&assumed));
         float new_f = assumed_f + static_cast<float>(val);
-        hip_bfloat16 new_bf16(new_f);
+        hip_bfloat16 new_bf16 = tenzor::rocm::f32_to_bf16_rne(new_f);
         unsigned short int new_bits = *reinterpret_cast<unsigned short int*>(&new_bf16);
         old = atomicCAS(address_as_ushort, assumed, new_bits);
     } while (assumed != old);
@@ -631,7 +638,9 @@ auto masked_fill_hip(
             dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             mask.data<bool>(),
-            hip_bfloat16(static_cast<float>(value)),
+            // S.10: RNE-round so a Float64 user-supplied fill value doesn't
+            // truncate its low mantissa silently.
+            tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)),
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1861,7 +1870,8 @@ auto masked_fill_hip(
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             mask.data<bool>(),
-            hip_bfloat16(static_cast<float>(value)),
+            // S.10: RNE round, see paired site above.
+            tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)),
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
@@ -2318,7 +2328,9 @@ __global__ void embedding_bag_sum_kernel_hip_bf16(
         if (divide_by_count && bag_size > 0) {
             acc /= static_cast<float>(bag_size);
         }
-        output[bag * embedding_dim + j] = hip_bfloat16(acc);
+        // S.10: RNE-round the accumulator instead of the truncating ctor —
+        // mean over a bag drifts predictably if we drop the low mantissa.
+        output[bag * embedding_dim + j] = tenzor::rocm::f32_to_bf16_rne(acc);
     }
 }
 
@@ -2344,7 +2356,10 @@ __global__ void embedding_bag_max_kernel_hip_bf16(
             float val = static_cast<float>(embeddings[i * embedding_dim + j]);
             if (val > max_val) max_val = val;
         }
-        output[bag * embedding_dim + j] = hip_bfloat16(max_val);
+        // S.10: max over a bag is exact in float32 but the back-cast still
+        // needs RNE rounding to avoid the truncating-ctor bias documented
+        // in R.11.
+        output[bag * embedding_dim + j] = tenzor::rocm::f32_to_bf16_rne(max_val);
     }
 }
 

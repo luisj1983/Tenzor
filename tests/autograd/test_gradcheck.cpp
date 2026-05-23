@@ -232,6 +232,8 @@ TEST_P(GradCheckBackendTest, NumericalGradientComputation) {
     auto num_grad_cpu = num_grad.to(Device::cpu());
     const float* grad_ptr = num_grad_cpu.data<float>();
     // Float32 precision requires larger tolerance
+    // reason: finite-difference noise dominates at this scale (eps=1e-6,
+    // central-diff error is O(eps^2 · |f'''|) + O(rounding/eps) on Float32)
     EXPECT_NEAR(grad_ptr[0], 6.0f, 1e-2);   // ~0.01 tolerance for Float32
     EXPECT_NEAR(grad_ptr[1], 12.0f, 1e-2);  // ~0.01 tolerance for Float32
 }

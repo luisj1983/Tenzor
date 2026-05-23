@@ -286,7 +286,12 @@ VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
 
     auto dev_it = device_allocators_.find(device);
     if (dev_it == device_allocators_.end()) {
-        throw std::runtime_error("VulkanCachingAllocator: Device not found");
+        // S.5: typed exception so the caller can distinguish "ptr lives on a
+        // different device" from a real internal error and only catch the
+        // expected case. The previous std::runtime_error was lost inside a
+        // catch(...), masking unrelated failures (driver crashes, mutex
+        // poisoning) that should have been logged + rethrown.
+        throw std::out_of_range("VulkanCachingAllocator: Device not found");
     }
 
     // If device is shutdown, return null handle
@@ -296,7 +301,8 @@ VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
 
     auto it = dev_it->second.all_blocks.find(ptr);
     if (it == dev_it->second.all_blocks.end()) {
-        throw std::runtime_error("VulkanCachingAllocator: Pointer not found");
+        // S.5: same typed-exception pattern as the device-not-found branch.
+        throw std::out_of_range("VulkanCachingAllocator: Pointer not found");
     }
 
     return it->second->buffer;

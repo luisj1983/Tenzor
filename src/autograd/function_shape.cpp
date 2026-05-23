@@ -17,15 +17,108 @@
 #include "tenzor/utils/safe_math.hpp"
 #include <cmath>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <tuple>
 #include <typeinfo>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #ifdef __GNUC__
 #include <cxxabi.h>
 #include <cstdlib>
 #endif
 
 namespace tenzor {
+
+namespace {
+
+// S.2 — Cache the CPU Int64 slice-backward index tensor (and a
+// device-resident copy keyed by device) per (shape, dim, start, end, step).
+// The index depends only on the slice parameters, so it can be reused across
+// every backward of the same SliceBackward (or any structurally identical
+// slice). Without this cache, each backward allocates an Int64 tensor of
+// grad_output.numel() elements on the CPU, fills it with a tight loop, and
+// then copies it to the GPU — serialising the GPU stream on a host malloc +
+// memset + memcpy per backward.
+struct SliceIndexKey {
+    std::vector<int64_t> shape;
+    int64_t dim;
+    int64_t start;
+    int64_t end;
+    int64_t step;
+    // The device identity matters for the cached on-device copy. We key the
+    // CPU-side index purely on shape/dim/start/end/step and store a single
+    // device copy keyed by device type+index — the common case is one device
+    // across the whole graph.
+    Device::Type device_type;
+    int32_t device_index;
+
+    bool operator==(const SliceIndexKey& other) const noexcept {
+        return shape == other.shape && dim == other.dim && start == other.start &&
+               end == other.end && step == other.step &&
+               device_type == other.device_type && device_index == other.device_index;
+    }
+};
+
+struct SliceIndexKeyHash {
+    std::size_t operator()(const SliceIndexKey& k) const noexcept {
+        std::size_t h = std::hash<int64_t>{}(k.dim);
+        auto mix = [&](std::size_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+        for (auto s : k.shape) mix(std::hash<int64_t>{}(s));
+        mix(std::hash<int64_t>{}(k.start));
+        mix(std::hash<int64_t>{}(k.end));
+        mix(std::hash<int64_t>{}(k.step));
+        mix(std::hash<uint8_t>{}(static_cast<uint8_t>(k.device_type)));
+        mix(std::hash<int32_t>{}(k.device_index));
+        return h;
+    }
+};
+
+static std::mutex g_slice_index_cache_mutex;
+static std::unordered_map<SliceIndexKey, Tensor, SliceIndexKeyHash>
+    g_slice_index_cache;
+
+static Tensor get_or_build_slice_index(const std::vector<int64_t>& shape,
+                                        int64_t dim, int64_t start,
+                                        int64_t end, int64_t step,
+                                        Device device) {
+    SliceIndexKey key{shape, dim, start, end, step, device.type, device.index};
+    {
+        std::lock_guard<std::mutex> lock(g_slice_index_cache_mutex);
+        auto it = g_slice_index_cache.find(key);
+        if (it != g_slice_index_cache.end()) {
+            return it->second;
+        }
+    }
+
+    // Build CPU index then move to target device (or keep on CPU if device is CPU).
+    auto index = zeros(shape, DType::Int64, Device::cpu());
+    int64_t* index_ptr = index.data<int64_t>();
+    int64_t ndim_local = static_cast<int64_t>(shape.size());
+    int64_t slice_size = shape[dim];
+    int64_t total_elements = 1;
+    for (auto s : shape) total_elements *= s;
+    int64_t dim_stride = 1;
+    for (int64_t d = dim + 1; d < ndim_local; ++d) {
+        dim_stride *= shape[d];
+    }
+    for (int64_t i = 0; i < total_elements; ++i) {
+        int64_t pos_in_dim = (i / dim_stride) % slice_size;
+        index_ptr[i] = start + pos_in_dim * step;
+    }
+    if (device != Device::cpu()) {
+        index = index.to(device);
+    }
+
+    std::lock_guard<std::mutex> lock(g_slice_index_cache_mutex);
+    auto [it, inserted] = g_slice_index_cache.emplace(key, index);
+    return it->second;
+}
+
+} // namespace
 
 // ReshapeBackward implementation
 auto ReshapeBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
@@ -299,22 +392,14 @@ auto SliceBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
                             ? grad_out_var
                             : Variable(grad_t, grad_out_var.requires_grad());
 
-    int64_t slice_size = grad_t.shape()[dim_];
-    int64_t total_elements = grad_t.numel();
+    // S.2 — reuse the cached Int64 index tensor keyed by
+    // (shape, dim, start, end, step, device) so backward only pays the
+    // host-fill + H2D cost once per unique slice. The cached tensor lives
+    // on the same device as grad_output so the scatter dispatch doesn't
+    // serialise on an unnecessary CPU→GPU copy.
     auto index_shape = std::vector<int64_t>(grad_t.shape().begin(), grad_t.shape().end());
-    auto index = zeros(index_shape, DType::Int64, Device::cpu());
-    int64_t* index_ptr = index.data<int64_t>();
-    int64_t dim_stride = 1;
-    for (int64_t d = dim_ + 1; d < grad_t.ndim(); ++d) {
-        dim_stride *= grad_t.shape()[d];
-    }
-    for (int64_t i = 0; i < total_elements; ++i) {
-        int64_t pos_in_dim = (i / dim_stride) % slice_size;
-        index_ptr[i] = start_ + pos_in_dim * step_;
-    }
-    if (grad_t.device() != Device::cpu()) {
-        index = index.to(grad_t.device());
-    }
+    auto index = get_or_build_slice_index(index_shape, dim_, start_, end_, step_,
+                                          grad_t.device());
 
     auto zeros_t = zeros(input_shape_, grad_t.dtype(), grad_t.device());
     Variable zeros_var(zeros_t, /*requires_grad=*/false);

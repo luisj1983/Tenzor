@@ -137,6 +137,8 @@ TEST_F(GradCheckDirectTest, NumericalGradientQuadratic) {
     ASSERT_EQ(num_grad.numel(), 3);
 
     float* grad_ptr = num_grad.data<float>();
+    // reason: finite-difference noise dominates at this scale
+    // (Float32 numerical gradient with eps=1e-6; rounding term ~ |f|/eps)
     EXPECT_NEAR(grad_ptr[0], 2.0f, 0.05);  // 2*1 (Float32 numerical gradient)
     EXPECT_NEAR(grad_ptr[1], 4.0f, 0.05);  // 2*2
     EXPECT_NEAR(grad_ptr[2], 6.0f, 0.05);  // 2*3

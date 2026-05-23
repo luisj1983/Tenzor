@@ -191,8 +191,13 @@ auto SAM::load_state_dict(const std::unordered_map<std::string, Tensor>& state) 
         rho_ = state.at("sam_rho").data<double>()[0];
     }
 
-    // Forward the rest to the base optimizer
-    base_optimizer_->load_state_dict(state);
+    // S.17: strip the SAM-only key before forwarding so base optimisers
+    // that hash-check their state dict (e.g. validating known keys) don't
+    // see the extra sam_rho entry. The base optimiser only cares about
+    // its own state — SAM owns sam_rho.
+    auto base_state = state;
+    base_state.erase("sam_rho");
+    base_optimizer_->load_state_dict(base_state);
 }
 
 } // namespace tenzor::optim

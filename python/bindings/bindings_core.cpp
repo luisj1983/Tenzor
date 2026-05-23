@@ -756,6 +756,56 @@ Returns:
              py::arg("memory_format"),
              "Convert tensor to specified memory format (e.g., channels_last for NHWC)",
              py::call_guard<py::gil_scoped_release>())
+        // S.24: PyTorch-style keyword form: tensor.to(dtype=..., device=...,
+        // copy=False). Routes to the appropriate C++ overload based on which
+        // kwargs are present. If copy=True, force a clone() even when the
+        // target dtype/device matches the source — matches PyTorch's
+        // semantics where copy=True guarantees a fresh storage.
+        .def("to", [](const tenzor::Tensor& self, py::kwargs kwargs) -> tenzor::Tensor {
+            std::optional<tenzor::Device> target_device;
+            std::optional<tenzor::DType> target_dtype;
+            bool force_copy = false;
+            for (auto item : kwargs) {
+                const std::string key = py::cast<std::string>(item.first);
+                if (key == "device") {
+                    if (!item.second.is_none()) {
+                        target_device = py::cast<tenzor::Device>(item.second);
+                    }
+                } else if (key == "dtype") {
+                    if (!item.second.is_none()) {
+                        target_dtype = py::cast<tenzor::DType>(item.second);
+                    }
+                } else if (key == "copy") {
+                    force_copy = py::cast<bool>(item.second);
+                } else {
+                    throw py::type_error(
+                        "Tensor.to: unexpected keyword argument '" + key +
+                        "' (accepted: device, dtype, copy)");
+                }
+            }
+            tenzor::Tensor result;
+            {
+                py::gil_scoped_release release;
+                if (target_device.has_value() && target_dtype.has_value()) {
+                    result = self.to(*target_device, *target_dtype);
+                } else if (target_device.has_value()) {
+                    result = self.to(*target_device);
+                } else if (target_dtype.has_value()) {
+                    result = self.to(*target_dtype);
+                } else {
+                    result = self;
+                }
+                if (force_copy) {
+                    // If to() already produced a fresh tensor (different
+                    // dtype or device), .clone() still makes the storage
+                    // independent — matches PyTorch's copy=True contract.
+                    result = result.clone();
+                }
+            }
+            return result;
+        },
+        "Convert tensor by keyword: to(dtype=..., device=..., copy=False). "
+        "When copy=True forces an independent storage clone.")
         .def("reshape", &tenzor::Tensor::reshape,
              py::arg("shape"),
              "Return a tensor with the same data but a new shape")

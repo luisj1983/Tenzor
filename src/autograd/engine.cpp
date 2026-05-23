@@ -73,12 +73,15 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
         auto nan_mask = isnan(grad);
         auto inf_mask = isinf(grad);
 
-        // Sum bool masks as float to check if any anomalies exist
-        auto nan_count = sum(nan_mask.to(DType::Float32));
-        auto inf_count = sum(inf_mask.to(DType::Float32));
+        // S.3 — sum mask in Int64 so the count is exact for tensors above
+        // 2^24 elements. Float32 sum silently saturates beyond that, making
+        // the reported "NaN count: N" diagnostic wrong for 16M+ element
+        // grads. Int64 is also the natural dtype for an integer count.
+        auto nan_count = sum(nan_mask.to(DType::Int64));
+        auto inf_count = sum(inf_mask.to(DType::Int64));
 
-        bool has_nan = nan_count.item<float>() > 0.0f;
-        bool has_inf = inf_count.item<float>() > 0.0f;
+        bool has_nan = nan_count.item<int64_t>() > 0;
+        bool has_inf = inf_count.item<int64_t>() > 0;
 
         if (has_nan || has_inf) {
             // Get demangled function name for readability
@@ -107,14 +110,14 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
             }
             detail += "]";
 
-            // Anomaly counts
-            detail += "\n  NaN count: " + std::to_string(static_cast<int64_t>(nan_count.item<float>()));
-            detail += "\n  Inf count: " + std::to_string(static_cast<int64_t>(inf_count.item<float>()));
+            // Anomaly counts (S.3 — Int64 to avoid Float32 saturation beyond 2^24).
+            detail += "\n  NaN count: " + std::to_string(nan_count.item<int64_t>());
+            detail += "\n  Inf count: " + std::to_string(inf_count.item<int64_t>());
 
-            // Finite value statistics
+            // Finite value statistics — count in Int64 for the same reason.
             auto finite_mask = logical_not(logical_or(nan_mask, inf_mask));
-            Tensor finite_count_t = sum(finite_mask.to(DType::Float32));
-            float finite_count_val = finite_count_t.item<float>();
+            Tensor finite_count_t = sum(finite_mask.to(DType::Int64));
+            int64_t finite_count_val = finite_count_t.item<int64_t>();
             if (finite_count_val > 0) {
                 auto grad_shape_vec = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
                 Tensor grad_f32 = (grad.dtype() != DType::Float32) ? grad.to(DType::Float32) : grad;

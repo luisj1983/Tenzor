@@ -218,6 +218,18 @@ void pack_weights(cudnnRNNDescriptor_t rnn_desc,
         // Input-to-hidden weights: gate-major in cuDNN. Per-gate slot, but
         // PyTorch / Tenzor passes the gate-stacked W_ih (rows = gates *
         // hidden). Copy per gate so we don't depend on a contiguous stride.
+        //
+        // S.8: lifetime contract for the cudaMemcpyAsync source buffers.
+        // The four references below alias entries of W_ih / W_hh / b_ih /
+        // b_hh, which are `const std::vector<Tensor>&` parameters owned by
+        // the caller. All async D2D copies enqueued in this loop are placed
+        // on `stream`; cuDNN's RNN forward / backward call further down the
+        // same stream observes them stream-ordered, and the caller keeps
+        // the source vectors alive at least until after `cudnnRNNForward`
+        // returns (see pack_weights() call site in rnn_forward()). The
+        // ternary on b_ih / b_hh emptiness binds to a temporary `Tensor{}`
+        // whose lifetime is the loop iteration; that branch has
+        // `numel() == 0`, so no memcpy is enqueued from a dangling pointer.
         const Tensor& wih = W_ih[pl];
         const Tensor& whh = W_hh[pl];
         const Tensor& bih = b_ih.empty() ? Tensor{} : b_ih[pl];

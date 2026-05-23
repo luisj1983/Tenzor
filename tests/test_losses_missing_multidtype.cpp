@@ -35,7 +35,7 @@ TEST_P(MissingLossesMultiDTypeTest, MarginRankingLoss_ForwardShape) {
     auto result = loss.forward(
         Variable(input1.tensor(), true), input2, target);
     // Mean reduction => scalar
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -48,13 +48,13 @@ TEST_P(MissingLossesMultiDTypeTest, MarginRankingLoss_ReductionModes) {
         nn::MarginRankingLoss loss_mean(0.0, nn::Reduction::Mean);
         auto r = loss_mean.forward(
             Variable(input1.tensor(), true), input2, target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MarginRankingLoss loss_sum(0.0, nn::Reduction::Sum);
         auto r = loss_sum.forward(
             Variable(input1.tensor(), true), input2, target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MarginRankingLoss loss_none(0.0, nn::Reduction::None);
@@ -90,7 +90,7 @@ TEST_P(MissingLossesMultiDTypeTest, PoissonNLLLoss_ForwardShape) {
     auto target = Variable(tenzor::abs(createRandn({4, 5})), false);
 
     auto result = loss.forward(Variable(input.tensor(), true), target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -101,12 +101,12 @@ TEST_P(MissingLossesMultiDTypeTest, PoissonNLLLoss_ReductionModes) {
     {
         nn::PoissonNLLLoss loss_mean(true, false, 1e-8, nn::Reduction::Mean);
         auto r = loss_mean.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::PoissonNLLLoss loss_sum(true, false, 1e-8, nn::Reduction::Sum);
         auto r = loss_sum.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::PoissonNLLLoss loss_none(true, false, 1e-8, nn::Reduction::None);
@@ -142,7 +142,7 @@ TEST_P(MissingLossesMultiDTypeTest, CosineEmbeddingLoss_ForwardShape) {
 
     auto result = loss.forward(
         Variable(input1.tensor(), true), input2, target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -155,13 +155,13 @@ TEST_P(MissingLossesMultiDTypeTest, CosineEmbeddingLoss_ReductionModes) {
         nn::CosineEmbeddingLoss loss_mean(0.0, nn::Reduction::Mean);
         auto r = loss_mean.forward(
             Variable(input1.tensor(), true), input2, target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::CosineEmbeddingLoss loss_sum(0.0, nn::Reduction::Sum);
         auto r = loss_sum.forward(
             Variable(input1.tensor(), true), input2, target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::CosineEmbeddingLoss loss_none(0.0, nn::Reduction::None);
@@ -198,7 +198,7 @@ TEST_P(MissingLossesMultiDTypeTest, TripletMarginLoss_ForwardShape) {
 
     auto result = loss.forward(
         Variable(anchor.tensor(), true), positive, negative);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -211,13 +211,13 @@ TEST_P(MissingLossesMultiDTypeTest, TripletMarginLoss_ReductionModes) {
         nn::TripletMarginLoss loss_mean(1.0, 2.0, false, nn::Reduction::Mean);
         auto r = loss_mean.forward(
             Variable(anchor.tensor(), true), positive, negative);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::TripletMarginLoss loss_sum(1.0, 2.0, false, nn::Reduction::Sum);
         auto r = loss_sum.forward(
             Variable(anchor.tensor(), true), positive, negative);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::TripletMarginLoss loss_none(1.0, 2.0, false, nn::Reduction::None);
@@ -255,7 +255,7 @@ TEST_P(MissingLossesMultiDTypeTest, GaussianNLLLoss_ForwardShape) {
                   tenzor::full({4, 3}, 0.1f, dtype(), device()), false);
 
     auto result = loss.forward(Variable(input.tensor(), true), target, var);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -269,13 +269,13 @@ TEST_P(MissingLossesMultiDTypeTest, GaussianNLLLoss_ReductionModes) {
         nn::GaussianNLLLoss loss_mean(false, 1e-6, nn::Reduction::Mean);
         auto r = loss_mean.forward(
             Variable(input.tensor(), true), target, var);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::GaussianNLLLoss loss_sum(false, 1e-6, nn::Reduction::Sum);
         auto r = loss_sum.forward(
             Variable(input.tensor(), true), target, var);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::GaussianNLLLoss loss_none(false, 1e-6, nn::Reduction::None);
@@ -312,7 +312,7 @@ TEST_P(MissingLossesMultiDTypeTest, SoftMarginLoss_ForwardShape) {
     auto target = Variable(tenzor::ones({4, 5}, dtype(), device()), false);
 
     auto result = loss.forward(Variable(input.tensor(), true), target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -323,12 +323,12 @@ TEST_P(MissingLossesMultiDTypeTest, SoftMarginLoss_ReductionModes) {
     {
         nn::SoftMarginLoss loss_mean(nn::Reduction::Mean);
         auto r = loss_mean.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::SoftMarginLoss loss_sum(nn::Reduction::Sum);
         auto r = loss_sum.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::SoftMarginLoss loss_none(nn::Reduction::None);
@@ -362,7 +362,7 @@ TEST_P(MissingLossesMultiDTypeTest, HingeEmbeddingLoss_ForwardShape) {
     auto target = Variable(tenzor::ones({4, 5}, dtype(), device()), false);
 
     auto result = loss.forward(Variable(input.tensor(), true), target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -373,12 +373,12 @@ TEST_P(MissingLossesMultiDTypeTest, HingeEmbeddingLoss_ReductionModes) {
     {
         nn::HingeEmbeddingLoss loss_mean(1.0, nn::Reduction::Mean);
         auto r = loss_mean.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::HingeEmbeddingLoss loss_sum(1.0, nn::Reduction::Sum);
         auto r = loss_sum.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::HingeEmbeddingLoss loss_none(1.0, nn::Reduction::None);
@@ -412,7 +412,7 @@ TEST_P(MissingLossesMultiDTypeTest, MultiLabelSoftMarginLoss_ForwardShape) {
     auto target = Variable(tenzor::zeros({4, 6}, dtype(), device()), false);
 
     auto result = loss.forward(Variable(input.tensor(), true), target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -423,12 +423,12 @@ TEST_P(MissingLossesMultiDTypeTest, MultiLabelSoftMarginLoss_ReductionModes) {
     {
         nn::MultiLabelSoftMarginLoss loss_mean(nn::Reduction::Mean);
         auto r = loss_mean.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MultiLabelSoftMarginLoss loss_sum(nn::Reduction::Sum);
         auto r = loss_sum.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MultiLabelSoftMarginLoss loss_none(nn::Reduction::None);
@@ -463,7 +463,7 @@ TEST_P(MissingLossesMultiDTypeTest, MultiMarginLoss_ForwardShape) {
     auto target = tenzor::zeros({4}, DType::Int64, device());
 
     auto result = loss.forward(Variable(input.tensor(), true), target);
-    EXPECT_LE(result.tensor().numel(), 1);
+    EXPECT_EQ(result.tensor().numel(), 1);
     expectDevice(result.tensor());
 }
 
@@ -474,12 +474,12 @@ TEST_P(MissingLossesMultiDTypeTest, MultiMarginLoss_ReductionModes) {
     {
         nn::MultiMarginLoss loss_mean(1, 1.0, nn::Reduction::Mean);
         auto r = loss_mean.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MultiMarginLoss loss_sum(1, 1.0, nn::Reduction::Sum);
         auto r = loss_sum.forward(Variable(input.tensor(), true), target);
-        EXPECT_LE(r.tensor().numel(), 1);
+        EXPECT_EQ(r.tensor().numel(), 1);
     }
     {
         nn::MultiMarginLoss loss_none(1, 1.0, nn::Reduction::None);

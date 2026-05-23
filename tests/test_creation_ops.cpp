@@ -127,9 +127,12 @@ TEST(CreationOpsTest, Randn) {
     double std = std::sqrt(variance_sum / t.numel());
 
     // Mean should be close to 0 (within 0.1 for 10000 samples)
+    // reason: randn finite-sample variance; 3σ for N=10000 (~3/sqrt(N)=0.03,
+    // bound padded to 0.1 for CI stability)
     EXPECT_NEAR(mean, 0.0, 0.1);
 
     // Std should be close to 1 (within 0.1 for 10000 samples)
+    // reason: randn finite-sample variance; 3σ for N=10000
     EXPECT_NEAR(std, 1.0, 0.1);
 }
 

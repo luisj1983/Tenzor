@@ -45,6 +45,10 @@ protected:
     }
 
     void SetUp() override {
+        // Fixed seed so std::rand()-driven target generation in the body of
+        // each test is reproducible across runs and across ranks.
+        std::srand(42);
+
         // Check if distributed environment is available
         rank_env_ = std::getenv("RANK");
         world_size_env_ = std::getenv("WORLD_SIZE");

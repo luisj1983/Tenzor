@@ -107,7 +107,11 @@ output buffer only.
                  return lite_tensor_to_tensor(out);
              },
              py::arg("input"),
-             "Single-input forward — returns a single Tensor.")
+             "Single-input forward — returns a single Tensor.",
+             // S.20: release the GIL across forward() so concurrent
+             // Python threads (DataLoader workers, host-side decode) make
+             // progress while the runtime runs its C++ inference loop.
+             py::call_guard<py::gil_scoped_release>())
         .def("forward",
              [](lite::LiteRuntime& self, const std::vector<Tensor>& xs) {
                  std::vector<lite::LiteTensor> lts;
@@ -120,7 +124,9 @@ output buffer only.
                  return result;
              },
              py::arg("inputs"),
-             "Multi-input forward — accepts and returns a list of Tensors.")
+             "Multi-input forward — accepts and returns a list of Tensors.",
+             // S.20: see __call__ above.
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly(
             "input_shapes",
             [](const lite::LiteRuntime& self) { return self.input_shapes(); })

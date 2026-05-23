@@ -393,6 +393,19 @@ public:
      */
     virtual auto defaults() const -> std::unordered_map<std::string, double>;
 
+    /**
+     * @brief Total number of completed step() invocations.
+     *
+     * Incremented monotonically by the base step() implementation after
+     * step_impl() returns and post-step hooks fire. Used by features that
+     * need a stable per-iteration key across post-step hooks (S.14: pruning
+     * mask reapplication idempotence keyed on step_count() rather than a
+     * hook-local atomic counter).
+     *
+     * @return Monotonic count of completed steps (starts at 0).
+     */
+    auto step_count() const -> uint64_t;
+
 protected:
     /**
      * @brief Construct optimizer with parameters to optimize
@@ -424,6 +437,12 @@ protected:
     // are stable across insertions / removals.
     std::vector<std::pair<uint64_t, PostStepHook>> post_step_hooks_;
     std::atomic<uint64_t> next_hook_id_{1};
+
+    // S.14: monotonic per-optimizer step counter so post-step hooks
+    // (e.g. pruning mask reapplication) can key idempotence on a stable
+    // global step number rather than a hook-local atomic that ticks once
+    // per invocation (which the threaded DataParallel hand-out breaks).
+    std::atomic<uint64_t> step_count_total_{0};
 
     /**
      * @brief Fire every registered post-step hook in registration order.

@@ -40,10 +40,19 @@ auto Optimizer::step() -> void {
 
     step_impl();
 
+    // S.14: bump the optimizer-wide step counter before firing post-step
+    // hooks so hook implementations can read the current step index via
+    // step_count() and key idempotence on it.
+    step_count_total_.fetch_add(1, std::memory_order_relaxed);
+
     // Audit G.10: fire post-step hooks (e.g. pruning mask
     // reapplication) after the parameter update has been applied.
     // Hooks fire in registration order; exceptions propagate.
     fire_post_step_hooks_();
+}
+
+auto Optimizer::step_count() const -> uint64_t {
+    return step_count_total_.load(std::memory_order_relaxed);
 }
 
 auto Optimizer::register_post_step_hook(PostStepHook hook) -> uint64_t {

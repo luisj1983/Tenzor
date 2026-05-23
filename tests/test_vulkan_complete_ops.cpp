@@ -495,6 +495,9 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeConv2d) {
 
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << "Conv2d time: " << duration.count() << "ms\n";
+
+    // reason: regression-guard ceiling; tighten when baseline is established
+    EXPECT_LT(duration.count(), 10000);
 }
 
 TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeMatmul) {
@@ -514,6 +517,9 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeMatmul) {
 
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << "Matmul time: " << duration.count() << "ms\n";
+
+    // reason: regression-guard ceiling; tighten when baseline is established
+    EXPECT_LT(duration.count(), 10000);
 }
 
 int main(int argc, char** argv) {

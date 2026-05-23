@@ -138,17 +138,31 @@ void register_distributed(py::module_& m) {
             py::call_guard<py::gil_scoped_release>())
         .def("all_gather", [](tenzor::distributed::ProcessGroup& self,
                                const tenzor::Tensor& tensor,
-                               std::vector<tenzor::Tensor> output)
-                               -> std::vector<tenzor::Tensor> {
+                               py::list output_list) -> py::object {
+            // S.19: mirror gather's "mutate the supplied output list in
+            // place, return None" semantics for PyTorch parity with
+            // torch.distributed.all_gather. Previously this took a
+            // std::vector by value, mutated the copy, and returned the
+            // filled vector — Python callers had to re-bind the return
+            // value or silently see the original list untouched.
+            std::vector<tenzor::Tensor> output;
+            output.reserve(output_list.size());
+            for (auto item : output_list) {
+                output.push_back(item.cast<tenzor::Tensor>());
+            }
             {
                 // Q.15: release the GIL across the actual collective.
                 py::gil_scoped_release release;
                 self.all_gather(tensor, output);
             }
-            return output;
+            for (size_t i = 0; i < output.size(); ++i) {
+                output_list[i] = py::cast(output[i]);
+            }
+            return py::none();
         }, py::arg("tensor"), py::arg("output"),
-           "All-gather: returns the filled output list (Python callers must "
-           "re-bind the return value; the passed list is not mutated).")
+           "All-gather per-rank tensors onto every rank. The `output` list "
+           "is mutated in place on all ranks. Returns None — matches "
+           "torch.distributed.all_gather semantics.")
         .def("reduce_scatter", &tenzor::distributed::ProcessGroup::reduce_scatter,
             "Reduce-scatter: each rank ends up with one slice of the reduction",
             py::arg("tensors"), py::arg("output"),

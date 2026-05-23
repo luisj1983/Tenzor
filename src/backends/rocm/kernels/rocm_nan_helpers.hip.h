@@ -103,7 +103,21 @@ __device__ __host__ inline hip_bfloat16 safe_f2bf(float x) {
         *reinterpret_cast<uint16_t*>(&b) = nan_bits;
         return b;
     }
-    return hip_bfloat16(x);
+    // S.10 / R.11: round-to-nearest-even on float32 → bfloat16 instead of
+    // the truncating `hip_bfloat16(float)` ctor. We inline the bit-twiddle
+    // here (rather than #including bfloat16_helpers.hpp) because this header
+    // already has __host__/__device__ visibility and the helper file is
+    // device-only.
+    union { float f; uint32_t u; } pun;
+    pun.f = x;
+    uint32_t bits = pun.u;
+    uint32_t lsb = (bits >> 16) & 1u;
+    uint32_t rounding_bias = 0x7fffu + lsb;
+    bits += rounding_bias;
+    uint16_t out_bits = static_cast<uint16_t>(bits >> 16);
+    hip_bfloat16 out;
+    *reinterpret_cast<uint16_t*>(&out) = out_bits;
+    return out;
 }
 
 __device__ __host__ inline float safe_bf2f(hip_bfloat16 x) {

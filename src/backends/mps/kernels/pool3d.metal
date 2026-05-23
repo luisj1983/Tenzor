@@ -31,6 +31,12 @@ kernel void maxpool3d_forward_kernel(
     constant uint& pd            [[buffer(17)]],
     constant uint& ph            [[buffer(18)]],
     constant uint& pw            [[buffer(19)]],
+    // S.11: dilation parameters added for PyTorch parity. Previously the
+    // shader read kernel taps at stride 1; dilated 3D pools silently
+    // produced wrong outputs.
+    constant uint& dd_dil        [[buffer(20)]],
+    constant uint& dh_dil        [[buffer(21)]],
+    constant uint& dw_dil        [[buffer(22)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -43,13 +49,13 @@ kernel void maxpool3d_forward_kernel(
     int max_idx = 0;
 
     for (uint dd = 0; dd < kd; ++dd) {
-        int id_d = int(od * sd) - int(pd) + int(dd);
+        int id_d = int(od * sd) - int(pd) + int(dd * dd_dil);
         if (id_d < 0 || id_d >= int(in_d)) continue;
         for (uint dh = 0; dh < kh; ++dh) {
-            int id_h = int(oh * sh) - int(ph) + int(dh);
+            int id_h = int(oh * sh) - int(ph) + int(dh * dh_dil);
             if (id_h < 0 || id_h >= int(in_h)) continue;
             for (uint dw = 0; dw < kw; ++dw) {
-                int id_w = int(ow * sw) - int(pw) + int(dw);
+                int id_w = int(ow * sw) - int(pw) + int(dw * dw_dil);
                 if (id_w < 0 || id_w >= int(in_w)) continue;
                 uint src = ((b * channels + c) * in_d + uint(id_d)) * in_h * in_w + uint(id_h) * in_w + uint(id_w);
                 float v = input[src];
@@ -103,6 +109,10 @@ kernel void avgpool3d_forward_kernel(
     constant uint& ph            [[buffer(17)]],
     constant uint& pw            [[buffer(18)]],
     constant uint& count_include_pad [[buffer(19)]],
+    // S.11: dilation parameters for parity with MaxPool3d.
+    constant uint& dd_dil        [[buffer(20)]],
+    constant uint& dh_dil        [[buffer(21)]],
+    constant uint& dw_dil        [[buffer(22)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -115,13 +125,13 @@ kernel void avgpool3d_forward_kernel(
     int count = 0;
 
     for (uint dd = 0; dd < kd; ++dd) {
-        int id_d = int(od * sd) - int(pd) + int(dd);
+        int id_d = int(od * sd) - int(pd) + int(dd * dd_dil);
         if (id_d < 0 || id_d >= int(in_d)) { if (count_include_pad) count++; continue; }
         for (uint dh = 0; dh < kh; ++dh) {
-            int id_h = int(oh * sh) - int(ph) + int(dh);
+            int id_h = int(oh * sh) - int(ph) + int(dh * dh_dil);
             if (id_h < 0 || id_h >= int(in_h)) { if (count_include_pad) count++; continue; }
             for (uint dw = 0; dw < kw; ++dw) {
-                int id_w = int(ow * sw) - int(pw) + int(dw);
+                int id_w = int(ow * sw) - int(pw) + int(dw * dw_dil);
                 if (id_w < 0 || id_w >= int(in_w)) { if (count_include_pad) count++; continue; }
                 uint src = ((b * channels + c) * in_d + uint(id_d)) * in_h * in_w + uint(id_h) * in_w + uint(id_w);
                 sum += input[src];
@@ -292,6 +302,12 @@ kernel void conv3d_im2col_kernel(
     constant uint& pd            [[buffer(16)]],
     constant uint& ph            [[buffer(17)]],
     constant uint& pw            [[buffer(18)]],
+    // S.11: per-axis dilation. PyTorch Conv3d supports dilation > 1; the
+    // shader previously read kernel taps at stride 1, silently dropping
+    // dilation.
+    constant uint& dd_dil        [[buffer(19)]],
+    constant uint& dh_dil        [[buffer(20)]],
+    constant uint& dw_dil        [[buffer(21)]],
     uint id                      [[thread_position_in_grid]])
 {
     // col shape: [batch, in_c*kd*kh*kw, out_d*out_h*out_w]
@@ -311,9 +327,9 @@ kernel void conv3d_im2col_kernel(
     uint oh = (col_w / out_w) % out_h;
     uint od = col_w / (out_w * out_h);
 
-    int id_d = int(od * sd) - int(pd) + int(kd_idx);
-    int id_h = int(oh * sh) - int(ph) + int(kh_idx);
-    int id_w = int(ow * sw) - int(pw) + int(kw_idx);
+    int id_d = int(od * sd) - int(pd) + int(kd_idx * dd_dil);
+    int id_h = int(oh * sh) - int(ph) + int(kh_idx * dh_dil);
+    int id_w = int(ow * sw) - int(pw) + int(kw_idx * dw_dil);
 
     float val = 0.0f;
     if (id_d >= 0 && id_d < int(in_d) && id_h >= 0 && id_h < int(in_h) && id_w >= 0 && id_w < int(in_w)) {

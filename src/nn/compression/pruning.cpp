@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
@@ -669,28 +670,27 @@ auto register_pruning_auto_reapply(
     // the masks are snapshotted at registration time), and dispatches
     // through the existing apply_pruning_masks entry point.
     //
-    // P.7: hook idempotence. The lambda keeps its own atomic
-    // last_applied_iter_ counter and skips re-application if the masks
-    // have already been re-applied in this iteration. This is defensive
-    // against (a) double-registration of the same hook (e.g. caller
-    // calls register_pruning_auto_reapply twice with overlapping configs)
-    // and (b) explicit apply_pruning_masks() calls in user code in the
-    // same iteration. We can't safely query the concrete optimizer's
-    // step_count_ field from the type-erased hook, so we maintain a
-    // local monotonic counter that ticks once per hook invocation.
-    auto last_applied_iter = std::make_shared<std::atomic<uint64_t>>(0);
-    auto current_iter = std::make_shared<std::atomic<uint64_t>>(0);
+    // S.14 (supersedes P.7): hook idempotence keyed on the optimizer's
+    // own step_count(). The previous P.7 implementation kept a hook-local
+    // atomic that ticked once per invocation — under threaded DataParallel
+    // multiple concurrent step()s would each tick the counter and race
+    // through apply_pruning_masks(), defeating de-duplication. Reading
+    // step_count() from the base Optimizer gives a stable per-iteration
+    // key shared across all hooks on the same optimizer instance, so
+    // re-entrant calls in the same step coalesce correctly.
+    auto last_applied_step = std::make_shared<std::atomic<uint64_t>>(
+        std::numeric_limits<uint64_t>::max());
     return optimizer.register_post_step_hook(
-        [module, config = std::move(config),
-         last_applied_iter, current_iter]() mutable {
-            const uint64_t iter = current_iter->fetch_add(1) + 1;
-            uint64_t prev = last_applied_iter->load();
-            if (prev >= iter) {
+        [module, config = std::move(config), last_applied_step,
+         optimizer_ptr = &optimizer]() mutable {
+            const uint64_t iter = optimizer_ptr->step_count();
+            uint64_t prev = last_applied_step->load();
+            if (prev != std::numeric_limits<uint64_t>::max() && prev >= iter) {
                 // Already re-applied at this (or a later) step — skip.
                 return;
             }
-            // CAS so re-entrant invocations in the same step coalesce.
-            if (!last_applied_iter->compare_exchange_strong(prev, iter)) {
+            // CAS so concurrent invocations in the same step coalesce.
+            if (!last_applied_step->compare_exchange_strong(prev, iter)) {
                 return;
             }
             apply_pruning_masks(module, config);

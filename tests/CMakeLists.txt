@@ -412,7 +412,7 @@ tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
 # them as inputs → OOB crash. Fix exposes them via new SSBO bindings.
 add_executable(test_vulkan_layer_norm_saved_stats test_vulkan_layer_norm_saved_stats.cpp)
 target_link_libraries(test_vulkan_layer_norm_saved_stats PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_vulkan_layer_norm_saved_stats DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_vulkan_layer_norm_saved_stats DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 
 # Phase P0 / Fix 6 — CUDA flash-attention backward dropout reproduction:
 # backward kernel used to (void)-cast the Philox seed; now threads it
@@ -523,15 +523,17 @@ target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR
 add_test(NAME cpu_CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
 set_tests_properties(cpu_CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "cpu")
 
-# Phase 9-followup #29: tolerance audit. Advisory check (not strict by
-# default — fixing the 261 existing unjustified loose tolerances is its own
-# workstream). Adds a CTest entry so devs can spot-run it; --strict in CI
-# turns each unjustified tolerance into a build failure.
+# Phase 9-followup #29: tolerance audit. Runs strict against a baseline of
+# known pre-existing unjustified loose tolerances (audit-3 T.3) so the
+# ratchet only fails on NEW violations. Drive the baseline to zero over time
+# by justifying or tightening each entry.
 add_test(NAME ToleranceAudit
     COMMAND ${CMAKE_COMMAND} -E env
             python3 ${PROJECT_SOURCE_DIR}/scripts/audit_tolerances.py
-                --root ${PROJECT_SOURCE_DIR}/tests)
-set_tests_properties(ToleranceAudit PROPERTIES TIMEOUT 60 LABELS "audit")
+                --root ${PROJECT_SOURCE_DIR}/tests
+                --strict
+                --baseline ${PROJECT_SOURCE_DIR}/tools/audit_tolerances_baseline.txt)
+set_tests_properties(ToleranceAudit PROPERTIES TIMEOUT 60 LABELS "audit;lint")
 
 # Manual KLDiv debug test
 add_executable(test_kldiv_manual test_kldiv_manual.cpp)
@@ -611,7 +613,7 @@ tenzor_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 60)
 # Vulkan complete operations tests
 add_executable(test_vulkan_complete_ops test_vulkan_complete_ops.cpp)
 target_link_libraries(test_vulkan_complete_ops PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 
 # Repeat and Tile tests
 add_executable(test_repeat_tile test_repeat_tile.cpp)
@@ -665,17 +667,17 @@ tenzor_discover_tests(test_conv1d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE
 # CholeskySolve multi-backend
 add_executable(test_cholesky_solve_multidtype test_cholesky_solve_multidtype.cpp)
 target_link_libraries(test_cholesky_solve_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_cholesky_solve_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_cholesky_solve_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # DeformableConv2d multi-backend
 add_executable(test_deformable_conv2d_multidtype test_deformable_conv2d_multidtype.cpp)
 target_link_libraries(test_deformable_conv2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_deformable_conv2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_deformable_conv2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # Einsum dispatch multi-backend
 add_executable(test_einsum_dispatch_multidtype test_einsum_dispatch_multidtype.cpp)
 target_link_libraries(test_einsum_dispatch_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_einsum_dispatch_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_einsum_dispatch_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # ConvTranspose2d multi-backend
 add_executable(test_convtranspose2d_multidtype test_convtranspose2d_multidtype.cpp)
@@ -724,16 +726,16 @@ tenzor_discover_tests(test_roi_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MOD
 # LOBPCG eigenvalue solver multi-backend
 add_executable(test_lobpcg_multidtype test_lobpcg_multidtype.cpp)
 target_link_libraries(test_lobpcg_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_lobpcg_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_lobpcg_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # DCT / IDCT multi-backend
 add_executable(test_dct_multidtype test_dct_multidtype.cpp)
 target_link_libraries(test_dct_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_dct_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_dct_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 add_executable(test_mfcc_multidtype test_mfcc_multidtype.cpp)
 target_link_libraries(test_mfcc_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_mfcc_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_mfcc_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 
 # LazyTensor deferred-execution tests (Phase 5.2)
 add_executable(test_lazy_tensor test_lazy_tensor.cpp)
