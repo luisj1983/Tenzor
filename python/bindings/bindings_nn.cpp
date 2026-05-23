@@ -1073,16 +1073,19 @@ void register_nn(py::module_& m) {
     // Functional activations
     nn.def("hardswish", [](const tenzor::Variable& input) {
         return tenzor::nn::hardswish(input);
-    }, "Functional Hardswish activation", py::arg("input"));
+    }, "Functional Hardswish activation", py::arg("input"),
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("hardsigmoid", [](const tenzor::Variable& input) {
         return tenzor::nn::hardsigmoid(input);
-    }, "Functional Hardsigmoid activation", py::arg("input"));
+    }, "Functional Hardsigmoid activation", py::arg("input"),
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("hardtanh", [](const tenzor::Variable& input, double min_val, double max_val) {
         return tenzor::nn::hardtanh(input, min_val, max_val);
     }, "Functional Hardtanh activation", py::arg("input"),
-       py::arg("min_val") = -1.0, py::arg("max_val") = 1.0);
+       py::arg("min_val") = -1.0, py::arg("max_val") = 1.0,
+       py::call_guard<py::gil_scoped_release>());
 
     // GLU
     py::class_<tenzor::nn::GLU, tenzor::nn::Module,
@@ -1092,7 +1095,8 @@ void register_nn(py::module_& m) {
 
     nn.def("glu", [](const tenzor::Variable& input, int64_t dim) {
         return tenzor::nn::glu(input, dim);
-    }, "Functional GLU activation", py::arg("input"), py::arg("dim") = -1);
+    }, "Functional GLU activation", py::arg("input"), py::arg("dim") = -1,
+       py::call_guard<py::gil_scoped_release>());
 
     // Unflatten
     py::class_<tenzor::nn::Unflatten, tenzor::nn::Module,
@@ -1725,27 +1729,40 @@ void register_nn(py::module_& m) {
         .def_property_readonly("embedding_dim", &tenzor::nn::SparseEmbedding::embedding_dim);
 
     // Functional activation functions
-    nn.def("relu", &tenzor::nn::relu, "ReLU activation function");
+    nn.def("relu", &tenzor::nn::relu, "ReLU activation function",
+          py::call_guard<py::gil_scoped_release>());
     nn.def("leaky_relu", &tenzor::nn::leaky_relu, "Leaky ReLU activation function",
-          py::arg("input"), py::arg("negative_slope") = 0.01);
+          py::arg("input"), py::arg("negative_slope") = 0.01,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("elu", &tenzor::nn::elu, "ELU activation function",
-          py::arg("input"), py::arg("alpha") = 1.0);
+          py::arg("input"), py::arg("alpha") = 1.0,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("gelu", &tenzor::nn::gelu,
            py::arg("input"), py::arg("approximate") = "none",
-           "GELU activation function");
-    nn.def("sigmoid", &tenzor::nn::sigmoid, "Sigmoid activation function");
-    nn.def("tanh", &tenzor::nn::tanh, "Tanh activation function");
+           "GELU activation function",
+           py::call_guard<py::gil_scoped_release>());
+    nn.def("sigmoid", &tenzor::nn::sigmoid, "Sigmoid activation function",
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("tanh", &tenzor::nn::tanh, "Tanh activation function",
+          py::call_guard<py::gil_scoped_release>());
     nn.def("softmax", &tenzor::nn::softmax, "Softmax activation function",
-          py::arg("input"), py::arg("dim") = -1);
+          py::arg("input"), py::arg("dim") = -1,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("log_softmax", &tenzor::nn::log_softmax, "Log-Softmax activation function",
-          py::arg("input"), py::arg("dim") = -1);
-    nn.def("selu", &tenzor::nn::selu, "SELU activation function");
-    nn.def("swish", &tenzor::nn::swish, "Swish activation function");
-    nn.def("mish", &tenzor::nn::mish, "Mish activation function");
+          py::arg("input"), py::arg("dim") = -1,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("selu", &tenzor::nn::selu, "SELU activation function",
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("swish", &tenzor::nn::swish, "Swish activation function",
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("mish", &tenzor::nn::mish, "Mish activation function",
+          py::call_guard<py::gil_scoped_release>());
     nn.def("rrelu", &tenzor::nn::rrelu, "Randomized ReLU activation function",
           py::arg("input"), py::arg("lower") = 1.0 / 8.0,
-          py::arg("upper") = 1.0 / 3.0, py::arg("training") = false);
-    nn.def("log_sigmoid", &tenzor::nn::log_sigmoid, "Log-Sigmoid activation function");
+          py::arg("upper") = 1.0 / 3.0, py::arg("training") = false,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("log_sigmoid", &tenzor::nn::log_sigmoid, "Log-Sigmoid activation function",
+          py::call_guard<py::gil_scoped_release>());
 
     nn.def("softplus", [](const tenzor::Variable& input, float beta) -> tenzor::Variable {
         return tenzor::softplus(input, beta);
@@ -2089,21 +2106,26 @@ void register_nn(py::module_& m) {
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
           py::arg("input"), py::arg("target"),
-          py::arg("reduction") = tenzor::nn::Reduction::Mean);
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("l1_loss", &tenzor::nn::l1_loss, "L1 loss function",
           py::arg("input"), py::arg("target"),
-          py::arg("reduction") = tenzor::nn::Reduction::Mean);
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("cross_entropy", &tenzor::nn::cross_entropy, "Cross entropy loss function",
           py::arg("input"), py::arg("target"),
           py::arg("reduction") = tenzor::nn::Reduction::Mean,
-          py::arg("ignore_index") = -100);
+          py::arg("ignore_index") = -100,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("nll_loss", &tenzor::nn::nll_loss, "NLL loss function",
           py::arg("input"), py::arg("target"),
           py::arg("reduction") = tenzor::nn::Reduction::Mean,
-          py::arg("ignore_index") = -100);
+          py::arg("ignore_index") = -100,
+          py::call_guard<py::gil_scoped_release>());
     nn.def("bce_loss", &tenzor::nn::bce_loss, "BCE loss function",
           py::arg("input"), py::arg("target"),
-          py::arg("reduction") = tenzor::nn::Reduction::Mean);
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
 
     nn.def("kl_div_loss", &tenzor::nn::kl_div_loss,
           "KL divergence loss function",
@@ -2199,15 +2221,20 @@ void register_nn(py::module_& m) {
         layer.train(true);
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("p") = 0.5, py::arg("training") = true,
-       "Apply dropout to input tensor");
+       "Apply dropout to input tensor",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_linear", [](const tenzor::Variable& input, const tenzor::Variable& weight,
                                     const py::object& bias) -> tenzor::Variable {
-        if (bias.is_none()) {
+        tenzor::Variable bias_var;
+        bool has_bias = !bias.is_none();
+        if (has_bias) bias_var = bias.cast<tenzor::Variable>();
+        py::gil_scoped_release release;
+        if (!has_bias) {
             // y = x @ W^T (no bias)
             return tenzor::matmul(input, tenzor::transpose(weight, 0, 1));
         }
-        return tenzor::linear(input, weight, bias.cast<tenzor::Variable>());
+        return tenzor::linear(input, weight, bias_var);
     }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(),
        "Apply linear transformation: y = xW^T + b");
 
@@ -2216,14 +2243,16 @@ void register_nn(py::module_& m) {
         tenzor::nn::MaxPool2d layer(kernel_size, stride, padding);
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
-       "Apply 2D max pooling");
+       "Apply 2D max pooling",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_avg_pool2d", [](const tenzor::Variable& input, int64_t kernel_size,
                                         int64_t stride, int64_t padding) -> tenzor::Variable {
         tenzor::nn::AvgPool2d layer(kernel_size, stride, padding);
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
-       "Apply 2D average pooling");
+       "Apply 2D average pooling",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_adaptive_avg_pool2d",
           [](const tenzor::Variable& input, int64_t output_h, int64_t output_w) -> tenzor::Variable {
@@ -2248,7 +2277,8 @@ void register_nn(py::module_& m) {
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("num_features"),
        py::arg("training") = true, py::arg("momentum") = 0.1, py::arg("eps") = 1e-5,
-       "Apply batch normalization (creates fresh running stats)");
+       "Apply batch normalization (creates fresh running stats)",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_layer_norm", [](const tenzor::Variable& input,
                                         std::vector<int64_t> normalized_shape,
@@ -2256,7 +2286,8 @@ void register_nn(py::module_& m) {
         tenzor::nn::LayerNorm layer(std::move(normalized_shape), eps, true);
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("normalized_shape"), py::arg("eps") = 1e-5,
-       "Apply layer normalization");
+       "Apply layer normalization",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_group_norm", [](const tenzor::Variable& input,
                                         int64_t num_groups, int64_t num_channels,
@@ -2265,7 +2296,8 @@ void register_nn(py::module_& m) {
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("num_groups"), py::arg("num_channels"),
        py::arg("eps") = 1e-5,
-       "Apply group normalization");
+       "Apply group normalization",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_instance_norm",
           [](const tenzor::Variable& input, int64_t num_features,
@@ -2295,7 +2327,8 @@ void register_nn(py::module_& m) {
         return tenzor::Variable(result, input.requires_grad());
     }, py::arg("input"), py::arg("size"),
        py::arg("mode") = "bilinear", py::arg("align_corners") = false,
-       "Interpolate/resize tensor to given size");
+       "Interpolate/resize tensor to given size",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_embedding", [](const tenzor::Variable& input,
                                        const tenzor::Variable& weight,
@@ -2307,7 +2340,8 @@ void register_nn(py::module_& m) {
         // Note: functional embedding creates a new Embedding layer each call
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("weight"), py::arg("padding_idx") = -1,
-       "Lookup embeddings from weight matrix");
+       "Lookup embeddings from weight matrix",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_binary_cross_entropy_with_logits",
            [](const tenzor::Variable& input, const tenzor::Variable& target,
@@ -2316,7 +2350,8 @@ void register_nn(py::module_& m) {
         return loss.forward(input, target);
     }, py::arg("input"), py::arg("target"),
        py::arg("reduction") = tenzor::nn::Reduction::Mean,
-       "Binary cross entropy with logits loss");
+       "Binary cross entropy with logits loss",
+       py::call_guard<py::gil_scoped_release>());
 
     // New nn.functional wrappers using the C++ functional namespace
     nn.def("functional_nll_loss", &tenzor::nn::functional::nll_loss,
@@ -2406,11 +2441,13 @@ void register_nn(py::module_& m) {
     // Gradient clipping utilities
     nn.def("clip_grad_norm_", &tenzor::nn::utils::clip_grad_norm_,
            py::arg("parameters"), py::arg("max_norm"), py::arg("norm_type") = 2.0,
-           "Clip gradients by global norm, returns total norm before clipping");
+           "Clip gradients by global norm, returns total norm before clipping",
+           py::call_guard<py::gil_scoped_release>());
 
     nn.def("clip_grad_value_", &tenzor::nn::utils::clip_grad_value_,
            py::arg("parameters"), py::arg("clip_value"),
-           "Clip gradient values to [-clip_value, clip_value]");
+           "Clip gradient values to [-clip_value, clip_value]",
+           py::call_guard<py::gil_scoped_release>());
 
     // PackedSequence and RNN utilities
     py::class_<tenzor::nn::PackedSequence>(nn, "PackedSequence")

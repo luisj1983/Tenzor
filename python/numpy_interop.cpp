@@ -1,6 +1,7 @@
 #include "numpy_interop.hpp"
 #include <tenzor/core/storage.hpp>
 #include <tenzor/core/checked_math.hpp>
+#include <tenzor/utils/error.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <sstream>
@@ -72,9 +73,12 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::QInt4x2:
         case DType::QInt8:
         case DType::QUInt8:
-            throw std::runtime_error("Quantized dtype " +
+            throw ::tenzor::TypeError(
+                std::string("Quantized/FP8 tensors (dtype ") +
                 std::string(dtype_name(dtype)) +
-                " has no NumPy equivalent; dequantize the tensor first");
+                ") cannot be exposed to NumPy directly. Quantized tensors "
+                "must be dequantized before calling .numpy() — use "
+                "t.dequantize().numpy() or t.to(DType::Float32).numpy() first");
     }
     throw std::runtime_error("Unsupported dtype for NumPy conversion: " +
                            std::string(dtype_name(dtype)));

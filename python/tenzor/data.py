@@ -644,6 +644,9 @@ class SubsetRandomSampler(Sampler[int]):
 # Collate
 # ---------------------------------------------------------------------------
 
+_MAX_COLLATE_DEPTH = 32
+
+
 def default_collate(batch: list) -> Any:
     """Default collate function that stacks tensors and groups tuples.
 
@@ -659,7 +662,22 @@ def default_collate(batch: list) -> Any:
     RuntimeError instead of being silently swallowed (audit item E.12).
     The previous "swallow RuntimeError → return un-batched list" path
     hid real bugs in user datasets — failures are now visible.
+
+    Recursion is bounded by ``_MAX_COLLATE_DEPTH`` (audit item M.7); a
+    pathologically nested dict/tuple sample raises ``RecursionError``
+    with an actionable message at the boundary instead of overflowing
+    the Python stack.
     """
+    return _default_collate_impl(batch, 0)
+
+
+def _default_collate_impl(batch: list, _current_depth: int) -> Any:
+    if _current_depth > _MAX_COLLATE_DEPTH:
+        raise RecursionError(
+            f"default_collate exceeded max nested-dict depth of "
+            f"{_MAX_COLLATE_DEPTH} — flatten via collate_fn="
+        )
+
     if not batch:
         return batch
 
@@ -668,11 +686,17 @@ def default_collate(batch: list) -> Any:
     # Dict: collate each key's values independently.
     if isinstance(elem, dict):
         keys = elem.keys()
-        return {k: default_collate([d[k] for d in batch]) for k in keys}
+        return {
+            k: _default_collate_impl([d[k] for d in batch], _current_depth + 1)
+            for k in keys
+        }
 
     # Tuple / list: collate each position independently.
     if isinstance(elem, (tuple, list)):
-        collated = [default_collate([d[i] for d in batch]) for i in range(len(elem))]
+        collated = [
+            _default_collate_impl([d[i] for d in batch], _current_depth + 1)
+            for i in range(len(elem))
+        ]
         return type(elem)(collated)
 
     # Tensors / Variables: stack along new leading axis.  Propagate any
@@ -1047,26 +1071,24 @@ class DataLoader(Generic[T_co]):
         self.worker_init_fn = worker_init_fn
         self.persistent_workers = persistent_workers
         self.timeout = timeout
-        # Audit item E.13: pin_memory=True silently no-op'd when the C++
-        # backend lacked a `pin_memory` symbol (non-CUDA build).  Users
-        # who asked for pinned memory lost the async-transfer guarantees
-        # without any warning.  Validate up-front so the constructor
-        # fails loudly instead of producing a silently-pageable loader.
+        # Audit items E.13 / M.8: pin_memory=True silently no-op'd when
+        # the C++ backend lacked a `pin_memory` symbol (non-CUDA build).
+        # Users who asked for pinned memory lost the async-transfer
+        # guarantees without any warning.  Validate up-front so the
+        # constructor fails loudly instead of producing a silently
+        # pageable loader.
         if pin_memory:
             try:
                 from . import tenzor_core as _core_pm
-                if not hasattr(_core_pm, "pin_memory"):
-                    raise RuntimeError(
-                        "DataLoader: pin_memory=True requires the C++ "
-                        "core to expose `pin_memory`, but this build does "
-                        "not.  Either rebuild with the pinned allocator "
-                        "enabled (CUDA / OS-level page-lock paths) or "
-                        "pass pin_memory=False."
-                    )
             except ImportError as e:
                 raise RuntimeError(
-                    "DataLoader: pin_memory=True requires tenzor_core, "
-                    "which failed to import: " + str(e)
+                    "pin_memory=True requires a CUDA-enabled Tenzor build "
+                    "(TENZOR_USE_CUDA=ON); set pin_memory=False or rebuild"
+                ) from e
+            if not hasattr(_core_pm, "pin_memory"):
+                raise RuntimeError(
+                    "pin_memory=True requires a CUDA-enabled Tenzor build "
+                    "(TENZOR_USE_CUDA=ON); set pin_memory=False or rebuild"
                 )
         self.pin_memory = pin_memory
         self.rank = rank

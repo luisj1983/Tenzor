@@ -2270,7 +2270,7 @@ def margin_ranking_loss(input1: Variable, input2: Variable, target: Variable,
 
     Wraps tenzor_core.nn.margin_ranking_loss.
     """
-    return _nn.margin_ranking_loss(input1, input2, target, margin, reduction)
+    return _nn.margin_ranking_loss(input1, input2, target, margin=margin, reduction=reduction)
 
 
 __all__ = [
