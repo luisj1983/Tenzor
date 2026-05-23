@@ -120,6 +120,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsForwardShape) {
 
     // Embeddings output should match dtype (converted internally if needed)
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsWithPositionIds) {
@@ -139,6 +140,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsWithPositionIds) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsGradientFlow) {
@@ -193,6 +195,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsDifferentSequenceLengths) {
         EXPECT_EQ(output.tensor().shape()[1], seq_len);
         EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
         EXPECT_FALSE(has_invalid_values(output.tensor()));
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -217,6 +220,7 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerForwardShape) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerWithCausalMask) {
@@ -238,6 +242,7 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerWithCausalMask) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerGradientFlow) {
@@ -291,6 +296,7 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerDifferentSequenceLengths) {
         EXPECT_EQ(output.tensor().shape()[1], seq_len);
         EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
         EXPECT_FALSE(has_invalid_values(output.tensor()));
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -312,6 +318,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelForwardShape) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelParameterCount) {
@@ -381,6 +388,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelWithPositionIds) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelWithCausalMask) {
@@ -398,6 +406,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelWithCausalMask) {
     EXPECT_EQ(output.tensor().shape()[1], seq_len_);
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
     EXPECT_FALSE(has_invalid_values(output.tensor()));
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -418,6 +427,7 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadForwardShape) {
     EXPECT_EQ(logits.tensor().shape()[1], seq_len_);
     EXPECT_EQ(logits.tensor().shape()[2], config_.vocab_size);
     EXPECT_FALSE(has_invalid_values(logits.tensor()));
+    expectFiniteNonZero(logits.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadLogitsRange) {
@@ -435,6 +445,7 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadLogitsRange) {
 
     // Check that logits are reasonable (not NaN or inf)
     EXPECT_FALSE(has_invalid_values(logits.tensor()));
+    expectFiniteNonZero(logits.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadGradientFlow) {
@@ -482,6 +493,7 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadDifferentSequenceLengths) {
         EXPECT_EQ(logits.tensor().shape()[1], seq_len);
         EXPECT_EQ(logits.tensor().shape()[2], config_.vocab_size);
         EXPECT_FALSE(has_invalid_values(logits.tensor()));
+        expectFiniteNonZero(logits.tensor());
     }
 }
 
@@ -526,6 +538,7 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelForward) {
     EXPECT_EQ(logits.tensor().shape()[1], 8);
     EXPECT_EQ(logits.tensor().shape()[2], gpt3_config.vocab_size);
     EXPECT_FALSE(has_invalid_values(logits.tensor()));
+    expectFiniteNonZero(logits.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelGradientFlow) {
@@ -882,6 +895,7 @@ TEST_P(GPTMultiDTypeTest, LongSequenceHandling) {
     EXPECT_EQ(logits.tensor().shape()[1], long_seq_len);
     EXPECT_EQ(logits.tensor().shape()[2], config_.vocab_size);
     EXPECT_FALSE(has_invalid_values(logits.tensor()));
+    expectFiniteNonZero(logits.tensor());
 }
 
 TEST_P(GPTMultiDTypeTest, BatchedGeneration) {

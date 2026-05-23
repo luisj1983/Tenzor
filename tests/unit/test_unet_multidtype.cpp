@@ -133,6 +133,7 @@ TEST_P(UNetMultiDTypeTest, EncoderPathDimensionality) {
     // Output should match input spatial dimensions (encoder-decoder symmetry)
     expectShape(output.tensor(), {1, 21, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, DecoderPathReconstruction) {
@@ -150,6 +151,7 @@ TEST_P(UNetMultiDTypeTest, DecoderPathReconstruction) {
         EXPECT_EQ(shape[2], size) << "Height not preserved at size " << size;
         EXPECT_EQ(shape[3], size) << "Width not preserved at size " << size;
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -176,6 +178,8 @@ TEST_P(UNetMultiDTypeTest, BilinearVsTransposedConv) {
     // Check configuration
     EXPECT_FALSE(model_transposed->is_bilinear());
     EXPECT_TRUE(model_bilinear->is_bilinear());
+    expectFiniteNonZero(output_transposed.tensor());
+    expectFiniteNonZero(output_bilinear.tensor());
 }
 
 // ============================================================================
@@ -232,6 +236,7 @@ TEST_P(UNetMultiDTypeTest, MultipleImageSizes) {
 
         expectShape(output.tensor(), {1, 21, size, size});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -255,6 +260,7 @@ TEST_P(UNetMultiDTypeTest, NonSquareImages) {
         EXPECT_EQ(shape[1], 21);
         EXPECT_EQ(shape[2], h) << "Height not preserved for " << h << "x" << w;
         EXPECT_EQ(shape[3], w) << "Width not preserved for " << h << "x" << w;
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -281,6 +287,7 @@ TEST_P(UNetMultiDTypeTest, BatchSizeVariation) {
         EXPECT_EQ(shape[1], 21);
         EXPECT_EQ(shape[2], hw);
         EXPECT_EQ(shape[3], hw);
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -299,6 +306,7 @@ TEST_P(UNetMultiDTypeTest, SmallImageSizes) {
         auto shape = output.tensor().shape();
         EXPECT_EQ(shape[2], size) << "Small image size " << size << " not handled correctly";
         EXPECT_EQ(shape[3], size);
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -316,6 +324,7 @@ TEST_P(UNetMultiDTypeTest, BinarySegmentation) {
 
     expectShape(output.tensor(), {2, 1, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, MultiClassSegmentation) {
@@ -337,6 +346,7 @@ TEST_P(UNetMultiDTypeTest, MultiClassSegmentation) {
 
         auto shape = output.tensor().shape();
         EXPECT_EQ(shape[1], classes) << "Wrong number of output classes for " << classes;
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -350,6 +360,7 @@ TEST_P(UNetMultiDTypeTest, GrayscaleInput) {
 
     expectShape(output.tensor(), {1, 21, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, MultiChannelInput) {
@@ -368,6 +379,7 @@ TEST_P(UNetMultiDTypeTest, MultiChannelInput) {
         EXPECT_EQ(shape[1], 21);
         EXPECT_EQ(shape[2], 256);
         EXPECT_EQ(shape[3], 256);
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -385,6 +397,7 @@ TEST_P(UNetMultiDTypeTest, BilinearUpsampling) {
 
     expectShape(output.tensor(), {2, 21, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, TransposedConvUpsampling) {
@@ -397,6 +410,7 @@ TEST_P(UNetMultiDTypeTest, TransposedConvUpsampling) {
 
     expectShape(output.tensor(), {2, 21, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, UpsamplingMethodComparison) {
@@ -422,6 +436,8 @@ TEST_P(UNetMultiDTypeTest, UpsamplingMethodComparison) {
     EXPECT_EQ(shape_b[1], shape_t[1]);
     EXPECT_EQ(shape_b[2], shape_t[2]);
     EXPECT_EQ(shape_b[3], shape_t[3]);
+    expectFiniteNonZero(output_bilinear.tensor());
+    expectFiniteNonZero(output_transposed.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, UpsamplingWithGradients) {
@@ -483,6 +499,7 @@ TEST_P(UNetMultiDTypeTest, InferenceMode) {
     // Output should be valid
     expectShape(output.tensor(), {1, 21, 256, 256});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, ModeToggling) {
@@ -520,6 +537,7 @@ TEST_P(UNetMultiDTypeTest, MinimalImageSize) {
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[2], 16);
     EXPECT_EQ(shape[3], 16);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, SingleClassSegmentation) {
@@ -532,6 +550,7 @@ TEST_P(UNetMultiDTypeTest, SingleClassSegmentation) {
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[1], 1);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, LargeBatchSize) {
@@ -547,6 +566,7 @@ TEST_P(UNetMultiDTypeTest, LargeBatchSize) {
     EXPECT_EQ(shape[1], 21);
     EXPECT_EQ(shape[2], 128);
     EXPECT_EQ(shape[3], 128);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(UNetMultiDTypeTest, OutputNumericalStability) {

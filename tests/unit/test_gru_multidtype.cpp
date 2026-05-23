@@ -76,6 +76,7 @@ TEST_P(GRUCellMultiDTypeTest, BasicForward) {
     EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(h_next.tensor());
 }
 
 TEST_P(GRUCellMultiDTypeTest, NoInitialHidden) {
@@ -92,6 +93,7 @@ TEST_P(GRUCellMultiDTypeTest, NoInitialHidden) {
     EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(h_next.tensor());
 }
 
 TEST_P(GRUCellMultiDTypeTest, NoBias) {
@@ -107,6 +109,7 @@ TEST_P(GRUCellMultiDTypeTest, NoBias) {
     EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_next.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(h_next.tensor());
 }
 
 TEST_P(GRUCellMultiDTypeTest, HiddenStateEvolution) {
@@ -125,6 +128,7 @@ TEST_P(GRUCellMultiDTypeTest, HiddenStateEvolution) {
     EXPECT_EQ(h3.shape()[0], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h3.shape()[1], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h3.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(h3.tensor());
 }
 
 TEST_P(GRUCellMultiDTypeTest, ParameterCount) {
@@ -192,6 +196,8 @@ TEST_P(GRUMultiDTypeTest, BasicForward) {
 
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
     EXPECT_EQ(h_n.tensor().dtype(), dtype()) << "Hidden state dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, MultiLayer) {
@@ -210,6 +216,8 @@ TEST_P(GRUMultiDTypeTest, MultiLayer) {
 
     EXPECT_EQ(h_n.shape()[0], 3) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // 3 layers
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, BatchFirst) {
@@ -226,6 +234,7 @@ TEST_P(GRUMultiDTypeTest, BatchFirst) {
     EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // seq_len
     EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, Bidirectional) {
@@ -244,6 +253,8 @@ TEST_P(GRUMultiDTypeTest, Bidirectional) {
 
     EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());  // num_layers * num_directions
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, BidirectionalMultiLayer) {
@@ -259,6 +270,8 @@ TEST_P(GRUMultiDTypeTest, BidirectionalMultiLayer) {
     EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype()); // hidden_size * 2
     EXPECT_EQ(h_n.shape()[0], 4) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());     // num_layers * num_directions
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, WithDropout) {
@@ -275,6 +288,7 @@ TEST_P(GRUMultiDTypeTest, WithDropout) {
     EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, InitialHiddenState) {
@@ -291,6 +305,7 @@ TEST_P(GRUMultiDTypeTest, InitialHiddenState) {
     EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, SequenceLengthVariation) {
@@ -312,6 +327,8 @@ TEST_P(GRUMultiDTypeTest, SequenceLengthVariation) {
 
     EXPECT_EQ(output1.tensor().dtype(), dtype()) << "Output dtype() mismatch";
     EXPECT_EQ(output2.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, BatchSizeVariation) {
@@ -333,6 +350,8 @@ TEST_P(GRUMultiDTypeTest, BatchSizeVariation) {
 
     EXPECT_EQ(output1.tensor().dtype(), dtype()) << "Output dtype() mismatch";
     EXPECT_EQ(output2.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, SingleTimestep) {
@@ -347,6 +366,7 @@ TEST_P(GRUMultiDTypeTest, SingleTimestep) {
 
     EXPECT_EQ(output.shape()[0], 1) << "Failed on " << device().to_string() << " with dtype() " << dtype_to_string(dtype());
     EXPECT_EQ(output.tensor().dtype(), dtype()) << "Output dtype() mismatch";
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(GRUMultiDTypeTest, OutputConsistency) {

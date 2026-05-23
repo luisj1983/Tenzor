@@ -81,6 +81,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellBasicForward) {
     EXPECT_EQ(c_next.shape()[0], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(c_next.shape()[1], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(c_next.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(h_next.tensor());
+    expectFiniteNonZero(c_next.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMCellNoInitialStates) {
@@ -102,6 +104,9 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellNoInitialStates) {
     EXPECT_EQ(c_next.shape()[0], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(c_next.shape()[1], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(c_next.dtype(), dtype()) << "Failed on " << device().to_string();
+    // c_next will be near-zero with zero initial states (no info yet for cell mem)
+    // but h_next from sigmoid * tanh(c) should still be non-trivial.
+    expectFiniteNonZero(h_next.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMCellNoBias) {
@@ -117,6 +122,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellNoBias) {
     EXPECT_EQ(h_next.shape()[0], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(h_next.shape()[1], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(h_next.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(h_next.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMCellStateEvolution) {
@@ -135,6 +141,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellStateEvolution) {
     EXPECT_EQ(h3.shape()[0], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(h3.shape()[1], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(h3.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(h3.tensor());
+    expectFiniteNonZero(c3.tensor());
 }
 
 // ============================================================================
@@ -169,6 +177,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMBasicForward) {
     EXPECT_EQ(c_n.shape()[1], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(c_n.shape()[2], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(c_n.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMMultiLayer) {
@@ -191,6 +201,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMMultiLayer) {
     EXPECT_EQ(c_n.shape()[0], 3) << "Failed on " << device().to_string();
     EXPECT_EQ(h_n.dtype(), dtype()) << "Failed on " << device().to_string();
     EXPECT_EQ(c_n.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMBatchFirst) {
@@ -207,6 +219,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMBatchFirst) {
     EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device().to_string();  // seq_len
     EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string(); // hidden_size
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMBidirectional) {
@@ -232,6 +245,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMBidirectional) {
 
     EXPECT_EQ(c_n.shape()[0], 2) << "Failed on " << device().to_string();
     EXPECT_EQ(c_n.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMBidirectionalMultiLayer) {
@@ -249,6 +264,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMBidirectionalMultiLayer) {
     EXPECT_EQ(h_n.shape()[0], 4) << "Failed on " << device().to_string();     // num_layers * num_directions
     EXPECT_EQ(c_n.shape()[0], 4) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMWithDropout) {
@@ -265,6 +282,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMWithDropout) {
     EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMInitialStates) {
@@ -284,6 +302,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMInitialStates) {
     EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device().to_string();
     EXPECT_EQ(c_n.shape()[0], 2) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMSequenceLengthVariation) {
@@ -304,6 +324,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMSequenceLengthVariation) {
     auto [output2, states2] = lstm.forward(input2, {Variable{}, Variable{}});
     EXPECT_EQ(output2.shape()[0], 50) << "Failed on " << device().to_string();
     EXPECT_EQ(output2.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMBatchSizeVariation) {
@@ -324,6 +346,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMBatchSizeVariation) {
     auto [output2, states2] = lstm.forward(input2, {Variable{}, Variable{}});
     EXPECT_EQ(output2.shape()[1], 32) << "Failed on " << device().to_string();
     EXPECT_EQ(output2.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMSingleTimestep) {
@@ -338,6 +362,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMSingleTimestep) {
 
     EXPECT_EQ(output.shape()[0], 1) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMOutputConsistency) {
@@ -431,6 +456,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMLargeHidden) {
 
     EXPECT_EQ(output.shape()[2], 512) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMVeryDeepNetwork) {
@@ -447,6 +473,8 @@ TEST_P(LSTMMultiDTypeTest, LSTMVeryDeepNetwork) {
     EXPECT_EQ(h_n.shape()[0], 5) << "Failed on " << device().to_string();  // 5 layers
     EXPECT_EQ(c_n.shape()[0], 5) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMLongSequence) {
@@ -461,6 +489,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMLongSequence) {
 
     EXPECT_EQ(output.shape()[0], 100) << "Failed on " << device().to_string();
     EXPECT_EQ(output.dtype(), dtype()) << "Failed on " << device().to_string();
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMInvalidNumLayers) {

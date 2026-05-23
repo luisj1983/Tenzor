@@ -63,6 +63,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbedding16x16) {
 
     // (224/16) * (224/16) = 14 * 14 = 196 patches
     expectShape(output, {2, 196, 768});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, PatchEmbedding14x14) {
@@ -76,6 +77,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbedding14x14) {
 
     // (224/14) * (224/14) = 16 * 16 = 256 patches
     expectShape(output, {1, 256, 1280});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, PatchEmbeddingGradientFlow) {
@@ -111,6 +113,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbeddingBatchSizeOne) {
     Variable output = patch_embed->forward(input);
 
     expectShape(output, {1, 196, 768});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -129,6 +132,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationForwardShape) {
 
     // SE preserves shape
     expectShape(output, {2, 64, 14, 14});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationDifferentReduction) {
@@ -142,6 +146,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationDifferentReduction) {
     Variable output = se_025->forward(input);
 
     expectShape(output, {1, 128, 7, 7});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationGradientFlow) {
@@ -181,6 +186,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SEBlockDifferentChannels) {
         auto shape = output.tensor().shape();
         EXPECT_EQ(shape[1], channels);
         EXPECT_EQ(output.tensor().dtype(), dtype());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -200,6 +206,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand1Shape) {
     Variable output = mbconv->forward(input);
 
     expectShape(output, {2, 32, 28, 28});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand6Shape) {
@@ -215,6 +222,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand6Shape) {
 
     // Stride=2 halves spatial dimensions
     expectShape(output, {2, 40, 28, 28});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockKernel5) {
@@ -229,6 +237,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockKernel5) {
     Variable output = mbconv->forward(input);
 
     expectShape(output, {1, 80, 14, 14});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
@@ -270,6 +279,7 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockForwardShape) {
 
     // ConvNeXt block preserves shape
     expectShape(output, {2, 96, 56, 56});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockGradientFlow) {
@@ -318,6 +328,8 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockDifferentChannels) {
     auto shape_192 = output_192.tensor().shape();
     EXPECT_EQ(shape_192[1], 192);
     EXPECT_EQ(output_192.tensor().dtype(), dtype());
+    expectFiniteNonZero(output_96.tensor());
+    expectFiniteNonZero(output_192.tensor());
 }
 
 // ============================================================================
@@ -337,6 +349,7 @@ TEST_P(VisionComponentsMultiDTypeTest, LayerScaleForwardShape) {
 
     // LayerScale preserves shape
     expectShape(output, {2, 96, 56, 56});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, LayerScaleGradientFlow) {
@@ -378,6 +391,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPForwardShape) {
     Variable output = mlp->forward(input);
 
     expectShape(output, {2, 56*56, 96});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(VisionComponentsMultiDTypeTest, SwinMLPGradientFlow) {
@@ -408,6 +422,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPDifferentDimensions) {
 
     Variable output_small = mlp_small->forward(var_small);
     expectShape(output_small, {1, 1024, 48});
+    expectFiniteNonZero(output_small.tensor());
 
     auto mlp_large = std::make_shared<SwinMLP>(192, 768, 192, 0.0);
     auto input_large = randn({1, 256, 192}, DType::Float32, device());
@@ -416,6 +431,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPDifferentDimensions) {
 
     Variable output_large = mlp_large->forward(var_large);
     expectShape(output_large, {1, 256, 192});
+    expectFiniteNonZero(output_large.tensor());
 }
 
 // ============================================================================

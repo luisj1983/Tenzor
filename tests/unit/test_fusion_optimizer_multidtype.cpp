@@ -15,6 +15,10 @@ using namespace tenzor;
 using namespace tenzor::ops;
 using namespace tenzor::testing;
 
+// audit-3 T.1 rationale — FusionOptimizer/FusionGraph operate on the symbolic
+// computation graph (OpType + dependency edges), not on tensor values. Adding
+// expectFiniteNonZero would be vacuous: the graph contains no tensor outputs
+// to validate. Shape/structural assertions are the natural correctness bar.
 class FusionOptimizerMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     FusionOptimizer optimizer_;

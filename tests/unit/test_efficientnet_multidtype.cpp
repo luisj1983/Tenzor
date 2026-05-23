@@ -82,6 +82,7 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationForwardShape) {
     // SE preserves input shape and dtype
     expectShape(output.tensor(), {2, channels, 14, 14});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentChannels) {
@@ -96,6 +97,7 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentChannels) {
 
         expectShape(output.tensor(), {1, channels, 7, 7});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -129,6 +131,7 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentReductionRatios) {
 
         expectShape(output.tensor(), {2, channels, 14, 14});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -146,6 +149,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockNoExpansionShape) {
 
     expectShape(output.tensor(), {2, 32, 28, 28});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockWithExpansionShape) {
@@ -159,6 +163,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockWithExpansionShape) {
     // Stride=2 halves spatial dims, channels change to out_channels
     expectShape(output.tensor(), {2, 64, 14, 14});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentExpansionRatios) {
@@ -172,6 +177,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentExpansionRatios) {
 
         expectShape(output.tensor(), {2, 24, 56, 56});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -186,6 +192,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentKernelSizes) {
 
         expectShape(output.tensor(), {2, 40, 28, 28});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -200,9 +207,11 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentStrides) {
 
     Variable output1 = block_stride1->forward(input);
     expectShape(output1.tensor(), {2, 48, 56, 56});
+    expectFiniteNonZero(output1.tensor());
 
     Variable output2 = block_stride2->forward(input);
     expectShape(output2.tensor(), {2, 48, 28, 28});
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockGradientFlow) {
@@ -235,6 +244,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockWithoutSE) {
 
     expectShape(output.tensor(), {2, 48, 28, 28});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -250,6 +260,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0GradientFlow) {
@@ -279,6 +290,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0SmallBatch) {
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0CustomClasses) {
@@ -291,6 +303,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0CustomClasses) {
 
     expectShape(output.tensor(), {2, 100});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0DifferentBatchSizes) {
@@ -304,6 +317,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0DifferentBatchSizes) {
 
         expectShape(output.tensor(), {batch, 10});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -320,6 +334,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1GradientFlow) {
@@ -344,10 +359,12 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1CustomResolution) {
     Variable input_224(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output_224 = model->forward(input_224);
     expectShape(output_224.tensor(), {1, 10});
+    expectFiniteNonZero(output_224.tensor());
 
     Variable input_256(Tensor({1, 3, 256, 256}, dtype(), device()), true);
     Variable output_256 = model->forward(input_256);
     expectShape(output_256.tensor(), {1, 10});
+    expectFiniteNonZero(output_256.tensor());
 }
 
 // ============================================================================
@@ -363,6 +380,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB2ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB2GradientFlow) {
@@ -392,6 +410,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3BatchSizeOne) {
@@ -404,6 +423,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3BatchSizeOne) {
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3GradientFlow) {
@@ -433,6 +453,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB4ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB4CustomClasses) {
@@ -444,6 +465,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB4CustomClasses) {
 
     expectShape(output.tensor(), {1, 50});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -459,6 +481,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB5ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB5GradientFlow) {
@@ -489,6 +512,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6CustomClasses) {
@@ -500,6 +524,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6CustomClasses) {
 
     expectShape(output.tensor(), {1, 200});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -516,6 +541,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7GradientFlow) {
@@ -545,6 +571,7 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7BatchProcessing) {
 
     expectShape(output.tensor(), {batch_size, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -593,6 +620,7 @@ TEST_P(EfficientNetMultiDTypeTest, DifferentImageSizesB0) {
 
         expectShape(output.tensor(), {1, 10});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -609,6 +637,7 @@ TEST_P(EfficientNetMultiDTypeTest, DifferentImageSizesB4) {
 
         expectShape(output.tensor(), {1, 10});
         expectDType(output.tensor());
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -620,10 +649,12 @@ TEST_P(EfficientNetMultiDTypeTest, NonSquareInputImages) {
     Variable input_rect1(Tensor({1, 3, 224, 256}, dtype(), device()), true);
     Variable output_rect1 = model->forward(input_rect1);
     expectShape(output_rect1.tensor(), {1, 10});
+    expectFiniteNonZero(output_rect1.tensor());
 
     Variable input_rect2(Tensor({1, 3, 256, 224}, dtype(), device()), true);
     Variable output_rect2 = model->forward(input_rect2);
     expectShape(output_rect2.tensor(), {1, 10});
+    expectFiniteNonZero(output_rect2.tensor());
 }
 
 // ============================================================================
@@ -643,16 +674,19 @@ TEST_P(EfficientNetMultiDTypeTest, VariantResolutionProgression) {
     Variable input_b0(Tensor({1, 3, size_b0, size_b0}, dtype(), device()), true);
     Variable output_b0 = b0->forward(input_b0);
     expectShape(output_b0.tensor(), {1, 10});
+    expectFiniteNonZero(output_b0.tensor());
 
     int64_t size_b3 = getInputSize(300);
     Variable input_b3(Tensor({1, 3, size_b3, size_b3}, dtype(), device()), true);
     Variable output_b3 = b3->forward(input_b3);
     expectShape(output_b3.tensor(), {1, 10});
+    expectFiniteNonZero(output_b3.tensor());
 
     int64_t size_b7 = getInputSize(600);
     Variable input_b7(Tensor({1, 3, size_b7, size_b7}, dtype(), device()), true);
     Variable output_b7 = b7->forward(input_b7);
     expectShape(output_b7.tensor(), {1, 10});
+    expectFiniteNonZero(output_b7.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, VariantParameterScaling) {

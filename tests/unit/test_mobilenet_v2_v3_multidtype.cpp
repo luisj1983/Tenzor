@@ -68,6 +68,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2GradientFlow) {
@@ -93,6 +94,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2BatchSizes) {
         Variable input = createInput({batch_size, 3, 224, 224});
         Variable output = model->forward(input);
         expectShape(output.tensor(), {batch_size, 10});
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -117,6 +119,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier_0_5) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 
     // 0.5 width multiplier should have fewer parameters
     size_t params = countModelParameters(model);
@@ -131,6 +134,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier_0_75) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier_1_25) {
@@ -141,6 +145,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier_1_25) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 
     // 1.25 width multiplier should have more parameters
     size_t params = countModelParameters(model);
@@ -155,6 +160,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier_1_5) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -169,6 +175,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_128) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_160) {
@@ -179,6 +186,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_160) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_192) {
@@ -189,6 +197,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_192) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_256) {
@@ -199,6 +208,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_256) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_320) {
@@ -209,6 +219,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2InputSize_320) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -224,6 +235,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallGradientFlow) {
@@ -257,6 +269,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallBatchSizes) {
         Variable input = createInput({batch_size, 3, 224, 224});
         Variable output = model->forward(input);
         expectShape(output.tensor(), {batch_size, 10});
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -273,6 +286,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeGradientFlow) {
@@ -306,6 +320,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeBatchSizes) {
         Variable input = createInput({batch_size, 3, 224, 224});
         Variable output = model->forward(input);
         expectShape(output.tensor(), {batch_size, 10});
+        expectFiniteNonZero(output.tensor());
     }
 }
 
@@ -321,6 +336,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeInputSize_160) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallInputSize_192) {
@@ -331,6 +347,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallInputSize_192) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeInputSize_256) {
@@ -341,6 +358,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeInputSize_256) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -355,6 +373,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2CustomClasses_10) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2CustomClasses_100) {
@@ -365,6 +384,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2CustomClasses_100) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 100});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallCustomClasses_50) {
@@ -375,6 +395,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallCustomClasses_50) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 50});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeCustomClasses_200) {
@@ -385,6 +406,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeCustomClasses_200) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {2, 200});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -404,6 +426,8 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2DepthwiseConvolution) {
     // Same input should produce same output in eval mode
     expectShape(output1.tensor(), {1, 10});
     expectShape(output2.tensor(), {1, 10});
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3DepthwiseWithSE) {
@@ -416,6 +440,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3DepthwiseWithSE) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -464,6 +489,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileEdgeScenario_SmallModel_SmallInput) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 100});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileEdgeScenario_WidthMultiplier_SmallInput) {
@@ -475,6 +501,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileEdgeScenario_WidthMultiplier_SmallInput) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 100});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, MobileEdgeScenario_BatchInference) {
@@ -487,6 +514,7 @@ TEST_P(MobileNetMultiDTypeTest, MobileEdgeScenario_BatchInference) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {4, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -533,6 +561,7 @@ TEST_P(MobileNetMultiDTypeTest, MinimalConfiguration) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 2});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, LargeConfiguration) {
@@ -543,6 +572,7 @@ TEST_P(MobileNetMultiDTypeTest, LargeConfiguration) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 5000});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, SingleBatchInference) {
@@ -554,6 +584,7 @@ TEST_P(MobileNetMultiDTypeTest, SingleBatchInference) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(MobileNetMultiDTypeTest, LargeBatchInference) {
@@ -565,6 +596,7 @@ TEST_P(MobileNetMultiDTypeTest, LargeBatchInference) {
     Variable output = model->forward(input);
 
     expectShape(output.tensor(), {16, 10});
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================

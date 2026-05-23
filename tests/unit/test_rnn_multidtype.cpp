@@ -39,6 +39,7 @@ TEST_P(RNNMultiDTypeTest, RNNCellBasicForward) {
 
     expectShape(output.tensor(), {5, 20});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNCellReLUActivation) {
@@ -52,6 +53,7 @@ TEST_P(RNNMultiDTypeTest, RNNCellReLUActivation) {
 
     expectShape(output.tensor(), {5, 20});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNCellNoInitialHidden) {
@@ -63,6 +65,7 @@ TEST_P(RNNMultiDTypeTest, RNNCellNoInitialHidden) {
 
     expectShape(output.tensor(), {5, 20});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNCellNoBias) {
@@ -74,6 +77,7 @@ TEST_P(RNNMultiDTypeTest, RNNCellNoBias) {
 
     expectShape(output.tensor(), {5, 20});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNCellInvalidNonlinearity) {
@@ -101,6 +105,8 @@ TEST_P(RNNMultiDTypeTest, RNNBasicForward) {
 
     expectShape(h_n.tensor(), {1, 5, 20});  // num_layers, batch, hidden_size
     expectDType(h_n.tensor());
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNMultiLayer) {
@@ -115,6 +121,8 @@ TEST_P(RNNMultiDTypeTest, RNNMultiLayer) {
 
     expectShape(h_n.tensor(), {3, 5, 20});  // 3 layers
     expectDType(h_n.tensor());
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNBatchFirst) {
@@ -126,6 +134,7 @@ TEST_P(RNNMultiDTypeTest, RNNBatchFirst) {
 
     expectShape(output.tensor(), {5, 7, 20});  // batch, seq_len, hidden_size
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNBidirectional) {
@@ -140,6 +149,8 @@ TEST_P(RNNMultiDTypeTest, RNNBidirectional) {
 
     expectShape(h_n.tensor(), {2, 5, 20});  // num_layers * num_directions
     expectDType(h_n.tensor());
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNBidirectionalMultiLayer) {
@@ -153,6 +164,8 @@ TEST_P(RNNMultiDTypeTest, RNNBidirectionalMultiLayer) {
     EXPECT_EQ(h_n.shape()[0], 4);      // num_layers * num_directions
     expectDType(output.tensor());
     expectDType(h_n.tensor());
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNWithDropout) {
@@ -164,6 +177,7 @@ TEST_P(RNNMultiDTypeTest, RNNWithDropout) {
 
     expectShape(output.tensor(), {7, 5, 20});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNInitialHiddenState) {
@@ -179,6 +193,8 @@ TEST_P(RNNMultiDTypeTest, RNNInitialHiddenState) {
     expectShape(h_n.tensor(), {2, 5, 20});
     expectDType(output.tensor());
     expectDType(h_n.tensor());
+    expectFiniteNonZero(output.tensor());
+    expectFiniteNonZero(h_n.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNSequenceLengthVariation) {
@@ -196,6 +212,8 @@ TEST_P(RNNMultiDTypeTest, RNNSequenceLengthVariation) {
     auto [output2, h_n2] = rnn.forward(input2, Variable{});
     EXPECT_EQ(output2.shape()[0], 50);
     expectDType(output2.tensor());
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNBatchSizeVariation) {
@@ -213,6 +231,8 @@ TEST_P(RNNMultiDTypeTest, RNNBatchSizeVariation) {
     auto [output2, h_n2] = rnn.forward(input2, Variable{});
     EXPECT_EQ(output2.shape()[1], 32);
     expectDType(output2.tensor());
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNSingleTimestep) {
@@ -224,6 +244,7 @@ TEST_P(RNNMultiDTypeTest, RNNSingleTimestep) {
 
     EXPECT_EQ(output.shape()[0], 1);
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(RNNMultiDTypeTest, RNNOutputConsistency) {

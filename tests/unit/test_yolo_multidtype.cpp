@@ -188,6 +188,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5NanoForwardPass) {
 
     EXPECT_TRUE(output.tensor().numel() > 0);
     EXPECT_EQ(output.requires_grad(), true);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(YOLOMultiDTypeTest, YOLOv5SmallForwardPass) {
@@ -199,6 +200,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5SmallForwardPass) {
 
     EXPECT_TRUE(output.tensor().numel() > 0);
     EXPECT_EQ(output.requires_grad(), true);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(YOLOMultiDTypeTest, YOLOv5MediumForwardPass) {
@@ -209,6 +211,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5MediumForwardPass) {
     auto output = model->forward(images);
 
     EXPECT_TRUE(output.tensor().numel() > 0);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(YOLOMultiDTypeTest, YOLOv5LargeForwardPass) {
@@ -219,6 +222,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5LargeForwardPass) {
     auto output = model->forward(images);
 
     EXPECT_TRUE(output.tensor().numel() > 0);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(YOLOMultiDTypeTest, YOLOv5XLargeForwardPass) {
@@ -229,6 +233,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5XLargeForwardPass) {
     auto output = model->forward(images);
 
     EXPECT_TRUE(output.tensor().numel() > 0);
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(YOLOMultiDTypeTest, YOLOv5GradientFlow) {

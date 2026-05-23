@@ -205,6 +205,7 @@ TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_ForwardCorrectness_4D) {
     ASSERT_EQ(output.shape()[2], 16);
     ASSERT_EQ(output.shape()[3], 16);
     ASSERT_EQ(output.dtype(), dtype());
+    expectFiniteNonZero(output);
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_CustomEpsilon) {

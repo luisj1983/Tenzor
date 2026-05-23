@@ -18,6 +18,11 @@ using namespace tenzor::testing;
 // Backend + DType Parameterization
 // ============================================================================
 
+// audit-3 T.1 rationale — Transform tests (reshape/view/transpose/permute/
+// squeeze) exercise stride/metadata manipulation on zeros tensors. The
+// correctness bar is shape/stride/storage equality; tensor values are
+// uniformly zero by construction, so expectFiniteNonZero would always fail.
+// Shape-only assertions are the natural correctness bar for these tests.
 class TransformMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     Tensor t2d;

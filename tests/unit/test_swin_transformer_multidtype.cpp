@@ -95,6 +95,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinTinyGradientFlow) {
@@ -157,6 +158,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyBatchSizeOne) {
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinTinyCustomClasses) {
@@ -170,6 +172,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyCustomClasses) {
 
     expectShape(output.tensor(), {2, 100});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -187,6 +190,7 @@ TEST_P(SwinMultiDTypeTest, SwinSmallForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinSmallGradientFlow) {
@@ -245,6 +249,7 @@ TEST_P(SwinMultiDTypeTest, SwinBaseForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinBaseGradientFlow) {
@@ -289,6 +294,7 @@ TEST_P(SwinMultiDTypeTest, SwinLargeForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinLargeGradientFlow) {
@@ -334,6 +340,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyImageSize448) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinSmallImageSize448) {
@@ -346,6 +353,7 @@ TEST_P(SwinMultiDTypeTest, SwinSmallImageSize448) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinBaseImageSize672) {
@@ -369,6 +377,7 @@ TEST_P(SwinMultiDTypeTest, SwinBaseImageSize672) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    expectFiniteNonZero(output.tensor());
 }
 
 // ============================================================================
@@ -392,6 +401,8 @@ TEST_P(SwinMultiDTypeTest, SwinTinyPatchMergingFeatures) {
     EXPECT_EQ(output2.tensor().shape()[0], 2 * output1.tensor().shape()[0]);
     expectDType(output1.tensor());
     expectDType(output2.tensor());
+    expectFiniteNonZero(output1.tensor());
+    expectFiniteNonZero(output2.tensor());
 }
 
 TEST_P(SwinMultiDTypeTest, SwinSmallPatchMergingConsistency) {
