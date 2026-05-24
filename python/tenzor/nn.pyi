@@ -201,13 +201,12 @@ class Conv3d(Module):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int | Tuple[int, int, int],
-        stride: int | Tuple[int, int, int] = 1,
-        padding: int | Tuple[int, int, int] = 0,
-        dilation: int | Tuple[int, int, int] = 1,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        dilation: int = 1,
         groups: int = 1,
-        bias: bool = True,
-        padding_mode: str = 'zeros'
+        bias: bool = True
     ) -> None: ...
 
     def forward(self, input: Tensor) -> Tensor: ...
@@ -244,8 +243,7 @@ class ConvTranspose1d(Module):
         output_padding: int = 0,
         groups: int = 1,
         bias: bool = True,
-        dilation: int = 1,
-        padding_mode: str = 'zeros'
+        dilation: int = 1
     ) -> None: ...
 
     def forward(self, input: Tensor) -> Tensor: ...

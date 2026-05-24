@@ -17,6 +17,10 @@
 #include <vector>
 #include <cmath>
 
+#include "multi_backend_dtype_fixture.hpp"
+
+using ::tenzor::testing::SkipReason;
+
 using namespace tenzor;
 
 // ============================================================================
@@ -63,7 +67,7 @@ class OneAPIBackendTest : public BackendTestBase {};
 
 TEST_F(OneAPIBackendTest, BackendInitialization) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device device = Device::oneapi(0);
@@ -73,7 +77,7 @@ TEST_F(OneAPIBackendTest, BackendInitialization) {
 
 TEST_F(OneAPIBackendTest, MemoryAllocation) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device device = Device::oneapi(0);
@@ -85,7 +89,7 @@ TEST_F(OneAPIBackendTest, MemoryAllocation) {
 
 TEST_F(OneAPIBackendTest, BasicMatMul) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device device = Device::oneapi(0);
@@ -107,7 +111,7 @@ TEST_F(OneAPIBackendTest, BasicMatMul) {
 
 TEST_F(OneAPIBackendTest, Conv2dForward) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device device = Device::oneapi(0);
@@ -131,7 +135,7 @@ TEST_F(OneAPIBackendTest, Conv2dForward) {
 
 TEST_F(OneAPIBackendTest, Conv2dBackwardFixed) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     // This test verifies the fixed conv2d backward pass
@@ -166,7 +170,7 @@ class VulkanBackendTest : public BackendTestBase {};
 
 TEST_F(VulkanBackendTest, BackendInitialization) {
     if (!isBackendAvailable(Device::Type::Vulkan)) {
-        GTEST_SKIP() << "Vulkan backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "Vulkan backend not available");
     }
 
     Device device = Device::vulkan(0);
@@ -211,7 +215,7 @@ TEST_F(CrossBackendTest, BasicCPUOperations) {
 
 TEST_F(CrossBackendTest, OneAPIToCPUTransfer) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device cpu = Device::cpu();
@@ -229,7 +233,7 @@ TEST_F(CrossBackendTest, OneAPIToCPUTransfer) {
 
 TEST_F(CrossBackendTest, CPUToOneAPITransfer) {
     if (!isBackendAvailable(Device::Type::OneAPI)) {
-        GTEST_SKIP() << "OneAPI backend not available";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable, "OneAPI backend not available");
     }
 
     Device cpu = Device::cpu();

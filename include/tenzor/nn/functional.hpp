@@ -25,6 +25,7 @@
 #include "../ops/creation.hpp"
 #include "../core/tensor.hpp"
 
+#include <array>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -330,6 +331,54 @@ auto avg_pool2d(const Variable& input,
  */
 auto adaptive_avg_pool2d(const Variable& input,
                          std::pair<int64_t, int64_t> output_size) -> Variable;
+
+// ----------------------------------------------------------------------------
+// 1D / 3D pooling free functions (audit-5 Z.21).
+//
+// Mirror the 2D signatures so Python wrappers can call directly into C++
+// instead of constructing a fresh `nn.MaxPool1d` / `nn.AvgPool3d` / etc.
+// module per invocation. Each function delegates to the matching layer
+// module's forward_impl, which already wires the correct autograd backward
+// Function (MaxPoolNdBackward / AvgPoolNdBackward).
+// ----------------------------------------------------------------------------
+
+/** @brief Functional 1D max pooling. Mirrors nn.MaxPool1d.forward_impl. */
+auto max_pool1d(const Variable& input,
+                int64_t kernel_size,
+                int64_t stride = -1,
+                int64_t padding = 0) -> Variable;
+
+/** @brief Functional 1D average pooling. Mirrors nn.AvgPool1d.forward_impl. */
+auto avg_pool1d(const Variable& input,
+                int64_t kernel_size,
+                int64_t stride = -1,
+                int64_t padding = 0) -> Variable;
+
+/** @brief Functional 3D max pooling. Mirrors nn.MaxPool3d.forward_impl. */
+auto max_pool3d(const Variable& input,
+                std::array<int64_t, 3> kernel_size,
+                std::array<int64_t, 3> stride = {-1, -1, -1},
+                std::array<int64_t, 3> padding = {0, 0, 0}) -> Variable;
+
+/** @brief Functional 3D average pooling. Mirrors nn.AvgPool3d.forward_impl. */
+auto avg_pool3d(const Variable& input,
+                std::array<int64_t, 3> kernel_size,
+                std::array<int64_t, 3> stride = {-1, -1, -1},
+                std::array<int64_t, 3> padding = {0, 0, 0}) -> Variable;
+
+/** @brief Functional 1D adaptive max pooling. */
+auto adaptive_max_pool1d(const Variable& input, int64_t output_size) -> Variable;
+
+/** @brief Functional 1D adaptive average pooling. */
+auto adaptive_avg_pool1d(const Variable& input, int64_t output_size) -> Variable;
+
+/** @brief Functional 3D adaptive max pooling. */
+auto adaptive_max_pool3d(const Variable& input,
+                         std::array<int64_t, 3> output_size) -> Variable;
+
+/** @brief Functional 3D adaptive average pooling. */
+auto adaptive_avg_pool3d(const Variable& input,
+                         std::array<int64_t, 3> output_size) -> Variable;
 
 // ============================================================================
 // Normalization (implemented in functional.cpp)

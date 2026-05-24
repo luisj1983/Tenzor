@@ -11,6 +11,7 @@
 #include <tenzor/nn/layers/pooling.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -45,10 +46,8 @@ TEST_P(Pooling1dMultiDTypeTest, MaxPool1dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "MaxPool1d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 2, 6});
 }
 
@@ -84,10 +83,8 @@ TEST_P(Pooling1dMultiDTypeTest, AvgPool1dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AvgPool1d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 2, 6});
 }
 
@@ -114,10 +111,8 @@ TEST_P(Pooling1dMultiDTypeTest, AdaptiveMaxPool1dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AdaptiveMaxPool1d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 2, 12});
 }
 
@@ -144,10 +139,8 @@ TEST_P(Pooling1dMultiDTypeTest, AdaptiveAvgPool1dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AdaptiveAvgPool1d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 2, 12});
 }
 

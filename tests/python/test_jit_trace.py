@@ -58,19 +58,23 @@ def test_gelu_traces_as_single_gelu_node():
 
     # And it must not have lowered to the decomposition (any of these
     # primitives appearing alongside GELU would mean we lost composition).
+    # The canonical tanh-based GELU decomposition emits Pow/Tanh/Mul/Add.
+    # Mul/Add appear in many legitimate graphs so we only flag the
+    # decomposition-only ops (Tanh and Pow) — a fresh trace of nn.gelu
+    # alone should never produce them.  If a future graph-rewrite pass
+    # legitimately expands GELU into its decomposition downstream, add the
+    # pass-specific OpType to the whitelist below with a comment.
     decomposition_primitives = {
-        # The canonical tanh-based GELU decomposition emits Pow/Tanh/Mul/Add.
-        # Mul/Add are present in many graphs so we only flag the
-        # decomposition-only ops.
         tz.jit.OpType.Tanh,
+        tz.jit.OpType.Pow,
     }
     leak = op_types & decomposition_primitives
-    if leak:
-        print(f"  WARNING: trace also contains decomposition primitives: "
-              f"{[str(t) for t in leak]}")
-        # We intentionally don't assert here — a future graph rewrite pass
-        # may legitimately expand GELU.  The hard requirement is just that
-        # the *initial* trace carries the GELU node.
+    assert leak == set(), (
+        "tz.nn.gelu trace leaked decomposition primitives "
+        f"{[str(t) for t in leak]} — Variable-level autograd composition "
+        "has regressed (raw-tensor decomposition crept into the GELU "
+        f"forward).  Full op_types seen: {sorted(str(t) for t in op_types)}"
+    )
 
     print("  GELU trace OK")
 

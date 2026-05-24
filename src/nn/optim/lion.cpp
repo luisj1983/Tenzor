@@ -133,6 +133,11 @@ auto Lion::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
     state["weight_decay"].data<double>()[0] = weight_decay_;
 
+    // Z.12: persist parameter count for fail-fast load (mirrors Adam / LAMB).
+    Tensor n({1}, DType::Int64, Device::cpu());
+    n.data<int64_t>()[0] = static_cast<int64_t>(momentum_.size());
+    state["num_params"] = n;
+
     for (size_t i = 0; i < momentum_.size(); ++i) {
         state["momentum_" + std::to_string(i)] = momentum_[i].clone();
     }
@@ -140,6 +145,17 @@ auto Lion::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto Lion::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Z.12: explicit num_params guard mirroring Adam / LAMB / SparseAdam.
+    if (state.count("num_params")) {
+        int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(momentum_.size())) {
+            throw std::runtime_error(
+                "Lion::load_state_dict: parameter count mismatch (state has " +
+                std::to_string(expected) + ", optimiser has " +
+                std::to_string(momentum_.size()) + ")");
+        }
+    }
+
     if (state.count("step_count"))  step_count_   = state.at("step_count").data<int64_t>()[0];
     if (state.count("lr"))          lr_           = state.at("lr").data<double>()[0];
     if (state.count("beta1"))       beta1_        = state.at("beta1").data<double>()[0];

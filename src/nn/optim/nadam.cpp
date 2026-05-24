@@ -177,6 +177,12 @@ auto NAdam::state_dict() const -> std::unordered_map<std::string, Tensor> {
     put_double("momentum_decay", momentum_decay_);
     put_double("mu_product", mu_product_);
 
+    // Z.12: persist the parameter count so a mismatched destination is
+    // detected up front instead of being inferred from key scanning.
+    Tensor n({1}, DType::Int64, Device::cpu());
+    n.data<int64_t>()[0] = static_cast<int64_t>(exp_avg_.size());
+    state["num_params"] = n;
+
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_"    + std::to_string(i)] = exp_avg_[i].clone();
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
@@ -189,6 +195,17 @@ auto NAdam::load_state_dict(const std::unordered_map<std::string, Tensor>& state
         auto it = state.find(key);
         if (it != state.end()) out = it->second.data<double>()[0];
     };
+
+    // Z.12: explicit num_params guard mirroring Adam / LAMB / SparseAdam.
+    if (state.count("num_params")) {
+        int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(exp_avg_.size())) {
+            throw std::runtime_error(
+                "NAdam::load_state_dict: parameter count mismatch (state has " +
+                std::to_string(expected) + ", optimiser has " +
+                std::to_string(exp_avg_.size()) + ")");
+        }
+    }
 
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];

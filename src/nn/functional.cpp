@@ -562,6 +562,70 @@ auto adaptive_avg_pool2d(const Variable& input,
     return avg_pool2d(input, {kernel_h, kernel_w}, {stride_h, stride_w}, {0, 0});
 }
 
+// ----------------------------------------------------------------------------
+// 1D / 3D pooling free functions (audit-5 Z.21).
+//
+// Each delegates to the matching layer Module's forward_impl, which already
+// wires the autograd backward Function and dispatches to the backend
+// kernel. This eliminates the per-call layer construction that the Python
+// wrappers used to do (functional.py:2112-2165), letting callers reach the
+// fast path from any language binding.
+// ----------------------------------------------------------------------------
+
+auto max_pool1d(const Variable& input,
+                int64_t kernel_size,
+                int64_t stride,
+                int64_t padding) -> Variable {
+    ::tenzor::nn::MaxPool1d layer(kernel_size, stride, padding);
+    return layer.forward_impl(input);
+}
+
+auto avg_pool1d(const Variable& input,
+                int64_t kernel_size,
+                int64_t stride,
+                int64_t padding) -> Variable {
+    ::tenzor::nn::AvgPool1d layer(kernel_size, stride, padding);
+    return layer.forward_impl(input);
+}
+
+auto max_pool3d(const Variable& input,
+                std::array<int64_t, 3> kernel_size,
+                std::array<int64_t, 3> stride,
+                std::array<int64_t, 3> padding) -> Variable {
+    ::tenzor::nn::MaxPool3d layer(kernel_size, stride, padding);
+    return layer.forward_impl(input);
+}
+
+auto avg_pool3d(const Variable& input,
+                std::array<int64_t, 3> kernel_size,
+                std::array<int64_t, 3> stride,
+                std::array<int64_t, 3> padding) -> Variable {
+    ::tenzor::nn::AvgPool3d layer(kernel_size, stride, padding);
+    return layer.forward_impl(input);
+}
+
+auto adaptive_max_pool1d(const Variable& input, int64_t output_size) -> Variable {
+    ::tenzor::nn::AdaptiveMaxPool1d layer(output_size);
+    return layer.forward_impl(input);
+}
+
+auto adaptive_avg_pool1d(const Variable& input, int64_t output_size) -> Variable {
+    ::tenzor::nn::AdaptiveAvgPool1d layer(output_size);
+    return layer.forward_impl(input);
+}
+
+auto adaptive_max_pool3d(const Variable& input,
+                         std::array<int64_t, 3> output_size) -> Variable {
+    ::tenzor::nn::AdaptiveMaxPool3d layer(output_size[0], output_size[1], output_size[2]);
+    return layer.forward_impl(input);
+}
+
+auto adaptive_avg_pool3d(const Variable& input,
+                         std::array<int64_t, 3> output_size) -> Variable {
+    ::tenzor::nn::AdaptiveAvgPool3d layer(output_size[0], output_size[1], output_size[2]);
+    return layer.forward_impl(input);
+}
+
 // ============================================================================
 // Normalization
 // ============================================================================

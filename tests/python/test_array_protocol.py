@@ -98,3 +98,64 @@ def test_np_asarray_on_cuda_tensor():
     arr = np.asarray(t)
     assert arr.shape == (3,)
     assert arr.tolist() == [4.0, 4.0, 4.0]
+
+
+# ---------------------------------------------------------------------------
+# Audit-5 Z.26 — __array__(copy=True/False/None) semantics.
+#
+# W.16 + Y.25 implement the NumPy 2.0 strict copy= contract:
+#   copy=None  → may share storage (zero-copy view permitted)
+#   copy=True  → MUST return a fresh allocation independent of Tenzor storage
+#   copy=False → MUST raise ValueError if a copy would be required
+# ---------------------------------------------------------------------------
+
+def test_array_protocol_copy_true_forces_fresh_allocation():
+    """copy=True must guarantee the returned array does not alias the tensor.
+
+    The CPU+contiguous+no-dtype-cast path is the only one where the zero-copy
+    view path is reachable; the implementation must force an explicit
+    ``.copy()`` on top of it so writes through the returned array do not
+    propagate back into Tenzor storage.
+    """
+    t = tz.full((4,), 1.5, dtype=f32)
+    arr_view = t.__array__(copy=None)       # zero-copy view permitted
+    arr_copy = t.__array__(copy=True)       # must force fresh allocation
+
+    # Mutate the (potentially) aliased view to seed both arrays.
+    # The copy=True result must NOT change.
+    pre_copy_value = arr_copy[0]
+    arr_view[0] = 99.0
+    assert arr_copy[0] == pre_copy_value, (
+        "copy=True returned a view that aliases Tenzor storage — "
+        "W.16 contract broken (mutating the no-copy view also changed the "
+        "copy=True array)."
+    )
+
+
+def test_array_protocol_copy_true_with_dtype_cast_is_independent():
+    """copy=True + dtype= must also yield an independent allocation."""
+    t = tz.full((3,), 2.0, dtype=f32)
+    arr = t.__array__(dtype=np.float64, copy=True)
+    assert arr.dtype == np.float64
+    # Mutating the result must not affect a subsequent re-read.
+    arr[0] = 999.0
+    arr2 = np.asarray(t)
+    assert arr2[0] == 2.0
+
+
+def test_array_protocol_copy_false_raises_on_dtype_mismatch():
+    """copy=False must raise when a dtype cast would force a copy."""
+    t = tz.full((3,), 1.0, dtype=f32)
+    with pytest.raises(ValueError, match="copy"):
+        t.__array__(dtype=np.float64, copy=False)
+
+
+def test_array_protocol_copy_false_raises_on_device_copy():
+    """copy=False must raise for non-CPU tensors (host transfer is a copy)."""
+    try:
+        cuda = _core.Device(_core.DeviceType.CUDA, 0)
+        t = tz.full((3,), 4.0, dtype=f32, device=cuda)
+    except Exception:
+        pytest.skip("no CUDA device")
+    with pytest.raises(ValueError, match="copy"):
+        t.__array__(copy=False)

@@ -15,6 +15,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -896,7 +897,13 @@ auto split(const Variable& input, int64_t split_size, int64_t dim) -> std::vecto
     const int64_t dim_size = input.shape()[dim];
 
     std::vector<Variable> result;
+    // audit-5 Z.27: PyTorch parity — `torch.split(zeros(0, 5), 2, dim=0)`
+    // returns a 1-tuple with a single empty `[0, 5]` output, not an empty
+    // tuple.  The general loop below exits immediately when dim_size == 0
+    // (start=0 is not < 0), which would silently yield an empty vector and
+    // surprise structured-binding callers.
     if (dim_size == 0) {
+        result.push_back(slice(input, dim, /*start=*/0, /*end=*/0, /*step=*/1));
         return result;
     }
     for (int64_t start = 0; start < dim_size; start += split_size) {
@@ -1162,6 +1169,22 @@ auto sqrt(const Variable& input) -> Variable {
 auto pow(const Variable& input, double exponent) -> Variable {
     return unary_autograd_with_param<PowBackward>(input, exponent,
         [exponent](const Tensor& t) { return tenzor::pow(t, exponent); });
+}
+
+// Audit-5 Z.20: Variable ** Variable and scalar ** Variable. Implemented
+// as exp(b * log(a)) so the chain rule yields the correct partial
+// derivatives via the autograd-aware exp / log / multiplication. Both
+// inputs propagate grad_fn naturally.
+auto pow(const Variable& base, const Variable& exponent) -> Variable {
+    // exp(exponent * log(base))
+    return ::tenzor::exp(exponent * ::tenzor::log(base));
+}
+
+auto pow(double base, const Variable& exponent) -> Variable {
+    // exp(exponent * log(base)); log(base) is a runtime constant captured
+    // into the graph as a scalar multiplier of the differentiable exponent.
+    double log_base = std::log(base);
+    return ::tenzor::exp(exponent * log_base);
 }
 
 auto reciprocal(const Variable& input) -> Variable {

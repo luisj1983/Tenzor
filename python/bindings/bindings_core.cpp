@@ -4179,12 +4179,19 @@ Returns:
         .def("__rmatmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return b.matmul(a);
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
-        // Power — uses the autograd-aware ``tenzor::pow(Variable, float)``
-        // overload from include/tenzor/autograd/ops.hpp so the resulting
+        // Power — uses the autograd-aware ``tenzor::pow(Variable, ...)``
+        // overloads from include/tenzor/autograd/ops.hpp so the resulting
         // Variable retains its grad_fn (audit J.3: previously dropped the
-        // graph by re-wrapping a Tensor with requires_grad=false).
+        // graph by re-wrapping a Tensor with requires_grad=false; audit-5
+        // Z.20: add Variable**Variable and scalar**Variable as well).
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
             return tenzor::pow(a, exp);
+        }, py::is_operator())
+        .def("__pow__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::pow(a, b);
+        }, py::is_operator())
+        .def("__rpow__", [](const tenzor::Variable& exp, float base) {
+            return tenzor::pow(static_cast<double>(base), exp);
         }, py::is_operator())
         // Modulo and floor division — non-differentiable, but Q.14 requires
         // they propagate requires_grad with a zero-cotangent stop-gradient

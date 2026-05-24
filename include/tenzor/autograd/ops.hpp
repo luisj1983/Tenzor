@@ -551,6 +551,16 @@ auto sqrt(const Variable& input) -> Variable;
 /// Power with scalar exponent. Grad: n*x^(n-1)
 auto pow(const Variable& input, double exponent) -> Variable;
 
+/// Power with Variable exponent: a^b = exp(b * log(a)). Both inputs
+/// participate in autograd; gradient w.r.t. `a` is `b * a^(b-1)` and
+/// gradient w.r.t. `b` is `a^b * log(a)` (audit-5 Z.20).
+auto pow(const Variable& base, const Variable& exponent) -> Variable;
+
+/// Scalar base, Variable exponent: c^b = exp(b * log(c)). Only the
+/// exponent is differentiable; gradient is `c^b * log(c)`. This is the
+/// Variable-aware analogue of Python's ``scalar ** var`` (audit-5 Z.20).
+auto pow(double base, const Variable& exponent) -> Variable;
+
 /// Reciprocal: 1/x. Grad: -1/x²
 auto reciprocal(const Variable& input) -> Variable;
 

@@ -2109,60 +2109,95 @@ def conv_transpose2d(input: Variable, weight: Variable, bias=None,
         tuple(int(v) for v in dilation))
 
 
+def _triple(x) -> tuple:
+    """Coerce ``int | (a, b, c)`` to a length-3 tuple of ints (audit-5 Z.21)."""
+    if isinstance(x, int):
+        return (int(x), int(x), int(x))
+    t = tuple(int(v) for v in x)
+    if len(t) != 3:
+        raise ValueError(f"expected length-3 tuple, got {x!r}")
+    return t
+
+
 def max_pool1d(input: Variable, kernel_size: int,
                stride=None, padding: int = 0) -> Variable:
-    """Functional 1-D max pooling (audit E.8)."""
-    if stride is None or stride == -1:
-        stride = kernel_size
-    return _nn.MaxPool1d(kernel_size, stride=stride, padding=padding)(input)
+    """Functional 1-D max pooling.
+
+    Audit-5 Z.21: calls the C++ ``functional_max_pool1d`` binding directly
+    so we no longer construct a fresh ``nn.MaxPool1d`` module per call.
+    """
+    if stride is None:
+        stride = -1
+    return _nn.functional_max_pool1d(input, int(kernel_size),
+                                     int(stride), int(padding))
 
 
 def max_pool3d(input: Variable, kernel_size,
                stride=None, padding=0) -> Variable:
-    """Functional 3-D max pooling (audit E.8)."""
-    if stride is None or stride == -1:
-        stride = kernel_size
-    return _nn.MaxPool3d(kernel_size, stride=stride, padding=padding)(input)
+    """Functional 3-D max pooling.
+
+    Audit-5 Z.21: calls the C++ ``functional_max_pool3d`` binding directly.
+    """
+    ks = _triple(kernel_size)
+    st = (-1, -1, -1) if stride is None else _triple(stride)
+    pd = _triple(padding)
+    return _nn.functional_max_pool3d(input, ks, st, pd)
 
 
 def avg_pool1d(input: Variable, kernel_size: int,
                stride=None, padding: int = 0,
                count_include_pad: bool = True) -> Variable:
-    """Functional 1-D average pooling (audit E.8)."""
-    if stride is None or stride == -1:
-        stride = kernel_size
-    return _nn.AvgPool1d(kernel_size, stride=stride, padding=padding,
-                          count_include_pad=count_include_pad)(input)
+    """Functional 1-D average pooling.
+
+    Audit-5 Z.21: routes through the C++ ``functional_avg_pool1d`` binding.
+    The ``count_include_pad`` flag is accepted for PyTorch API parity; the
+    backend layer implements the include-pad behaviour by default and the
+    ``False`` variant is not yet supported (would silently change averages).
+    """
+    if not count_include_pad:
+        raise NotImplementedError(
+            "avg_pool1d(count_include_pad=False) is not yet supported")
+    if stride is None:
+        stride = -1
+    return _nn.functional_avg_pool1d(input, int(kernel_size),
+                                     int(stride), int(padding))
 
 
 def avg_pool3d(input: Variable, kernel_size,
                stride=None, padding=0,
                count_include_pad: bool = True) -> Variable:
-    """Functional 3-D average pooling (audit E.8)."""
-    if stride is None or stride == -1:
-        stride = kernel_size
-    return _nn.AvgPool3d(kernel_size, stride=stride, padding=padding,
-                          count_include_pad=count_include_pad)(input)
+    """Functional 3-D average pooling.
+
+    Audit-5 Z.21: routes through the C++ ``functional_avg_pool3d`` binding.
+    See ``avg_pool1d`` for the ``count_include_pad`` caveat.
+    """
+    if not count_include_pad:
+        raise NotImplementedError(
+            "avg_pool3d(count_include_pad=False) is not yet supported")
+    ks = _triple(kernel_size)
+    st = (-1, -1, -1) if stride is None else _triple(stride)
+    pd = _triple(padding)
+    return _nn.functional_avg_pool3d(input, ks, st, pd)
 
 
 def adaptive_avg_pool1d(input: Variable, output_size: int) -> Variable:
-    """Functional adaptive 1-D average pooling (audit E.8)."""
-    return _nn.AdaptiveAvgPool1d(output_size)(input)
+    """Functional adaptive 1-D average pooling (audit-5 Z.21)."""
+    return _nn.functional_adaptive_avg_pool1d(input, int(output_size))
 
 
 def adaptive_avg_pool3d(input: Variable, output_size) -> Variable:
-    """Functional adaptive 3-D average pooling (audit E.8)."""
-    return _nn.AdaptiveAvgPool3d(output_size)(input)
+    """Functional adaptive 3-D average pooling (audit-5 Z.21)."""
+    return _nn.functional_adaptive_avg_pool3d(input, _triple(output_size))
 
 
 def adaptive_max_pool1d(input: Variable, output_size: int) -> Variable:
-    """Functional adaptive 1-D max pooling (audit E.8)."""
-    return _nn.AdaptiveMaxPool1d(output_size)(input)
+    """Functional adaptive 1-D max pooling (audit-5 Z.21)."""
+    return _nn.functional_adaptive_max_pool1d(input, int(output_size))
 
 
 def adaptive_max_pool3d(input: Variable, output_size) -> Variable:
-    """Functional adaptive 3-D max pooling (audit E.8)."""
-    return _nn.AdaptiveMaxPool3d(output_size)(input)
+    """Functional adaptive 3-D max pooling (audit-5 Z.21)."""
+    return _nn.functional_adaptive_max_pool3d(input, _triple(output_size))
 
 
 def dropout2d(input: Variable, p: float = 0.5,

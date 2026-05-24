@@ -788,6 +788,7 @@ inline std::string read_name_tensor(const Tensor& t) {
 
 auto ReduceLROnPlateau::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"]   = make_scheduler_type_tensor("ReduceLROnPlateau");
     state["best_metric"]      = make_scalar_f64(best_metric_);
     state["num_bad_epochs"]   = make_scalar_i64(num_bad_epochs_);
     state["cooldown_counter"] = make_scalar_i64(cooldown_counter_);
@@ -796,6 +797,7 @@ auto ReduceLROnPlateau::state_dict() const -> std::unordered_map<std::string, Te
 
 auto ReduceLROnPlateau::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "ReduceLROnPlateau", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("best_metric");      it != state.end()) best_metric_      = read_scalar_f64(it->second);
     if (auto it = state.find("num_bad_epochs");   it != state.end()) num_bad_epochs_   = read_scalar_i64(it->second);
@@ -808,6 +810,7 @@ auto ReduceLROnPlateau::load_state_dict(
 
 auto CyclicLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("CyclicLR");
     state["step_count"] = make_scalar_i64(step_count_);
     state["base_lr"]    = make_scalar_f64(base_lr_);
     state["max_lr"]     = make_scalar_f64(max_lr_);
@@ -816,6 +819,7 @@ auto CyclicLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
 
 auto CyclicLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "CyclicLR", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("step_count"); it != state.end()) step_count_ = read_scalar_i64(it->second);
     if (auto it = state.find("base_lr");    it != state.end()) base_lr_    = read_scalar_f64(it->second);
@@ -828,6 +832,7 @@ auto CyclicLR::load_state_dict(
 
 auto OneCycleLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("OneCycleLR");
     state["step_count"]  = make_scalar_i64(step_count_);
     state["max_lr"]      = make_scalar_f64(max_lr_);
     state["total_steps"] = make_scalar_i64(total_steps_);
@@ -836,6 +841,7 @@ auto OneCycleLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
 
 auto OneCycleLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "OneCycleLR", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("step_count");  it != state.end()) step_count_  = read_scalar_i64(it->second);
     if (auto it = state.find("max_lr");      it != state.end()) max_lr_      = read_scalar_f64(it->second);
@@ -848,6 +854,7 @@ auto OneCycleLR::load_state_dict(
 
 auto CosineAnnealingWarmRestarts::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("CosineAnnealingWarmRestarts");
     state["step_count"] = make_scalar_i64(step_count_);
     state["T_cur"]      = make_scalar_i64(T_cur_);
     state["T_i"]        = make_scalar_i64(T_i_);
@@ -858,6 +865,7 @@ auto CosineAnnealingWarmRestarts::state_dict() const -> std::unordered_map<std::
 
 auto CosineAnnealingWarmRestarts::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "CosineAnnealingWarmRestarts", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("step_count"); it != state.end()) step_count_ = read_scalar_i64(it->second);
     if (auto it = state.find("T_cur");      it != state.end()) T_cur_      = read_scalar_i64(it->second);
@@ -872,6 +880,7 @@ auto CosineAnnealingWarmRestarts::load_state_dict(
 
 auto LambdaLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("LambdaLR");
     state["epoch"]   = make_scalar_i64(static_cast<int64_t>(epoch_));
     state["base_lr"] = make_scalar_f64(base_lr_);
     // Audit-4 W.12: persist the lambda identifier so a mismatched
@@ -888,6 +897,7 @@ auto LambdaLR::load_state_dict(
 
 auto LambdaLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state, bool force) -> void {
+    check_scheduler_type(state, "LambdaLR", force);
     LRScheduler::load_state_dict(state);
     // Audit-4 W.12: verify the saved lambda identifier matches the
     // destination's before touching counters. Throws unless force=true.
@@ -910,6 +920,7 @@ auto LambdaLR::load_state_dict(
 
 auto MultiStepLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("MultiStepLR");
     state["epoch"]   = make_scalar_i64(static_cast<int64_t>(epoch_));
     state["base_lr"] = make_scalar_f64(base_lr_);
     return state;
@@ -917,6 +928,7 @@ auto MultiStepLR::state_dict() const -> std::unordered_map<std::string, Tensor> 
 
 auto MultiStepLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "MultiStepLR", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("epoch");   it != state.end()) epoch_   = static_cast<int>(read_scalar_i64(it->second));
     if (auto it = state.find("base_lr"); it != state.end()) base_lr_ = read_scalar_f64(it->second);
@@ -928,6 +940,7 @@ auto MultiStepLR::load_state_dict(
 
 auto PolynomialLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
+    state["scheduler_type"] = make_scheduler_type_tensor("PolynomialLR");
     state["epoch"]   = make_scalar_i64(static_cast<int64_t>(epoch_));
     state["base_lr"] = make_scalar_f64(base_lr_);
     state["end_lr"]  = make_scalar_f64(end_lr_);
@@ -936,6 +949,7 @@ auto PolynomialLR::state_dict() const -> std::unordered_map<std::string, Tensor>
 
 auto PolynomialLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    check_scheduler_type(state, "PolynomialLR", /*force=*/false);
     LRScheduler::load_state_dict(state);
     if (auto it = state.find("epoch");   it != state.end()) epoch_   = static_cast<int>(read_scalar_i64(it->second));
     if (auto it = state.find("base_lr"); it != state.end()) base_lr_ = read_scalar_f64(it->second);

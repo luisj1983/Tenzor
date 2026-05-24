@@ -8,6 +8,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -183,7 +184,25 @@ auto LazyLinear::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error("LazyLinear: input last dimension must be positive, got " +
                 std::to_string(last_dim));
         }
-        materialize(last_dim, input.tensor().device());
+        // Z.11: honour an explicit pre-materialisation `to(Device)` call.
+        // V.29 captured `requested_device_` but materialise() always used the
+        // input tensor's device, so a `to(GPU0)` followed by a CPU input
+        // silently allocated weights on the CPU. Prefer the explicit request
+        // and warn once if it disagrees with the input's device.
+        const Device input_dev = input.tensor().device();
+        Device target_dev = input_dev;
+        if (requested_device_.has_value()) {
+            target_dev = requested_device_.value();
+            if (target_dev.type != input_dev.type ||
+                target_dev.index != input_dev.index) {
+                TENZOR_WARN_ONCE(
+                    "LazyLinear::materialize: requested device differs from "
+                    "first-input device; honouring the explicit `to(Device)` "
+                    "request. Pass the input on the matching device to silence "
+                    "this warning.");
+            }
+        }
+        materialize(last_dim, target_dev);
     } else {
         // Verify input dimension matches materialized in_features
         if (last_dim != in_features_) {

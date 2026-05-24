@@ -11,6 +11,7 @@
 #include <tenzor/nn/layers/rnn.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -63,11 +64,8 @@ TEST_P(RNNCellsDispatchMultiDTypeTest, LSTMCellBackwardGradient) {
     auto [h_next, c_next] = cell.forward(input, hx, cx);
 
     auto grad = tenzor::ones({2, 16}, dtype(), device());
-    EXPECT_NO_THROW({ h_next.backward(grad); })
-        << "LSTMCell backward threw on " << device().to_string();
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "LSTMCell backward did not produce input gradient on " << device().to_string();
+    h_next.backward(grad);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {2, 8});
 }
 
@@ -99,11 +97,8 @@ TEST_P(RNNCellsDispatchMultiDTypeTest, GRUCellBackwardGradient) {
     auto h_next = cell.forward(input, hx);
 
     auto grad = tenzor::ones({2, 16}, dtype(), device());
-    EXPECT_NO_THROW({ h_next.backward(grad); })
-        << "GRUCell backward threw on " << device().to_string();
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "GRUCell backward did not produce input gradient on " << device().to_string();
+    h_next.backward(grad);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {2, 8});
 }
 
@@ -182,11 +177,8 @@ TEST_P(RNNCellsDispatchMultiDTypeTest, LSTMBackwardGradient) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad); })
-        << "LSTM backward threw on " << device().to_string();
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "LSTM backward did not produce input gradient on " << device().to_string();
+    output.backward(grad);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {3, 2, 8});
 }
 

@@ -63,6 +63,11 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
  * Zero-copy when tensor is on CPU (supports strided views)
  * Always copies when tensor is on non-CPU devices (CUDA, Vulkan, ROCm, OneAPI)
  *
+ * BFloat16 tensors (audit-5 Z.19): exposing a BFloat16 tensor to NumPy
+ * requires the ``ml_dtypes`` package (``pip install ml_dtypes``). Without
+ * it this function raises ``ValueError`` rather than silently returning a
+ * raw uint16 buffer that would round-trip back as ``UInt16``.
+ *
  * @param tensor The input tensor
  * @return NumPy array (may share memory with CPU tensor)
  */

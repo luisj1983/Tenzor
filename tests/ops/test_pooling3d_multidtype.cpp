@@ -18,6 +18,7 @@
 #include <tenzor/nn/layers/pooling.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -74,10 +75,8 @@ TEST_P(Pooling3dMultiDTypeTest, MaxPool3dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "MaxPool3d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 1, 4, 4, 4});
 
     // Audit-T.1: rerun on CPU and compare input.grad() element-wise.
@@ -120,10 +119,8 @@ TEST_P(Pooling3dMultiDTypeTest, AvgPool3dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AvgPool3d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 1, 4, 4, 4});
 
     // Audit-T.1: AvgPool3d backward distributes 1/window_size to each
@@ -166,10 +163,8 @@ TEST_P(Pooling3dMultiDTypeTest, AdaptiveMaxPool3dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AdaptiveMaxPool3d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 1, 6, 6, 6});
 
     Variable input_cpu(input.tensor().to(Device::cpu()).to(DType::Float32), true);
@@ -209,10 +204,8 @@ TEST_P(Pooling3dMultiDTypeTest, AdaptiveAvgPool3dGradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
-
-    ASSERT_TRUE(input.grad().has_value())
-        << "AdaptiveAvgPool3d backward did not produce gradient on " << device().to_string();
+    output.backward(grad_output);
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 1, 6, 6, 6});
 
     Variable input_cpu(input.tensor().to(Device::cpu()).to(DType::Float32), true);

@@ -94,11 +94,13 @@ auto AdamAtan2::step_impl() -> void {
             }
 
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(hp.lr));
-            attrs.set(AttrKey::Beta1, static_cast<float>(hp.beta1));
-            attrs.set(AttrKey::Beta2, static_cast<float>(hp.beta2));
-            attrs.set(AttrKey::Eps, static_cast<float>(hp.eps));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(hp.weight_decay));
+            // Z.9: pass native double to match the fused-Adam contract; the
+            // previous static_cast<float> narrowed Float64 params' hyperparams.
+            attrs.set(AttrKey::Lr, hp.lr);
+            attrs.set(AttrKey::Beta1, hp.beta1);
+            attrs.set(AttrKey::Beta2, hp.beta2);
+            attrs.set(AttrKey::Eps, hp.eps);
+            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Step, step_count_);
             attrs.set(AttrKey::Amsgrad, amsgrad_);
 

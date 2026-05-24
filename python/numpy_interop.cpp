@@ -28,8 +28,12 @@ auto get_ml_dtypes_bfloat16() -> py::object {
     return cached;
 }
 
-// If the tensor dtype is BFloat16, try to reinterpret a uint16 NumPy array
-// as ml_dtypes.bfloat16. Issues a warning if ml_dtypes is unavailable.
+// If the tensor dtype is BFloat16, reinterpret a uint16 NumPy array as
+// ml_dtypes.bfloat16. Raises ValueError if ml_dtypes is unavailable
+// (audit-5 Z.19): the previous warn-and-return-raw-uint16 path produced
+// silently-lossy roundtrips because `numpy_dtype_to_tenzor` on the way back
+// would map kind='u', itemsize=2 to UInt16 rather than BFloat16, so the
+// dtype was lost without any user-visible error.
 auto apply_bfloat16_dtype(py::array result, DType dtype) -> py::array {
     if (dtype != DType::BFloat16) {
         return result;
@@ -39,11 +43,12 @@ auto apply_bfloat16_dtype(py::array result, DType dtype) -> py::array {
         // View the uint16 data as bfloat16 (same binary layout, zero-copy)
         return result.attr("view")(bf16_dtype);
     }
-    PyErr_WarnEx(PyExc_UserWarning,
-        "ml_dtypes package not available; BFloat16 tensor is exposed as raw "
-        "uint16 bits. Install ml_dtypes for proper bfloat16 NumPy support: "
-        "pip install ml_dtypes", 1);
-    return result;
+    throw py::value_error(
+        "BFloat16 numpy interop requires the ml_dtypes package: "
+        "pip install ml_dtypes. Without it, a uint16 numpy array would "
+        "round-trip back to UInt16 (not BFloat16), silently losing the "
+        "dtype. Install ml_dtypes or cast to Float32 first: "
+        "t.to(DType.Float32).numpy().");
 }
 
 } // anonymous namespace

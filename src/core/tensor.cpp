@@ -1892,7 +1892,16 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
         }
     }
     int64_t storage_elements = static_cast<int64_t>(result.impl_->storage->size_bytes() / tenzor::dtype_size(result.impl_->dtype));
-    if (min_offset < 0 || max_offset >= storage_elements) {
+    // Audit-5 Z.27: an empty slice (numel == 0) reaches no memory, so the
+    // bounds check is vacuous — and would otherwise spuriously throw on a
+    // zero-element tensor where storage_elements == 0 (any non-negative
+    // offset trips `max_offset >= 0`). Skip the check when the result has
+    // no elements; this is what NumPy / PyTorch do.
+    int64_t result_numel = 1;
+    for (auto d : result.impl_->shape) {
+        result_numel *= d;
+    }
+    if (result_numel > 0 && (min_offset < 0 || max_offset >= storage_elements)) {
         throw std::out_of_range("Slice offset exceeds storage bounds");
     }
 

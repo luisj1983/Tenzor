@@ -120,19 +120,23 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
-    bool is_float16 = (inputs[0].dtype() == DType::Float16);
     bool is_float64 = (inputs[0].dtype() == DType::Float64);
-    bool is_bfloat16 = (inputs[0].dtype() == DType::BFloat16);
-    std::string adam_shader = is_float16 ? "fused_adam_step_f16"
-                            : is_float64 ? "fused_adam_step_f64"
-                            : is_bfloat16 ? "fused_adam_step_bf16"
-                            : "fused_adam_step";
+    // Z.7: F16/BF16 Vulkan fused-Adam shaders were dead code (the nn/optim/adam.cpp
+    // dispatch only fires the fused path on CUDA). Reject those dtypes explicitly
+    // so any future caller that tries to wire half-precision sees an immediate
+    // error instead of a missing pipeline lookup that would surface much later.
+    if (inputs[0].dtype() == DType::Float16 ||
+        inputs[0].dtype() == DType::BFloat16) {
+        throw std::runtime_error(
+            "FusedAdamStep on Vulkan: F16/BF16 path is not supported (master-weights "
+            "upcast is not wired). Use the non-fused step path or run on CUDA.");
+    }
+    std::string adam_shader = is_float64 ? "fused_adam_step_f64"
+                                         : "fused_adam_step";
     auto* pipeline = getPipeline(adam_shader, device_id);
 
-    // For F16/BF16: param/grad are packed uint32, state buffers are Float32
-    size_t f16_buf_size = ((numel + 1) / 2) * 4;
-    size_t param_buf_size = (is_float16 || is_bfloat16) ? f16_buf_size : numel * inputs[0].dtype_size();
-    size_t state_buf_size = (is_float16 || is_bfloat16) ? numel * sizeof(float) : param_buf_size;
+    size_t param_buf_size = numel * inputs[0].dtype_size();
+    size_t state_buf_size = param_buf_size;
 
     // Bindings: grad(0), param(1), exp_avg(2), exp_avg_sq(3), max_exp_avg_sq(4)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -181,7 +185,8 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     pc.padding0 = 0;
     pc.padding1 = 0;
 
-    int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
+    // Z.7: F16/BF16 paths rejected above; dispatch is per-element for F32/F64.
+    int64_t dispatch_count = numel;
     uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

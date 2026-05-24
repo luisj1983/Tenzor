@@ -20,6 +20,8 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include <cmath>
 
+#include "../grad_flow_helpers.hpp"
+
 using namespace tenzor;
 using namespace tenzor::nn;
 
@@ -563,8 +565,8 @@ TEST_P(LossAdvancedMultiDTypeTest, KLDivLoss_BackwardGradient) {
     auto loss = criterion(input, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, FocalLoss_BackwardGradient) {
@@ -575,8 +577,8 @@ TEST_P(LossAdvancedMultiDTypeTest, FocalLoss_BackwardGradient) {
     auto loss = criterion(input, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, DiceLoss_BackwardGradient) {
@@ -587,8 +589,8 @@ TEST_P(LossAdvancedMultiDTypeTest, DiceLoss_BackwardGradient) {
     auto loss = criterion(input, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, HuberLoss_BackwardGradient) {
@@ -599,8 +601,8 @@ TEST_P(LossAdvancedMultiDTypeTest, HuberLoss_BackwardGradient) {
     auto loss = criterion(input, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
@@ -617,8 +619,8 @@ TEST_P(LossAdvancedMultiDTypeTest, BCEWithLogitsLoss_BackwardGradient) {
     auto loss = criterion(logits, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(logits.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(logits);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, CTCLoss_BackwardGradient) {
@@ -654,8 +656,8 @@ TEST_P(LossAdvancedMultiDTypeTest, CTCLoss_BackwardGradient) {
     auto loss = criterion(log_probs, targets, input_lengths, target_lengths);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(log_probs.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(log_probs);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, TripletMarginWithDistanceLoss_BackwardGradient) {
@@ -680,8 +682,8 @@ TEST_P(LossAdvancedMultiDTypeTest, TripletMarginWithDistanceLoss_BackwardGradien
     auto loss = criterion(anchor, positive, negative);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(anchor.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(anchor);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, MultiLabelMarginLoss_BackwardGradient) {
@@ -703,8 +705,8 @@ TEST_P(LossAdvancedMultiDTypeTest, MultiLabelMarginLoss_BackwardGradient) {
     auto loss = criterion(input, target);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, InfoNCELoss_BackwardGradient) {
@@ -715,8 +717,8 @@ TEST_P(LossAdvancedMultiDTypeTest, InfoNCELoss_BackwardGradient) {
     auto loss = criterion(queries, keys);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(queries.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(queries);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, NTXentLoss_BackwardGradient) {
@@ -727,8 +729,8 @@ TEST_P(LossAdvancedMultiDTypeTest, NTXentLoss_BackwardGradient) {
     auto loss = criterion(z_i, z_j);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(z_i.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(z_i);
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, TripletLoss_BackwardGradient) {
@@ -741,8 +743,8 @@ TEST_P(LossAdvancedMultiDTypeTest, TripletLoss_BackwardGradient) {
     auto loss = criterion(anchor, positive, negative);
 
     EXPECT_EQ(loss.tensor().dtype(), dtype);
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(anchor.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(anchor);
 }
 
 //==============================================================================

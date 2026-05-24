@@ -177,7 +177,15 @@ class WorkerInfo:
         )
 
 
-_worker_info: Optional[WorkerInfo] = None
+# Audit item Z.15: _worker_info must be thread-local so the num_workers=1
+# fast path (which uses a single prefetch thread inside the main process)
+# can populate it without leaking the WorkerInfo into the main thread.
+# Multi-process workers see this as their own process-local state.
+class _WorkerInfoTLS(threading.local):
+    info: Optional[WorkerInfo] = None
+
+
+_worker_info_tls = _WorkerInfoTLS()
 
 
 def get_worker_info() -> Optional[WorkerInfo]:
@@ -205,7 +213,7 @@ def get_worker_info() -> Optional[WorkerInfo]:
     ...         else:
     ...             yield from self._all_items()
     """
-    return _worker_info
+    return _worker_info_tls.info
 
 
 def set_worker_info(info: Optional[WorkerInfo]) -> None:
@@ -214,14 +222,12 @@ def set_worker_info(info: Optional[WorkerInfo]) -> None:
     This is called internally by DataLoader worker processes and should
     not normally be called by user code.
     """
-    global _worker_info
-    _worker_info = info
+    _worker_info_tls.info = info
 
 
 def clear_worker_info() -> None:
     """Clear the ``WorkerInfo`` for the current process/thread."""
-    global _worker_info
-    _worker_info = None
+    _worker_info_tls.info = None
 
 
 class TensorDataset(Dataset):
@@ -755,15 +761,38 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
 class _PrefetchWorker:
     """Background thread that prefetches batches into a queue."""
 
-    def __init__(self, iterable, queue_size: int = 2):
+    def __init__(
+        self,
+        iterable,
+        queue_size: int = 2,
+        worker_init_fn: Optional[Callable] = None,
+        dataset: Any = None,
+    ):
         self._iterable = iterable
         self._queue: Queue = Queue(maxsize=queue_size)
         self._sentinel = object()
+        # Audit item Z.15: with num_workers=1 the fast path used a plain
+        # thread but never invoked worker_init_fn nor populated
+        # get_worker_info().  Multi-worker semantics now match for
+        # num_workers in {1, >=2}.
+        self._worker_init_fn = worker_init_fn
+        self._dataset = dataset
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
+        # Install a per-thread WorkerInfo so user code that calls
+        # get_worker_info() inside the dataset iterator sees the same
+        # contract as the multi-process path.
+        _worker_info_tls.info = WorkerInfo(
+            id=0,
+            num_workers=1,
+            seed=0,
+            dataset=self._dataset,
+        )
         try:
+            if self._worker_init_fn is not None:
+                self._worker_init_fn(0)
             for item in self._iterable:
                 self._queue.put(item)
         except Exception as e:
@@ -799,8 +828,7 @@ def _worker_loop(
     world_size: int = 1,
 ):
     """Target function for each DataLoader worker process."""
-    global _worker_info
-    _worker_info = WorkerInfo(
+    _worker_info_tls.info = WorkerInfo(
         id=worker_id, num_workers=num_workers, seed=seed, dataset=dataset,
         rank=rank, world_size=world_size,
     )
@@ -1098,7 +1126,8 @@ class DataLoader(Generic[T_co]):
     drop_last : bool, optional
         If ``True``, drop the last incomplete batch.  Default: ``False``.
     prefetch_factor : int, optional
-        Number of batches to prefetch per worker.  Default: ``2``.
+        Number of batches to prefetch per worker.  Must be ``>= 1``.
+        Default: ``2``.
     worker_init_fn : callable or None, optional
         Called with ``worker_id`` at the start of each worker process.
     persistent_workers : bool, optional
@@ -1139,6 +1168,15 @@ class DataLoader(Generic[T_co]):
         self.dataset = dataset
         self.collate_fn = collate_fn or default_collate
         self.num_workers = num_workers
+        # Audit item Z.16: prefetch_factor=0 caused unbounded queues (maxsize=0
+        # in mp.Queue means *no limit*) and the prefill loop ran zero iterations,
+        # producing a DataLoader that buffered the entire dataset in memory and
+        # only managed work via worker-side blocking. Reject up-front instead of
+        # silently degrading behaviour.
+        if prefetch_factor < 1:
+            raise ValueError(
+                f"prefetch_factor must be >= 1, got {prefetch_factor}"
+            )
         self.prefetch_factor = prefetch_factor
         self.worker_init_fn = worker_init_fn
         self.persistent_workers = persistent_workers
@@ -1216,9 +1254,15 @@ class DataLoader(Generic[T_co]):
             return _wrap_pin_memory(it, self.pin_memory)
 
         if self.num_workers == 1 and not isinstance(self.dataset, IterableDataset):
-            # Single prefetch thread (fast path, avoids process overhead)
+            # Single prefetch thread (fast path, avoids process overhead).
+            # Audit item Z.15: forward worker_init_fn and dataset so the
+            # thread populates WorkerInfo and runs user-supplied init code,
+            # matching the multi-process path's contract.
             it = _PrefetchWorker(
-                self._generate_batches(), queue_size=self.prefetch_factor
+                self._generate_batches(),
+                queue_size=self.prefetch_factor,
+                worker_init_fn=self.worker_init_fn,
+                dataset=self.dataset,
             )
             return _wrap_pin_memory(it, self.pin_memory)
 

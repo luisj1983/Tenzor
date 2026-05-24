@@ -1309,12 +1309,17 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
         shader_name = "roi_align_backward_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "roi_align_backward_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        // Z.4: BF16 shader accumulates in F32; narrow back after dispatch.
+        shader_name = "roi_align_backward_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create grad_features output tensor (same shape as original features)
-    // For f16 backward, we accumulate in f32 then convert
-    DType accum_dtype = (grad_output.dtype() == DType::Float16) ? DType::Float32 : grad_output.dtype();
+    // For f16/bf16 backward, we accumulate in f32 then convert (Z.4 adds BF16)
+    DType accum_dtype = (grad_output.dtype() == DType::Float16 ||
+                        grad_output.dtype() == DType::BFloat16)
+                       ? DType::Float32 : grad_output.dtype();
     std::vector<int64_t> grad_features_shape = {batch_size, channels, feat_height, feat_width};
     Tensor grad_features(grad_features_shape, accum_dtype, grad_output.device());
 
@@ -1383,9 +1388,10 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // Convert back from f32 accumulation buffer to f16 if needed
-    if (grad_output.dtype() == DType::Float16) {
-        grad_features = grad_features.to(DType::Float16);
+    // Convert back from f32 accumulation buffer to original dtype if needed (Z.4 adds BF16)
+    if (grad_output.dtype() == DType::Float16 ||
+        grad_output.dtype() == DType::BFloat16) {
+        grad_features = grad_features.to(grad_output.dtype());
     }
 
     return grad_features;

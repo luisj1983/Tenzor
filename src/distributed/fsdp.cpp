@@ -19,6 +19,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <numeric>
@@ -346,15 +347,30 @@ auto FSDPUnit::all_gather_params() -> void {
     // for bandwidth savings. Audit-4 W.11: the comm dtype is now
     // configurable (default BFloat16) instead of being hardcoded to Float16
     // — BF16 has the same exponent range as F32 and is the standard AMP
-    // dtype for transformer-scale training. We only down-cast when the
-    // requested comm dtype is genuinely narrower than the live param
-    // dtype; up-casting (e.g. F16 param into BF16 comm) would waste
-    // bandwidth and risk silent value drift.
+    // dtype for transformer-scale training.
+    //
+    // Audit-5 Z.13: previously gated on `dtype == Float32 && comm_dtype !=
+    // Float32`, which silently skipped compression for a native-F16 model
+    // with the default `comm_dtype=BFloat16` (same size, but the F16->BF16
+    // up-cast would still have been pointless and lossy). Widen the gate to
+    // "down-cast whenever the param dtype is strictly wider than the comm
+    // dtype" so any narrower-than-param comm dtype compresses regardless of
+    // the source. Equal-size or wider comm dtypes are no-ops and we emit a
+    // one-time warning so the user knows their comm_dtype request was
+    // ignored.
     Tensor comm_shard = local_shard_;
     DType comm_dtype = dtype;
+    const bool comm_narrower = ::tenzor::dtype_size(config_.comm_dtype) <
+                               ::tenzor::dtype_size(dtype);
     const bool use_mixed_precision = config_.mixed_precision &&
-                                     dtype == DType::Float32 &&
-                                     config_.comm_dtype != DType::Float32;
+                                     config_.comm_dtype != dtype &&
+                                     comm_narrower;
+    if (config_.mixed_precision && config_.comm_dtype != dtype && !comm_narrower) {
+        TENZOR_WARN_ONCE(
+            "FSDP: comm_dtype is no narrower than the parameter dtype; "
+            "skipping the mixed-precision down-cast to avoid wasted bandwidth "
+            "and lossy F16->BF16 (or wider) reinterpretation.");
+    }
     if (use_mixed_precision) {
         comm_shard = local_shard_.to(config_.comm_dtype);
         comm_dtype = config_.comm_dtype;
@@ -372,7 +388,7 @@ auto FSDPUnit::all_gather_params() -> void {
     // Cast back to original dtype after communication
     if (use_mixed_precision) {
         for (auto& g : gathered) {
-            g = g.to(DType::Float32);
+            g = g.to(dtype);
         }
     }
 

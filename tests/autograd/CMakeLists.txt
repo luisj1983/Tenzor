@@ -6,6 +6,22 @@
 add_executable(test_autograd_edge_cases test_autograd_edge_cases.cpp)
 target_link_libraries(test_autograd_edge_cases PRIVATE tenzor_core GTest::gtest_main)
 
+# Audit-5 Z.27: regression for autograd::chunk / autograd::split empty-dim
+# handling (Y.5 + PyTorch parity for split).
+add_executable(test_chunk_split test_chunk_split.cpp)
+target_link_libraries(test_chunk_split PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_chunk_split LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Audit-5 Z.28 (V.5 follow-up): save_for_backward across two distinct GPU
+# devices in a single forward.  Skipped if fewer than two GPU devices are
+# visible.
+add_executable(test_save_backward_multi_device test_save_backward_multi_device.cpp)
+target_link_libraries(test_save_backward_multi_device PRIVATE tenzor_core GTest::gtest_main)
+target_include_directories(test_save_backward_multi_device PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests
+)
+tenzor_discover_tests(test_save_backward_multi_device LABELS "autograd" DISCOVERY_TIMEOUT 60 BACKENDS multi)
+
 # Phase 4 — gradcheck across backends for critical ops. Small inputs so
 # per-element finite-difference perturbation stays fast on GPUs.
 add_executable(test_gradcheck_multibackend test_gradcheck_multibackend.cpp)

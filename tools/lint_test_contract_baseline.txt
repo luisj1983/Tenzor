@@ -8,6 +8,12 @@
 # test_pooling.cpp (3), test_layernorm_multidtype.cpp (1),
 # test_pipeline_parallel.cpp (1), test_activation_backward_multidtype.cpp (1),
 # test_conv3d_multidtype.cpp (1). 8 entries dropped (~12%).
+# audit-5 Z.25: 4 pooling1d + 4 pooling3d + 3 rnn_cells_dispatch entries
+# migrated to EXPECT_GRAD_FLOWS. 11 entries dropped.
+# audit-5 Z.29: 11 test_losses_advanced_multidtype.cpp entries migrated to
+# EXPECT_GRAD_FLOWS (KLDiv, Focal, Dice, Huber, BCEWithLogits, CTC, Triplet
+# variants, MultiLabelMargin, InfoNCE, NTXent). 11 entries dropped (~32%
+# reduction of post-Z.25 baseline).
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_activations.cpp:274:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_activations_multidtype.cpp:274:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:57:
@@ -24,17 +30,6 @@
 /home/lee/Projects/Tenzor/tests/nn/test_pipeline_parallel_multidtype.cpp:81:
 /home/lee/Projects/Tenzor/tests/ops/test_batchnorm_dispatch_multidtype.cpp:100:
 /home/lee/Projects/Tenzor/tests/ops/test_embedding_bag_multidtype.cpp:101:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling1d_multidtype.cpp:115:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling1d_multidtype.cpp:145:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling1d_multidtype.cpp:46:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling1d_multidtype.cpp:85:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling3d_multidtype.cpp:107:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling3d_multidtype.cpp:137:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling3d_multidtype.cpp:46:
-/home/lee/Projects/Tenzor/tests/ops/test_pooling3d_multidtype.cpp:77:
-/home/lee/Projects/Tenzor/tests/ops/test_rnn_cells_dispatch_multidtype.cpp:183:
-/home/lee/Projects/Tenzor/tests/ops/test_rnn_cells_dispatch_multidtype.cpp:63:
-/home/lee/Projects/Tenzor/tests/ops/test_rnn_cells_dispatch_multidtype.cpp:99:
 /home/lee/Projects/Tenzor/tests/unit/test_electra.cpp:364:
 /home/lee/Projects/Tenzor/tests/unit/test_electra.cpp:402:
 /home/lee/Projects/Tenzor/tests/unit/test_gru.cpp:290:
@@ -42,17 +37,6 @@
 /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:392:
 /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:403:
 /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:414:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:563:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:575:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:587:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:599:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:617:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:654:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:680:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:703:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:715:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:727:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp:741:
 /home/lee/Projects/Tenzor/tests/unit/test_lstm.cpp:327:
 /home/lee/Projects/Tenzor/tests/unit/test_pruning_multidtype.cpp:897:
 /home/lee/Projects/Tenzor/tests/unit/test_rnn.cpp:311:

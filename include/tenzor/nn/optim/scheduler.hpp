@@ -107,6 +107,20 @@ public:
 
 protected:
     LRScheduler() = default;
+
+    /// Audit-5 Z.10: persist a UInt8 byte-tensor that names the concrete
+    /// scheduler subclass ("StepLR", "CosineAnnealingLR", …) so a checkpoint
+    /// loaded into the wrong scheduler type fails loudly instead of applying
+    /// the wrong schedule.  Mirrors W.12 LambdaLR's lambda_name guard.
+    static auto make_scheduler_type_tensor(const std::string& name) -> Tensor;
+
+    /// Audit-5 Z.10: read the saved scheduler_type tensor and throw if it
+    /// disagrees with @p expected, unless @p force is true.  No-op if the
+    /// key is absent (older checkpoints).
+    static auto check_scheduler_type(
+        const std::unordered_map<std::string, Tensor>& state,
+        const std::string& expected,
+        bool force) -> void;
 };
 
 /**

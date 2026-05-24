@@ -199,6 +199,14 @@ auto SparseAdam::step_impl() -> void {
                     }
                 }
             }
+            // Z.8: when the producer asserted a sparse grad — even an empty one
+            // (nnz == 0) — PyTorch semantics are "no update". Fall through to the
+            // dense-rows scan below would scan zero non-zero rows but still incur
+            // index/scatter allocations; worse, if `sparse_grad().has_value()` is
+            // false but `has_sparse_grad()` is true (producer set the flag without
+            // attaching the sparse tensor), the dense path would silently apply a
+            // dense update. Honour the producer's intent and skip outright.
+            continue;
         }
 
         if (!param.has_grad()) continue;

@@ -4,6 +4,7 @@
 #include "tenzor/backend/oneapi_caching_allocator.hpp"
 #include "tenzor/utils/logging.hpp"
 #include <sycl/sycl.hpp>
+#include <algorithm>
 #include <vector>
 #include <unordered_map>
 #include <stdexcept>
@@ -600,10 +601,23 @@ public:
         info.max_shared_memory = static_cast<int>(dev.local_mem_size);
 
         // SYCL sub-group size is like warp size
+        // Z.5: Pick the largest sub-group size ≤ 64 so AMD (via Codeplay) reports 64,
+        // NVIDIA reports 32, Intel iGPU reports 8 or 16. Falling back to front()
+        // silently picked the smallest, breaking reduction-tile sizing on AMD/Intel.
         try {
             auto sub_group_sizes = dev.device.get_info<sycl::info::device::sub_group_sizes>();
             if (!sub_group_sizes.empty()) {
-                info.warp_size = static_cast<int>(sub_group_sizes.front());
+                size_t best = 0;
+                for (size_t s : sub_group_sizes) {
+                    if (s <= 64 && s > best) {
+                        best = s;
+                    }
+                }
+                // If all sizes exceed 64 (extremely unlikely), pick the smallest.
+                if (best == 0) {
+                    best = *std::min_element(sub_group_sizes.begin(), sub_group_sizes.end());
+                }
+                info.warp_size = static_cast<int>(best);
             }
         }
 #ifdef TENZOR_HAS_ONEMKL

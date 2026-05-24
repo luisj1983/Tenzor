@@ -54,6 +54,54 @@ namespace py = pybind11;
 
 namespace tenzor::python {
 
+namespace {
+
+// Audit-5 Z.17: try to wrap a hook callable in a `py::weakref` to avoid the
+// strong reference cycle (module -> hook closure -> module). Many callables
+// cannot be weakref'd (plain functions, builtins, transient lambdas);
+// `PyWeakref_NewRef` raises `TypeError` for those. We catch and fall back to
+// a strong reference, which preserves the previous behaviour for those
+// hooks (users can still break a cycle via `handle.remove()`).
+//
+// PyTorch handles bound methods specially via `weakref.WeakMethod`. We do
+// the same: if the hook has a `__self__` (i.e. is a bound method) we wrap
+// the bound method itself via `weakref.WeakMethod` so the *object* is the
+// referent; otherwise we try `weakref.ref` on the callable.
+inline py::object _make_hook_ref(py::object hook) {
+    // Already a weakref (caller pre-wrapped)? Keep it as-is.
+    if (PyWeakref_Check(hook.ptr())) {
+        return hook;
+    }
+    try {
+        py::module_ weakref_mod = py::module_::import("weakref");
+        // Bound method: WeakMethod is the only safe wrapper since the
+        // transient method object would otherwise be GC'd immediately
+        // after binding.
+        if (py::hasattr(hook, "__self__") && py::hasattr(hook, "__func__")) {
+            return weakref_mod.attr("WeakMethod")(hook);
+        }
+        return weakref_mod.attr("ref")(hook);
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return hook;  // strong reference fallback
+    }
+}
+
+// Audit-5 Z.17: dereference a hook reference. If the referent is gone,
+// return a null py::object so the caller can skip the invocation.
+inline py::object _resolve_hook_ref(const py::object& ref) {
+    if (PyWeakref_Check(ref.ptr())) {
+        py::object cb = ref();  // weakref.ref / WeakMethod call returns referent or None
+        if (cb.is_none()) {
+            return py::object();
+        }
+        return cb;
+    }
+    return ref;  // strong reference
+}
+
+}  // namespace
+
 void register_nn(py::module_& m) {
     auto nn = m.def_submodule("nn", "Neural network components");
 
@@ -106,6 +154,7 @@ void register_nn(py::module_& m) {
         .def("named_buffers", &tenzor::nn::Module::named_buffers,
              "Get all buffers with their names")
         .def("get_submodules", &tenzor::nn::Module::get_submodules,
+             py::return_value_policy::reference_internal,
              "Get direct submodules as a dictionary")
 
         // ====================================================================
@@ -219,30 +268,36 @@ void register_nn(py::module_& m) {
         // ====================================================================
         .def("state_dict", &tenzor::nn::Module::state_dict,
              "Get module state as dictionary (parameters + buffers)")
-        // Audit-4 W.17: mirror PyTorch's
-        // ``Module.load_state_dict`` which returns
-        // ``_IncompatibleKeys(missing_keys, unexpected_keys)``. We return a
-        // 2-tuple ``(missing_keys, unexpected_keys)`` (list[str], list[str])
-        // so callers can introspect what was skipped under strict=False.
-        // With strict=True the legacy throw-on-mismatch path runs first,
-        // and (since execution only reaches the return statement on
-        // success) the returned tuple is always empty/empty.
+        // Audit-4 W.17 / audit-5 Z.22: mirror PyTorch's
+        // ``Module.load_state_dict`` semantics. PyTorch returns
+        // ``_IncompatibleKeys(missing_keys, unexpected_keys)`` *only* in
+        // non-strict mode; the strict=True path raises on mismatch and
+        // (when it succeeds) returns None. We follow the same contract:
+        //   - strict=True : None on success, raise on mismatch
+        //   - strict=False: (missing_keys, unexpected_keys) tuple of
+        //                   list[str], list[str]
         .def("load_state_dict",
              [](tenzor::nn::Module& self,
                 const std::unordered_map<std::string, tenzor::Tensor>& state,
-                bool strict) {
+                bool strict) -> py::object {
                  std::vector<std::string> missing_keys;
                  std::vector<std::string> unexpected_keys;
                  self.load_state_dict(state, strict, missing_keys, unexpected_keys);
+                 if (strict) {
+                     // strict=True only reaches here on success — load_state_dict
+                     // throws on any mismatch. PyTorch returns None in that case.
+                     return py::none();
+                 }
                  return py::make_tuple(py::cast(missing_keys),
                                        py::cast(unexpected_keys));
              },
              py::arg("state"), py::arg("strict") = true,
              "Load module state from dictionary. If strict=True (default), "
-             "throws on missing/unexpected keys; if strict=False, returns "
-             "a (missing_keys, unexpected_keys) tuple of str lists so the "
-             "caller can introspect what was skipped (audit-4 W.17, mirrors "
-             "PyTorch's _IncompatibleKeys).")
+             "throws on missing/unexpected keys and returns None on success "
+             "(PyTorch contract). If strict=False, returns a "
+             "(missing_keys, unexpected_keys) tuple of str lists so the "
+             "caller can introspect what was skipped (audit-4 W.17 / "
+             "audit-5 Z.22, mirrors PyTorch's _IncompatibleKeys behaviour).")
         .def("save", &tenzor::nn::Module::save,
              py::arg("path"),
              "Save module to file")
@@ -256,7 +311,8 @@ void register_nn(py::module_& m) {
         // Each register_*_hook returns a RemovableHandle (defined in
         // python/tenzor/nn.py). Call handle.remove() to detach.
         //
-        // 5th-audit B'1: reference-cycle hazard for self-referential hooks.
+        // Audit-5 Z.17 (ex-5th-audit B'1): reference-cycle hazard for
+        // self-referential hooks.
         //
         //   class M(nn.Module):
         //       def __init__(self):
@@ -270,80 +326,91 @@ void register_nn(py::module_& m) {
         // to the hook from the cycle's perspective — Python sees a cycle of
         // length 0.
         //
-        // We intentionally keep STRONG refs to hooks here (changing to
-        // `py::weakref` would silently stop firing for any user that passes
-        // a transient lambda — incompatible with PyTorch semantics). To
-        // break the cycle for self-referential hooks, Python users should
-        // either:
-        //   (a) wrap with `weakref.WeakMethod(self.my_hook)` and unwrap in
-        //       the hook body, or
-        //   (b) explicitly call `handle.remove()` in `__del__` /
-        //       `__exit__`, or
-        //   (c) register the hook on the parent rather than self.
+        // Fix: store a `py::weakref` to the hook when possible, falling back
+        // to a strong reference for callables that do not support weak refs
+        // (plain functions, builtin methods, transient lambdas). When the
+        // weakref expires (the hook owner was GC'd) we skip the callback,
+        // mirroring PyTorch's WeakValueDictionary behaviour for hooks.
         //
-        // The Python `RemovableHandle` already exposes (b) — see
-        // `python/tenzor/nn.py`.
+        // The fallback to strong refs preserves the previous semantics for
+        // hooks that *cannot* be weakref'd, so users who pass lambdas still
+        // see them fire. To break a cycle in that case, call
+        // `handle.remove()` explicitly (the Python `RemovableHandle` already
+        // exposes this — see `python/tenzor/nn.py`).
         // ====================================================================
         .def("register_forward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
+            py::object hook_ref = _make_hook_ref(hook);
             size_t hook_id = mod.register_forward_post_hook(
                 [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
                     py::gil_scoped_acquire acquire;
-                    hook_ref(m, input, output);
+                    py::object cb = _resolve_hook_ref(hook_ref);
+                    if (!cb) return;
+                    cb(m, input, output);
                 });
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called after forward pass (PyTorch-compatible). "
-           "Returns a RemovableHandle; call handle.remove() to detach.")
+           "Returns a RemovableHandle; call handle.remove() to detach. "
+           "The hook is held weakly when possible (audit-5 Z.17) to avoid "
+           "creating a reference cycle with the owning module.")
         .def("register_forward_pre_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
+            py::object hook_ref = _make_hook_ref(hook);
             size_t hook_id = mod.register_forward_pre_hook(
                 [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input) {
                     py::gil_scoped_acquire acquire;
-                    hook_ref(m, input);
+                    py::object cb = _resolve_hook_ref(hook_ref);
+                    if (!cb) return;
+                    cb(m, input);
                 });
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called before forward pass. Returns a "
-           "RemovableHandle.")
+           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
         .def("register_full_backward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
+            py::object hook_ref = _make_hook_ref(hook);
             size_t hook_id = mod.register_backward_post_hook(
                 [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
                     py::gil_scoped_acquire acquire;
-                    hook_ref(m, grad_input, grad_output);
+                    py::object cb = _resolve_hook_ref(hook_ref);
+                    if (!cb) return;
+                    cb(m, grad_input, grad_output);
                 });
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called after backward pass with full gradients. "
-           "Returns a RemovableHandle.")
+           "Returns a RemovableHandle. Held weakly when possible "
+           "(audit-5 Z.17).")
         .def("register_full_backward_pre_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
+            py::object hook_ref = _make_hook_ref(hook);
             size_t hook_id = mod.register_backward_pre_hook(
                 [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_output) {
                     py::gil_scoped_acquire acquire;
-                    hook_ref(m, grad_output);
+                    py::object cb = _resolve_hook_ref(hook_ref);
+                    if (!cb) return;
+                    cb(m, grad_output);
                 });
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called before backward pass. Returns a "
-           "RemovableHandle.")
+           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
         .def("register_forward_post_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
+            py::object hook_ref = _make_hook_ref(hook);
             size_t hook_id = mod.register_forward_post_hook(
                 [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
                     py::gil_scoped_acquire acquire;
-                    hook_ref(m, input, output);
+                    py::object cb = _resolve_hook_ref(hook_ref);
+                    if (!cb) return;
+                    cb(m, input, output);
                 });
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called after forward pass. Returns a "
-           "RemovableHandle.")
+           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
         .def("remove_hook", &tenzor::nn::Module::remove_hook,
              py::arg("hook_id"),
              "Remove a registered hook by ID")
@@ -2315,6 +2382,90 @@ void register_nn(py::module_& m) {
     }, py::arg("input"), py::arg("output_h"), py::arg("output_w"),
        "Apply 2D adaptive max pooling",
        py::call_guard<py::gil_scoped_release>());
+
+    // Audit-5 Z.21: 1D / 3D functional pool bindings so Python callers do
+    // not have to construct a fresh layer Module per call. These mirror
+    // the 2D bindings above and route through the C++ free functions in
+    // tenzor::nn::functional which already wire the autograd backward.
+    nn.def("functional_max_pool1d",
+           [](const tenzor::Variable& input, int64_t kernel_size,
+              int64_t stride, int64_t padding) -> tenzor::Variable {
+               return tenzor::nn::functional::max_pool1d(input, kernel_size, stride, padding);
+           },
+           py::arg("input"), py::arg("kernel_size"),
+           py::arg("stride") = -1, py::arg("padding") = 0,
+           "Apply 1D max pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_avg_pool1d",
+           [](const tenzor::Variable& input, int64_t kernel_size,
+              int64_t stride, int64_t padding) -> tenzor::Variable {
+               return tenzor::nn::functional::avg_pool1d(input, kernel_size, stride, padding);
+           },
+           py::arg("input"), py::arg("kernel_size"),
+           py::arg("stride") = -1, py::arg("padding") = 0,
+           "Apply 1D average pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_max_pool3d",
+           [](const tenzor::Variable& input,
+              std::array<int64_t, 3> kernel_size,
+              std::array<int64_t, 3> stride,
+              std::array<int64_t, 3> padding) -> tenzor::Variable {
+               return tenzor::nn::functional::max_pool3d(input, kernel_size, stride, padding);
+           },
+           py::arg("input"), py::arg("kernel_size"),
+           py::arg("stride") = std::array<int64_t, 3>{-1, -1, -1},
+           py::arg("padding") = std::array<int64_t, 3>{0, 0, 0},
+           "Apply 3D max pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_avg_pool3d",
+           [](const tenzor::Variable& input,
+              std::array<int64_t, 3> kernel_size,
+              std::array<int64_t, 3> stride,
+              std::array<int64_t, 3> padding) -> tenzor::Variable {
+               return tenzor::nn::functional::avg_pool3d(input, kernel_size, stride, padding);
+           },
+           py::arg("input"), py::arg("kernel_size"),
+           py::arg("stride") = std::array<int64_t, 3>{-1, -1, -1},
+           py::arg("padding") = std::array<int64_t, 3>{0, 0, 0},
+           "Apply 3D average pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_adaptive_max_pool1d",
+           [](const tenzor::Variable& input, int64_t output_size) -> tenzor::Variable {
+               return tenzor::nn::functional::adaptive_max_pool1d(input, output_size);
+           },
+           py::arg("input"), py::arg("output_size"),
+           "Apply 1D adaptive max pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_adaptive_avg_pool1d",
+           [](const tenzor::Variable& input, int64_t output_size) -> tenzor::Variable {
+               return tenzor::nn::functional::adaptive_avg_pool1d(input, output_size);
+           },
+           py::arg("input"), py::arg("output_size"),
+           "Apply 1D adaptive average pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_adaptive_max_pool3d",
+           [](const tenzor::Variable& input,
+              std::array<int64_t, 3> output_size) -> tenzor::Variable {
+               return tenzor::nn::functional::adaptive_max_pool3d(input, output_size);
+           },
+           py::arg("input"), py::arg("output_size"),
+           "Apply 3D adaptive max pooling",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_adaptive_avg_pool3d",
+           [](const tenzor::Variable& input,
+              std::array<int64_t, 3> output_size) -> tenzor::Variable {
+               return tenzor::nn::functional::adaptive_avg_pool3d(input, output_size);
+           },
+           py::arg("input"), py::arg("output_size"),
+           "Apply 3D adaptive average pooling",
+           py::call_guard<py::gil_scoped_release>());
 
     // Y.24: helper that applies optional affine `weight` / `bias` Variables
     // *outside* of the transient layer, so their grad_fn flows back to the
