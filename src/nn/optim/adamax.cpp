@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/adamax.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include <cmath>
@@ -63,14 +64,21 @@ auto Adamax::step_impl() -> void {
 
         const Tensor& grad = param.grad().value();
 
+        // R.16: run math in the optimiser state dtype (Float32 for halves)
+        // and cast back to the param dtype on assignment.
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
 
-        auto grad_copy = grad.clone();
+        Tensor param_hi = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+        Tensor grad_copy = needs_upcast ? grad.to(state_dt) : grad.clone();
 
         if (hp.weight_decay > 0.0) {
-            grad_copy = grad_copy + param.tensor() * scalar(hp.weight_decay);
+            grad_copy = grad_copy + param_hi * scalar(hp.weight_decay);
         }
 
         // m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
@@ -85,8 +93,9 @@ auto Adamax::step_impl() -> void {
         auto denom = exp_inf_[i] + scalar(hp.eps);
 
         // theta -= (lr / (1 - beta1^t)) * m_t / denom
-        param.tensor() = param.tensor() -
+        Tensor updated = param_hi -
                          div(exp_avg_[i], denom) * scalar(step_size);
+        param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
     }
 }
 
@@ -96,8 +105,9 @@ auto Adamax::initialize_buffers() -> void {
 
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_inf_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_inf_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -110,8 +120,9 @@ auto Adamax::on_parameters_appended_(size_t old_count, size_t new_count) -> void
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_inf_.push_back(zeros_like(param->tensor()));
+            // R.16: see Adamax::initialize_buffers for dtype rationale.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_inf_.push_back(make_optim_state(param->tensor()));
         } else {
             exp_avg_.push_back(Tensor{});
             exp_inf_.push_back(Tensor{});
@@ -173,11 +184,15 @@ auto Adamax::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
             std::to_string(exp_avg_.size()) + " parameters");
     }
 
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string exp_avg_key = "exp_avg_" + std::to_string(i);
         std::string exp_inf_key = "exp_inf_" + std::to_string(i);
-        if (state.count(exp_avg_key)) exp_avg_[i] = state.at(exp_avg_key).clone();
-        if (state.count(exp_inf_key)) exp_inf_[i] = state.at(exp_inf_key).clone();
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
+        if (state.count(exp_avg_key)) exp_avg_[i] = state.at(exp_avg_key).to(state_dt);
+        if (state.count(exp_inf_key)) exp_inf_[i] = state.at(exp_inf_key).to(state_dt);
     }
 }
 

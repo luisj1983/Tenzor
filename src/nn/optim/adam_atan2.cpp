@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/optim/adam_atan2.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -106,7 +107,18 @@ auto AdamAtan2::step_impl() -> void {
             continue;
         }
 
-        auto grad = param.grad()->clone();
+        // R.16: half-precision params use Float32 state buffers; run math
+        // in state dtype, cast back to param dtype on write.
+        const DType param_dt = param_tensor.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, state_dt, param_tensor.device());
+        };
+
+        Tensor param_hi = needs_upcast ? param_tensor.to(state_dt) : param_tensor;
+        Tensor grad = needs_upcast ? grad_tensor.to(state_dt) : grad_tensor.clone();
 
         // Track gradient magnitude only when statistics tracking is enabled
         // (.item() forces GPU synchronization per parameter, which is expensive)
@@ -117,33 +129,33 @@ auto AdamAtan2::step_impl() -> void {
         total_params++;
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * static_cast<float>(hp.beta1) +
-                     grad * static_cast<float>(1.0 - hp.beta1);
+        exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
+                     grad * scalar(1.0 - hp.beta1);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(hp.beta2) +
-                        grad * grad * static_cast<float>(1.0 - hp.beta2);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(hp.beta2) +
+                        grad * grad * scalar(1.0 - hp.beta2);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(hp.beta1, step_count_);
         double bias_correction2 = 1.0 - std::pow(hp.beta2, step_count_);
 
         // Compute bias-corrected estimates
-        auto m_hat = exp_avg_[i] * static_cast<float>(1.0 / bias_correction1);
-        auto v_hat = exp_avg_sq_[i] * static_cast<float>(1.0 / bias_correction2);
+        auto m_hat = exp_avg_[i] * scalar(1.0 / bias_correction1);
+        auto v_hat = exp_avg_sq_[i] * scalar(1.0 / bias_correction2);
 
         // AMSGrad: use maximum of past squared gradients
         if (amsgrad_) {
             // Element-wise max using comparison
             auto mask = max_exp_avg_sq_[i] > v_hat;
-            auto mask_f = mask.to(DType::Float32);
+            auto mask_f = mask.to(state_dt);
             auto inv_mask = ones_like(mask_f) - mask_f;
             max_exp_avg_sq_[i] = max_exp_avg_sq_[i] * mask_f + v_hat * inv_mask;
             v_hat = max_exp_avg_sq_[i];
         }
 
         // Compute sqrt(v_hat) + eps
-        auto denom = sqrt(v_hat) + static_cast<float>(hp.eps);
+        auto denom = sqrt(v_hat) + scalar(hp.eps);
 
         // Adam-atan2 update: use atan(m_hat / denom) to approximate atan2
         // atan2(y, x) ≈ atan(y/x) when x > 0 (which is always true for denom)
@@ -163,11 +175,12 @@ auto AdamAtan2::step_impl() -> void {
 
         // Decoupled weight decay (like AdamW)
         if (hp.weight_decay > 0) {
-            param.tensor() = param.tensor() * static_cast<float>(1.0 - hp.lr * hp.weight_decay);
+            param_hi = param_hi * scalar(1.0 - hp.lr * hp.weight_decay);
         }
 
         // Apply update
-        param.tensor() = param.tensor() - update * static_cast<float>(hp.lr);
+        param_hi = param_hi - update * scalar(hp.lr);
+        param.tensor() = needs_upcast ? param_hi.to(param_dt) : param_hi;
     }
 
     // Update statistics (only meaningful when tracking is enabled)
@@ -185,10 +198,11 @@ auto AdamAtan2::initialize_buffers() -> void {
 
     for (auto& param : parameters_) {
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         }
     }
@@ -203,10 +217,11 @@ auto AdamAtan2::on_parameters_appended_(size_t old_count, size_t new_count) -> v
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            exp_avg_.push_back(zeros_like(param->tensor()));
-            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            // R.16: see AdamAtan2::initialize_buffers for dtype rationale.
+            exp_avg_.push_back(make_optim_state(param->tensor()));
+            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             if (amsgrad_) {
-                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         } else {
             exp_avg_.push_back(Tensor{});
@@ -284,22 +299,25 @@ auto AdamAtan2::load_state_dict(const std::unordered_map<std::string, Tensor>& s
         weight_decay_ = state.at("weight_decay").data<double>()[0];
     }
 
-    // Load momentum buffers
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string exp_avg_key = "exp_avg_" + std::to_string(i);
         std::string exp_avg_sq_key = "exp_avg_sq_" + std::to_string(i);
         std::string max_key = "max_exp_avg_sq_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
 
         if (state.count(exp_avg_key)) {
-            exp_avg_[i] = state.at(exp_avg_key).clone();
+            exp_avg_[i] = state.at(exp_avg_key).to(state_dt);
         }
 
         if (state.count(exp_avg_sq_key)) {
-            exp_avg_sq_[i] = state.at(exp_avg_sq_key).clone();
+            exp_avg_sq_[i] = state.at(exp_avg_sq_key).to(state_dt);
         }
 
         if (amsgrad_ && state.count(max_key) && i < max_exp_avg_sq_.size()) {
-            max_exp_avg_sq_[i] = state.at(max_key).clone();
+            max_exp_avg_sq_[i] = state.at(max_key).to(state_dt);
         }
     }
 }

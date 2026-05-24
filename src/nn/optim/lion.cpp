@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/lion.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -57,24 +58,33 @@ auto Lion::step_impl() -> void {
 
         const Tensor& grad = param.grad().value();
 
+        // R.16: run math in optimiser state dtype (Float32 for halves).
+        const DType param_dt = param.tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         // Dtype-matched scalar helper (preserves Float64 precision that
         // static_cast<float> would truncate).
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+            return full({1}, value, state_dt, param.tensor().device());
         };
 
+        Tensor param_hi = needs_upcast ? param.tensor().to(state_dt) : param.tensor();
+        Tensor grad_hi  = needs_upcast ? grad.to(state_dt) : grad;
+
         // c_t = beta1 * m_{t-1} + (1 - beta1) * g_t   — update direction
-        auto c = momentum_[i] * scalar(hp.beta1) + grad * scalar(1.0 - hp.beta1);
+        auto c = momentum_[i] * scalar(hp.beta1) + grad_hi * scalar(1.0 - hp.beta1);
 
         // theta_t = theta_{t-1} - lr * (sign(c_t) + wd * theta_{t-1})
         Tensor step = sign(c);
         if (hp.weight_decay > 0.0) {
-            step = step + param.tensor() * scalar(hp.weight_decay);
+            step = step + param_hi * scalar(hp.weight_decay);
         }
-        param.tensor() = param.tensor() - step * scalar(hp.lr);
+        Tensor updated = param_hi - step * scalar(hp.lr);
+        param.tensor() = needs_upcast ? updated.to(param_dt) : updated;
 
         // m_t = beta2 * m_{t-1} + (1 - beta2) * g_t   — momentum state
-        momentum_[i] = momentum_[i] * scalar(hp.beta2) + grad * scalar(1.0 - hp.beta2);
+        momentum_[i] = momentum_[i] * scalar(hp.beta2) + grad_hi * scalar(1.0 - hp.beta2);
     }
 }
 
@@ -82,7 +92,8 @@ auto Lion::initialize_buffers() -> void {
     momentum_.clear();
     for (auto& param : parameters_) {
         if (param) {
-            momentum_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            momentum_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -93,7 +104,8 @@ auto Lion::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            momentum_.push_back(zeros_like(param->tensor()));
+            // R.16: see Lion::initialize_buffers for dtype rationale.
+            momentum_.push_back(make_optim_state(param->tensor()));
         } else {
             momentum_.push_back(Tensor{});
         }
@@ -146,10 +158,14 @@ auto Lion::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
             std::to_string(momentum_.size()) + " parameters");
     }
 
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < momentum_.size(); ++i) {
         std::string key = "momentum_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(key)) {
-            momentum_[i] = state.at(key).clone();
+            momentum_[i] = state.at(key).to(state_dt);
         }
     }
 }

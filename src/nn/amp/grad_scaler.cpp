@@ -58,7 +58,14 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
         return;  // Already unscaled
     }
 
-    const float inv_scale = 1.0f / scale_;
+    // U.8: build inv_scale in Float32. For scale = 2^17 the F16
+    // representation of 1/scale ≈ 7.6e-6 is denormal (rounds to zero),
+    // so the F16/BF16 path below ALWAYS upcasts the grad to Float32,
+    // multiplies by an F32 inv_scale tensor, then casts back to the grad
+    // dtype. Mirrors PyTorch's _amp_foreach_non_finite_check_and_unscale_,
+    // which always runs the unscale arithmetic in F32 regardless of grad
+    // dtype.
+    const float inv_scale_f32 = 1.0f / scale_;
 
     // Unscale all parameter gradients
     for (auto& param : optimizer.parameters()) {
@@ -71,9 +78,21 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             continue;
         }
 
-        // Clone gradient before modifying to avoid corrupting shared gradient data
-        // (e.g., when retain_graph=true and backward is called multiple times)
-        param->set_grad(grad->clone() * inv_scale);
+        const DType grad_dt = grad->dtype();
+        // Clone gradient before modifying to avoid corrupting shared gradient
+        // data (e.g., when retain_graph=true and backward is called multiple
+        // times).
+        if (grad_dt == DType::Float16 || grad_dt == DType::BFloat16) {
+            // U.8: upcast to F32 for the multiply, then cast back.
+            auto inv_scale = full({1}, inv_scale_f32,
+                                  DType::Float32, grad->device());
+            Tensor unscaled = grad->to(DType::Float32) * inv_scale;
+            param->set_grad(unscaled.to(grad_dt));
+        } else {
+            auto inv_scale = full({1}, inv_scale_f32,
+                                  grad_dt, grad->device());
+            param->set_grad(grad->clone() * inv_scale);
+        }
     }
 
     has_unscaled_ = true;

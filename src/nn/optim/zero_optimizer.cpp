@@ -7,6 +7,7 @@
 #include "tenzor/nn/optim/gradient_utils.hpp"
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"  // V.30: optim_state_dtype helper
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/utils/log.hpp"
 #include "tenzor/ops/math.hpp"
@@ -970,8 +971,14 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
         // every parameter's contribution. This is exactly the global flat buffer slice
         // [rank_starts[rank], rank_starts[rank+1]). Use the dtype of the first param as
         // the state dtype unless overridden — same rule as ParamLevel.
+        // V.30: when the user doesn't pass state_dtype, default to F32 for
+        // half-precision params (R.16 master-weights invariant) instead of
+        // mirroring the param dtype — otherwise momentum/variance underflow
+        // for F16 eps=1e-8 and BF16 momentum erodes.
         DType state_dtype = config_.state_dtype.value_or(
-            !parameters_.empty() ? parameters_[0]->tensor().dtype() : DType::Float32);
+            !parameters_.empty()
+                ? optim_state_dtype(parameters_[0]->tensor().dtype())
+                : DType::Float32);
 
         partition.momentum.assign(1, zeros({slice_n}, state_dtype, dev));
         partition.variance.assign(1, zeros({slice_n}, state_dtype, dev));
@@ -1147,9 +1154,11 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
     for (size_t i = 0; i < partition.params.size(); ++i) {
         const auto& param = partition.params[i];
         const Tensor& p = param->tensor();
-        // Resolve effective state dtype: caller can override via config_.state_dtype, else
-        // match the parameter dtype (legacy behaviour).
-        DType state_dtype = config_.state_dtype.value_or(p.dtype());
+        // V.30: caller can override via config_.state_dtype; otherwise honour the
+        // R.16 master-weights invariant (Float32 state when the param is F16/BF16).
+        // Prior behaviour mirrored the param dtype, which underflows for F16
+        // eps=1e-8 and erodes BF16 momentum after ~1k steps.
+        DType state_dtype = config_.state_dtype.value_or(optim_state_dtype(p.dtype()));
 
         // Momentum and variance live in `state_dtype` so that fp16/bf16 training can keep
         // optimizer-state precision in fp32 without doubling the parameter storage. zeros() is
@@ -3960,14 +3969,15 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
 
             // Resize momentum / variance to match current (sliced) shape if the
             // existing allocation is mis-sized.
+            // V.30: default to F32 for half-precision params (R.16 invariant).
             if (i < partition.momentum.size()
                 && partition.momentum[i].numel() != current.numel()) {
-                DType state_dtype = config_.state_dtype.value_or(current.dtype());
+                DType state_dtype = config_.state_dtype.value_or(optim_state_dtype(current.dtype()));
                 partition.momentum[i] = zeros(shape, state_dtype, dev);
             }
             if (i < partition.variance.size()
                 && partition.variance[i].numel() != current.numel()) {
-                DType state_dtype = config_.state_dtype.value_or(current.dtype());
+                DType state_dtype = config_.state_dtype.value_or(optim_state_dtype(current.dtype()));
                 partition.variance[i] = zeros(shape, state_dtype, dev);
             }
 

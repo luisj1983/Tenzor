@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/asgd.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 
 #include <cmath>
@@ -61,30 +62,38 @@ auto ASGD::step_impl() -> void {
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
 
+        // R.16: half-precision params use Float32 ax buffer; run math in
+        // state dtype and cast back on assignment.
+        const DType param_dt = param_tensor.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         // Use dtype-appropriate scalar tensors to preserve Float64 precision
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param_tensor.dtype(), param_tensor.device());
+            return full({1}, value, state_dt, param_tensor.device());
         };
 
-        auto grad = grad_tensor.clone();
+        Tensor param_hi = needs_upcast ? param_tensor.to(state_dt) : param_tensor;
+        Tensor grad = needs_upcast ? grad_tensor.to(state_dt) : grad_tensor.clone();
 
         // Weight decay (L2 regularization applied to gradient)
         if (hp.weight_decay > 0.0) {
-            grad = grad + param_tensor * scalar(hp.weight_decay);
+            grad = grad + param_hi * scalar(hp.weight_decay);
         }
 
         // Compute step-dependent learning rate: eta_t = lr / (1 + lambd * lr * t)^alpha
         double eta = hp.lr / std::pow(1.0 + hp.lambd * hp.lr * static_cast<double>(step_count_), hp.alpha);
 
         // SGD update with decayed learning rate
-        param_tensor = param_tensor - grad * scalar(eta);
+        param_hi = param_hi - grad * scalar(eta);
+        param_tensor = needs_upcast ? param_hi.to(param_dt) : param_hi;
 
         // Update running average after t0 steps
         // mu_t = max(1, t - t0)
         // ax_t = (1 - 1/mu_t) * ax_{t-1} + (1/mu_t) * x_t
         double mu = std::max(1.0, static_cast<double>(step_count_) - hp.t0);
         double inv_mu = 1.0 / mu;
-        ax_buffers_[i] = ax_buffers_[i] * scalar(1.0 - inv_mu) + param_tensor * scalar(inv_mu);
+        ax_buffers_[i] = ax_buffers_[i] * scalar(1.0 - inv_mu) + param_hi * scalar(inv_mu);
     }
 
     step_count_++;
@@ -102,8 +111,11 @@ auto ASGD::initialize_buffers() -> void {
     ax_buffers_.clear();
     for (auto& param : parameters_) {
         if (param) {
-            // Initialize averaged parameters as a copy of the initial parameters
-            ax_buffers_.push_back(param->tensor().clone());
+            // R.16: half-precision params get Float32 ax buffer (upcast on
+            // init so the running average doesn't erode in BF16).
+            const auto& pt = param->tensor();
+            const DType state_dt = optim_state_dtype(pt.dtype());
+            ax_buffers_.push_back(state_dt == pt.dtype() ? pt.clone() : pt.to(state_dt));
         }
     }
 }
@@ -116,7 +128,10 @@ auto ASGD::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            ax_buffers_.push_back(param->tensor().clone());
+            // R.16: see ASGD::initialize_buffers for dtype rationale.
+            const auto& pt = param->tensor();
+            const DType state_dt = optim_state_dtype(pt.dtype());
+            ax_buffers_.push_back(state_dt == pt.dtype() ? pt.clone() : pt.to(state_dt));
         } else {
             ax_buffers_.push_back(Tensor{});
         }
@@ -197,11 +212,14 @@ auto ASGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
         step_count_ = state.at("step_count").data<int64_t>()[0];
     }
 
-    // Load averaged parameter buffers
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < ax_buffers_.size(); ++i) {
         std::string ax_key = "ax_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(ax_key)) {
-            ax_buffers_[i] = state.at(ax_key).clone();
+            ax_buffers_[i] = state.at(ax_key).to(state_dt);
         }
     }
 }

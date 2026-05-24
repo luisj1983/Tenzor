@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/sgd.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/foreach.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -66,6 +67,8 @@ auto SGD::step_impl() -> void {
         const Tensor& grad_tensor = *param.grad();
 
         // ── CUDA path: fused single-kernel dispatch ──────────────────────────
+        // R.16: fused CUDA kernel only handles Float32/Float64 (half-precision
+        // params have Float32 state via make_optim_state and need the upcast path).
         if (param_tensor.device().type == Device::Type::CUDA &&
             (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
             std::vector<Tensor> inputs = {param_tensor, grad_tensor};
@@ -79,6 +82,36 @@ auto SGD::step_impl() -> void {
             attrs.set(AttrKey::Dampening, hp.dampening);
             attrs.set(AttrKey::Nesterov, hp.nesterov);
             dispatch(OpId::FusedSGDStep, inputs, attrs);
+            continue;
+        }
+
+        // R.16: half-precision params hold Float32 velocity buffers; run
+        // the SGD update in Float32 and downcast on write-back. The foreach
+        // batch path below requires uniform dtype between param/grad/velocity
+        // so we handle halves inline.
+        const DType param_dt = param_tensor.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        if (state_dt != param_dt) {
+            auto scalar = [&](double value) -> Tensor {
+                return full({1}, value, state_dt, param_tensor.device());
+            };
+            Tensor param_hi = param_tensor.to(state_dt);
+            Tensor grad_hi  = grad_tensor.to(state_dt);
+            if (hp.weight_decay > 0.0) {
+                grad_hi = grad_hi + param_hi * scalar(hp.weight_decay);
+            }
+            Tensor updated;
+            if (hp.momentum > 0.0) {
+                velocity_buffers_[i] = velocity_buffers_[i] * scalar(hp.momentum)
+                                     + grad_hi * scalar(1.0 - hp.dampening);
+                Tensor eff_grad = hp.nesterov
+                    ? grad_hi + velocity_buffers_[i] * scalar(hp.momentum)
+                    : velocity_buffers_[i];
+                updated = param_hi - eff_grad * scalar(hp.lr);
+            } else {
+                updated = param_hi - grad_hi * scalar(hp.lr);
+            }
+            param_tensor = updated.to(param_dt);
             continue;
         }
 
@@ -158,7 +191,8 @@ auto SGD::initialize_buffers() -> void {
     velocity_buffers_.clear();
     for (auto& param : parameters_) {
         if (param) {
-            velocity_buffers_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 velocity buffers.
+            velocity_buffers_.push_back(make_optim_state(param->tensor()));
         }
     }
 }
@@ -171,7 +205,8 @@ auto SGD::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            velocity_buffers_.push_back(zeros_like(param->tensor()));
+            // R.16: see SGD::initialize_buffers for dtype rationale.
+            velocity_buffers_.push_back(make_optim_state(param->tensor()));
         } else {
             velocity_buffers_.push_back(Tensor{});
         }
@@ -253,11 +288,15 @@ auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) 
         nesterov_ = state.at("nesterov").data<int64_t>()[0] != 0;
     }
 
-    // Load velocity buffers
+    // Load velocity buffers.
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
         std::string velocity_key = "velocity_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(velocity_key)) {
-            velocity_buffers_[i] = state.at(velocity_key).clone();
+            velocity_buffers_[i] = state.at(velocity_key).to(state_dt);
         }
     }
 }

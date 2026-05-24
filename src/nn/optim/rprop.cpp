@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/rprop.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/indexing.hpp"
@@ -61,15 +62,22 @@ auto Rprop::step_impl() -> void {
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
 
+        // R.16: half-precision params use Float32 state buffers. Run math
+        // in state_dt; cast param/grad on entry, cast result back on write.
+        const DType param_dt = param_tensor.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
+
         auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param_tensor.dtype(), param_tensor.device());
+            return full({1}, value, state_dt, param_tensor.device());
         };
 
-        auto grad = grad_tensor.clone();
+        Tensor param_hi = needs_upcast ? param_tensor.to(state_dt) : param_tensor;
+        Tensor grad = needs_upcast ? grad_tensor.to(state_dt) : grad_tensor.clone();
 
         if (first_step_) {
             // First step: just use initial lr as step size, apply update
-            param_tensor = param_tensor - sign(grad) * step_sizes_[i];
+            param_hi = param_hi - sign(grad) * step_sizes_[i];
         } else {
             // Compute element-wise product of current and previous gradients
             auto sign_change = grad * prev_grads_[i];
@@ -92,11 +100,13 @@ auto Rprop::step_impl() -> void {
             grad = where(neg_mask, scalar(0.0), grad);
 
             // Update parameters: x -= sign(grad) * step_size
-            param_tensor = param_tensor - sign(grad) * step_sizes_[i];
+            param_hi = param_hi - sign(grad) * step_sizes_[i];
         }
 
         // Store current gradient for next step
         prev_grads_[i] = grad.clone();
+
+        param_tensor = needs_upcast ? param_hi.to(param_dt) : param_hi;
 
         // Note: hp.lr is captured for API symmetry with other optimisers but
         // Rprop's update does not consume the LR directly during a step --
@@ -120,9 +130,13 @@ auto Rprop::initialize_buffers() -> void {
     prev_grads_.clear();
     for (auto& param : parameters_) {
         if (param) {
+            // R.16: half-precision params get Float32 state buffers.
+            const auto& pt = param->tensor();
+            const DType state_dt = optim_state_dtype(pt.dtype());
+            std::vector<int64_t> shape(pt.shape().begin(), pt.shape().end());
             // Initialize step sizes to the initial learning rate
-            step_sizes_.push_back(full_like(param->tensor(), lr_));
-            prev_grads_.push_back(zeros_like(param->tensor()));
+            step_sizes_.push_back(full(shape, lr_, state_dt, pt.device()));
+            prev_grads_.push_back(make_optim_state(pt));
         }
     }
 }
@@ -136,8 +150,12 @@ auto Rprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void 
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            step_sizes_.push_back(full_like(param->tensor(), lr_));
-            prev_grads_.push_back(zeros_like(param->tensor()));
+            // R.16: see Rprop::initialize_buffers for dtype rationale.
+            const auto& pt = param->tensor();
+            const DType state_dt = optim_state_dtype(pt.dtype());
+            std::vector<int64_t> shape(pt.shape().begin(), pt.shape().end());
+            step_sizes_.push_back(full(shape, lr_, state_dt, pt.device()));
+            prev_grads_.push_back(make_optim_state(pt));
         } else {
             step_sizes_.push_back(Tensor{});
             prev_grads_.push_back(Tensor{});
@@ -221,19 +239,24 @@ auto Rprop::load_state_dict(const std::unordered_map<std::string, Tensor>& state
         first_step_ = state.at("first_step").data<int64_t>()[0] != 0;
     }
 
-    // Load step size buffers
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < step_sizes_.size(); ++i) {
         std::string key = "step_size_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(key)) {
-            step_sizes_[i] = state.at(key).clone();
+            step_sizes_[i] = state.at(key).to(state_dt);
         }
     }
 
-    // Load previous gradient buffers
     for (size_t i = 0; i < prev_grads_.size(); ++i) {
         std::string key = "prev_grad_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(key)) {
-            prev_grads_[i] = state.at(key).clone();
+            prev_grads_[i] = state.at(key).to(state_dt);
         }
     }
 }

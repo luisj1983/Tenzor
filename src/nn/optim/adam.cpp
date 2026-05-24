@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/adam.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/foreach.hpp"
@@ -12,28 +13,8 @@
 
 namespace tenzor::optim {
 
-// R.16: Adam-family optimisers keep moment buffers in Float32 when the
-// parameter is a half-precision dtype (Float16 / BFloat16). Storing
-// exp_avg / exp_avg_sq at the parameter's dtype underflows for eps=1e-8 in
-// Float16 and erodes the BFloat16 mantissa to ~3 bits of effective
-// precision after a few thousand steps. Mirrors PyTorch's master-weights
-// convention used by AMP: the parameter stays in low precision, the
-// optimiser state is upcast. param/grad are upcast inside the step lambda
-// and cast back to param dtype on assignment.
-namespace {
-inline auto optim_state_dtype(DType param_dtype) -> DType {
-    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
-        return DType::Float32;
-    }
-    return param_dtype;
-}
-inline auto make_optim_state(const Tensor& param) -> Tensor {
-    DType state_dt = optim_state_dtype(param.dtype());
-    if (state_dt == param.dtype()) return zeros_like(param);
-    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
-    return zeros(shape, state_dt, param.device());
-}
-} // namespace
+// R.16 master-weights helpers (optim_state_dtype / make_optim_state) are
+// shared across all optimisers via include/tenzor/nn/optim/master_weights.hpp.
 
 // Adam::Adam implementation
 Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
@@ -416,25 +397,33 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
             std::to_string(exp_avg_.size()) + " parameters");
     }
 
-    // Load momentum buffers
+    // V.27: cast to the R.16 master-weights dtype on load. Pre-R.16
+    // checkpoints stored half-precision buffers; restoring them as-is
+    // would silently break the master-weights invariant on the next step.
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string exp_avg_key = "exp_avg_" + std::to_string(i);
         std::string exp_avg_sq_key = "exp_avg_sq_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
 
         if (state.count(exp_avg_key)) {
-            exp_avg_[i] = state.at(exp_avg_key).clone();
+            exp_avg_[i] = state.at(exp_avg_key).to(state_dt);
         }
 
         if (state.count(exp_avg_sq_key)) {
-            exp_avg_sq_[i] = state.at(exp_avg_sq_key).clone();
+            exp_avg_sq_[i] = state.at(exp_avg_sq_key).to(state_dt);
         }
     }
 
     // Load AMSGrad max second moment buffers
     for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
         std::string key = "max_exp_avg_sq_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(key)) {
-            max_exp_avg_sq_[i] = state.at(key).clone();
+            max_exp_avg_sq_[i] = state.at(key).to(state_dt);
         }
     }
 }
@@ -717,25 +706,31 @@ auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state
         amsgrad_ = state.at("amsgrad").data<int64_t>()[0] != 0;
     }
 
-    // Load momentum buffers
+    // V.27: cast to the R.16 master-weights dtype on load (see Adam::load_state_dict).
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string exp_avg_key = "exp_avg_" + std::to_string(i);
         std::string exp_avg_sq_key = "exp_avg_sq_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
 
         if (state.count(exp_avg_key)) {
-            exp_avg_[i] = state.at(exp_avg_key).clone();
+            exp_avg_[i] = state.at(exp_avg_key).to(state_dt);
         }
 
         if (state.count(exp_avg_sq_key)) {
-            exp_avg_sq_[i] = state.at(exp_avg_sq_key).clone();
+            exp_avg_sq_[i] = state.at(exp_avg_sq_key).to(state_dt);
         }
     }
 
     // Load AMSGrad max second moment buffers
     for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
         std::string key = "max_exp_avg_sq_" + std::to_string(i);
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         if (state.count(key)) {
-            max_exp_avg_sq_[i] = state.at(key).clone();
+            max_exp_avg_sq_[i] = state.at(key).to(state_dt);
         }
     }
 }

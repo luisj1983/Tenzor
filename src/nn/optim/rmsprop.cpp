@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/optim/rmsprop.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -70,17 +71,17 @@ auto RMSprop::initialize_buffers() -> void {
         if (!param) continue;
         const auto& param_data = param->tensor();
 
-        // Initialize square_avg (E[g^2]) to zeros
-        square_avg_.push_back(zeros_like(param_data));
+        // R.16: half-precision params get Float32 state buffers.
+        square_avg_.push_back(make_optim_state(param_data));
 
         // Initialize grad_avg (E[g]) if centered
         if (centered_) {
-            grad_avg_.push_back(zeros_like(param_data));
+            grad_avg_.push_back(make_optim_state(param_data));
         }
 
         // Initialize momentum buffer if momentum > 0
         if (momentum_ > 0.0) {
-            momentum_buffer_.push_back(zeros_like(param_data));
+            momentum_buffer_.push_back(make_optim_state(param_data));
         }
     }
 }
@@ -98,12 +99,13 @@ auto RMSprop::on_parameters_appended_(size_t old_count, size_t new_count) -> voi
         const auto& param = parameters_[i];
         if (param) {
             const auto& param_data = param->tensor();
-            square_avg_.push_back(zeros_like(param_data));
+            // R.16: see RMSprop::initialize_buffers for dtype rationale.
+            square_avg_.push_back(make_optim_state(param_data));
             if (centered_) {
-                grad_avg_.push_back(zeros_like(param_data));
+                grad_avg_.push_back(make_optim_state(param_data));
             }
             if (momentum_ > 0.0) {
-                momentum_buffer_.push_back(zeros_like(param_data));
+                momentum_buffer_.push_back(make_optim_state(param_data));
             }
         } else {
             square_avg_.push_back(Tensor{});
@@ -147,9 +149,15 @@ auto RMSprop::step_impl() -> void {
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
+        const DType param_dt = param_data_orig.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
 
-        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip
-        if (original_device.type == Device::Type::Vulkan &&
+        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // R.16: skip the fused path for half-precision params — state lives
+        // at F32, the fused kernel expects state at param dtype.
+        if (!needs_upcast &&
+            original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
             std::vector<Tensor> inputs = {grad_orig, param->tensor(), square_avg_[i]};
@@ -172,8 +180,10 @@ auto RMSprop::step_impl() -> void {
             continue;
         }
 
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
-        if (original_device.type == Device::Type::CUDA &&
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // R.16: skip the fused path for half-precision params (see above).
+        if (!needs_upcast &&
+            original_device.type == Device::Type::CUDA &&
             grad_orig.device().type == Device::Type::CUDA) {
 
             // CUDA registry expects: [param, grad, square_avg, grad_avg?, momentum_buffer?]
@@ -197,42 +207,50 @@ auto RMSprop::step_impl() -> void {
             continue;
         }
 
-        // Generic fallback using tensor-level ops (device-agnostic)
-        Tensor grad = grad_orig;
-        Tensor param_data = param_data_orig;
-        float alpha = static_cast<float>(hp.alpha);
-        float eps = static_cast<float>(hp.eps);
-        float lr = static_cast<float>(hp.lr);
+        // Generic fallback using tensor-level ops (device-agnostic).
+        // R.16: arithmetic runs in state_dt (Float32 for half-precision
+        // params); param/grad upcast on entry, result downcast on write.
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, state_dt, param_data_orig.device());
+        };
+        Tensor param_data = needs_upcast ? param_data_orig.to(state_dt) : param_data_orig;
+        Tensor grad = needs_upcast ? grad_orig.to(state_dt) : grad_orig;
 
         // Apply weight decay: g = g + weight_decay * param
         if (hp.weight_decay > 0.0) {
-            grad = grad + param_data * static_cast<float>(hp.weight_decay);
+            grad = grad + param_data * scalar(hp.weight_decay);
         }
 
         // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
-        square_avg_[i] = square_avg_[i] * alpha + grad * grad * (1.0f - alpha);
+        square_avg_[i] = square_avg_[i] * scalar(hp.alpha)
+                       + grad * grad * scalar(1.0 - hp.alpha);
 
         // Compute denominator
         Tensor denom;
         if (hp.centered) {
             // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-            grad_avg_[i] = grad_avg_[i] * alpha + grad * (1.0f - alpha);
+            grad_avg_[i] = grad_avg_[i] * scalar(hp.alpha)
+                         + grad * scalar(1.0 - hp.alpha);
             // denom = sqrt(v - m^2 + eps)
-            denom = sqrt(square_avg_[i] - grad_avg_[i] * grad_avg_[i] + eps);
+            denom = sqrt(square_avg_[i] - grad_avg_[i] * grad_avg_[i] + scalar(hp.eps));
         } else {
-            denom = sqrt(square_avg_[i] + eps);
+            denom = sqrt(square_avg_[i] + scalar(hp.eps));
         }
 
         Tensor new_param;
         if (hp.momentum > 0.0) {
-            float mom = static_cast<float>(hp.momentum);
             // buf = momentum * buf + g / denom
-            momentum_buffer_[i] = momentum_buffer_[i] * mom + grad / denom;
+            momentum_buffer_[i] = momentum_buffer_[i] * scalar(hp.momentum)
+                                + grad / denom;
             // param -= lr * buf
-            new_param = param_data - momentum_buffer_[i] * lr;
+            new_param = param_data - momentum_buffer_[i] * scalar(hp.lr);
         } else {
             // param -= lr * g / denom
-            new_param = param_data - grad / denom * lr;
+            new_param = param_data - grad / denom * scalar(hp.lr);
+        }
+
+        if (needs_upcast) {
+            new_param = new_param.to(param_dt);
         }
 
         // Copy result into existing tensor storage (preserves pointer stability on CPU)
@@ -361,23 +379,28 @@ auto RMSprop::load_state_dict(const std::unordered_map<std::string, Tensor>& sta
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
+        // V.27: cast to R.16 master-weights dtype on load so half-precision
+        // params restore F32 state, not the checkpoint's possibly-F16 dtype.
+        const DType state_dt = parameters_[i]
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
 
         auto it = state.find(prefix + ".square_avg");
         if (it != state.end()) {
-            square_avg_[i] = it->second;
+            square_avg_[i] = it->second.to(state_dt);
         }
 
         if (centered_) {
             it = state.find(prefix + ".grad_avg");
             if (it != state.end() && i < grad_avg_.size()) {
-                grad_avg_[i] = it->second;
+                grad_avg_[i] = it->second.to(state_dt);
             }
         }
 
         if (momentum_ > 0.0) {
             it = state.find(prefix + ".momentum_buffer");
             if (it != state.end() && i < momentum_buffer_.size()) {
-                momentum_buffer_[i] = it->second;
+                momentum_buffer_[i] = it->second.to(state_dt);
             }
         }
     }

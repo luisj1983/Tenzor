@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -60,11 +61,9 @@ auto Adadelta::initialize_buffers() -> void {
         if (!param) continue;
         const auto& param_data = param->tensor();
 
-        // Initialize E[g^2] to zeros
-        square_avg_.push_back(zeros_like(param_data));
-
-        // Initialize E[Δθ^2] to zeros
-        acc_delta_.push_back(zeros_like(param_data));
+        // R.16: half-precision params get Float32 state buffers.
+        square_avg_.push_back(make_optim_state(param_data));
+        acc_delta_.push_back(make_optim_state(param_data));
     }
 }
 
@@ -77,8 +76,9 @@ auto Adadelta::on_parameters_appended_(size_t old_count, size_t new_count) -> vo
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
-            square_avg_.push_back(zeros_like(param->tensor()));
-            acc_delta_.push_back(zeros_like(param->tensor()));
+            // R.16: half-precision params get Float32 state buffers.
+            square_avg_.push_back(make_optim_state(param->tensor()));
+            acc_delta_.push_back(make_optim_state(param->tensor()));
         } else {
             square_avg_.push_back(Tensor{});
             acc_delta_.push_back(Tensor{});
@@ -120,13 +120,15 @@ auto Adadelta::step_impl() -> void {
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
+        const DType param_dt = param_data_orig.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
 
         // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip.
-        // Input order matches the CUDA/CPU contract [param, grad, square_avg,
-        // acc_delta]; the Vulkan dispatch remaps to shader-binding order
-        // internally. Previous [grad, param, ...] order was a mismatch with
-        // dispatchFusedAdadeltaStep's expected layout.
-        if (original_device.type == Device::Type::Vulkan &&
+        // R.16: skip the fused path for half-precision params — state lives
+        // at F32 while the fused kernel expects state at param dtype.
+        if (!needs_upcast &&
+            original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
             std::vector<Tensor> inputs = {
@@ -147,8 +149,10 @@ auto Adadelta::step_impl() -> void {
             continue;
         }
 
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
-        if (original_device.type == Device::Type::CUDA &&
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // R.16: skip the fused path for half-precision params.
+        if (!needs_upcast &&
+            original_device.type == Device::Type::CUDA &&
             grad_orig.device().type == Device::Type::CUDA) {
 
             // CUDA registry expects: [param, grad, square_avg, acc_delta]
@@ -167,30 +171,36 @@ auto Adadelta::step_impl() -> void {
             continue;
         }
 
-        // Generic fallback using tensor-level ops (device-agnostic)
-        Tensor grad = grad_orig;
-        Tensor param_data = param_data_orig;
-        float rho = static_cast<float>(hp.rho);
-        float eps = static_cast<float>(hp.eps);
-        float lr = static_cast<float>(hp.lr);
+        // Generic fallback using tensor-level ops (device-agnostic).
+        // R.16: run in state_dt (Float32 for half-precision params).
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, state_dt, param_data_orig.device());
+        };
+        Tensor param_data = needs_upcast ? param_data_orig.to(state_dt) : param_data_orig;
+        Tensor grad = needs_upcast ? grad_orig.to(state_dt) : grad_orig;
 
         // Apply weight decay: g = g + weight_decay * param
         if (hp.weight_decay > 0.0) {
-            grad = grad + param_data * static_cast<float>(hp.weight_decay);
+            grad = grad + param_data * scalar(hp.weight_decay);
         }
 
         // Accumulate squared gradient: v = rho * v + (1 - rho) * g^2
-        square_avg_[i] = square_avg_[i] * rho + grad * grad * (1.0f - rho);
+        square_avg_[i] = square_avg_[i] * scalar(hp.rho)
+                       + grad * grad * scalar(1.0 - hp.rho);
 
         // Compute RMS of gradients and updates
-        auto std_grad = sqrt(square_avg_[i] + eps);
-        auto std_delta = sqrt(acc_delta_[i] + eps);
+        auto std_grad = sqrt(square_avg_[i] + scalar(hp.eps));
+        auto std_delta = sqrt(acc_delta_[i] + scalar(hp.eps));
 
         // Compute parameter update: delta = -(std_delta / std_grad) * g
-        auto delta = (std_delta / std_grad) * grad * (-1.0f);
+        auto delta = (std_delta / std_grad) * grad * scalar(-1.0);
 
         // Apply update: param += lr * delta
-        auto new_param = param_data + delta * lr;
+        auto new_param = param_data + delta * scalar(hp.lr);
+
+        if (needs_upcast) {
+            new_param = new_param.to(param_dt);
+        }
 
         // Copy result into existing tensor storage (preserves pointer stability on CPU)
         if (original_device.type == Device::Type::CPU) {
@@ -202,7 +212,8 @@ auto Adadelta::step_impl() -> void {
         }
 
         // Accumulate squared update: acc = rho * acc + (1 - rho) * delta^2
-        acc_delta_[i] = acc_delta_[i] * rho + delta * delta * (1.0f - rho);
+        acc_delta_[i] = acc_delta_[i] * scalar(hp.rho)
+                      + delta * delta * scalar(1.0 - hp.rho);
     }
 }
 
@@ -291,17 +302,21 @@ auto Adadelta::load_state_dict(const std::unordered_map<std::string, Tensor>& st
     eps_          = adadelta_get_f64(state, "eps",          eps_);
     weight_decay_ = adadelta_get_f64(state, "weight_decay", weight_decay_);
 
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
+        const DType state_dt = parameters_[i]
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
 
         auto it = state.find(prefix + ".square_avg");
         if (it != state.end()) {
-            square_avg_[i] = it->second;
+            square_avg_[i] = it->second.to(state_dt);
         }
 
         it = state.find(prefix + ".acc_delta");
         if (it != state.end()) {
-            acc_delta_[i] = it->second;
+            acc_delta_[i] = it->second.to(state_dt);
         }
     }
 }

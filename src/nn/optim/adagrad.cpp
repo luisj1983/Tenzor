@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/optim/adagrad.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -68,23 +69,26 @@ auto Adagrad::initialize_buffers() -> void {
         if (!param) continue;
         const auto& param_data = param->tensor();
         auto original_device = param_data.device();
+        // R.16: half-precision params get Float32 state.
+        const DType state_dt = optim_state_dtype(param_data.dtype());
 
         // Initialize accumulator G_0
         if (initial_accumulator_value_ == 0.0) {
-            sum_.push_back(zeros_like(param_data));
+            sum_.push_back(make_optim_state(param_data));
         } else {
-            // Create on CPU for data access, then move to target device
+            // Create on CPU for data access, then move to target device.
+            // Use the state dtype so half-precision params hold F32 accumulators.
             std::vector<int64_t> shape_vec(param_data.shape().begin(), param_data.shape().end());
-            Tensor accumulator_cpu = zeros(shape_vec, param_data.dtype(), Device::cpu());
+            Tensor accumulator_cpu = zeros(shape_vec, state_dt, Device::cpu());
             int64_t numel = accumulator_cpu.numel();
-            DType dtype = param_data.dtype();
 
-            if (dtype == DType::Float64) {
+            if (state_dt == DType::Float64) {
                 double* acc_ptr = accumulator_cpu.data<double>();
                 for (int64_t i = 0; i < numel; ++i) {
                     acc_ptr[i] = initial_accumulator_value_;
                 }
             } else {
+                // Float32 (covers F16/BF16 R.16 master state too).
                 float* acc_ptr = accumulator_cpu.data<float>();
                 for (int64_t i = 0; i < numel; ++i) {
                     acc_ptr[i] = static_cast<float>(initial_accumulator_value_);
@@ -108,10 +112,13 @@ auto Adagrad::on_parameters_appended_(size_t old_count, size_t new_count) -> voi
             continue;
         }
         const auto& param_data = param->tensor();
+        const DType state_dt = optim_state_dtype(param_data.dtype());
         if (initial_accumulator_value_ == 0.0) {
-            sum_.push_back(zeros_like(param_data));
+            sum_.push_back(make_optim_state(param_data));
         } else {
-            sum_.push_back(full_like(param_data, initial_accumulator_value_));
+            // R.16: half-precision params need Float32 accumulators.
+            std::vector<int64_t> shape_vec(param_data.shape().begin(), param_data.shape().end());
+            sum_.push_back(full(shape_vec, initial_accumulator_value_, state_dt, param_data.device()));
         }
     }
 }
@@ -162,9 +169,15 @@ auto Adagrad::step_impl() -> void {
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
+        const DType param_dt = param_data_orig.dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
+        const bool needs_upcast = (state_dt != param_dt);
 
-        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip
-        if (original_device.type == Device::Type::Vulkan &&
+        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // R.16: skip the fused path for half-precision params — state lives
+        // at F32 while the fused kernel expects state at param dtype.
+        if (!needs_upcast &&
+            original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
             std::vector<Tensor> inputs = {grad_orig, param->tensor(), sum_[i]};
@@ -181,8 +194,10 @@ auto Adagrad::step_impl() -> void {
             continue;
         }
 
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
-        if (original_device.type == Device::Type::CUDA &&
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // R.16: skip the fused path for half-precision params.
+        if (!needs_upcast &&
+            original_device.type == Device::Type::CUDA &&
             grad_orig.device().type == Device::Type::CUDA) {
 
             // CUDA registry expects: [param, grad, sum_sq]
@@ -205,21 +220,31 @@ auto Adagrad::step_impl() -> void {
             continue;
         }
 
-        // Generic fallback using tensor-level ops (device-agnostic)
-        Tensor grad = grad_orig;
-        Tensor param_data = param_data_orig;
+        // Generic fallback using tensor-level ops (device-agnostic).
+        // V.25 + R.16: use dtype-appropriate scalar tensors at state_dt
+        // (Float32 for half-precision params) — the prior code force-cast
+        // hyperparams via static_cast<float>, losing Float64 precision.
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, state_dt, param_data_orig.device());
+        };
+        Tensor param_data = needs_upcast ? param_data_orig.to(state_dt) : param_data_orig;
+        Tensor grad = needs_upcast ? grad_orig.to(state_dt) : grad_orig;
 
         // Apply weight decay: g = g + weight_decay * param
         if (hp.weight_decay > 0.0) {
-            grad = grad + param_data * static_cast<float>(hp.weight_decay);
+            grad = grad + param_data * scalar(hp.weight_decay);
         }
 
         // Update accumulator: G_t = G_{t-1} + g_t^2
         sum_[i] = sum_[i] + grad * grad;
 
         // Update parameters: theta = theta - lr * g / (sqrt(G) + eps)
-        auto std_dev = sqrt(sum_[i]) + static_cast<float>(hp.eps);
-        auto new_param = param_data - grad * static_cast<float>(hp.lr) / std_dev;
+        auto std_dev = sqrt(sum_[i]) + scalar(hp.eps);
+        auto new_param = param_data - grad * scalar(hp.lr) / std_dev;
+
+        if (needs_upcast) {
+            new_param = new_param.to(param_dt);
+        }
 
         // Copy result into existing tensor storage (preserves pointer stability on CPU)
         if (original_device.type == Device::Type::CPU) {
@@ -334,11 +359,15 @@ auto Adagrad::load_state_dict(const std::unordered_map<std::string, Tensor>& sta
     initial_accumulator_value_ = adagrad_get_f64(state, "initial_accumulator_value", initial_accumulator_value_);
     eps_                       = adagrad_get_f64(state, "eps",                       eps_);
 
+    // V.27: cast to R.16 master-weights dtype on load.
     for (size_t i = 0; i < parameters_.size(); ++i) {
         std::string prefix = "param_" + std::to_string(i);
+        const DType state_dt = parameters_[i]
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
         auto it = state.find(prefix + ".sum");
         if (it != state.end()) {
-            sum_[i] = it->second;
+            sum_[i] = it->second.to(state_dt);
         }
     }
 
