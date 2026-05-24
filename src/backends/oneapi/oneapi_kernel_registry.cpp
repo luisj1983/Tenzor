@@ -2068,7 +2068,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::conv2d_backward_bias(inputs[0], get_q(inputs))};
         });
 
-    // Conv1d: wraps Conv2d by unsqueezing height dimension [N,C,L] -> [N,C,1,L]
+    // Conv1d: wraps Conv2d by unsqueezing height dimension [N,C,L] -> [N,C,1,L].
+    // Audit U.4: project scalar Stride/Padding/Dilation onto the W axis
+    // only; pin H to neutral (stride=1, padding=0, dilation=1). See the
+    // CUDA registry for the full rationale.
     table.register_kernel(OpId::Conv1dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto input_4d = inputs[0].unsqueeze(2);
@@ -2076,7 +2079,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> conv2d_inputs = inputs.size() > 2
                 ? std::vector<Tensor>{input_4d, weight_4d, inputs[2]}
                 : std::vector<Tensor>{input_4d, weight_4d};
-            auto result = tenzor::dispatch(OpId::Conv2dForward, conv2d_inputs, attrs);
+            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto result = tenzor::dispatch(OpId::Conv2dForward, conv2d_inputs, conv2d_attrs);
             return {result[0].squeeze(2)};
         });
 
@@ -2086,7 +2090,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto input_4d = inputs[1].unsqueeze(2);
             auto weight_4d = inputs[2].unsqueeze(2);
             std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-            auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, attrs);
+            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, conv2d_attrs);
             return {result[0].squeeze(2)};
         });
 
@@ -2096,15 +2101,18 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto input_4d = inputs[1].unsqueeze(2);
             auto weight_4d = inputs[2].unsqueeze(2);
             std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-            auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, attrs);
+            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, conv2d_attrs);
             return {result[0].squeeze(2)};
         });
 
     table.register_kernel(OpId::Conv1dBackwardBias,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto grad_4d = inputs[0].unsqueeze(2);
             std::vector<Tensor> conv2d_inputs = {grad_4d};
-            auto result = tenzor::dispatch(OpId::Conv2dBackwardBias, conv2d_inputs, {});
+            // U.4: project to per-axis; preserves Stream / other keys.
+            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto result = tenzor::dispatch(OpId::Conv2dBackwardBias, conv2d_inputs, conv2d_attrs);
             return {result[0]};
         });
 

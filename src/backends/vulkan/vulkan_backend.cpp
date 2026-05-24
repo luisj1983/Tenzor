@@ -872,6 +872,13 @@ auto VulkanBackend::get_device_vendor(int32_t device_id) const -> GpuVendor {
     return devices_[device_id].vendor;
 }
 
+auto VulkanBackend::has_atomic_float(int32_t device_id) const -> bool {
+    if (device_id < 0 || static_cast<size_t>(device_id) >= devices_.size()) {
+        return false;
+    }
+    return devices_[device_id].hasAtomicFloat;
+}
+
 auto VulkanBackend::recommended_workgroup_2d(GpuVendor vendor, OpKind op)
     -> std::pair<uint32_t, uint32_t> {
     // Defaults are chosen to match each vendor's subgroup width in the
@@ -1298,6 +1305,27 @@ void ensure_fp16_supported(int32_t device_id, const char* op_name) {
         throw std::runtime_error(
             std::string("[Vulkan ") + (op_name ? op_name : "?") +
             "] requires shaderFloat16 (VK_KHR_shader_float16_int8 not supported on this device)");
+    }
+}
+
+// U.5/U.6/U.7: Shared VK_EXT_shader_atomic_float capability gate for
+// vulkan_ops_*.cpp dispatchers whose compute shaders perform `atomicAdd(float)`
+// on an SSBO (grid_sample_backward, affine_grid_backward, col2im / Fold /
+// MaxUnpool, interpolate_bilinear_backward, …). Mirrors ensure_fp64_supported
+// (R.13). Queries devices_[device_id].hasAtomicFloat via the public
+// has_atomic_float() accessor.
+void ensure_atomic_float_supported(int32_t device_id, const char* op_name) {
+    auto* backend = DispatchTableRegistry::get_backend(Device::Type::Vulkan);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] Vulkan backend is not initialised; cannot query VK_EXT_shader_atomic_float");
+    }
+    auto* vk = static_cast<VulkanBackend*>(backend);
+    if (!vk->has_atomic_float(device_id)) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] requires VK_EXT_shader_atomic_float (not supported on this device)");
     }
 }
 

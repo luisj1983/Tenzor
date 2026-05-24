@@ -133,6 +133,9 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
             "dispatchGridSampleBackward (Vulkan): mode '" + mode_str +
             "' not supported. Supported: 'bilinear', 'nearest'.");
     }
+    // U.5: grid_sample_backward.comp uses atomicAdd(float) on grad_input
+    // (VK_EXT_shader_atomic_float). Fail fast on devices that don't advertise it.
+    vulkan::ensure_atomic_float_supported(input.device().index, "grid_sample_backward");
     auto in_shape = input.shape();
     auto grid_shape = grid.shape();
     int32_t N = static_cast<int32_t>(in_shape[0]);
@@ -243,6 +246,9 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
                                                const std::vector<int64_t>& size,
                                                bool align_corners) -> Tensor
 {
+    // U.6: affine_grid_backward.comp uses atomicAdd(float) on grad_theta
+    // (VK_EXT_shader_atomic_float). Fail fast on devices that don't advertise it.
+    vulkan::ensure_atomic_float_supported(grad_grid.device().index, "affine_grid_backward");
     int32_t N = static_cast<int32_t>(size[0]);
     int32_t H = static_cast<int32_t>(size[2]);
     int32_t W = static_cast<int32_t>(size[3]);

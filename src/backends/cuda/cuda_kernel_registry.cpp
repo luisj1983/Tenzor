@@ -2797,14 +2797,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 #endif
 
-    // Conv1d: wraps Conv2d by unsqueezing height dimension [N,C,L] -> [N,C,1,L]
+    // Conv1d: wraps Conv2d by unsqueezing height dimension [N,C,L] -> [N,C,1,L].
+    // Audit U.4: scalar Stride/Padding/Dilation from the 1D caller must be
+    // projected onto the W axis only; the synthetic H axis is pinned to
+    // neutral (stride=1, padding=0, dilation=1) before forwarding to
+    // Conv2d. Naive forwarding lets Conv2d's scalar reader apply the same
+    // value to both H and W, producing H_out=3 (padding=1) or rejecting
+    // the kernel (dilation=2). conv1d_to_conv2d_attrs preserves Groups,
+    // Stream, WeightShape, InputShape, etc.
     table.register_kernel(OpId::Conv1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto input_4d = inputs[0].unsqueeze(2);
         auto weight_4d = inputs[1].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = inputs.size() > 2
             ? std::vector<Tensor>{input_4d, weight_4d, inputs[2]}
             : std::vector<Tensor>{input_4d, weight_4d};
-        auto result = tenzor::dispatch(OpId::Conv2dForward, conv2d_inputs, attrs);
+        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto result = tenzor::dispatch(OpId::Conv2dForward, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
 
@@ -2813,7 +2821,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, attrs);
+        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
 
@@ -2822,14 +2831,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, attrs);
+        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
 
-    table.register_kernel(OpId::Conv1dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+    table.register_kernel(OpId::Conv1dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto grad_4d = inputs[0].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d};
-        auto result = tenzor::dispatch(OpId::Conv2dBackwardBias, conv2d_inputs, {});
+        // U.4: project to per-axis even though Conv2dBackwardBias does not
+        // currently consume stride/padding/dilation — keeps the contract
+        // honest if a future Conv2dBackwardBias implementation reads them.
+        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardBias, conv2d_inputs, conv2d_attrs);
         return {result[0]};
     });
 

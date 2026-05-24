@@ -2362,6 +2362,10 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
  * Inverse operation of im2col, accumulates overlapping values
  */
 auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attrs) -> Tensor {
+    // U.7: col2im.comp (Fold / MaxUnpool path) uses atomicAdd(float) on the
+    // output buffer (VK_EXT_shader_atomic_float). Fail fast on devices that
+    // don't advertise it.
+    vulkan::ensure_atomic_float_supported(input.device().index, "col2im");
     auto input_shape = input.shape();
     if (input_shape.size() != 3) {
         throw std::invalid_argument("col2im requires 3D input (N, C*K*K, L)");

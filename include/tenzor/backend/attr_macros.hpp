@@ -175,6 +175,41 @@ read_3d_vec(const OpAttributes& a,
 [[nodiscard]] inline auto kernel_size_3d_vec(const OpAttributes& a)   { return read_3d_vec(a, AttrKey::KernelSize,    AttrKey::KernelSizeD, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 1); }
 [[nodiscard]] inline auto output_padding_3d_vec(const OpAttributes& a){ return read_3d_vec(a, AttrKey::OutputPadding, AttrKey::OutputPaddingD, AttrKey::OutputPaddingH, AttrKey::OutputPaddingW, 0); }
 
+// =====================================================================
+// Conv1d -> Conv2d attribute projection
+// =====================================================================
+//
+// Conv1d on the GPU backends is implemented as a wrapper that unsqueezes
+// the input to [N,C,1,L] and delegates to Conv2dForward. The 1D semantics
+// pack stride/padding/dilation as the W axis only; the H axis is always
+// neutral (stride=1, padding=0, dilation=1).
+//
+// Naively forwarding the caller's `attrs` to Conv2d is wrong: Conv2d
+// reads scalar `AttrKey::Stride/Padding/Dilation` and applies them to
+// *both* H and W. With padding=1 this produces H_out=3 instead of 1 and
+// the trailing `.squeeze(2)` silently leaves a 4-D tensor of wrong
+// shape; with dilation=2 Conv2d may reject because the kernel exceeds
+// H=1.
+//
+// `conv1d_to_conv2d_attrs` projects scalar Stride/Padding/Dilation onto
+// the W axis (preserving any per-axis override the caller already set)
+// and pins the H axis to its neutral values, leaving all other keys
+// (Groups, Stream, WeightShape, InputShape, etc.) untouched.
+[[nodiscard]] inline auto
+conv1d_to_conv2d_attrs(const OpAttributes& src) -> OpAttributes {
+    OpAttributes dst = src;
+    const auto stride   = stride_1d(src);
+    const auto padding  = padding_1d(src);
+    const auto dilation = dilation_1d(src);
+    dst.set(AttrKey::StrideH,   int64_t{1});
+    dst.set(AttrKey::StrideW,   stride[0]);
+    dst.set(AttrKey::PaddingH,  int64_t{0});
+    dst.set(AttrKey::PaddingW,  padding[0]);
+    dst.set(AttrKey::DilationH, int64_t{1});
+    dst.set(AttrKey::DilationW, dilation[0]);
+    return dst;
+}
+
 }  // namespace tenzor::backend::attrs
 
 // =====================================================================

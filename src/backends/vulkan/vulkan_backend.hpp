@@ -118,6 +118,12 @@ public:
     /// Get the detected GPU vendor for a device (used by tests / profiling).
     auto get_device_vendor(int32_t device_id) const -> GpuVendor;
 
+    /// U.5/U.6/U.7: Whether the device advertises VK_EXT_shader_atomic_float
+    /// with float-add SSBO support. Used by host-side capability gates for
+    /// shaders that use `atomicAdd(float)` (grid_sample_backward,
+    /// affine_grid_backward, col2im, interpolate_bilinear_backward, etc.).
+    auto has_atomic_float(int32_t device_id) const -> bool;
+
 private:
     // Vulkan context management
 
@@ -1050,6 +1056,19 @@ void ensure_fp64_supported(int32_t device_id, const char* op_name);
  * extension across consumer hardware yet), so this gate covers both dtypes.
  */
 void ensure_fp16_supported(int32_t device_id, const char* op_name);
+
+/**
+ * @brief U.5/U.6/U.7: Throw a typed runtime_error with a uniform message if
+ *        the requested Vulkan device does not advertise VK_EXT_shader_atomic_float
+ *        (float-add SSBO atomics).
+ *
+ * Same pattern as ensure_fp64_supported (R.13). Call this at the entry of any
+ * dispatcher whose compute shader performs `atomicAdd(float)` on an SSBO
+ * (grid_sample_backward, affine_grid_backward, col2im / Fold / MaxUnpool,
+ * interpolate_bilinear_backward, …) so unsupported devices fail fast with a
+ * readable diagnostic instead of hitting an opaque SPIR-V validation error.
+ */
+void ensure_atomic_float_supported(int32_t device_id, const char* op_name);
 
 } // namespace vulkan
 
