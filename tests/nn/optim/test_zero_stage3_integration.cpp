@@ -29,6 +29,20 @@
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <filesystem>
+#include <unistd.h>  // W.24: getpid()
+
+namespace {
+// W.24: per-process + per-test path so parallel ctest runs never collide.
+static std::string make_zero_tmp_path(const std::string& stem) {
+    const auto* test_info =
+        ::testing::UnitTest::GetInstance()->current_test_info();
+    std::string unique = std::string("tenzor_") + stem + "_" +
+        std::to_string(getpid()) + "_" +
+        (test_info ? test_info->name() : "unknown");
+    return (std::filesystem::temp_directory_path() / unique).string();
+}
+} // anonymous namespace
 #include <chrono>
 
 using namespace tenzor;
@@ -673,8 +687,8 @@ TEST_F(ZeROStage3IntegrationTest, CorrectnessVsStage2) {
 TEST_F(ZeROStage3IntegrationTest, CorrectnessWithCheckpointRestore) {
     // Test: Training continues correctly after checkpoint restore
     auto [X, y] = generate_data(32, 64, 10);
-    std::string model_checkpoint_path = "/tmp/zero_stage3_model_checkpoint.pt";
-    std::string opt_checkpoint_path = "/tmp/zero_stage3_opt_checkpoint";
+    std::string model_checkpoint_path = make_zero_tmp_path("zero_stage3_model_checkpoint.pt");
+    std::string opt_checkpoint_path = make_zero_tmp_path("zero_stage3_opt_checkpoint");
 
     // Train for 30 steps and save both model and optimizer
     std::vector<float> losses_first;

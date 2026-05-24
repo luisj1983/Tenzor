@@ -200,6 +200,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/fft.cpp
     kernels/sparse.cpp
     kernels/nested_attention.cpp
+    kernels/ctc_loss.cpp
 )
 
 set(ALL_OBJECTS "")

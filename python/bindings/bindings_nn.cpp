@@ -219,10 +219,30 @@ void register_nn(py::module_& m) {
         // ====================================================================
         .def("state_dict", &tenzor::nn::Module::state_dict,
              "Get module state as dictionary (parameters + buffers)")
-        .def("load_state_dict", py::overload_cast<const std::unordered_map<std::string, tenzor::Tensor>&, bool>(
-             &tenzor::nn::Module::load_state_dict),
+        // Audit-4 W.17: mirror PyTorch's
+        // ``Module.load_state_dict`` which returns
+        // ``_IncompatibleKeys(missing_keys, unexpected_keys)``. We return a
+        // 2-tuple ``(missing_keys, unexpected_keys)`` (list[str], list[str])
+        // so callers can introspect what was skipped under strict=False.
+        // With strict=True the legacy throw-on-mismatch path runs first,
+        // and (since execution only reaches the return statement on
+        // success) the returned tuple is always empty/empty.
+        .def("load_state_dict",
+             [](tenzor::nn::Module& self,
+                const std::unordered_map<std::string, tenzor::Tensor>& state,
+                bool strict) {
+                 std::vector<std::string> missing_keys;
+                 std::vector<std::string> unexpected_keys;
+                 self.load_state_dict(state, strict, missing_keys, unexpected_keys);
+                 return py::make_tuple(py::cast(missing_keys),
+                                       py::cast(unexpected_keys));
+             },
              py::arg("state"), py::arg("strict") = true,
-             "Load module state from dictionary. If strict=True (default), throws on missing/unexpected keys.")
+             "Load module state from dictionary. If strict=True (default), "
+             "throws on missing/unexpected keys; if strict=False, returns "
+             "a (missing_keys, unexpected_keys) tuple of str lists so the "
+             "caller can introspect what was skipped (audit-4 W.17, mirrors "
+             "PyTorch's _IncompatibleKeys).")
         .def("save", &tenzor::nn::Module::save,
              py::arg("path"),
              "Save module to file")

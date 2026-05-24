@@ -187,10 +187,27 @@ auto RAdam::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
+    // Audit-4 W.14: num_params guard mirrors Adam::state_dict so a restore
+    // against a mismatched model count fails loudly before any per-parameter
+    // buffer is overwritten.
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto RAdam::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Audit-4 W.14: param-count guard up front. Mirrors Adam::load_state_dict.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "RAdam::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
+
     // Load optimizer configuration
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];

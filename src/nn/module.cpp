@@ -322,6 +322,20 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
 //     any aliasing view, including FSDP2 shard views and any activation
 //     that captured the pre-load Tensor in save_for_backward.
 auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state, bool strict) -> void {
+    // Audit-4 W.17: delegate to the out-param variant so the keep/throw
+    // path and the introspect path share a single implementation.
+    std::vector<std::string> missing_keys;
+    std::vector<std::string> unexpected_keys;
+    load_state_dict(state, strict, missing_keys, unexpected_keys);
+}
+
+auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state,
+                             bool strict,
+                             std::vector<std::string>& missing_keys,
+                             std::vector<std::string>& unexpected_keys) -> void {
+    missing_keys.clear();
+    unexpected_keys.clear();
+
     // Track which state keys are consumed to detect unexpected keys
     std::unordered_set<std::string> consumed_keys;
 
@@ -379,11 +393,14 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
                 sub_state[sub_key] = tensor;
             }
         }
-        module->load_state_dict(sub_state);
+        // Submodules are loaded non-strict so per-submodule missing/
+        // unexpected keys propagate to the root's aggregate report via
+        // the parameters_/buffers_ scan above and the consumed_keys
+        // bookkeeping; the root then decides whether to throw.
+        module->load_state_dict(sub_state, /*strict=*/false);
     }
 
     // Collect missing keys (expected but not in state)
-    std::vector<std::string> missing_keys;
     for (const auto& [name, _] : parameters_) {
         if (state.find(name) == state.end()) {
             missing_keys.push_back(name);
@@ -396,7 +413,6 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
     }
 
     // Collect unexpected keys
-    std::vector<std::string> unexpected_keys;
     for (const auto& [key, _] : state) {
         if (consumed_keys.find(key) == consumed_keys.end()) {
             unexpected_keys.push_back(key);

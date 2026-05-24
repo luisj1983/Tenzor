@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <cmath>
+#include "../../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 
@@ -253,6 +254,7 @@ TEST(MaxPool2dTest, BackwardPassExecutes) {
     EXPECT_NO_THROW({
         output.backward(grad_output);
     });
+    EXPECT_GRAD_FLOWS(input);  // W.26
 }
 
 TEST(MaxPool2dTest, GradientNonZero) {
@@ -440,6 +442,7 @@ TEST(AvgPool2dTest, BackwardPassExecutes) {
     EXPECT_NO_THROW({
         output.backward(grad_output);
     });
+    EXPECT_GRAD_FLOWS(input);  // W.26
 }
 
 TEST(AvgPool2dTest, GradientNonZero) {
@@ -568,6 +571,7 @@ TEST(AdaptiveAvgPool2dTest, BackwardPassExecutes) {
     EXPECT_NO_THROW({
         output.backward(grad_output);
     });
+    EXPECT_GRAD_FLOWS(input);  // W.26
 }
 
 TEST(AdaptiveAvgPool2dTest, GradientNonZero) {

@@ -43,7 +43,7 @@ protected:
 };
 
 TEST_P(GradCheckMultiBackendTest, MatMul) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({3, 4}, dtype(), device()), true);
     auto b = Variable(randn({4, 5}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable {
@@ -54,7 +54,7 @@ TEST_P(GradCheckMultiBackendTest, MatMul) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Softmax) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 5}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::softmax(v, -1));
@@ -64,7 +64,7 @@ TEST_P(GradCheckMultiBackendTest, Softmax) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Add) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable {
@@ -75,7 +75,7 @@ TEST_P(GradCheckMultiBackendTest, Add) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Mul) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable {
@@ -86,7 +86,7 @@ TEST_P(GradCheckMultiBackendTest, Mul) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ReLU) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Add a constant offset so most elements are on the positive side (so
     // finite-difference doesn't cross the non-differentiable point at 0).
     auto x = Variable(randn({6}, dtype(), device()) + 1.0f, true);
@@ -98,7 +98,7 @@ TEST_P(GradCheckMultiBackendTest, ReLU) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SumReduction) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(v);
@@ -108,7 +108,7 @@ TEST_P(GradCheckMultiBackendTest, SumReduction) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MeanReduction) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::mean(v, /*dim=*/0, /*keepdim=*/false));
@@ -123,7 +123,7 @@ TEST_P(GradCheckMultiBackendTest, MeanReduction) {
 // Fixed in src/autograd/function_elementwise.cpp; this test pins the
 // regression on every backend × Float32+Float64.
 TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_Last) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::mean(v, /*dim=*/-1, /*keepdim=*/false));
@@ -133,7 +133,7 @@ TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_Last) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_SecondLast) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4, 5}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::mean(v, /*dim=*/-2, /*keepdim=*/false));
@@ -148,7 +148,7 @@ TEST_P(GradCheckMultiBackendTest, MeanNegativeDim_SecondLast) {
 // backend-divergent backward kernels.
 
 TEST_P(GradCheckMultiBackendTest, Sub) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable { return tenzor::sum(x - b); };
@@ -156,7 +156,7 @@ TEST_P(GradCheckMultiBackendTest, Sub) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Div) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()) + 2.0f, false);  // away from 0
     auto f = [&b](const Variable& x) -> Variable { return tenzor::sum(x / b); };
@@ -164,28 +164,28 @@ TEST_P(GradCheckMultiBackendTest, Div) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Sqrt) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(tenzor::abs(randn({6}, dtype(), device())) + 0.5f, true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::sqrt(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Exp) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()) * 0.5f, true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::exp(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Log) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(tenzor::abs(randn({6}, dtype(), device())) + 0.5f, true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::log(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Sigmoid) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::functional::sigmoid(v));
@@ -194,7 +194,7 @@ TEST_P(GradCheckMultiBackendTest, Sigmoid) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Tanh) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (device().type == Device::Type::Vulkan && dtype() == DType::Float64) {
         // Vulkan tanh Float64 has precision issue. Filed separately.
         GTEST_SKIP() << "Vulkan Float64 tanh gradcheck precision";
@@ -207,7 +207,7 @@ TEST_P(GradCheckMultiBackendTest, Tanh) {
 }
 
 TEST_P(GradCheckMultiBackendTest, GeLU) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (device().type == Device::Type::Vulkan && dtype() == DType::Float64) {
         // Vulkan gelu Float64 has precision issue. Filed separately.
         GTEST_SKIP() << "Vulkan Float64 gelu gradcheck precision";
@@ -220,14 +220,14 @@ TEST_P(GradCheckMultiBackendTest, GeLU) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Neg) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::neg(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Abs) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // abs() has a non-differentiable point at 0; shift away from 0 so
     // finite-difference doesn't straddle it.
     auto x = Variable(randn({6}, dtype(), device()) + 2.0f, true);
@@ -236,7 +236,7 @@ TEST_P(GradCheckMultiBackendTest, Abs) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Reciprocal) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Stay away from 0 — reciprocal blows up.
     auto x = Variable(randn({6}, dtype(), device()) + 2.0f, true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::reciprocal(v)); };
@@ -244,21 +244,21 @@ TEST_P(GradCheckMultiBackendTest, Reciprocal) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Sin) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::sin(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Cos) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::cos(v)); };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
 TEST_P(GradCheckMultiBackendTest, Pow) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Positive base; exponent=2 (well-behaved gradient).
     auto x = Variable(tenzor::abs(randn({6}, dtype(), device())) + 0.5f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -268,7 +268,7 @@ TEST_P(GradCheckMultiBackendTest, Pow) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Transpose) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 5}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::transpose(v, 0, 1));
@@ -277,7 +277,7 @@ TEST_P(GradCheckMultiBackendTest, Transpose) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Reshape) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::reshape(v, std::vector<int64_t>{2, 3}));
@@ -286,7 +286,7 @@ TEST_P(GradCheckMultiBackendTest, Reshape) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LeakyRelu) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // All-positive inputs so central-difference stays well clear of the
     // x=0 non-differentiable kink. LeakyReLU is piecewise-linear, so
     // gradcheck only needs the active branch to be far from x=0.
@@ -298,7 +298,7 @@ TEST_P(GradCheckMultiBackendTest, LeakyRelu) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Softplus) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::softplus(v));
@@ -312,7 +312,7 @@ TEST_P(GradCheckMultiBackendTest, Softplus) {
 // — issue is in those backends' layer_norm_backward kernels themselves
 // (not the dispatcher), tracked in #38.
 TEST_P(GradCheckMultiBackendTest, LayerNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // ROCm Float64 LayerNorm backward kernel itself has a precision issue —
     // dispatch wiring is correct (verified) but the kernel produces values
     // outside the gradcheck tolerance. Tracked in #38.
@@ -336,7 +336,7 @@ TEST_P(GradCheckMultiBackendTest, LayerNorm) {
 // ============================================================================
 
 TEST_P(GradCheckMultiBackendTest, Mish) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::mish(v));
@@ -346,7 +346,7 @@ TEST_P(GradCheckMultiBackendTest, Mish) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ELU) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::elu(v, /*alpha=*/1.0));
@@ -356,7 +356,7 @@ TEST_P(GradCheckMultiBackendTest, ELU) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SELU) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::selu(v));
@@ -366,7 +366,7 @@ TEST_P(GradCheckMultiBackendTest, SELU) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LogSigmoid) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::log_sigmoid(v));
@@ -376,7 +376,7 @@ TEST_P(GradCheckMultiBackendTest, LogSigmoid) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Swish) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::swish(v));
@@ -386,7 +386,7 @@ TEST_P(GradCheckMultiBackendTest, Swish) {
 }
 
 TEST_P(GradCheckMultiBackendTest, HardShrink) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // HardShrink with lambda=0.5 is non-differentiable at ±0.5. Bias inputs
     // outside the kink region: shift to range roughly [1.0, 3.0] so finite
     // differences stay away from ±0.5.
@@ -399,7 +399,7 @@ TEST_P(GradCheckMultiBackendTest, HardShrink) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Softsign) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::softsign(v));
@@ -409,7 +409,7 @@ TEST_P(GradCheckMultiBackendTest, Softsign) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Threshold) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Threshold is non-differentiable at the threshold value. Bias inputs to
     // be predominantly above the threshold so finite-diff perturbations don't
     // cross it.
@@ -429,7 +429,7 @@ TEST_P(GradCheckMultiBackendTest, Threshold) {
 // ============================================================================
 
 TEST_P(GradCheckMultiBackendTest, Var) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 3}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::var(v));
@@ -439,7 +439,7 @@ TEST_P(GradCheckMultiBackendTest, Var) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Std) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 3}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::std(v));
@@ -449,7 +449,7 @@ TEST_P(GradCheckMultiBackendTest, Std) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Prod) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Bias well away from zero — the prod gradient (prod / x_i) blows up as
     // x_i approaches 0 and finite differences become unreliable.
     auto x = Variable(randn({4}, dtype(), device()) + 2.0f, true);
@@ -461,7 +461,7 @@ TEST_P(GradCheckMultiBackendTest, Prod) {
 }
 
 TEST_P(GradCheckMultiBackendTest, CumSum) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::cumsum(v, 0));
@@ -471,7 +471,7 @@ TEST_P(GradCheckMultiBackendTest, CumSum) {
 }
 
 TEST_P(GradCheckMultiBackendTest, CumProd) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Same zero-blowup concern as prod — bias the input away from 0.
     auto x = Variable(randn({4}, dtype(), device()) + 2.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -482,7 +482,7 @@ TEST_P(GradCheckMultiBackendTest, CumProd) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LogSumExp) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::logsumexp(v, /*dim=*/-1));
@@ -492,7 +492,7 @@ TEST_P(GradCheckMultiBackendTest, LogSumExp) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MaxDim) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Build inputs with well-separated values so finite-difference
     // perturbations don't change which element is argmax.
     auto base = randn({4, 3}, dtype(), device());
@@ -505,7 +505,7 @@ TEST_P(GradCheckMultiBackendTest, MaxDim) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MinDim) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto base = randn({4, 3}, dtype(), device());
     auto x = Variable(base * static_cast<float>(2.0) + 5.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -523,7 +523,7 @@ TEST_P(GradCheckMultiBackendTest, MinDim) {
 // ============================================================================
 
 TEST_P(GradCheckMultiBackendTest, IndexSelect) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({5, 3}, dtype(), device()), true);
     Tensor idx_cpu = tenzor::zeros({3}, DType::Int64, Device::cpu());
     auto* idx_data = idx_cpu.data<int64_t>();
@@ -537,7 +537,7 @@ TEST_P(GradCheckMultiBackendTest, IndexSelect) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Gather) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 3}, dtype(), device()), true);
     Tensor idx_cpu = tenzor::zeros({4, 3}, DType::Int64, Device::cpu());
     auto* idx_data = idx_cpu.data<int64_t>();
@@ -551,7 +551,7 @@ TEST_P(GradCheckMultiBackendTest, Gather) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Scatter) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 3}, dtype(), device()), true);
     auto src = Variable(randn({4, 3}, dtype(), device()), false);
     Tensor idx_cpu = tenzor::zeros({4, 3}, DType::Int64, Device::cpu());
@@ -566,7 +566,7 @@ TEST_P(GradCheckMultiBackendTest, Scatter) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Where) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Build the condition as a deterministic Bool tensor on CPU then move
     // to device; avoids depending on overloaded comparison operators that
     // may not return a usable Variable type.
@@ -587,7 +587,7 @@ TEST_P(GradCheckMultiBackendTest, Where) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Roll) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::roll(v, /*shifts=*/2, /*dim=*/0));
@@ -605,7 +605,7 @@ TEST_P(GradCheckMultiBackendTest, Roll) {
 // ============================================================================
 
 TEST_P(GradCheckMultiBackendTest, Erf) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()) * 0.5f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::erf(v));
@@ -615,7 +615,7 @@ TEST_P(GradCheckMultiBackendTest, Erf) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Erfc) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()) * 0.5f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::erfc(v));
@@ -625,7 +625,7 @@ TEST_P(GradCheckMultiBackendTest, Erfc) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Lgamma) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Bias positive — gamma(x) has poles at non-positive integers.
     auto x = Variable(randn({4}, dtype(), device()) + 3.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -636,7 +636,7 @@ TEST_P(GradCheckMultiBackendTest, Lgamma) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Digamma) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()) + 3.0f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::digamma(v));
@@ -646,7 +646,7 @@ TEST_P(GradCheckMultiBackendTest, Digamma) {
 }
 
 TEST_P(GradCheckMultiBackendTest, I0e) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::i0e(v));
@@ -656,7 +656,7 @@ TEST_P(GradCheckMultiBackendTest, I0e) {
 }
 
 TEST_P(GradCheckMultiBackendTest, I1e) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::i1e(v));
@@ -666,7 +666,7 @@ TEST_P(GradCheckMultiBackendTest, I1e) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Det) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Build a well-conditioned matrix: random + identity offset so det is
     // bounded away from 0 (det/x_ij blows up at singular matrices).
     auto eye_t = tenzor::eye(3, std::nullopt, dtype(), device());
@@ -679,7 +679,7 @@ TEST_P(GradCheckMultiBackendTest, Det) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Inv) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto eye_t = tenzor::eye(3, std::nullopt, dtype(), device());
     auto x = Variable(randn({3, 3}, dtype(), device()) * 0.3f + eye_t, true);
     auto f = [](const Variable& v) -> Variable {
@@ -690,7 +690,7 @@ TEST_P(GradCheckMultiBackendTest, Inv) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Cholesky) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // cholesky reads only one triangle of A and returns L such that A = LL^T.
     // Perturbing the unread triangle gives an ambiguous numerical gradient,
     // so wrap the parameter in v · v^T + I to enforce symmetry implicitly
@@ -709,7 +709,7 @@ TEST_P(GradCheckMultiBackendTest, Cholesky) {
 }
 
 TEST_P(GradCheckMultiBackendTest, VectorNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Bias away from 0; vector_norm gradient is x/|x| which blows up at 0.
     auto x = Variable(randn({4}, dtype(), device()) + 2.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -720,7 +720,7 @@ TEST_P(GradCheckMultiBackendTest, VectorNorm) {
 }
 
 TEST_P(GradCheckMultiBackendTest, FFTRoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // rfft(x) → irfft → real-valued output. The round-trip is identity (up
     // to numerical precision), so any error in the rfft/irfft backwards
     // shows up as gradcheck mismatch on the round-trip composition.
@@ -738,7 +738,7 @@ TEST_P(GradCheckMultiBackendTest, FFTRoundTrip) {
 // fft2 / ifft2 round-trip is identity on the inner complex tensor, so the
 // composition with rfft/irfft on a 2D real input is gradcheckable end-to-end.
 TEST_P(GradCheckMultiBackendTest, FFT2RoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         auto Y = tenzor::fft_autograd::rfft(v);
@@ -752,7 +752,7 @@ TEST_P(GradCheckMultiBackendTest, FFT2RoundTrip) {
 }
 
 TEST_P(GradCheckMultiBackendTest, IFFT2RoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         auto Y = tenzor::fft_autograd::rfft(v);
@@ -767,7 +767,7 @@ TEST_P(GradCheckMultiBackendTest, IFFT2RoundTrip) {
 }
 
 TEST_P(GradCheckMultiBackendTest, FFTNRoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // 3D: exercise default-all-dims path of fftn/ifftn.
     auto x = Variable(randn({2, 4, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
@@ -782,7 +782,7 @@ TEST_P(GradCheckMultiBackendTest, FFTNRoundTrip) {
 }
 
 TEST_P(GradCheckMultiBackendTest, IFFTNRoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 4, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         auto Y = tenzor::fft_autograd::rfft(v);
@@ -809,7 +809,7 @@ TEST_P(GradCheckMultiBackendTest, IFFTNRoundTrip) {
 // eval() mode, forward uses running stats, backward should differentiate
 // only w.r.t. input (running stats are not differentiable parameters).
 TEST_P(GradCheckMultiBackendTest, BatchNorm1d_EvalBackward) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "BatchNorm1d eval gradcheck requires Float64 precision";
     }
@@ -832,7 +832,7 @@ TEST_P(GradCheckMultiBackendTest, BatchNorm1d_EvalBackward) {
 }
 
 TEST_P(GradCheckMultiBackendTest, InstanceNorm1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "InstanceNorm1d gradcheck requires Float64 precision";
     }
@@ -849,7 +849,7 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, InstanceNorm2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "InstanceNorm2d gradcheck requires Float64 precision";
     }
@@ -866,7 +866,7 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, InstanceNorm3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "InstanceNorm3d gradcheck requires Float64 precision";
     }
@@ -883,7 +883,7 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm3d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SyncBatchNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "SyncBatchNorm gradcheck requires Float64 precision";
     }
@@ -905,7 +905,7 @@ TEST_P(GradCheckMultiBackendTest, SyncBatchNorm) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BatchNorm3d_EvalBackward) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "BatchNorm3d eval gradcheck requires Float64 precision";
     }
@@ -928,7 +928,7 @@ TEST_P(GradCheckMultiBackendTest, BatchNorm3d_EvalBackward) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BatchNorm2d_EvalBackward) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "BatchNorm2d eval gradcheck requires Float64 precision";
     }
@@ -960,7 +960,7 @@ TEST_P(GradCheckMultiBackendTest, BatchNorm2d_EvalBackward) {
 // for this batch.
 
 TEST_P(GradCheckMultiBackendTest, Conv1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Conv1d gradcheck requires Float64 precision";
     }
@@ -974,7 +974,7 @@ TEST_P(GradCheckMultiBackendTest, Conv1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Conv3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Conv3d gradcheck requires Float64 precision";
     }
@@ -988,7 +988,7 @@ TEST_P(GradCheckMultiBackendTest, Conv3d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ConvTranspose1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "ConvTranspose1d gradcheck requires Float64 precision";
     }
@@ -1002,7 +1002,7 @@ TEST_P(GradCheckMultiBackendTest, ConvTranspose1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ConvTranspose2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "ConvTranspose2d gradcheck requires Float64 precision";
     }
@@ -1016,7 +1016,7 @@ TEST_P(GradCheckMultiBackendTest, ConvTranspose2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ConvTranspose3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "ConvTranspose3d gradcheck requires Float64 precision";
     }
@@ -1033,7 +1033,7 @@ TEST_P(GradCheckMultiBackendTest, ConvTranspose3d) {
 // Forces head_dim=33 (not in {32,64,128}) so the fused kernel rejects and the
 // composed-ops fallback runs. dropout_p=0 to keep it deterministic for now.
 TEST_P(GradCheckMultiBackendTest, FlashAttentionComposedBackward) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "FlashAttention gradcheck requires Float64 precision";
     }
@@ -1057,7 +1057,7 @@ TEST_P(GradCheckMultiBackendTest, FlashAttentionComposedBackward) {
 // dedicated Variable wrappers but compose cleanly from existing autograd ops.
 
 TEST_P(GradCheckMultiBackendTest, Corrcoef_Composed) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Corrcoef gradcheck requires Float64 precision";
     }
@@ -1085,7 +1085,7 @@ TEST_P(GradCheckMultiBackendTest, Corrcoef_Composed) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Beta_Composed) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Beta gradcheck requires Float64 precision";
     }
@@ -1105,7 +1105,7 @@ TEST_P(GradCheckMultiBackendTest, Beta_Composed) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Cov_Composed) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Cov gradcheck requires Float64 precision";
     }
@@ -1126,7 +1126,7 @@ TEST_P(GradCheckMultiBackendTest, Cov_Composed) {
 }
 
 TEST_P(GradCheckMultiBackendTest, EmbeddingBag_Composed) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "EmbeddingBag gradcheck requires Float64 precision";
     }
@@ -1154,7 +1154,7 @@ TEST_P(GradCheckMultiBackendTest, EmbeddingBag_Composed) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MaxPool1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "MaxPool1d gradcheck requires Float64 precision";
     }
@@ -1168,7 +1168,7 @@ TEST_P(GradCheckMultiBackendTest, MaxPool1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MaxPool3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "MaxPool3d gradcheck requires Float64 precision";
     }
@@ -1182,7 +1182,7 @@ TEST_P(GradCheckMultiBackendTest, MaxPool3d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, AvgPool1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "AvgPool1d gradcheck requires Float64 precision";
     }
@@ -1196,7 +1196,7 @@ TEST_P(GradCheckMultiBackendTest, AvgPool1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, AvgPool3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "AvgPool3d gradcheck requires Float64 precision";
     }
@@ -1210,7 +1210,7 @@ TEST_P(GradCheckMultiBackendTest, AvgPool3d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, AdaptiveAvgPool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "AdaptiveAvgPool2d gradcheck requires Float64 precision";
     }
@@ -1223,7 +1223,7 @@ TEST_P(GradCheckMultiBackendTest, AdaptiveAvgPool2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Conv2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Small input/weight to keep the finite-diff loop tractable.
     // Shape: batch=1, in_ch=2, H=3, W=3; weight: out_ch=2, in_ch=2, kH=2, kW=2.
     auto x = Variable(randn({1, 2, 3, 3}, dtype(), device()), true);
@@ -1236,7 +1236,7 @@ TEST_P(GradCheckMultiBackendTest, Conv2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, AvgPool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({1, 2, 4, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::functional::avg_pool2d(v, /*kernel_size=*/{2, 2}));
@@ -1246,7 +1246,7 @@ TEST_P(GradCheckMultiBackendTest, AvgPool2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MaxPool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Bias inputs so the max element of each pool window is well-separated
     // (otherwise tiny finite-diff perturbations can change which element is
     // max, producing a non-smooth gradient at the perturbation point).
@@ -1263,7 +1263,7 @@ TEST_P(GradCheckMultiBackendTest, MaxPool2d) {
 // across forward calls, which is required for finite-diff to produce a
 // matching gradient (otherwise window selection drifts during ε perturbation).
 TEST_P(GradCheckMultiBackendTest, FractionalMaxPool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({1, 2, 6, 6}, dtype(), device()) * 2.0f + 5.0f, true);
     // 2 random samples per (N, C) — uniform on [0, 1) for fractional offset.
     auto samples_cpu = rand({1, 2, 2}, DType::Float32, Device::cpu());
@@ -1278,7 +1278,7 @@ TEST_P(GradCheckMultiBackendTest, FractionalMaxPool2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, FractionalMaxPool3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({1, 2, 4, 4, 4}, dtype(), device()) * 2.0f + 5.0f, true);
     // 3 random samples per (N, C).
     auto samples_cpu = rand({1, 2, 3}, DType::Float32, Device::cpu());
@@ -1297,7 +1297,7 @@ TEST_P(GradCheckMultiBackendTest, FractionalMaxPool3d) {
 // input. Indices are synthetic deterministic patterns; the function under
 // test is the unpool itself (input is the pooled tensor, indices are fixed).
 TEST_P(GradCheckMultiBackendTest, MaxUnpool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto pooled = Variable(randn({1, 2, 2, 2}, dtype(), device()), true);
     auto indices = zeros({1, 2, 2, 2}, DType::Int64, Device::cpu());
     auto* idx = indices.data<int64_t>();
@@ -1316,7 +1316,7 @@ TEST_P(GradCheckMultiBackendTest, MaxUnpool2d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MaxUnpool3d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto pooled = Variable(randn({1, 1, 2, 2, 2}, dtype(), device()), true);
     auto indices = zeros({1, 1, 2, 2, 2}, DType::Int64, Device::cpu());
     auto* idx = indices.data<int64_t>();
@@ -1339,7 +1339,7 @@ TEST_P(GradCheckMultiBackendTest, MaxUnpool3d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, GroupNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // 1 batch × 4 channels × 3×3, group into 2 groups of 2 channels.
     auto x = Variable(randn({1, 4, 3, 3}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
@@ -1355,7 +1355,7 @@ TEST_P(GradCheckMultiBackendTest, GroupNorm) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, MSELoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto t = Variable(randn({3, 4}, dtype(), device()), false);
     auto f = [&t](const Variable& v) -> Variable {
@@ -1366,7 +1366,7 @@ TEST_P(GradCheckMultiBackendTest, MSELoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, L1Loss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Bias inputs apart so finite-diff doesn't hit |x-t|=0 (kink point).
     auto x = Variable(randn({3, 4}, dtype(), device()) + 2.0f, true);
     auto t = Variable(randn({3, 4}, dtype(), device()) - 2.0f, false);
@@ -1378,7 +1378,7 @@ TEST_P(GradCheckMultiBackendTest, L1Loss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SmoothL1Loss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Use small differences so we stay in the L2 region (|d| < beta=1.0).
     auto x = Variable(randn({3, 4}, dtype(), device()) * 0.3f, true);
     auto t = Variable(randn({3, 4}, dtype(), device()) * 0.3f, false);
@@ -1390,7 +1390,7 @@ TEST_P(GradCheckMultiBackendTest, SmoothL1Loss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BCEWithLogitsLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Logits with moderate magnitude so sigmoid grad is well-conditioned.
     auto x = Variable(randn({3, 4}, dtype(), device()) * 0.5f, true);
     // Target ∈ [0,1] (probabilistic); use a scaled-and-shifted random for
@@ -1404,7 +1404,7 @@ TEST_P(GradCheckMultiBackendTest, BCEWithLogitsLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, CrossEntropy) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Logits over 4 classes for batch of 3.
     auto x = Variable(randn({3, 4}, dtype(), device()) * 0.5f, true);
     // Class indices (Int64) constructed on host then moved to device.
@@ -1419,7 +1419,7 @@ TEST_P(GradCheckMultiBackendTest, CrossEntropy) {
 }
 
 TEST_P(GradCheckMultiBackendTest, NLLLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // log_softmax of random logits to produce valid log-probabilities. Compute
     // through Variable autograd so the result is on the right device + dtype.
     auto logits_v = Variable(randn({3, 4}, dtype(), device()) * 0.5f, false);
@@ -1435,7 +1435,7 @@ TEST_P(GradCheckMultiBackendTest, NLLLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, KLDivLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // input must be log-probabilities; target is probabilities. Use Variable
     // autograd ops to construct both, then strip grad_fn for the inputs to the
     // gradcheck so the chain rule starts at log_softmax output as expected.
@@ -1452,7 +1452,7 @@ TEST_P(GradCheckMultiBackendTest, KLDivLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, HuberLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Stay in quadratic region (|d| < delta=1.0).
     auto x = Variable(randn({3, 4}, dtype(), device()) * 0.3f, true);
     auto t = Variable(randn({3, 4}, dtype(), device()) * 0.3f, false);
@@ -1465,7 +1465,7 @@ TEST_P(GradCheckMultiBackendTest, HuberLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, HingeEmbeddingLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // target ∈ {-1, +1}. Use moderate magnitude inputs to avoid the margin kink.
     auto x = Variable(randn({3, 4}, dtype(), device()) * 0.3f + 1.5f, true);
     // Build target with literal {-1, 1, -1, 1, ...} pattern (Float32 staging,
@@ -1483,7 +1483,7 @@ TEST_P(GradCheckMultiBackendTest, HingeEmbeddingLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MarginRankingLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // gradient w.r.t. input1; input2 fixed. target = +1 means input1 should rank higher.
     auto x1 = Variable(randn({4}, dtype(), device()) + 0.5f, true);
     auto x2 = Variable(randn({4}, dtype(), device()) - 0.5f, false);
@@ -1499,7 +1499,7 @@ TEST_P(GradCheckMultiBackendTest, MarginRankingLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, CosineEmbeddingLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x1 = Variable(randn({3, 4}, dtype(), device()) + 0.5f, true);
     auto x2 = Variable(randn({3, 4}, dtype(), device()) + 0.5f, false);
     std::vector<float> tgt = {1.0f, -1.0f, 1.0f};
@@ -1514,7 +1514,7 @@ TEST_P(GradCheckMultiBackendTest, CosineEmbeddingLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, TripletMarginLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Gradient w.r.t. anchor; positive/negative fixed at clearly distinct points
     // so the triplet is well inside the hinge region (active margin).
     auto a = Variable(randn({3, 4}, dtype(), device()) * 0.3f + 1.0f, true);
@@ -1529,7 +1529,7 @@ TEST_P(GradCheckMultiBackendTest, TripletMarginLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, MultiMarginLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // MultiMarginLoss has hinge non-differentiabilities at margin - x[y] + x[i] = 0.
     // To gradcheck reliably we need every hinge **deeply** in the active region
     // so finite-difference perturbations don't straddle the kink. Construct
@@ -1562,7 +1562,7 @@ TEST_P(GradCheckMultiBackendTest, MultiMarginLoss) {
 }
 
 TEST_P(GradCheckMultiBackendTest, GaussianNLLLoss) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({3, 4}, dtype(), device()), true);
     auto t = Variable(randn({3, 4}, dtype(), device()), false);
     // Variance must be strictly positive — use fabs+offset.
@@ -1582,7 +1582,7 @@ TEST_P(GradCheckMultiBackendTest, GaussianNLLLoss) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, Embedding) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t indices[6] = {0, 2, 1, 4, 0, 3};
     auto idx_cpu = ::tenzor::Tensor::from_blob(indices, {6}, DType::Int64).clone();
     auto idx = idx_cpu.to(device());
@@ -1599,7 +1599,7 @@ TEST_P(GradCheckMultiBackendTest, Embedding) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, LogAddExp) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable {
@@ -1610,7 +1610,7 @@ TEST_P(GradCheckMultiBackendTest, LogAddExp) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LogAddExp2) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto a = Variable(randn({4}, dtype(), device()), true);
     auto b = Variable(randn({4}, dtype(), device()), false);
     auto f = [&b](const Variable& x) -> Variable {
@@ -1621,7 +1621,7 @@ TEST_P(GradCheckMultiBackendTest, LogAddExp2) {
 }
 
 TEST_P(GradCheckMultiBackendTest, XLogY) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // xlogy(x, y) = x * log(y); needs y > 0 for differentiability w.r.t. y,
     // and finite x for the term to be defined.
     auto a = Variable(randn({4}, dtype(), device()), true);
@@ -1634,7 +1634,7 @@ TEST_P(GradCheckMultiBackendTest, XLogY) {
 }
 
 TEST_P(GradCheckMultiBackendTest, CosineSimilarity) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Use non-zero-norm inputs — small offsets keep both vectors away from origin.
     auto x1 = Variable(randn({3, 4}, dtype(), device()) + 1.0f, true);
     auto x2 = Variable(randn({3, 4}, dtype(), device()) + 1.0f, false);
@@ -1646,7 +1646,7 @@ TEST_P(GradCheckMultiBackendTest, CosineSimilarity) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Renorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // 2D input renormalized along dim=1; pick maxnorm small enough that the
     // norms exceed it and renorm actually does work (otherwise the gradient
     // is identity).
@@ -1659,7 +1659,7 @@ TEST_P(GradCheckMultiBackendTest, Renorm) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Entr) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // entr(x) = -x*log(x), defined for x >= 0, smooth for x > 0.
     auto x = Variable(::tenzor::abs(randn({4}, dtype(), device())) + 0.3f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1670,7 +1670,7 @@ TEST_P(GradCheckMultiBackendTest, Entr) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SphericalBesselJ0) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Smooth on all reals; bias away from zero where the derivative is small.
     auto x = Variable(randn({4}, dtype(), device()) + 1.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1682,7 +1682,7 @@ TEST_P(GradCheckMultiBackendTest, SphericalBesselJ0) {
 
 // audit-2026-05-03 Phase 12 — Bessel J0/J1/Y0/Y1 + Zeta autograd gradchecks.
 TEST_P(GradCheckMultiBackendTest, BesselJ0) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // J_0 is smooth; bias inputs away from zeros of J_1 (where J_0' = 0).
     auto x = Variable(randn({4}, dtype(), device()) * 0.5f + 1.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1693,7 +1693,7 @@ TEST_P(GradCheckMultiBackendTest, BesselJ0) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BesselJ1) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()) * 0.5f + 1.5f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::bessel_j1(v));
@@ -1703,7 +1703,7 @@ TEST_P(GradCheckMultiBackendTest, BesselJ1) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BesselY0) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // Y_0(x) singular at x=0; restrict to x > 0.5.
     auto x = Variable(randn({4}, dtype(), device()) * 0.3f + 1.5f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1714,7 +1714,7 @@ TEST_P(GradCheckMultiBackendTest, BesselY0) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BesselY1) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()) * 0.3f + 1.5f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::bessel_y1(v));
@@ -1724,7 +1724,7 @@ TEST_P(GradCheckMultiBackendTest, BesselY1) {
 }
 
 TEST_P(GradCheckMultiBackendTest, ZetaWrtQ) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // zeta(s, q) Hurwitz; defined for s > 1, q > 0. Differentiable wrt q.
     // Use s = 3.0 (constant) and gradcheck wrt q in (0.5, 1.5).
     auto s = Variable(full({4}, 3.0, dtype(), device()), false);
@@ -1737,7 +1737,7 @@ TEST_P(GradCheckMultiBackendTest, ZetaWrtQ) {
 }
 
 TEST_P(GradCheckMultiBackendTest, BetaIncWrtX) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // I_x(a, b) requires x in (0, 1) and a, b > 0.
     auto a = Variable(full({4}, 2.0, dtype(), device()), false);
     auto b = Variable(full({4}, 3.0, dtype(), device()), false);
@@ -1754,7 +1754,7 @@ TEST_P(GradCheckMultiBackendTest, BetaIncWrtX) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, ErfInv) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // erfinv domain is (-1, 1); keep inputs well inside the open interval.
     auto x = Variable(randn({4}, dtype(), device()) * 0.3f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1765,7 +1765,7 @@ TEST_P(GradCheckMultiBackendTest, ErfInv) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Polygamma) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // polygamma(n, x); test n=1 (trigamma). Domain x > 0.
     auto x = Variable(::tenzor::abs(randn({4}, dtype(), device())) + 1.0f, true);
     auto f = [](const Variable& v) -> Variable {
@@ -1776,7 +1776,7 @@ TEST_P(GradCheckMultiBackendTest, Polygamma) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Sinc) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // sinc(x) = sin(pi*x)/(pi*x); smooth everywhere including x=0.
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
@@ -1787,7 +1787,7 @@ TEST_P(GradCheckMultiBackendTest, Sinc) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Ndtr) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::ndtr(v));
@@ -1797,7 +1797,7 @@ TEST_P(GradCheckMultiBackendTest, Ndtr) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LogNdtr) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // log_ndtr is well-defined everywhere; gradient is the unnormalized
     // pdf(x)/cdf(x) ratio. Avoid extreme tails where it's numerically delicate.
     auto x = Variable(randn({4}, dtype(), device()) * 0.5f, true);
@@ -1809,7 +1809,7 @@ TEST_P(GradCheckMultiBackendTest, LogNdtr) {
 }
 
 TEST_P(GradCheckMultiBackendTest, Multigammaln) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // multigammaln(input, p): generalized log-gamma, requires input > (p-1)/2.
     // Use p=2; minimum input ≈ 0.5. Bias well above for safety.
     auto x = Variable(::tenzor::abs(randn({4}, dtype(), device())) + 2.0f, true);
@@ -1832,7 +1832,7 @@ TEST_P(GradCheckMultiBackendTest, Multigammaln) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, RMSNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 4}, dtype(), device()) + 0.5f, true);
     auto f = [](const Variable& v) -> Variable {
         // RMS over the last (=1) dim of a 2D (N, F) input.
@@ -1871,7 +1871,7 @@ auto make_spd(int64_t n, DType dt, Device dev) -> ::tenzor::Tensor {
 } // anonymous namespace
 
 TEST_P(GradCheckMultiBackendTest, LinalgEigvalsh) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Eigvalsh gradcheck requires Float64 precision";
     }
@@ -1885,7 +1885,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgEigvalsh) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgSVDSingularValues) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "SVD gradcheck requires Float64 precision";
     }
@@ -1902,7 +1902,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgSVDSingularValues) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgEighEigenvalues) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Eigh gradcheck requires Float64 precision";
     }
@@ -1917,7 +1917,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgEighEigenvalues) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgCholeskySolve) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t n = 3;
     // Compute L = cholesky(A) outside the lambda; gradcheck w.r.t. B.
     auto A_t = make_spd(n, dtype(), device());
@@ -1931,7 +1931,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgCholeskySolve) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgCholeskyInverse) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "CholeskyInverse gradcheck requires Float64 precision";
     }
@@ -1949,7 +1949,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgCholeskyInverse) {
 // audit-2026-05-03 bug #1: Solve backward gradcheck. Tests both the
 // gradient w.r.t. A (the matrix) and w.r.t. B (the RHS), Float32 + Float64.
 TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradB) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t n = 3;
     // Make A well-conditioned so finite-diff is stable.
     auto A_t = make_spd(n, dtype(), device());
@@ -1963,7 +1963,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradB) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradA) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Solve gradcheck w.r.t. A requires Float64 precision";
     }
@@ -1985,7 +1985,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgSolve_GradA) {
 // audit-2026-05-03 Phase 8 — final 3 linalg promotions (Variable wrappers
 // added in src/autograd/ops.cpp).
 TEST_P(GradCheckMultiBackendTest, LinalgLU) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "LU gradcheck requires Float64 precision";
     }
@@ -2007,7 +2007,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgLU) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgLUSolve) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "LUSolve gradcheck requires Float64 precision";
     }
@@ -2025,7 +2025,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgLUSolve) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgEig_Eigvals) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Eig gradcheck requires Float64 precision";
     }
@@ -2054,7 +2054,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgEig_Eigvals) {
 // (grad_V being silently dropped) without flapping on that numerical
 // subtlety.
 TEST_P(GradCheckMultiBackendTest, LinalgEig_GradVIsNotDropped) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "Eig V-gradient test uses Float64 for tolerance margin";
     }
@@ -2082,7 +2082,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgEig_GradVIsNotDropped) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "LDL gradcheck requires Float64 precision";
     }
@@ -2113,7 +2113,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgQR_Q) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "QR gradcheck requires Float64 precision";
     }
@@ -2128,7 +2128,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgQR_Q) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgQR_R) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "QR gradcheck requires Float64 precision";
     }
@@ -2143,7 +2143,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgQR_R) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgMatrixNorm) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "MatrixNorm gradcheck requires Float64 precision";
     }
@@ -2157,7 +2157,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgMatrixNorm) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LinalgSVD_Full) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "SVD full gradcheck requires Float64 precision";
     }
@@ -2189,7 +2189,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgSVD_Full) {
 // even when only eigvals appear in the loss).
 
 TEST_P(GradCheckMultiBackendTest, LinalgHouseholderProduct) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {
         GTEST_SKIP() << "HouseholderProduct gradcheck requires Float64 precision";
     }
@@ -2212,7 +2212,7 @@ TEST_P(GradCheckMultiBackendTest, LinalgHouseholderProduct) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, RNNCell) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::RNNCell cell(in_sz, hid_sz, /*nonlinearity=*/"tanh", /*bias=*/true);
     cell.to(device());
@@ -2227,7 +2227,7 @@ TEST_P(GradCheckMultiBackendTest, RNNCell) {
 }
 
 TEST_P(GradCheckMultiBackendTest, GRUCell) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::GRUCell cell(in_sz, hid_sz, /*bias=*/true);
     cell.to(device());
@@ -2249,7 +2249,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_GatesOnly) {
     // Diagnostic variant: just gates_ih + gates_hh. This tests whether the
     // basic Linear forward chain through LSTMCell's two Linear submodules
     // is autograd-correct (no slice/sigmoid/tanh involved).
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
     nn::Linear weight_hh(hid_sz, 4 * hid_sz, /*bias=*/true);
@@ -2270,7 +2270,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_GatesOnly) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceDim1) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return ::tenzor::slice(v, 1, 1, 3);
@@ -2280,7 +2280,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceDim1) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceShape2x8Dim1Small) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return ::tenzor::slice(v, 1, 1, 3);
@@ -2290,7 +2290,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceShape2x8Dim1Small) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceShape2x8Dim1FromZero) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return ::tenzor::slice(v, 1, 0, 4);
@@ -2304,7 +2304,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_MirrorComprehensiveSlice) {
     // CPU-only comprehensive Slice test (shape={6,4}, dim=0, start=1, end=4).
     // If THIS fails on multibackend, the bug is in eps/tol or fixture
     // differences, not in slice math.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return ::tenzor::slice(v, 0, 1, 4);
@@ -2315,7 +2315,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_MirrorComprehensiveSlice) {
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_Slice6x4_Start1Size3) {
     // Same shape as comprehensive test, dim=1, start=1, slice_size=3.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({6, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 1, 4));
@@ -2325,7 +2325,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_Slice6x4_Start1Size3) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size3) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 1, 4));
@@ -2335,7 +2335,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size3) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart2Size3) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 2, 5));
@@ -2346,7 +2346,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart2Size3) {
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size4) {
     // start=1, end=5: slice_size=4, start=1.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 1, 5));
@@ -2357,7 +2357,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceStart1Size4) {
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceTopHalf) {
     // start=4, end=8 — second half (start equal to slice_size).
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 4, 8));
@@ -2371,7 +2371,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceForwardValueCheck) {
     // using KNOWN tensor values and verify both produce the same result.
     // If forward values differ, the bug is in sum forward when input has
     // non-zero offset.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() != DType::Float64) { GTEST_SKIP(); }
 
     // Build a known tensor: x[i][j] = i*8 + j, so slice cols 2..5 of row 0
@@ -2403,7 +2403,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceForwardValueCheck) {
 TEST_P(GradCheckMultiBackendTest, LSTMCell_RawSliceLooseTol) {
     // Same as RawSlice but with loose tolerance — distinguishes precision
     // issue (passes) from actual value-mismatch bug (fails).
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 2, 6));
@@ -2416,7 +2416,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_SliceWithContiguous) {
     // Hypothesis: bug is in sum(non-contiguous slice view). Adding
     // .contiguous() (autograd version) materializes the slice into a
     // contiguous tensor before sum.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         auto sliced = ::tenzor::slice(v, 1, 2, 6);
@@ -2431,7 +2431,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_RawSlice) {
     // Minimal: just sum(slice(x, dim, start, end)) where x is the gradchecked
     // input directly (no Linear wrapper). If this fails, the bug is purely
     // in slice's autograd path.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(randn({2, 8}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::slice(v, 1, 2, 6));
@@ -2442,7 +2442,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_RawSlice) {
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_JustSlice) {
     // Minimal: gates → 1 slice → sum.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
     weight_ih.to(device());
@@ -2460,7 +2460,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_JustSlice) {
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell_OneSliceSigmoid) {
     // Diagnostic: just ONE slice + sigmoid + sum.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
     weight_ih.to(device());
@@ -2480,7 +2480,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_OneSliceSigmoid) {
 TEST_P(GradCheckMultiBackendTest, LSTMCell_FourSlicesNoActivation) {
     // Diagnostic: 4 slices + sum each (no sigmoid/tanh). Tests pure
     // SliceBackward gradient accumulation.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
     weight_ih.to(device());
@@ -2503,7 +2503,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_FourSlicesNoActivation) {
 TEST_P(GradCheckMultiBackendTest, LSTMCell_GateSliceSigmoid) {
     // Diagnostic: gates → slice into 4 → sigmoid → sum. Tests whether the
     // 4-way slice gradient accumulation through sigmoid is correct.
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::Linear weight_ih(in_sz, 4 * hid_sz, /*bias=*/true);
     weight_ih.to(device());
@@ -2529,7 +2529,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_GateSliceSigmoid) {
 TEST_P(GradCheckMultiBackendTest, LSTMCell_HOnly) {
     // Diagnostic variant: only sum h_new (no c_new). Helps isolate whether
     // the bug is in the path through c_new (which uses fixed `c` Variable).
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::LSTMCell cell(in_sz, hid_sz, /*bias=*/true);
     cell.to(device());
@@ -2546,7 +2546,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell_HOnly) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LSTMCell) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     int64_t in_sz = 4, hid_sz = 5, batch = 2;
     nn::LSTMCell cell(in_sz, hid_sz, /*bias=*/true);
     cell.to(device());
@@ -2569,7 +2569,7 @@ TEST_P(GradCheckMultiBackendTest, LSTMCell) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, LPPool1d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // The lp_pool1d composition internally casts norm_type to float when
     // calling pow(), which loses Float64 precision on some backends.
     // Restrict to Float32 until that downcast is fixed in functional.cpp.
@@ -2588,7 +2588,7 @@ TEST_P(GradCheckMultiBackendTest, LPPool1d) {
 }
 
 TEST_P(GradCheckMultiBackendTest, LPPool2d) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto x = Variable(::tenzor::abs(randn({1, 2, 4, 4}, dtype(), device())) + 0.5f, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::functional::lp_pool2d(
@@ -2607,7 +2607,7 @@ TEST_P(GradCheckMultiBackendTest, LPPool2d) {
 // =====================================================================
 
 TEST_P(GradCheckMultiBackendTest, STFTRoundTrip) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // STFT/ISTFT internally use Complex64 (Float32 precision) — Float64
     // gradient flow loses precision in the round-trip and finite-diff fails.
     // Float32 is the meaningful precision band for these ops.
@@ -2652,7 +2652,7 @@ auto make_sparse_csr_3x3(DType dt, Device dev) -> ::tenzor::SparseTensor {
 } // anonymous namespace
 
 TEST_P(GradCheckMultiBackendTest, SparseSpMM) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto S = make_sparse_csr_3x3(dtype(), device());
     auto B = Variable(randn({3, 2}, dtype(), device()), true);
     auto f = [&S](const Variable& v) -> Variable {
@@ -2663,7 +2663,7 @@ TEST_P(GradCheckMultiBackendTest, SparseSpMM) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SparseSpMV) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto S = make_sparse_csr_3x3(dtype(), device());
     auto v = Variable(randn({3}, dtype(), device()), true);
     auto f = [&S](const Variable& vv) -> Variable {
@@ -2674,7 +2674,7 @@ TEST_P(GradCheckMultiBackendTest, SparseSpMV) {
 }
 
 TEST_P(GradCheckMultiBackendTest, SparseAdd) {
-    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     auto S = make_sparse_csr_3x3(dtype(), device());
     auto D = Variable(randn({3, 3}, dtype(), device()), true);
     auto f = [&S](const Variable& v) -> Variable {

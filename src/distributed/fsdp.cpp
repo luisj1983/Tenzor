@@ -342,12 +342,22 @@ auto FSDPUnit::all_gather_params() -> void {
     auto dtype = local_shard_.dtype();
     auto device = local_shard_.device();
 
-    // Mixed precision: cast shard to Float16 before communication for 2x bandwidth savings
+    // Mixed precision: cast shard to config_.comm_dtype before communication
+    // for bandwidth savings. Audit-4 W.11: the comm dtype is now
+    // configurable (default BFloat16) instead of being hardcoded to Float16
+    // — BF16 has the same exponent range as F32 and is the standard AMP
+    // dtype for transformer-scale training. We only down-cast when the
+    // requested comm dtype is genuinely narrower than the live param
+    // dtype; up-casting (e.g. F16 param into BF16 comm) would waste
+    // bandwidth and risk silent value drift.
     Tensor comm_shard = local_shard_;
     DType comm_dtype = dtype;
-    if (config_.mixed_precision && dtype == DType::Float32) {
-        comm_shard = local_shard_.to(DType::Float16);
-        comm_dtype = DType::Float16;
+    const bool use_mixed_precision = config_.mixed_precision &&
+                                     dtype == DType::Float32 &&
+                                     config_.comm_dtype != DType::Float32;
+    if (use_mixed_precision) {
+        comm_shard = local_shard_.to(config_.comm_dtype);
+        comm_dtype = config_.comm_dtype;
     }
 
     // Allocate output tensors for all-gather (one per rank)
@@ -360,7 +370,7 @@ auto FSDPUnit::all_gather_params() -> void {
     pg_->all_gather(comm_shard, gathered);
 
     // Cast back to original dtype after communication
-    if (config_.mixed_precision && dtype == DType::Float32) {
+    if (use_mixed_precision) {
         for (auto& g : gathered) {
             g = g.to(DType::Float32);
         }

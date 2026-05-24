@@ -34,35 +34,57 @@ class CuSPARSEHandlePool {
 public:
     /// Returns a per-thread cuSPARSE handle, optionally bound to the given stream.
     static cusparseHandle_t get(cudaStream_t stream = nullptr) {
-        static thread_local CuSPARSEHandlePool instance;
-        if (stream != instance.last_stream_) {
-            CUSPARSE_CHECK(cusparseSetStream(instance.handle_, stream));
-            instance.last_stream_ = stream;
+        ensure_initialized();
+        if (stream != last_stream()) {
+            CUSPARSE_CHECK(cusparseSetStream(handle(), stream));
+            last_stream() = stream;
         }
-        return instance.handle_;
+        return handle();
     }
 
     static void shutdown() {
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-private:
-    CuSPARSEHandlePool() {
-        CUSPARSE_CHECK(cusparseCreate(&handle_));
+    /// W.8: destroy the thread-local cuSPARSE handle so the next get()
+    /// lazily rebuilds.
+    static void clear_idle() {
+        if (handle() != nullptr) {
+            cusparseDestroy(handle());
+            handle() = nullptr;
+        }
+        last_stream() = sentinel_stream();
     }
 
-    ~CuSPARSEHandlePool() {
-        if (handle_) {
-            cusparseDestroy(handle_);
-            handle_ = nullptr;
+private:
+    struct HandleGuard {
+        cusparseHandle_t handle = nullptr;
+        cudaStream_t last_stream = reinterpret_cast<cudaStream_t>(~uintptr_t(0));
+        ~HandleGuard() {
+            if (handle) {
+                cusparseDestroy(handle);
+                handle = nullptr;
+            }
+        }
+    };
+    static HandleGuard& guard() {
+        static thread_local HandleGuard g;
+        return g;
+    }
+    static cusparseHandle_t& handle() { return guard().handle; }
+    static cudaStream_t& last_stream() { return guard().last_stream; }
+    static cudaStream_t sentinel_stream() {
+        return reinterpret_cast<cudaStream_t>(~uintptr_t(0));
+    }
+    static void ensure_initialized() {
+        if (handle() == nullptr) {
+            CUSPARSE_CHECK(cusparseCreate(&handle()));
         }
     }
 
+    CuSPARSEHandlePool() = delete;
     CuSPARSEHandlePool(const CuSPARSEHandlePool&) = delete;
     CuSPARSEHandlePool& operator=(const CuSPARSEHandlePool&) = delete;
-
-    cusparseHandle_t handle_ = nullptr;
-    cudaStream_t last_stream_ = reinterpret_cast<cudaStream_t>(~uintptr_t(0));  // Sentinel: force stream set on first use
 };
 
 } // namespace cuda

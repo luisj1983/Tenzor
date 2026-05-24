@@ -11,6 +11,7 @@
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -71,6 +72,7 @@ TEST_P(Conv3dMultiDTypeTest, BackwardGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
+    EXPECT_GRAD_FLOWS(input);  // W.26
     ASSERT_TRUE(input.grad().has_value())
         << "Conv3d backward did not produce input gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 4, 4, 4});

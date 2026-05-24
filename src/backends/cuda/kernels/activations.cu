@@ -3219,11 +3219,11 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
 
     // Initialize result to zero
     if (input.dtype() == DType::Float32) {
-        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(float), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(float), stream));
     } else if (input.dtype() == DType::Float64) {
-        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(double), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(double), stream));
     } else if (input.dtype() == DType::Float16) {
-        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__half), stream);
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__half), stream));
     }
 
     if (input.numel() == 0) {

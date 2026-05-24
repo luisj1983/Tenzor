@@ -960,6 +960,12 @@ namespace oneapi {
                       const std::string& norm, sycl::queue& queue) -> Tensor;
 #endif // TENZOR_HAS_ONEMKL
 
+    // CTC loss
+    auto ctc_loss_forward_kernel(const Tensor& log_probs, const Tensor& targets,
+                                 const Tensor& input_lengths, const Tensor& target_lengths,
+                                 int64_t blank, bool zero_infinity, sycl::queue& queue)
+        -> std::vector<Tensor>;
+
 } // namespace oneapi
 
 
@@ -6509,6 +6515,18 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Corrcoef, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return corrcoef(inputs[0]);
     });
+
+    // =========================================================================
+    // CTC Loss — log-domain forward-backward DP
+    // =========================================================================
+    table.register_kernel(OpId::CTCLossForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t blank = attrs.get_int(AttrKey::Blank, 0);
+            bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
+            return oneapi::ctc_loss_forward_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3],
+                blank, zero_infinity, get_q(inputs));
+        });
 
     // =========================================================================
     // LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient

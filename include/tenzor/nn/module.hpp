@@ -540,6 +540,28 @@ public:
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state, bool strict) -> void;
 
     /**
+     * @brief Audit-4 W.17: load_state_dict variant that reports missing
+     *        and unexpected keys via out-parameters instead of throwing.
+     *
+     * Mirrors PyTorch's ``Module.load_state_dict`` which returns an
+     * ``_IncompatibleKeys(missing_keys, unexpected_keys)`` named tuple.
+     * With @p strict=true the legacy throw-on-mismatch path is taken
+     * for back-compat, and the out-params are still populated before
+     * the throw (caller can introspect inside an except: block).
+     *
+     * @param state            Map of (name -> tensor) with saved state.
+     * @param strict           When true, throw on mismatch (for back-compat).
+     * @param missing_keys     [out] Keys expected by this module but
+     *                          absent from @p state.
+     * @param unexpected_keys  [out] Keys present in @p state but not
+     *                          consumed by this module.
+     */
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state,
+                         bool strict,
+                         std::vector<std::string>& missing_keys,
+                         std::vector<std::string>& unexpected_keys) -> void;
+
+    /**
      * @brief Save module to file.
      *
      * @param path File path for saved model

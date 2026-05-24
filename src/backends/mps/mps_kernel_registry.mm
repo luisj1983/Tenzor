@@ -241,6 +241,12 @@ std::vector<Tensor> mps_rmsnorm_forward(const Tensor& input, const Tensor& weigh
                                          float eps);
 std::vector<Tensor> mps_rmsnorm_backward(const Tensor& grad_output, const Tensor& input,
                                           const Tensor& weight, const Tensor& rrms);
+auto ctc_loss_forward_kernel(const Tensor& log_probs,
+                             const Tensor& targets,
+                             const Tensor& input_lengths,
+                             const Tensor& target_lengths,
+                             int64_t blank,
+                             bool zero_infinity) -> std::vector<Tensor>;
 std::vector<Tensor> mps_groupnorm_forward(const Tensor& input, int64_t num_groups,
                                            const Tensor& weight, const Tensor& bias,
                                            float eps);
@@ -1552,6 +1558,15 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             // inputs: [grad_output, input, weight, rrms]
             return mps_rmsnorm_backward(inputs[0], inputs[1], inputs[2], inputs[3]);
+        });
+
+    // CTC Loss — log-domain forward-backward DP
+    table.register_kernel(OpId::CTCLossForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t blank = attrs.get_int(AttrKey::Blank, 0);
+            bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
+            return ctc_loss_forward_kernel(inputs[0], inputs[1], inputs[2], inputs[3],
+                                           blank, zero_infinity);
         });
 
     // RNN family

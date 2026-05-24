@@ -35,47 +35,66 @@ public:
     /// Returns a per-thread cuBLAS handle, optionally bound to the given stream.
     /// Each thread owns its own handle, so no data race on cublasSetStream.
     static cublasHandle_t get(cudaStream_t stream = nullptr) {
-        static thread_local CuBLASHandlePool instance;
-        if (stream != instance.last_stream_) {
-            CUBLAS_CHECK(cublasSetStream(instance.handle_, stream));
-            instance.last_stream_ = stream;
+        ensure_initialized();
+        if (stream != last_stream()) {
+            CUBLAS_CHECK(cublasSetStream(handle(), stream));
+            last_stream() = stream;
         }
-        return instance.handle_;
+        return handle();
     }
 
     static void shutdown() {
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
+    /// W.8: destroy the thread-local cuBLAS handle so the next get() lazily
+    /// rebuilds. Frees the workspace memory cuBLAS retains internally.
+    /// Intended for backend reset_state() / long-running training loops
+    /// that rotate streams and accumulate idle handles.
+    static void clear_idle() {
+        if (handle() != nullptr) {
+            cublasDestroy(handle());
+            handle() = nullptr;
+        }
+        last_stream() = nullptr;
+    }
+
 private:
-    CuBLASHandlePool() {
-        CUBLAS_CHECK(cublasCreate(&handle_));
+    // RAII guard owned per-thread; destroys the handle when the thread exits.
+    struct HandleGuard {
+        cublasHandle_t handle = nullptr;
+        cudaStream_t last_stream = nullptr;
+        ~HandleGuard() {
+            if (handle) {
+                cublasDestroy(handle);
+                handle = nullptr;
+            }
+        }
+    };
+    static HandleGuard& guard() {
+        static thread_local HandleGuard g;
+        return g;
+    }
+    static cublasHandle_t& handle() { return guard().handle; }
+    static cudaStream_t& last_stream() { return guard().last_stream; }
+    static void ensure_initialized() {
+        if (handle() == nullptr) {
+            CUBLAS_CHECK(cublasCreate(&handle()));
 #if CUDA_VERSION >= 11000
-        // TF32 Tensor Core math requires CUDA 11.0+ and Ampere (SM 80+) GPUs.
-        {
             int dev = 0;
             cudaGetDevice(&dev);
             int major = 0;
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
             if (major >= 8) {
-                CUBLAS_CHECK(cublasSetMathMode(handle_, CUBLAS_TF32_TENSOR_OP_MATH));
+                CUBLAS_CHECK(cublasSetMathMode(handle(), CUBLAS_TF32_TENSOR_OP_MATH));
             }
-        }
 #endif
-    }
-
-    ~CuBLASHandlePool() {
-        if (handle_) {
-            cublasDestroy(handle_);
-            handle_ = nullptr;
         }
     }
 
+    CuBLASHandlePool() = delete;
     CuBLASHandlePool(const CuBLASHandlePool&) = delete;
     CuBLASHandlePool& operator=(const CuBLASHandlePool&) = delete;
-
-    cublasHandle_t handle_ = nullptr;
-    cudaStream_t last_stream_ = nullptr;
 };
 
 } // namespace cuda

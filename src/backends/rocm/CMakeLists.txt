@@ -72,6 +72,7 @@ set(ROCM_HIP_SOURCES
     kernels/nested.hip.cpp
     kernels/fft.hip.cpp
     kernels/linalg.hip.cpp
+    kernels/ctc_loss.hip.cpp
 )
 
 # Mark .hip.cpp files to be compiled as HIP language

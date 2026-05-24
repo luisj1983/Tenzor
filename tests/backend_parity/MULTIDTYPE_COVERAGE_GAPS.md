@@ -95,6 +95,16 @@ tests/integration/test_training_loops.cpp
 # whose surface area does not benefit from a 5-backend × dtype sweep, or
 # files awaiting a follow-up companion. Adding a companion is welcome; the
 # ratchet only blocks NEW non-multidtype tests landing without one.
+#
+# audit-4 W.27 (2026-05-24): cross-checked all 82 entries against the
+# tests/*_multidtype.cpp inventory.  The ratchet script
+# tools/check_multidtype_coverage.py matches by *exact* base name
+# (test_foo.cpp ↔ test_foo_multidtype.cpp) — topical matches (e.g.
+# test_lstm_proj_size.cpp covered by test_lstm_multidtype.cpp) do not
+# satisfy the script.  None of the entries gained an exact-name companion
+# since audit-3, so the ratchet is unchanged in this pass; the entries
+# stay grandfathered until either an exact-name companion lands or the
+# script is taught to consider topical coverage.
 tests/autograd/test_anomaly_mode_full.cpp
 tests/autograd/test_custom_op_higher_order.cpp
 tests/autograd/test_fused_linear_relu_higher_order.cpp

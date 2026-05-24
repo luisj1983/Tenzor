@@ -5,6 +5,7 @@
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
 #include <cmath>
+#include <cstring>
 #include <numbers>
 #include <stdexcept>
 
@@ -39,6 +40,25 @@ inline int64_t read_scalar_i64(const Tensor& t) {
 inline double read_scalar_f64(const Tensor& t) {
     Tensor host = (t.device().type != Device::Type::CPU) ? t.cpu() : t;
     return host.data<double>()[0];
+}
+
+// Audit-4 W.12: encode the lambda-identifier as a UInt8 byte tensor so
+// it travels through the existing Tensor-only state_dict checkpoint
+// pipeline. Empty names are represented as a length-0 UInt8 tensor.
+inline Tensor make_name_tensor(const std::string& name) {
+    Tensor t({static_cast<int64_t>(name.size())}, DType::UInt8, Device::cpu());
+    if (!name.empty()) {
+        std::memcpy(t.data<uint8_t>(), name.data(), name.size());
+    }
+    return t;
+}
+
+inline std::string read_name_tensor(const Tensor& t) {
+    Tensor host = (t.device().type != Device::Type::CPU) ? t.cpu() : t;
+    const int64_t n = host.numel();
+    if (n <= 0) return {};
+    const auto* bytes = reinterpret_cast<const char*>(host.data<uint8_t>());
+    return std::string(bytes, static_cast<size_t>(n));
 }
 
 }  // namespace
@@ -233,8 +253,10 @@ auto LinearLR::step() -> void {
 // MultiplicativeLR Implementation
 //==============================================================================
 
-MultiplicativeLR::MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda)
-    : optimizer_(optimizer), lr_lambda_(std::move(lr_lambda)) {
+MultiplicativeLR::MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda,
+                                   std::string name)
+    : optimizer_(optimizer), lr_lambda_(std::move(lr_lambda)),
+      name_(std::move(name)) {
     last_lr_ = optimizer.get_lr();
 }
 
@@ -445,12 +467,32 @@ auto LinearLR::load_state_dict(
 auto MultiplicativeLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
     state["epoch"] = make_scalar_i64(static_cast<int64_t>(epoch_));
+    // Audit-4 W.12: persist the lambda identifier so load_state_dict can
+    // detect mismatched destinations.
+    state["lambda_name"] = make_name_tensor(name_);
     return state;
 }
 
 auto MultiplicativeLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    load_state_dict(state, /*force=*/false);
+}
+
+auto MultiplicativeLR::load_state_dict(
+    const std::unordered_map<std::string, Tensor>& state, bool force) -> void {
     LRScheduler::load_state_dict(state);
+    // Audit-4 W.12: enforce lambda-identifier match before mutating
+    // counters, so a wrong-lambda destination fails loudly instead of
+    // proceeding with a silent wrong-LR trajectory.
+    if (auto it = state.find("lambda_name"); it != state.end() && !force) {
+        const std::string saved = read_name_tensor(it->second);
+        if (saved != name_) {
+            throw std::runtime_error(
+                "MultiplicativeLR::load_state_dict: lambda name mismatch — "
+                "saved '" + saved + "' but destination is '" + name_ +
+                "'. Pass force=true to override.");
+        }
+    }
     if (auto it = state.find("epoch");   it != state.end()) epoch_   = static_cast<int>(read_scalar_i64(it->second));
     if (auto it = state.find("last_lr"); it != state.end()) {
         last_lr_ = read_scalar_f64(it->second);
@@ -495,6 +537,15 @@ auto SequentialLR::load_state_dict(
     }
 }
 
+// Audit-4 W.10: ChainedScheduler has no parent epoch_ / step_count_ of its
+// own; every child scheduler maintains its own counter (StepLR::epoch_,
+// CosineAnnealingLR::epoch_, CyclicLR::step_count_, …) and ChainedScheduler
+// merely invokes each child's step() in order. The state_dict therefore
+// intentionally delegates fully to the children: the per-child prefixed
+// state captures every counter needed to restore the chain exactly, and
+// adding our own epoch_/step_count_ would be redundant (and would
+// double-count if both we and the children stepped). This contract is
+// covered by the ChainedScheduler_StateDict_RoundTrip test.
 auto ChainedScheduler::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
     for (size_t i = 0; i < schedulers_.size(); ++i) {

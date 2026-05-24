@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <unistd.h>  // W.24: getpid()
 
 using namespace tenzor;
 using namespace tenzor::jit;
@@ -51,7 +52,14 @@ class JITCompilerTest : public ::testing::Test {
 protected:
     void SetUp() override {
         device_ = Device::cpu();
-        test_dir_ = "/tmp/tenzor_jit_compiler_test";
+        // W.24: per-process + per-test directory to avoid parallel ctest
+        // races (mirrors the audit-3 T.11 ONNXImportTest fix).
+        const auto* test_info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        std::string unique_name = std::string("tenzor_jit_compiler_") +
+            std::to_string(getpid()) + "_" +
+            (test_info ? test_info->name() : "unknown");
+        test_dir_ = (fs::temp_directory_path() / unique_name).string();
         fs::create_directories(test_dir_);
     }
 

@@ -49,6 +49,7 @@ set(CPU_BACKEND_SOURCES
     kernels/flash_attention.cpp
     kernels/fft.cpp
     kernels/ctc.cpp
+    kernels/onednn_cache.cpp
 )
 
 # Create CPU backend shared library

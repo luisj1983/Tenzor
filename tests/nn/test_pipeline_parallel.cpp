@@ -12,6 +12,7 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/distributed/pipeline_parallel.hpp"
 #include "tenzor/nn/layers/linear.hpp"
+#include "../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -101,6 +102,7 @@ TEST_F(PipelineStageTest, ForwardSupportsAutograd) {
     auto grad = tenzor::ones(std::vector<int64_t>(output.shape().begin(), output.shape().end()),
                               DType::Float32, Device::cpu());
     EXPECT_NO_THROW(output.backward(grad));
+    EXPECT_GRAD_FLOWS(input);  // W.26
     EXPECT_TRUE(input.grad().has_value());
 }
 

@@ -34,35 +34,54 @@ class CuSOLVERHandlePool {
 public:
     /// Returns a per-thread cuSOLVER handle, optionally bound to the given stream.
     static cusolverDnHandle_t get(cudaStream_t stream = nullptr) {
-        static thread_local CuSOLVERHandlePool instance;
-        if (stream && stream != instance.last_stream_) {
-            CUSOLVER_CHECK(cusolverDnSetStream(instance.handle_, stream));
-            instance.last_stream_ = stream;
+        ensure_initialized();
+        if (stream && stream != last_stream()) {
+            CUSOLVER_CHECK(cusolverDnSetStream(handle(), stream));
+            last_stream() = stream;
         }
-        return instance.handle_;
+        return handle();
     }
 
     static void shutdown() {
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-private:
-    CuSOLVERHandlePool() {
-        CUSOLVER_CHECK(cusolverDnCreate(&handle_));
+    /// W.8: destroy the thread-local cuSOLVER handle so the next get() lazily
+    /// rebuilds.  Frees the workspace memory cuSOLVER retains internally.
+    static void clear_idle() {
+        if (handle() != nullptr) {
+            cusolverDnDestroy(handle());
+            handle() = nullptr;
+        }
+        last_stream() = nullptr;
     }
 
-    ~CuSOLVERHandlePool() {
-        if (handle_) {
-            cusolverDnDestroy(handle_);
-            handle_ = nullptr;
+private:
+    struct HandleGuard {
+        cusolverDnHandle_t handle = nullptr;
+        cudaStream_t last_stream = nullptr;
+        ~HandleGuard() {
+            if (handle) {
+                cusolverDnDestroy(handle);
+                handle = nullptr;
+            }
+        }
+    };
+    static HandleGuard& guard() {
+        static thread_local HandleGuard g;
+        return g;
+    }
+    static cusolverDnHandle_t& handle() { return guard().handle; }
+    static cudaStream_t& last_stream() { return guard().last_stream; }
+    static void ensure_initialized() {
+        if (handle() == nullptr) {
+            CUSOLVER_CHECK(cusolverDnCreate(&handle()));
         }
     }
 
+    CuSOLVERHandlePool() = delete;
     CuSOLVERHandlePool(const CuSOLVERHandlePool&) = delete;
     CuSOLVERHandlePool& operator=(const CuSOLVERHandlePool&) = delete;
-
-    cusolverDnHandle_t handle_ = nullptr;
-    cudaStream_t last_stream_ = nullptr;
 };
 
 } // namespace cuda

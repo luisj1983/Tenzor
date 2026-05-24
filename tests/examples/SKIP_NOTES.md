@@ -28,3 +28,9 @@ already makes the runner test-friendly — it's purely the runner-extraction
 labour that's deferred.
 
 The standalone showcase exe still builds and runs as before.
+
+**audit-4 W.28 (2026-05-24)**: re-evaluated; remains intentional. The
+autograd surface (GRU gates, Bahdanau attention, log_softmax cross-entropy)
+is still fully covered by `07_rnn_sequence` and `16_self_attention`. No
+new chat_ai-specific tensor logic has landed since audit-3, so the
+deferred runner is still the right call.

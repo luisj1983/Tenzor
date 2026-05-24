@@ -80,7 +80,7 @@ TEST_P(GradScalerMultiDTypeTest, CustomConstructor) {
 TEST_P(GradScalerMultiDTypeTest, LossScaling) {
     // Skip Float16 - GradScaler works with Float32/64 gradients
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(1000.0f);
@@ -97,7 +97,7 @@ TEST_P(GradScalerMultiDTypeTest, LossScaling) {
 // Test 4: Gradient unscaling
 TEST_P(GradScalerMultiDTypeTest, GradientUnscaling) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(100.0f);
@@ -125,7 +125,7 @@ TEST_P(GradScalerMultiDTypeTest, GradientUnscaling) {
 // Test 5: Inf detection
 TEST_P(GradScalerMultiDTypeTest, InfDetection) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler;
@@ -157,7 +157,7 @@ TEST_P(GradScalerMultiDTypeTest, InfDetection) {
 // Test 6: NaN detection
 TEST_P(GradScalerMultiDTypeTest, NanDetection) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler;
@@ -189,7 +189,7 @@ TEST_P(GradScalerMultiDTypeTest, NanDetection) {
 // Test 7: Scale backoff on overflow
 TEST_P(GradScalerMultiDTypeTest, ScaleBackoff) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 10);
@@ -222,7 +222,7 @@ TEST_P(GradScalerMultiDTypeTest, ScaleBackoff) {
 // Test 8: Scale growth after successful iterations
 TEST_P(GradScalerMultiDTypeTest, ScaleGrowth) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 3);
@@ -252,7 +252,7 @@ TEST_P(GradScalerMultiDTypeTest, ScaleGrowth) {
 // Test 9: SGD optimizer integration
 TEST_P(GradScalerMultiDTypeTest, SGDIntegration) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(100.0f);
@@ -283,7 +283,7 @@ TEST_P(GradScalerMultiDTypeTest, SGDIntegration) {
 // Test 10: Adam optimizer integration
 TEST_P(GradScalerMultiDTypeTest, AdamIntegration) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(100.0f);
@@ -312,7 +312,7 @@ TEST_P(GradScalerMultiDTypeTest, AdamIntegration) {
 // Test 11: Multiple parameters
 TEST_P(GradScalerMultiDTypeTest, MultipleParameters) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(100.0f);
@@ -352,7 +352,7 @@ TEST_P(GradScalerMultiDTypeTest, MultipleParameters) {
 // Test 12: Underflow prevention
 TEST_P(GradScalerMultiDTypeTest, UnderflowPrevention) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     float scale = 65536.0f;
@@ -386,7 +386,7 @@ TEST_P(GradScalerMultiDTypeTest, UnderflowPrevention) {
 // Test 13: Training loop simulation
 TEST_P(GradScalerMultiDTypeTest, TrainingLoopSimulation) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(1024.0f, 2.0f, 0.5f, 5);
@@ -430,7 +430,7 @@ TEST_P(GradScalerMultiDTypeTest, TrainingLoopSimulation) {
 // Test 14: Numeric range differences
 TEST_P(GradScalerMultiDTypeTest, NumericRangeDifferences) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler(1024.0f);
@@ -457,7 +457,7 @@ TEST_P(GradScalerMultiDTypeTest, NumericRangeDifferences) {
 // Test 15: State persistence
 TEST_P(GradScalerMultiDTypeTest, StateDictConsistency) {
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "GradScaler typically uses Float32/Float64 for gradients";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
     }
 
     GradScaler scaler1(2048.0f, 3.0f, 0.25f, 500);

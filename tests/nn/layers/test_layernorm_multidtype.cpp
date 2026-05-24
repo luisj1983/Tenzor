@@ -12,6 +12,7 @@
 #include <tenzor/nn/layers/normalization.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -90,6 +91,7 @@ TEST_P(LayerNormMultiDTypeTest, GradientFlow) {
     auto y = ln.forward(x);
     auto grad = tenzor::ones({2, 16}, dtype_, device_);
     EXPECT_NO_THROW({ y.backward(grad); });
+    EXPECT_GRAD_FLOWS(x);  // W.26
     ASSERT_TRUE(x.grad().has_value())
         << "LayerNorm backward did not populate input grad on "
         << device().to_string();

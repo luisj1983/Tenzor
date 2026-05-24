@@ -31,7 +31,7 @@ protected:
 
 TEST_P(GradCheckScatterTest, Scatter) {
     if (should_skip()) {
-        GTEST_SKIP() << "gradcheck supports only Float32/Float64";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64");
     }
     auto x = Variable(randn({4, 8}, dtype(), device()), /*requires_grad=*/true);
     auto src = Variable(randn({4, 3}, dtype(), device()), false);
@@ -46,7 +46,7 @@ TEST_P(GradCheckScatterTest, Scatter) {
 
 TEST_P(GradCheckScatterTest, ScatterAdd) {
     if (should_skip()) {
-        GTEST_SKIP() << "gradcheck supports only Float32/Float64";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64");
     }
     auto x = Variable(randn({4, 8}, dtype(), device()), /*requires_grad=*/true);
     auto src = Variable(randn({4, 3}, dtype(), device()), false);

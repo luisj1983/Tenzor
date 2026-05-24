@@ -67,7 +67,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, GradCheckResultReturnValue) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, GradCheckErrorExceptionPath) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto failing_func = [](const Variable& x) -> Variable {
         Variable result(x.tensor() * 2.0f, false);
@@ -98,7 +98,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, GradCheckErrorExceptionPath) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, GradCheckErrorRequiresGradFalse) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -124,7 +124,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, GradCheckErrorRequiresGradFalse) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, VerboseModePassingTest) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -155,7 +155,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, VerboseModePassingTest) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, VerboseModeFailingTest) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto failing_func = [](const Variable& x) -> Variable {
         Variable result(x.tensor() * 3.0f, false);
@@ -190,7 +190,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, VerboseModeFailingTest) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, NonScalarFunctionOutput) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -214,7 +214,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, NonScalarFunctionOutput) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, HighPrecisionGradients) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x * x - x * x * 2.0 + x * 3.0;
@@ -242,7 +242,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, HighPrecisionGradients) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, NumericalGradientDirect) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -275,7 +275,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, NumericalGradientDirect) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, ShapeMismatchError) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     Tensor num_grad = zeros({3}, dtype(), device());
     Tensor ana_grad = zeros({4}, dtype(), device());
@@ -287,7 +287,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, ShapeMismatchError) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, MultidimensionalShapeMismatch) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     Tensor num_grad = zeros({2, 3}, dtype(), device());
     Tensor ana_grad = zeros({2, 4}, dtype(), device());
@@ -299,7 +299,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, MultidimensionalShapeMismatch) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, MissingGradientError) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto unused_input_func = [this](const Variable& x) -> Variable {
         Tensor constant = zeros({1}, dtype(), device());
@@ -324,7 +324,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, MissingGradientError) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, LargeTensorSampling) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -348,7 +348,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, LargeTensorSampling) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, SmallAnalyticalValueRelativeError) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * 0.001f;
@@ -371,7 +371,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, SmallAnalyticalValueRelativeError) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, FailingElementsTruncation) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto bad_func = [](const Variable& x) -> Variable {
         Variable result(x.tensor() * 100.0f, false);
@@ -395,7 +395,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, FailingElementsTruncation) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, CompareGradientsTyped) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     Tensor num_grad = zeros({4}, dtype(), device());
     Tensor ana_grad = zeros({4}, dtype(), device());
@@ -424,7 +424,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, CompareGradientsTyped) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, IndirectZerosLikeTensor) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -450,7 +450,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, IndirectZerosLikeTensor) {
 }
 
 TEST_P(GradCheckExtendedMultiDTypeTest, IndirectExtractScalarZeroDim) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return tenzor::sum(x);
@@ -474,7 +474,7 @@ TEST_P(GradCheckExtendedMultiDTypeTest, IndirectExtractScalarZeroDim) {
 // ============================================================================
 
 TEST_P(GradCheckExtendedMultiDTypeTest, ErrorMessageGeneration) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     Tensor num_grad = zeros({5}, dtype(), device());
     Tensor ana_grad = zeros({5}, dtype(), device());

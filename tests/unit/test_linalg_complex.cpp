@@ -337,3 +337,85 @@ TEST(LinalgComplex, SVDComplex128) {
     EXPECT_GE(sp[0], 0.);
     EXPECT_GE(sp[1], 0.);
 }
+
+// ---------------------------------------------------------------------------
+// lstsq: Least-squares solver for complex matrices (audit-4 W.21).
+//
+// The CPU implementation composes lstsq over QR + solve_triangular + matmul,
+// all of which support Complex64/Complex128 via the LAPACKE primitives
+// (cgeqrf/zgeqrf and the per-dtype matmul kernels). PyTorch's linalg.lstsq
+// supports complex inputs via cgels/zgels; the QR composition has the same
+// semantics for over-determined / square systems with full column rank.
+// ---------------------------------------------------------------------------
+
+TEST(LinalgComplex, LstsqComplex64) {
+    // Over-determined system: A (3x2), B (3x1).
+    // Choose A with full column rank and a complex B; verify A @ x ≈ B
+    // (residual ≈ 0 because B lies in range(A) — we pick B = A @ x_true).
+    auto A = tz::zeros({3, 2}, tz::DType::Complex64);
+    auto* ap = A.data<std::complex<float>>();
+    ap[0] = {1.f, 0.f};  ap[1] = {0.f, 1.f};   // row 0
+    ap[2] = {1.f, 1.f};  ap[3] = {1.f, 0.f};   // row 1
+    ap[4] = {0.f, 1.f};  ap[5] = {2.f, 0.f};   // row 2
+
+    // x_true = [(1+0i), (0+1i)]^T → B = A @ x_true
+    auto x_true = tz::zeros({2, 1}, tz::DType::Complex64);
+    x_true.data<std::complex<float>>()[0] = {1.f, 0.f};
+    x_true.data<std::complex<float>>()[1] = {0.f, 1.f};
+    auto B = tz::matmul(A, x_true);
+
+    tz::Tensor x, residuals;
+    ASSERT_NO_THROW(std::tie(x, residuals) = tz::linalg::lstsq(A, B));
+    EXPECT_EQ(x.dtype(), tz::DType::Complex64);
+    ASSERT_EQ(x.shape().size(), 2u);
+    EXPECT_EQ(x.shape()[0], 2);
+    EXPECT_EQ(x.shape()[1], 1);
+
+    // Solution should match x_true since B is in range(A).
+    const auto* xp = x.data<std::complex<float>>();
+    EXPECT_NEAR(xp[0].real(), 1.f, 1e-4f);
+    EXPECT_NEAR(xp[0].imag(), 0.f, 1e-4f);
+    EXPECT_NEAR(xp[1].real(), 0.f, 1e-4f);
+    EXPECT_NEAR(xp[1].imag(), 1.f, 1e-4f);
+
+    // A @ x ≈ B as a defence-in-depth sanity check (matches cgels semantics).
+    auto recon = tz::matmul(A, x);
+    const auto* rp = recon.data<std::complex<float>>();
+    const auto* bp = B.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(rp[i].real(), bp[i].real(), 1e-4f) << "row " << i;
+        EXPECT_NEAR(rp[i].imag(), bp[i].imag(), 1e-4f) << "row " << i;
+    }
+}
+
+TEST(LinalgComplex, LstsqComplex128) {
+    // Same shape and structure in double precision.
+    auto A = tz::zeros({3, 2}, tz::DType::Complex128);
+    auto* ap = A.data<std::complex<double>>();
+    ap[0] = {1., 0.};  ap[1] = {0., 1.};
+    ap[2] = {1., 1.};  ap[3] = {1., 0.};
+    ap[4] = {0., 1.};  ap[5] = {2., 0.};
+
+    auto x_true = tz::zeros({2, 1}, tz::DType::Complex128);
+    x_true.data<std::complex<double>>()[0] = {1., 0.};
+    x_true.data<std::complex<double>>()[1] = {0., 1.};
+    auto B = tz::matmul(A, x_true);
+
+    tz::Tensor x, residuals;
+    ASSERT_NO_THROW(std::tie(x, residuals) = tz::linalg::lstsq(A, B));
+    EXPECT_EQ(x.dtype(), tz::DType::Complex128);
+
+    const auto* xp = x.data<std::complex<double>>();
+    EXPECT_NEAR(xp[0].real(), 1., 1e-10);
+    EXPECT_NEAR(xp[0].imag(), 0., 1e-10);
+    EXPECT_NEAR(xp[1].real(), 0., 1e-10);
+    EXPECT_NEAR(xp[1].imag(), 1., 1e-10);
+
+    auto recon = tz::matmul(A, x);
+    const auto* rp = recon.data<std::complex<double>>();
+    const auto* bp = B.data<std::complex<double>>();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(rp[i].real(), bp[i].real(), 1e-10) << "row " << i;
+        EXPECT_NEAR(rp[i].imag(), bp[i].imag(), 1e-10) << "row " << i;
+    }
+}

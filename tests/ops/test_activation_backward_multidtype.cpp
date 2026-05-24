@@ -11,6 +11,7 @@
 #include <tenzor/nn/layers/dropout.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -131,6 +132,7 @@ TEST_P(ActivationBackwardMultiDTypeTest, DropoutForwardBackward) {
     EXPECT_NO_THROW({ output.backward(grad_output); })
         << "Dropout backward threw on " << device().to_string();
 
+    EXPECT_GRAD_FLOWS(input);  // W.26
     ASSERT_TRUE(input.grad().has_value())
         << "Dropout backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {4, 16});

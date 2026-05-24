@@ -26,6 +26,21 @@
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <filesystem>
+#include <unistd.h>  // W.24: getpid()
+
+namespace {
+// W.24: per-process + per-test path so parallel ctest runs never collide
+// on the checkpoint files. Mirrors the audit-3 ONNXImportTest fix.
+static std::string make_zero_tmp_path(const std::string& stem) {
+    const auto* test_info =
+        ::testing::UnitTest::GetInstance()->current_test_info();
+    std::string unique = std::string("tenzor_") + stem + "_" +
+        std::to_string(getpid()) + "_" +
+        (test_info ? test_info->name() : "unknown");
+    return (std::filesystem::temp_directory_path() / unique).string();
+}
+} // anonymous namespace
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -660,7 +675,7 @@ TEST_F(ZeROStage2IntegrationTest, CheckpointSaveLoad) {
     train_model(*model, opt, X, y, 20);
 
     // Save checkpoint
-    std::string checkpoint_path = "/tmp/zero_stage2_test_checkpoint";
+    std::string checkpoint_path = make_zero_tmp_path("zero_stage2_test_checkpoint");
     EXPECT_NO_THROW(opt.save_checkpoint(checkpoint_path));
 
     // Create new optimizer and load checkpoint
@@ -674,8 +689,8 @@ TEST_F(ZeROStage2IntegrationTest, CheckpointSaveLoad) {
 
 TEST_F(ZeROStage2IntegrationTest, CheckpointResumeTraining) {
     auto [X, y] = generate_data(32, 64, 10);
-    std::string checkpoint_path = "/tmp/zero_stage2_resume_test.pt";
-    std::string opt_checkpoint_path = "/tmp/zero_stage2_resume_opt";
+    std::string checkpoint_path = make_zero_tmp_path("zero_stage2_resume_test.pt");
+    std::string opt_checkpoint_path = make_zero_tmp_path("zero_stage2_resume_opt");
 
     // Train for 30 steps and save both model and optimizer
     std::vector<float> losses_first;
@@ -737,7 +752,7 @@ TEST_F(ZeROStage2IntegrationTest, CheckpointMultiRankCompatibility) {
     ZeROStage1Optimizer opt(std::move(base_opt), config);
 
     // Save checkpoint without training (tests checkpoint format only)
-    std::string checkpoint_path = "/tmp/zero_stage2_multirank_test";
+    std::string checkpoint_path = make_zero_tmp_path("zero_stage2_multirank_test");
     EXPECT_NO_THROW(opt.save_checkpoint(checkpoint_path));
 
     // Load should work for same configuration
@@ -768,7 +783,7 @@ TEST_F(ZeROStage2IntegrationTest, CheckpointWithCPUOffload) {
     train_model(*model, opt, X, y, 20);
 
     // Save and load checkpoint
-    std::string checkpoint_path = "/tmp/zero_stage2_offload_checkpoint";
+    std::string checkpoint_path = make_zero_tmp_path("zero_stage2_offload_checkpoint");
     EXPECT_NO_THROW(opt.save_checkpoint(checkpoint_path));
 
     auto model2 = std::make_shared<SimpleMLP>(128, 256, 10);

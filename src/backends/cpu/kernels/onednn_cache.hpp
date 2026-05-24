@@ -148,5 +148,24 @@ inline dnnl::stream& get_onednn_stream() {
 
 #endif // TENZOR_USE_ONEDNN
 
+// ============================================================================
+// W.6: explicit cache-clear API
+// ============================================================================
+//
+// Each per-op .cpp owns a `thread_local` cache (g_conv2d_cache,
+// g_batchnorm_cache, …). Long-running training jobs that recycle stream
+// configurations would otherwise let these grow to MaxSize entries and
+// hold onto the underlying dnnl primitives + reordered weight buffers for
+// the process lifetime. `clear_dnnl_cache()` walks every registered cache
+// on the calling thread and clears it.
+
+/// Register a thread-local cache clear callback. Each per-op cpp registers
+/// its cache via a static initializer; clear_dnnl_cache() invokes them all.
+void register_dnnl_cache_clear_callback(void (*cb)());
+
+/// Clear all thread-local oneDNN primitive caches on the current thread.
+/// Idle entries are destroyed; subsequent calls lazily rebuild.
+void clear_dnnl_cache();
+
 } // namespace cpu
 } // namespace tenzor

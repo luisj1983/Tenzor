@@ -3,6 +3,7 @@
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
+#include "cuda_nan_helpers.cuh"
 #include "launch_config.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -217,7 +218,8 @@ __global__ void fold_kernel_fp16(
             do {
                 old_val = atomicCAS(addr, 0u, 0u);
                 __half* h = reinterpret_cast<__half*>(&old_val);
-                __half result = __float2half(__half2float(h[lane]) + val);
+                // W.7: NaN-preserving F32→F16 conversion.
+                __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[lane]) + val);
                 new_val = old_val;
                 reinterpret_cast<__half*>(&new_val)[lane] = result;
             } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -285,7 +287,8 @@ __global__ void fold_kernel_bf16(
             do {
                 old_val = atomicCAS(addr, 0u, 0u);
                 __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-                __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[lane]) + val);
+                // W.7: NaN-preserving F32→BF16 conversion.
+                __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[lane]) + val);
                 new_val = old_val;
                 reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
             } while (atomicCAS(addr, old_val, new_val) != old_val);

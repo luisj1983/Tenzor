@@ -8,6 +8,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include <filesystem>
 #include <fstream>
+#include <unistd.h>  // W.24: getpid()
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -26,7 +27,15 @@ static ::testing::Environment* const tenzor_env =
 class SerializationTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir_ = "/tmp/tenzor_serialization_test";
+        // W.24: mirror the ONNXImportTest pattern — per-process + per-test
+        // unique directory so parallel ctest workers don't race on each
+        // other's fixtures.
+        const auto* test_info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        std::string unique_name = std::string("tenzor_serialization_") +
+            std::to_string(getpid()) + "_" +
+            (test_info ? test_info->name() : "unknown");
+        test_dir_ = (std::filesystem::temp_directory_path() / unique_name).string();
         std::filesystem::create_directories(test_dir_);
     }
 

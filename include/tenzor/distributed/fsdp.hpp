@@ -13,6 +13,7 @@
 #include "distributed.hpp"
 #include "../nn/module.hpp"
 #include "../autograd/variable.hpp"
+#include "../core/dtype.hpp"
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -50,6 +51,19 @@ struct FSDPConfig {
 
     /** @brief Whether to use mixed precision for communication (future) */
     bool mixed_precision{false};
+
+    /**
+     * @brief Reduced-precision dtype for cross-rank communication.
+     *
+     * Audit-4 W.11: previously the FSDP all-gather hardcoded Float16 when
+     * mixed_precision was enabled. BFloat16 is the dominant AMP dtype for
+     * large-language-model training (matches Float32 exponent range — F16
+     * overflows for activations ≥ 65k) and was unreachable. This field
+     * lets the caller pick the comm dtype; the default is BFloat16, which
+     * is the safer choice for the modern transformer workloads FSDP
+     * targets.
+     */
+    DType comm_dtype{DType::BFloat16};
 
     /** @brief Limit all-gather to this many FSDP units in flight at once (0 = no limit) */
     size_t forward_prefetch_limit{2};

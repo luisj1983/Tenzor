@@ -1210,7 +1210,14 @@ auto jvp_norm(const DualTensor& x, float p, std::optional<int64_t> dim, bool kee
     auto abs_x = tenzor::abs(x.primal());
     auto sgn   = tenzor::sign(x.primal());
     auto pow_abs = tenzor::pow(abs_x, static_cast<double>(p) - 1.0);
-    auto weighted = tenzor::mul(tenzor::mul(sgn, pow_abs), x.tangent());
+    // Guard against the p<1 singularity at x=0: |x|^(p-1) is +inf there, and
+    // sign(0)=0 makes the product NaN. The contribution at exactly x=0 should
+    // be zero (sign is zero, the subgradient is the convex-set [-1,1] which
+    // averages to zero), so explicitly zero the weighted term where abs_x==0.
+    auto zero_like_abs = tenzor::zeros_like(abs_x);
+    auto zero_mask = tenzor::eq(abs_x, zero_like_abs);
+    auto safe_pow_abs = tenzor::where(zero_mask, zero_like_abs, pow_abs);
+    auto weighted = tenzor::mul(tenzor::mul(sgn, safe_pow_abs), x.tangent());
     auto num = tenzor::sum(weighted, dim, /*keepdim=*/true);
     auto scale = tenzor::pow(y_kd, 1.0 - static_cast<double>(p));
     auto tangent_kd = tenzor::mul(num, scale);

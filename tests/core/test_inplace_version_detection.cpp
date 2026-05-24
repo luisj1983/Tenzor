@@ -19,6 +19,7 @@
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
+#include "../grad_flow_helpers.hpp"  // W.26: EXPECT_GRAD_FLOWS
 
 namespace tenzor {
 namespace {
@@ -71,6 +72,7 @@ TEST_F(InplaceVersionDetectionTest, UnmodifiedSavedTensorBackwardSucceeds) {
 
     auto grad = ones({3, 4}, DType::Float32, Device::cpu());
     EXPECT_NO_THROW(y.backward(grad));
+    EXPECT_GRAD_FLOWS(x);  // W.26: strengthen control-path assertion
 }
 
 } // namespace

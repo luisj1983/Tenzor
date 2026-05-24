@@ -194,6 +194,13 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             0, 1, &mb, 0, nullptr, 0, nullptr);
         endSingleTimeCommands(cmd, device_id);
+        // W.9: force the fill submission to finish before the backward kernel
+        // is recorded into a fresh command buffer.  Under USE_COMMAND_BATCHING
+        // the two endSingleTimeCommands() invocations only enqueue work; the
+        // pipeline barrier above is intra-command-buffer and does not span
+        // separate submissions.  Without this synchronize, the scatter
+        // atomicAdd may race against an unflushed fill.
+        synchronize(device_id);
     }
 
     if (total == 0) {
@@ -292,6 +299,10 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             0, 1, &mb, 0, nullptr, 0, nullptr);
         endSingleTimeCommands(cmd, device_id);
+        // W.9: same fence-gap as grid_sample_backward; force the fill to
+        // finish before the backward kernel is recorded into a fresh
+        // command buffer.
+        synchronize(device_id);
     }
 
     if (total == 0) {

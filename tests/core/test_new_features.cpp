@@ -386,5 +386,48 @@ TEST_F(NewFeaturesTest, ChainedScheduler_MultipleSchedulers) {
     EXPECT_NEAR(lr, 0.072, 0.01);
 }
 
+// Audit-4 W.10: ChainedScheduler::state_dict() delegates entirely to its
+// children — it has no parent epoch_/step_count_. Round-trip through
+// state_dict/load_state_dict must restore the children's counters exactly.
+TEST_F(NewFeaturesTest, ChainedScheduler_StateDict_RoundTrip) {
+    auto param_src = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+    std::vector<std::shared_ptr<Variable>> params_src = {param_src};
+    optim::SGD optimizer_src(params_src, 0.1);
+
+    auto sched1_src = std::make_shared<optim::StepLR>(optimizer_src, 2, 0.5);
+    auto sched2_src = std::make_shared<optim::StepLR>(optimizer_src, 3, 0.25);
+    optim::ChainedScheduler chained_src({sched1_src, sched2_src});
+
+    // Drive the source chain for several steps so each child accumulates a
+    // distinct internal epoch_/last_lr.
+    for (int i = 0; i < 5; ++i) chained_src.step();
+    const double lr_src = chained_src.get_last_lr();
+    const int epoch1_src = sched1_src->get_epoch();
+    const int epoch2_src = sched2_src->get_epoch();
+
+    // Build a fresh, independent destination chain (different optimizer
+    // instance) and restore from the source state_dict.
+    auto param_dst = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+    std::vector<std::shared_ptr<Variable>> params_dst = {param_dst};
+    optim::SGD optimizer_dst(params_dst, 0.1);
+    auto sched1_dst = std::make_shared<optim::StepLR>(optimizer_dst, 2, 0.5);
+    auto sched2_dst = std::make_shared<optim::StepLR>(optimizer_dst, 3, 0.25);
+    optim::ChainedScheduler chained_dst({sched1_dst, sched2_dst});
+
+    auto state = chained_src.state_dict();
+    chained_dst.load_state_dict(state);
+
+    // Children counters round-trip exactly through the prefixed entries.
+    EXPECT_EQ(sched1_dst->get_epoch(), epoch1_src);
+    EXPECT_EQ(sched2_dst->get_epoch(), epoch2_src);
+    EXPECT_NEAR(chained_dst.get_last_lr(), lr_src, 1e-9);
+
+    // Stepping both chains one more time must produce the same LR — the
+    // delegation contract relies on children carrying their own counters.
+    chained_src.step();
+    chained_dst.step();
+    EXPECT_NEAR(chained_dst.get_last_lr(), chained_src.get_last_lr(), 1e-9);
+}
+
 } // namespace
 } // namespace tenzor

@@ -7,6 +7,7 @@
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -658,10 +659,11 @@ auto CosineAnnealingWarmRestarts::set_optimizer_lr(double lr) -> void {
 // LambdaLR Implementation
 //==============================================================================
 
-LambdaLR::LambdaLR(Optimizer& optimizer, LrLambda lr_lambda)
+LambdaLR::LambdaLR(Optimizer& optimizer, LrLambda lr_lambda, std::string name)
     : optimizer_(optimizer)
     , lr_lambda_(std::move(lr_lambda))
-    , epoch_(0) {
+    , epoch_(0)
+    , name_(std::move(name)) {
     if (!lr_lambda_) {
         throw std::invalid_argument("LambdaLR: lr_lambda must not be null");
     }
@@ -764,6 +766,24 @@ inline double read_scalar_f64(const Tensor& t) {
     return host.data<double>()[0];
 }
 
+// Audit-4 W.12: see src/nn/optim/scheduler.cpp for the matching helper
+// used by MultiplicativeLR.
+inline Tensor make_name_tensor(const std::string& name) {
+    Tensor t({static_cast<int64_t>(name.size())}, DType::UInt8, Device::cpu());
+    if (!name.empty()) {
+        std::memcpy(t.data<uint8_t>(), name.data(), name.size());
+    }
+    return t;
+}
+
+inline std::string read_name_tensor(const Tensor& t) {
+    Tensor host = (t.device().type != Device::Type::CPU) ? t.cpu() : t;
+    const int64_t n = host.numel();
+    if (n <= 0) return {};
+    const auto* bytes = reinterpret_cast<const char*>(host.data<uint8_t>());
+    return std::string(bytes, static_cast<size_t>(n));
+}
+
 }  // namespace
 
 auto ReduceLROnPlateau::state_dict() const -> std::unordered_map<std::string, Tensor> {
@@ -854,12 +874,32 @@ auto LambdaLR::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
     state["epoch"]   = make_scalar_i64(static_cast<int64_t>(epoch_));
     state["base_lr"] = make_scalar_f64(base_lr_);
+    // Audit-4 W.12: persist the lambda identifier so a mismatched
+    // destination is detected at load time rather than silently
+    // producing a wrong-LR trajectory.
+    state["lambda_name"] = make_name_tensor(name_);
     return state;
 }
 
 auto LambdaLR::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
+    load_state_dict(state, /*force=*/false);
+}
+
+auto LambdaLR::load_state_dict(
+    const std::unordered_map<std::string, Tensor>& state, bool force) -> void {
     LRScheduler::load_state_dict(state);
+    // Audit-4 W.12: verify the saved lambda identifier matches the
+    // destination's before touching counters. Throws unless force=true.
+    if (auto it = state.find("lambda_name"); it != state.end() && !force) {
+        const std::string saved = read_name_tensor(it->second);
+        if (saved != name_) {
+            throw std::runtime_error(
+                "LambdaLR::load_state_dict: lambda name mismatch — saved '" +
+                saved + "' but destination is '" + name_ +
+                "'. Pass force=true to override.");
+        }
+    }
     if (auto it = state.find("epoch");   it != state.end()) epoch_   = static_cast<int>(read_scalar_i64(it->second));
     if (auto it = state.find("base_lr"); it != state.end()) base_lr_ = read_scalar_f64(it->second);
     if (auto it = state.find("last_lr"); it != state.end()) {

@@ -54,7 +54,7 @@ protected:
 // ============================================================================
 
 TEST_P(GradCheckMissingMultiDTypeTest, CholeskyInverse) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     // cholesky_inverse(L) expects a lower-triangular Cholesky factor L and
     // returns (L Lᵀ)⁻¹. The previous version passed the full SPD matrix
@@ -81,7 +81,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, CholeskyInverse) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, Median) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     // Create in Float32 on CPU, convert to target dtype/device
     auto data = tenzor::arange(0, 15, 1.0, DType::Float32, Device::cpu());
@@ -100,7 +100,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, Median) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, TensorInv) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto n = 2;
     auto m = 3;
@@ -122,7 +122,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, TensorInv) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, TensorSolve) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     int64_t n = 4;
     auto a_data = randn({n, n}, DType::Float32, Device::cpu());
@@ -150,7 +150,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, TensorSolve) {
 // ============================================================================
 
 TEST_P(GradCheckMissingMultiDTypeTest, Entr) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto data = tenzor::add(
         tenzor::abs(randn({3, 4}, DType::Float32, Device::cpu())),
@@ -169,7 +169,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, Entr) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, HouseholderProduct) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     int64_t m = 4, n = 3;
     auto input_data = randn({m, n}, DType::Float32, Device::cpu());
@@ -192,7 +192,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, HouseholderProduct) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, LinalgNorm) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto data = randn({4, 4}, DType::Float32, Device::cpu());
     data = tenzor::add(data, 0.1f);
@@ -209,7 +209,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, LinalgNorm) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, Renorm) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto data = randn({3, 5}, DType::Float32, Device::cpu());
     data = tenzor::mul(data, 10.0f);
@@ -226,7 +226,7 @@ TEST_P(GradCheckMissingMultiDTypeTest, Renorm) {
 }
 
 TEST_P(GradCheckMissingMultiDTypeTest, Xlogy) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
+    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
 
     auto x_data = tenzor::add(tenzor::abs(randn({3, 4}, DType::Float32, Device::cpu())), 0.1f);
     auto y_data = tenzor::add(tenzor::abs(randn({3, 4}, DType::Float32, Device::cpu())), 0.1f);

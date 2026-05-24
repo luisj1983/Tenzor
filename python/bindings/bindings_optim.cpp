@@ -81,14 +81,21 @@ void register_optim(py::module_& m) {
         });
 
     // Optimizer base class - needed for functions that accept any optimizer
+    // W.20: zero_grad walks every parameter and dispatches a fill kernel;
+    // add_param_group / load_state_dict allocate state buffers. None of
+    // these need the GIL during the C++ work — release across the call so
+    // DataLoader workers / DDP comm hooks make progress in parallel.
     py::class_<tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Optimizer>>(optim, "Optimizer",
         "Base class for all optimizers")
-        .def("zero_grad", &tenzor::optim::Optimizer::zero_grad, "Zero out all parameter gradients")
+        .def("zero_grad", &tenzor::optim::Optimizer::zero_grad, "Zero out all parameter gradients",
+             py::call_guard<py::gil_scoped_release>())
         .def("state_dict", &tenzor::optim::Optimizer::state_dict, "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::Optimizer::load_state_dict, py::arg("state"),
-             "Load optimizer state dictionary")
+             "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())
         .def("add_param_group", &tenzor::optim::Optimizer::add_param_group,
-             py::arg("group"), "Add a parameter group with custom hyperparameters")
+             py::arg("group"), "Add a parameter group with custom hyperparameters",
+             py::call_guard<py::gil_scoped_release>())
         .def("param_groups", static_cast<std::vector<tenzor::optim::ParamGroup>& (tenzor::optim::Optimizer::*)()>(
              &tenzor::optim::Optimizer::param_groups),
              py::return_value_policy::reference_internal,
@@ -115,7 +122,8 @@ void register_optim(py::module_& m) {
             return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::SGD::zero_grad)
+        .def("zero_grad", &tenzor::optim::SGD::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SGD::set_lr,
              py::arg("lr"), "Set learning rate")
         .def("get_lr", &tenzor::optim::SGD::get_lr,
@@ -123,7 +131,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::SGD::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::SGD::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary");
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::ASGD, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::ASGD>>(optim, "ASGD",
         "Averaged Stochastic Gradient Descent optimizer")
@@ -138,7 +147,8 @@ void register_optim(py::module_& m) {
             self.step(); return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::ASGD::zero_grad)
+        .def("zero_grad", &tenzor::optim::ASGD::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::ASGD::set_lr,
              py::arg("lr"), "Set learning rate")
         .def("get_lr", &tenzor::optim::ASGD::get_lr,
@@ -146,7 +156,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::ASGD::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::ASGD::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary");
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::Adam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Adam>>(optim, "Adam")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
@@ -159,7 +170,8 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adam::zero_grad)
+        .def("zero_grad", &tenzor::optim::Adam::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Adam::set_lr,
              py::arg("lr"), "Set learning rate")
         .def("get_lr", &tenzor::optim::Adam::get_lr,
@@ -167,7 +179,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::Adam::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::Adam::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary");
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::AdamW, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::AdamW>>(optim, "AdamW")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
@@ -180,7 +193,8 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::AdamW::zero_grad)
+        .def("zero_grad", &tenzor::optim::AdamW::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::AdamW::set_lr,
              py::arg("lr"), "Set learning rate")
         .def("get_lr", &tenzor::optim::AdamW::get_lr,
@@ -188,7 +202,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::AdamW::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::AdamW::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary");
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // Additional optimizers
     // Audit-4 U.14: thread the Optimizer base + shared_ptr through the
@@ -207,9 +222,11 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::RMSprop::zero_grad)
+        .def("zero_grad", &tenzor::optim::RMSprop::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("state_dict", &tenzor::optim::RMSprop::state_dict)
-        .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict);
+        .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict,
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // Audit-4 U.14: Adagrad inherits from Optimizer in the .pyi stub; thread
     // the base + shared_ptr through pybind11 so that contract is honoured.
@@ -224,7 +241,8 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adagrad::zero_grad);
+        .def("zero_grad", &tenzor::optim::Adagrad::zero_grad,
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // Audit-4 U.14: Adadelta — same parent + shared_ptr fix as RMSprop / Adagrad.
     py::class_<tenzor::optim::Adadelta, tenzor::optim::Optimizer,
@@ -237,7 +255,8 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adadelta::zero_grad);
+        .def("zero_grad", &tenzor::optim::Adadelta::zero_grad,
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::RAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::RAdam>>(optim, "RAdam",
         "Rectified Adam optimizer (no warmup needed)")
@@ -250,11 +269,13 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::RAdam::zero_grad)
+        .def("zero_grad", &tenzor::optim::RAdam::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::RAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::RAdam::get_lr)
         .def("state_dict", &tenzor::optim::RAdam::state_dict)
-        .def("load_state_dict", &tenzor::optim::RAdam::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::RAdam::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::NAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::NAdam>>(optim, "NAdam",
         "NAdam (Nesterov-accelerated Adam) optimizer")
@@ -268,11 +289,13 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::NAdam::zero_grad)
+        .def("zero_grad", &tenzor::optim::NAdam::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::NAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::NAdam::get_lr)
         .def("state_dict", &tenzor::optim::NAdam::state_dict)
-        .def("load_state_dict", &tenzor::optim::NAdam::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::NAdam::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::Adamax, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Adamax>>(optim, "Adamax",
         "Adamax optimizer (Adam variant based on infinity norm)")
@@ -285,11 +308,13 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adamax::zero_grad)
+        .def("zero_grad", &tenzor::optim::Adamax::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Adamax::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::Adamax::get_lr)
         .def("state_dict", &tenzor::optim::Adamax::state_dict)
-        .def("load_state_dict", &tenzor::optim::Adamax::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::Adamax::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::LAMB, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::LAMB>>(optim, "LAMB",
         "LAMB optimizer for large-batch training")
@@ -302,11 +327,13 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::LAMB::zero_grad)
+        .def("zero_grad", &tenzor::optim::LAMB::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LAMB::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LAMB::get_lr)
         .def("state_dict", &tenzor::optim::LAMB::state_dict)
-        .def("load_state_dict", &tenzor::optim::LAMB::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::LAMB::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::SparseAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::SparseAdam>>(optim, "SparseAdam",
         "SparseAdam optimizer for efficient embedding training with sparse gradients")
@@ -319,11 +346,13 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad)
+        .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SparseAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
         .def("state_dict", &tenzor::optim::SparseAdam::state_dict)
-        .def("load_state_dict", &tenzor::optim::SparseAdam::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::SparseAdam::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::Rprop, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Rprop>>(optim, "Rprop",
         "Resilient Propagation optimizer with per-parameter adaptive step sizes")
@@ -337,7 +366,8 @@ void register_optim(py::module_& m) {
             self.step(); return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::Rprop::zero_grad)
+        .def("zero_grad", &tenzor::optim::Rprop::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Rprop::set_lr,
              py::arg("lr"), "Set learning rate (initial step size)")
         .def("get_lr", &tenzor::optim::Rprop::get_lr,
@@ -345,7 +375,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::Rprop::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::Rprop::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary");
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // LBFGS: quasi-Newton optimizer for small, precisely-convergent problems.
     // Requires a closure because line search needs to re-evaluate f + grad.
@@ -374,11 +405,13 @@ void register_optim(py::module_& m) {
             return self.step(closure);
         }, py::arg("closure"),
            "Perform an L-BFGS step. Closure must recompute loss and call loss.backward().")
-        .def("zero_grad", &tenzor::optim::LBFGS::zero_grad)
+        .def("zero_grad", &tenzor::optim::LBFGS::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LBFGS::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LBFGS::get_lr)
         .def("state_dict", &tenzor::optim::LBFGS::state_dict)
-        .def("load_state_dict", &tenzor::optim::LBFGS::load_state_dict, py::arg("state"));
+        .def("load_state_dict", &tenzor::optim::LBFGS::load_state_dict, py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // --- ZeRO optimizers (stages 1, 2, 3) ---
     // C++ now exposes a `std::shared_ptr<Optimizer>` overload on each ZeRO
@@ -419,10 +452,12 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step();
         })
-        .def("zero_grad", &tenzor::optim::ZeROStage1Optimizer::zero_grad)
+        .def("zero_grad", &tenzor::optim::ZeROStage1Optimizer::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("state_dict", &tenzor::optim::ZeROStage1Optimizer::state_dict)
         .def("load_state_dict", &tenzor::optim::ZeROStage1Optimizer::load_state_dict,
-             py::arg("state"));
+             py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());  // W.20
 
     // Stage 2 and 3 are aliased to Stage 1's binding for construction — they
     // share the same `base_optimizer + config` signature, only the config
@@ -558,37 +593,51 @@ void register_optim(py::module_& m) {
              "Get current epoch number");
 
     py::class_<tenzor::optim::LambdaLR, tenzor::optim::LRScheduler>(lr_scheduler, "LambdaLR")
-        .def(py::init([](tenzor::optim::SGD& opt, py::function lr_lambda) {
+        .def(py::init([](tenzor::optim::SGD& opt, py::function lr_lambda, std::string name) {
                  return new tenzor::optim::LambdaLR(opt,
                      [lr_lambda](int epoch) -> double {
                          py::gil_scoped_acquire gil;
                          return lr_lambda(epoch).cast<double>();
-                     });
-             }), py::arg("optimizer"), py::arg("lr_lambda"),
-             "Sets lr_t = base_lr * lr_lambda(epoch)")
-        .def(py::init([](tenzor::optim::Adam& opt, py::function lr_lambda) {
+                     }, std::move(name));
+             }), py::arg("optimizer"), py::arg("lr_lambda"), py::arg("name") = std::string{},
+             "Sets lr_t = base_lr * lr_lambda(epoch). Audit-4 W.12: pass name to "
+             "guard against loading a checkpoint produced by a different lambda.")
+        .def(py::init([](tenzor::optim::Adam& opt, py::function lr_lambda, std::string name) {
                  return new tenzor::optim::LambdaLR(opt,
                      [lr_lambda](int epoch) -> double {
                          py::gil_scoped_acquire gil;
                          return lr_lambda(epoch).cast<double>();
-                     });
-             }), py::arg("optimizer"), py::arg("lr_lambda"))
-        .def(py::init([](tenzor::optim::AdamW& opt, py::function lr_lambda) {
+                     }, std::move(name));
+             }), py::arg("optimizer"), py::arg("lr_lambda"), py::arg("name") = std::string{})
+        .def(py::init([](tenzor::optim::AdamW& opt, py::function lr_lambda, std::string name) {
                  return new tenzor::optim::LambdaLR(opt,
                      [lr_lambda](int epoch) -> double {
                          py::gil_scoped_acquire gil;
                          return lr_lambda(epoch).cast<double>();
-                     });
-             }), py::arg("optimizer"), py::arg("lr_lambda"))
-        .def(py::init([](tenzor::optim::RMSprop& opt, py::function lr_lambda) {
+                     }, std::move(name));
+             }), py::arg("optimizer"), py::arg("lr_lambda"), py::arg("name") = std::string{})
+        .def(py::init([](tenzor::optim::RMSprop& opt, py::function lr_lambda, std::string name) {
                  return new tenzor::optim::LambdaLR(opt,
                      [lr_lambda](int epoch) -> double {
                          py::gil_scoped_acquire gil;
                          return lr_lambda(epoch).cast<double>();
-                     });
-             }), py::arg("optimizer"), py::arg("lr_lambda"))
+                     }, std::move(name));
+             }), py::arg("optimizer"), py::arg("lr_lambda"), py::arg("name") = std::string{})
         .def("get_epoch", &tenzor::optim::LambdaLR::get_epoch,
-             "Get current epoch number");
+             "Get current epoch number")
+        // Audit-4 W.12: expose load_state_dict(force=...) for callers who
+        // want to bypass the saved lambda-name guard.
+        .def("load_state_dict",
+             [](tenzor::optim::LambdaLR& self,
+                const std::unordered_map<std::string, tenzor::Tensor>& state,
+                bool force) {
+                 self.load_state_dict(state, force);
+             },
+             py::arg("state"), py::arg("force") = false,
+             "Restore scheduler state. With force=True the saved "
+             "lambda-name guard is skipped (audit-4 W.12).")
+        .def("name", &tenzor::optim::LambdaLR::name,
+             "Lambda identifier set at construction (empty if not configured).");
 
     // Advanced schedulers
     py::class_<tenzor::optim::ReduceLROnPlateau, tenzor::optim::LRScheduler>(lr_scheduler, "ReduceLROnPlateau")
@@ -688,10 +737,25 @@ void register_optim(py::module_& m) {
 
     // MultiplicativeLR scheduler
     py::class_<tenzor::optim::MultiplicativeLR, tenzor::optim::LRScheduler>(lr_scheduler, "MultiplicativeLR")
-        .def(py::init<tenzor::optim::Optimizer&, std::function<double(int)>>(),
-             py::arg("optimizer"), py::arg("lr_lambda"))
+        .def(py::init<tenzor::optim::Optimizer&, std::function<double(int)>, std::string>(),
+             py::arg("optimizer"), py::arg("lr_lambda"),
+             py::arg("name") = std::string{},
+             "Audit-4 W.12: pass name to guard against loading a checkpoint "
+             "produced by a different lambda.")
         .def("step", &tenzor::optim::MultiplicativeLR::step)
-        .def("get_last_lr", &tenzor::optim::MultiplicativeLR::get_last_lr);
+        .def("get_last_lr", &tenzor::optim::MultiplicativeLR::get_last_lr)
+        // Audit-4 W.12: expose load_state_dict(force=...).
+        .def("load_state_dict",
+             [](tenzor::optim::MultiplicativeLR& self,
+                const std::unordered_map<std::string, tenzor::Tensor>& state,
+                bool force) {
+                 self.load_state_dict(state, force);
+             },
+             py::arg("state"), py::arg("force") = false,
+             "Restore scheduler state. With force=True the saved "
+             "lambda-name guard is skipped.")
+        .def("name", &tenzor::optim::MultiplicativeLR::name,
+             "Lambda identifier set at construction.");
 
     // SequentialLR scheduler
     py::class_<tenzor::optim::SequentialLR, tenzor::optim::LRScheduler>(lr_scheduler, "SequentialLR")
@@ -719,7 +783,8 @@ void register_optim(py::module_& m) {
              "Compute perturbation and apply to weights")
         .def("second_step", &tenzor::optim::SAM::second_step,
              "Restore original weights and step the base optimizer")
-        .def("zero_grad", &tenzor::optim::SAM::zero_grad)
+        .def("zero_grad", &tenzor::optim::SAM::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SAM::set_lr,
              py::arg("lr"), "Set learning rate on the base optimizer")
         .def("get_lr", &tenzor::optim::SAM::get_lr,
@@ -731,7 +796,8 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::SAM::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::SAM::load_state_dict,
-             py::arg("state"), "Load optimizer state dictionary")
+             py::arg("state"), "Load optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("base_optimizer",
              static_cast<tenzor::optim::Optimizer& (tenzor::optim::SAM::*)()>(
                  &tenzor::optim::SAM::base_optimizer),
@@ -779,11 +845,13 @@ void register_optim(py::module_& m) {
             if (closure) return py::cast(self.step(*closure));
             self.step(); return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::AdamAtan2::zero_grad)
+        .def("zero_grad", &tenzor::optim::AdamAtan2::zero_grad,
+             py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::AdamAtan2::set_lr)
         .def("get_lr", &tenzor::optim::AdamAtan2::get_lr)
         .def("state_dict", &tenzor::optim::AdamAtan2::state_dict)
-        .def("load_state_dict", &tenzor::optim::AdamAtan2::load_state_dict);
+        .def("load_state_dict", &tenzor::optim::AdamAtan2::load_state_dict,
+             py::call_guard<py::gil_scoped_release>());  // W.20
 }
 
 } // namespace tenzor::python

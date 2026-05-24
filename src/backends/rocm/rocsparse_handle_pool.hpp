@@ -39,36 +39,56 @@ class RocSPARSEHandlePool {
 public:
     /// Returns a per-thread rocSPARSE handle, optionally bound to the given stream.
     static rocsparse_handle get(hipStream_t stream = nullptr) {
-        static thread_local RocSPARSEHandlePool instance;
-        if (stream && stream != instance.last_stream_) {
-            ROCSPARSE_CHECK(rocsparse_set_stream(instance.handle_, stream));
-            instance.last_stream_ = stream;
+        ensure_initialized();
+        if (stream && stream != last_stream()) {
+            ROCSPARSE_CHECK(rocsparse_set_stream(handle(), stream));
+            last_stream() = stream;
         }
-        return instance.handle_;
+        return handle();
     }
 
     static void shutdown() {
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-private:
-    RocSPARSEHandlePool() {
-        ROCSPARSE_CHECK(rocsparse_create_handle(&handle_));
+    /// W.8: destroy the thread-local rocSPARSE handle so the next get()
+    /// lazily rebuilds.
+    static void clear_idle() {
+        if (handle() != nullptr) {
+            try { rocsparse_destroy_handle(handle()); }
+            catch (...) { /* must not throw from cleanup */ }
+            handle() = nullptr;
+        }
+        last_stream() = nullptr;
     }
 
-    ~RocSPARSEHandlePool() noexcept {
-        if (handle_ && is_backend_registry_alive()) {
-            try { rocsparse_destroy_handle(handle_); }
-            catch (...) { /* destructor must not throw */ }
-            handle_ = nullptr;
+private:
+    struct HandleGuard {
+        rocsparse_handle handle = nullptr;
+        hipStream_t last_stream = nullptr;
+        ~HandleGuard() noexcept {
+            if (handle && is_backend_registry_alive()) {
+                try { rocsparse_destroy_handle(handle); }
+                catch (...) { /* destructor must not throw */ }
+                handle = nullptr;
+            }
+        }
+    };
+    static HandleGuard& guard() {
+        static thread_local HandleGuard g;
+        return g;
+    }
+    static rocsparse_handle& handle() { return guard().handle; }
+    static hipStream_t& last_stream() { return guard().last_stream; }
+    static void ensure_initialized() {
+        if (handle() == nullptr) {
+            ROCSPARSE_CHECK(rocsparse_create_handle(&handle()));
         }
     }
 
+    RocSPARSEHandlePool() = delete;
     RocSPARSEHandlePool(const RocSPARSEHandlePool&) = delete;
     RocSPARSEHandlePool& operator=(const RocSPARSEHandlePool&) = delete;
-
-    rocsparse_handle handle_ = nullptr;
-    hipStream_t last_stream_ = nullptr;
 };
 
 } // namespace rocm

@@ -102,23 +102,14 @@ TEST_F(KLDivManualTest, StepByStepBackward) {
     std::cout << "   loss has grad_fn: " << (loss.grad_fn() != nullptr) << std::endl;
 
     // Step 6: backward
+    // W.22: replace the try-catch / EXPECT_TRUE(true) stub with the
+    // canonical EXPECT_GRAD_FLOWS macro from grad_flow_helpers.hpp.
+    // Letting gtest catch any thrown exception gives a useful diagnostic
+    // instead of swallowing it into a vacuous EXPECT_TRUE(false).
     std::cout << "7. Calling loss.backward()..." << std::endl;
-    try {
-        loss.backward();
-        std::cout << "   SUCCESS: backward completed!" << std::endl;
-
-        // Check gradient
-        if (input.grad().has_value()) {
-            std::cout << "   input.grad() exists!" << std::endl;
-            EXPECT_TRUE(true);
-        } else {
-            std::cout << "   ERROR: input.grad() is null!" << std::endl;
-            EXPECT_TRUE(false);
-        }
-    } catch (const std::exception& e) {
-        std::cout << "   EXCEPTION: " << e.what() << std::endl;
-        EXPECT_TRUE(false);
-    }
+    loss.backward();
+    std::cout << "   SUCCESS: backward completed!" << std::endl;
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_F(KLDivManualTest, ExactReplicaOfFailingTest) {

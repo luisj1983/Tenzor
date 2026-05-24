@@ -223,6 +223,24 @@ class Conv3d(Module):
     def forward(self, input: Tensor) -> Tensor: ...
 
 # Transposed convolution layers
+class ConvTranspose3d(Module):
+    """3D transposed convolution layer."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        output_padding: int = 0,
+        dilation: int = 1,
+        groups: int = 1,
+        bias: bool = True
+    ) -> None: ...
+
+    def forward(self, input: Tensor) -> Tensor: ...
+
 class ConvTranspose1d(Module):
     """1D transposed convolution layer."""
 
@@ -342,6 +360,50 @@ class AdaptiveMaxPool2d(Module):
     """2D adaptive max pooling layer."""
 
     def __init__(self, output_size: int | Tuple[int, int], return_indices: bool = False) -> None: ...
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class MaxPool3d(Module):
+    """3D max pooling layer."""
+
+    def __init__(
+        self,
+        kernel_size: int,
+        stride: Optional[int] = None,
+        padding: int = 0,
+        ceil_mode: bool = False,
+        return_indices: bool = False,
+    ) -> None: ...
+
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class AvgPool3d(Module):
+    """3D average pooling layer."""
+
+    def __init__(
+        self,
+        kernel_size: int,
+        stride: Optional[int] = None,
+        padding: int = 0,
+    ) -> None: ...
+
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class AdaptiveAvgPool3d(Module):
+    """3D adaptive average pooling layer."""
+
+    @overload
+    def __init__(self, output_size: int) -> None: ...
+    @overload
+    def __init__(self, output_d: int, output_h: int, output_w: int) -> None: ...
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class AdaptiveMaxPool3d(Module):
+    """3D adaptive max pooling layer."""
+
+    @overload
+    def __init__(self, output_size: int) -> None: ...
+    @overload
+    def __init__(self, output_d: int, output_h: int, output_w: int) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
 
 # Padding layers
@@ -573,6 +635,41 @@ class InstanceNorm2d(Module):
         track_running_stats: bool = False
     ) -> None: ...
 
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class InstanceNorm3d(Module):
+    """3D instance normalization."""
+
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        affine: bool = False,
+    ) -> None: ...
+
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class RMSNorm(Module):
+    """Root-Mean-Square layer normalization."""
+
+    normalized_shape: int
+    eps: float
+
+    def __init__(
+        self,
+        normalized_shape: int,
+        eps: float = 1e-6,
+    ) -> None: ...
+
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class GLU(Module):
+    """Gated Linear Unit: splits the input along ``dim`` into halves a, b
+    and returns ``a * sigmoid(b)``."""
+
+    dim: int
+
+    def __init__(self, dim: int = -1) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
 
 # Recurrent layers

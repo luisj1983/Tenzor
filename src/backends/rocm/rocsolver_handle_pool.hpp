@@ -34,35 +34,54 @@ class RocSOLVERHandlePool {
 public:
     /// Returns a per-thread rocBLAS handle (used by rocSOLVER), optionally bound to the given stream.
     static rocblas_handle get(hipStream_t stream = nullptr) {
-        static thread_local RocSOLVERHandlePool instance;
-        if (stream && stream != instance.last_stream_) {
-            ROCBLAS_CHECK_LINALG(rocblas_set_stream(instance.handle_, stream));
-            instance.last_stream_ = stream;
+        ensure_initialized();
+        if (stream && stream != last_stream()) {
+            ROCBLAS_CHECK_LINALG(rocblas_set_stream(handle(), stream));
+            last_stream() = stream;
         }
-        return instance.handle_;
+        return handle();
     }
 
     static void shutdown() {
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-private:
-    RocSOLVERHandlePool() {
-        ROCBLAS_CHECK_LINALG(rocblas_create_handle(&handle_));
+    /// W.8: destroy the thread-local rocBLAS handle so the next get() lazily
+    /// rebuilds.  Frees workspace memory rocBLAS / rocSOLVER retains.
+    static void clear_idle() {
+        if (handle() != nullptr) {
+            rocblas_destroy_handle(handle());
+            handle() = nullptr;
+        }
+        last_stream() = nullptr;
     }
 
-    ~RocSOLVERHandlePool() {
-        if (handle_) {
-            rocblas_destroy_handle(handle_);
-            handle_ = nullptr;
+private:
+    struct HandleGuard {
+        rocblas_handle handle = nullptr;
+        hipStream_t last_stream = nullptr;
+        ~HandleGuard() {
+            if (handle) {
+                rocblas_destroy_handle(handle);
+                handle = nullptr;
+            }
+        }
+    };
+    static HandleGuard& guard() {
+        static thread_local HandleGuard g;
+        return g;
+    }
+    static rocblas_handle& handle() { return guard().handle; }
+    static hipStream_t& last_stream() { return guard().last_stream; }
+    static void ensure_initialized() {
+        if (handle() == nullptr) {
+            ROCBLAS_CHECK_LINALG(rocblas_create_handle(&handle()));
         }
     }
 
+    RocSOLVERHandlePool() = delete;
     RocSOLVERHandlePool(const RocSOLVERHandlePool&) = delete;
     RocSOLVERHandlePool& operator=(const RocSOLVERHandlePool&) = delete;
-
-    rocblas_handle handle_ = nullptr;
-    hipStream_t last_stream_ = nullptr;
 };
 
 } // namespace rocm

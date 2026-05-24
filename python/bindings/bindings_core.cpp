@@ -1373,19 +1373,89 @@ Returns:
         // always copy (our storage is not owned by NumPy).
         .def("__array__", [](const tenzor::Tensor& t,
                              py::object dtype,
-                             py::object /*copy*/) -> py::object {
+                             py::object copy) -> py::object {
+             // Audit-4 W.16: honour the NumPy 2.0 __array__ copy=
+             // protocol.
+             //
+             //   copy=None  (default)  → current behaviour: always
+             //                            produce a fresh contiguous host
+             //                            copy. Safe default — Tenzor
+             //                            storage isn't NumPy-owned so a
+             //                            zero-copy view is fragile.
+             //   copy=True             → caller explicitly demands a
+             //                            fresh allocation. Force the
+             //                            contiguous host copy path even
+             //                            when a zero-copy view would
+             //                            otherwise be possible (CPU,
+             //                            contiguous, no dtype cast).
+             //   copy=False            → caller explicitly refuses a
+             //                            copy. If a copy is unavoidable
+             //                            (non-CPU storage, non-
+             //                            contiguous, or dtype mismatch
+             //                            with the requested @p dtype),
+             //                            raise ValueError to match
+             //                            NumPy 2.0 strict semantics
+             //                            instead of silently copying.
+             const bool want_no_copy   = !copy.is_none() && copy.cast<bool>() == false;
+             const bool want_force_copy = !copy.is_none() && copy.cast<bool>() == true;
+
+             const bool is_cpu = (t.device().type == tenzor::Device::Type::CPU);
+             const bool dtype_requested = !dtype.is_none();
+
+             // Determine whether a copy is unavoidable.
+             // - Non-CPU storage: prepare_tensor_for_numpy will copy.
+             // - Non-contiguous: create_numpy_array silently uses a view
+             //   (zero copy) when storage bounds permit, but a dtype cast
+             //   downstream would still allocate. We only consider the
+             //   storage-side copy here.
+             // - Dtype mismatch: NumPy's astype with copy=False can avoid
+             //   the copy iff the requested dtype matches the source's;
+             //   otherwise it always allocates.
+             const bool copy_for_device = !is_cpu;
+             // A dtype-cast copy is unavoidable when the requested dtype
+             // differs from the source's NumPy dtype. We delegate the
+             // exact comparison to NumPy via astype(copy=False) at the
+             // end; for the up-front gate we conservatively assume any
+             // explicit dtype request may force a copy.
+             const bool copy_for_dtype = dtype_requested;
+
+             if (want_no_copy && (copy_for_device || copy_for_dtype)) {
+                 throw py::value_error(
+                     "Unable to avoid copy while creating an array from this "
+                     "Tenzor tensor (copy=False but a copy is required: "
+                     + std::string(copy_for_device ? "non-CPU storage" :
+                                   "dtype cast requested") + ").");
+             }
+
              tenzor::Tensor cpu_tensor;
              {
                  py::gil_scoped_release release;
                  cpu_tensor = tenzor::numpy::prepare_tensor_for_numpy(t);
              }
              py::object arr = tenzor::numpy::create_numpy_array(cpu_tensor, t.dtype());
-             if (!dtype.is_none()) {
+
+             if (want_force_copy && !dtype_requested) {
+                 // Caller demanded a fresh allocation; the zero-copy view
+                 // path above doesn't satisfy that. Force a NumPy-side
+                 // copy via .copy() so the returned array does not alias
+                 // Tenzor storage.
+                 arr = arr.attr("copy")();
+             }
+
+             if (dtype_requested) {
                  // Delegate the dtype cast to NumPy itself so we pick up
                  // every NumPy-recognized type specifier (str, dtype
                  // object, Python scalar type, etc.) without having to
-                 // enumerate them here.
-                 arr = arr.attr("astype")(dtype, py::arg("copy") = false);
+                 // enumerate them here. When copy=True we always force a
+                 // fresh allocation; when copy=None (default) we honour
+                 // the long-standing "always materialise a host copy"
+                 // contract by passing copy=True; only copy=False reaches
+                 // this branch when the dtype actually matches (otherwise
+                 // we threw above).
+                 const bool astype_copy = want_force_copy
+                                          || (copy.is_none())
+                                          || (!want_no_copy);
+                 arr = arr.attr("astype")(dtype, py::arg("copy") = astype_copy);
              }
              return arr;
          },
@@ -1393,8 +1463,10 @@ Returns:
          py::arg("copy") = py::none(),
          "NumPy array protocol: called by np.asarray / np.array when "
          "they need to coerce this Tensor into an ndarray. Accepts an "
-         "optional dtype for type promotion. Always materializes a "
-         "host copy — Tenzor storage is not NumPy-owned.")
+         "optional dtype for type promotion and a NumPy-2.0 copy= flag: "
+         "copy=None (default) materialises a host copy, copy=True forces "
+         "a fresh allocation, copy=False raises ValueError if a copy "
+         "would be required.")
         .def_static("from_numpy", &tenzor::numpy::numpy_to_tensor,
              py::arg("array"), py::arg("device") = tenzor::Device::cpu(),
              "Create tensor from NumPy array (zero-copy when possible)")

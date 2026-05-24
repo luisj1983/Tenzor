@@ -466,6 +466,17 @@ using Conv2dPrimitiveCache = OneDNNPrimitiveCache<Conv2dCacheKey, Conv2dCachedPr
 
 static thread_local Conv2dPrimitiveCache g_conv2d_cache;
 
+// W.6: register a thread-local clear-callback. Invoked by clear_dnnl_cache().
+namespace {
+void clear_local_conv2d_cache() { g_conv2d_cache.clear(); }
+struct Conv2dCacheClearRegistrar {
+    Conv2dCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_conv2d_cache);
+    }
+};
+static Conv2dCacheClearRegistrar g_conv2d_cache_clear_registrar;
+}
+
 // oneDNN-accelerated Conv2d Forward with primitive caching
 // Caches primitives and reordered weights for 10-30x speedup on repeated calls
 static bool conv2d_forward_onednn(

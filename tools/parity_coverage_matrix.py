@@ -31,20 +31,14 @@ from typing import Iterable
 # Common backend names that appear in test parameter strings.
 BACKENDS = {"cpu", "cuda", "rocm", "vulkan", "oneapi", "mps"}
 
-# DType strings GoogleTest emits for the typed-test param. The MultiBackendDType
-# fixture parameters tuples like ("cuda", <DType>); GoogleTest renders the DType
-# enum as a 1-byte object — so we infer dtype from the test-suite name when
-# possible (e.g., "FusedConv2dSigmoidShape" → dtype unknown, "Float32Add" → fp32).
-DTYPE_HINTS = {
-    "float32": "Float32",
-    "float64": "Float64",
-    "float16": "Float16",
-    "bfloat16": "BFloat16",
-    "fp32": "Float32",
-    "fp64": "Float64",
-    "fp16": "Float16",
-    "bf16": "BFloat16",
-}
+# DType labels emitted by the MultiBackendDType fixture's param-namer.
+# A test name like ``ZerosBasicShape/cuda0_Float16`` carries both axes
+# explicitly in the printable suffix; the fixture builds this in
+# tests/multi_backend_dtype_fixture.hpp via the BackendDTypeNamer helper.
+DTYPE_LABELS = ("Float32", "Float64", "Float16", "BFloat16",
+                "Int8", "Int16", "Int32", "Int64",
+                "UInt8", "Bool",
+                "Complex64", "Complex128")
 
 
 @dataclass
@@ -56,7 +50,28 @@ class TestEntry:
     parameterized: bool = False
 
 
-PARAM_RE = re.compile(r'\("(?P<backend>[a-z]+)"\s*,\s*(?P<rest>.+)\)\s*$')
+# Audit-4 W.25: the printable param suffix is ``<backend>[N]_<Dtype>``:
+#   ZerosBasicShape/cpu_Float32
+#   ZerosBasicShape/cuda0_Float16
+#   ZerosBasicShape/oneapi0_BFloat16
+# The optional trailing digits come from device-index suffixes (cuda0, vulkan1).
+PARAM_TAIL_RE = re.compile(
+    r"/(?P<backend>cpu|cuda|rocm|vulkan|oneapi|mps)\d*_(?P<dtype>"
+    + "|".join(re.escape(d) for d in DTYPE_LABELS) +
+    r")\b"
+)
+
+# Backup: ctest renders the param tuple verbatim, e.g.
+#   ``MultiBackendDType/Foo.Op/("cuda", 1-byte object <01>)``
+# The hex byte indexes into the DType enum order
+# (kept in sync with include/tenzor/core/dtype.hpp).
+ENUM_DTYPE_ORDER = ("Float32", "Float64", "Float16", "BFloat16",
+                    "Int8", "Int16", "Int32", "Int64",
+                    "UInt8", "Bool", "Complex64", "Complex128")
+BYTE_PARAM_RE = re.compile(
+    r'\(\s*"(?P<backend>[a-z]+)"\s*,'
+    r'[^<]*<(?P<idx>[0-9A-Fa-f]+)>'
+)
 
 
 def parse_test_name(test_name: str) -> TestEntry:
@@ -64,40 +79,58 @@ def parse_test_name(test_name: str) -> TestEntry:
     Parse a GoogleTest test name into (op, backend, dtype).
 
     Examples:
-      MultiBackendDType/FooBar.MyOp/("cuda", 1-byte object <00>)
-        → op=MyOp, backend=cuda, dtype=Float32 (00 → first dtype)
+      MultiBackendDType/CreationOpsMultiDTypeTest.ZerosBasicShape/cuda0_Float16
+        → op=ZerosBasicShape, backend=cuda, dtype=Float16
       VisionFusedParity.FusedConv2dSigmoid
         → op=FusedConv2dSigmoid, parameterized=False
     """
     parameterized = "/" in test_name
-    name_only = test_name.split("/")[-1] if parameterized else test_name
-    suite_op = name_only.split(".")[-1] if "." in name_only else name_only
-    op_name = re.sub(r"_*[A-Z][a-z]+$", "", suite_op) or suite_op
+    # Op name is the leaf inside the SuiteName.OpName segment (the slash
+    # divides between TEST_P suites and the parameter suffix).
+    head = test_name.split("/")[1] if "/" in test_name else test_name
+    suite_op = head.split(".")[-1] if "." in head else head
+    op_name = suite_op  # keep the full op name — the prior regex strip
+                       # mangled names like "ZerosBasicShape" → "ZerosBasic".
 
     backend = None
     dtype = None
-    m = PARAM_RE.search(test_name)
-    if m:
-        backend = m.group("backend")
-        rest = m.group("rest").lower()
-        for hint, canonical in DTYPE_HINTS.items():
-            if hint in rest:
-                dtype = canonical
-                break
-        # Fallback: GoogleTest renders enums as "1-byte object <NN>".
-        if dtype is None:
-            byte_m = re.search(r"<(?P<hex>[0-9A-Fa-f]+)>", rest)
-            if byte_m:
-                idx = int(byte_m.group("hex"), 16)
-                dtype_order = ["Float32", "Float64", "Float16", "BFloat16"]
-                if 0 <= idx < len(dtype_order):
-                    dtype = dtype_order[idx]
 
-    # Detect backend keywords in the test/suite name (not all parity tests are
-    # parameterized — many use direct helper calls and the backend is implicit).
+    # Primary: pull (backend, dtype) from the printable param suffix.
+    tail = PARAM_TAIL_RE.search(test_name)
+    if tail:
+        backend = tail.group("backend")
+        dtype = tail.group("dtype")
+    else:
+        # Secondary: ctest renders the raw param tuple ``("cuda", 1-byte
+        # object <01>)`` — decode the hex byte against the DType enum.
+        cm = BYTE_PARAM_RE.search(test_name)
+        if cm:
+            backend = cm.group("backend")
+            try:
+                idx = int(cm.group("idx"), 16)
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(ENUM_DTYPE_ORDER):
+                dtype = ENUM_DTYPE_ORDER[idx]
+
+        # Tertiary: the dtype is sometimes baked into the op name itself,
+        # e.g. ``ExtendedParity.MatMul_Float64/"cpu"`` — pluck it out so
+        # the dtype tally isn't an undercount.
+        if dtype is None:
+            for d in DTYPE_LABELS:
+                if re.search(rf"(?<![A-Za-z0-9]){re.escape(d)}(?![A-Za-z0-9])",
+                             test_name):
+                    dtype = d
+                    break
+
+    # Last resort: scan the non-param portion of the name for a backend
+    # keyword as a *word*, not a substring (substring match used to pick up
+    # things like "cpu" inside arbitrary identifiers and ended up adding a
+    # bogus "cpu" entry as an op name).
     if backend is None:
         for b in BACKENDS:
-            if b in test_name.lower():
+            if re.search(rf"(?<![A-Za-z0-9])(?:{b})(?![A-Za-z0-9])",
+                         test_name, flags=re.IGNORECASE):
                 backend = b
                 break
 
@@ -166,8 +199,18 @@ def discover_all_tests(label: str = "backend_parity",
     """
     Combine ctest binary names with each binary's gtest test enumeration to
     produce a list of fully-qualified GoogleTest test names.
+
+    Audit-4 W.25: when called for the default ``backend_parity`` label we
+    also pull in the ``multi`` (MultiBackendDType) label so the per-dtype
+    counts reflect both the dtype-typed parity tests and the per-axis
+    multidtype tests. Without this, the dtype tally for the default report
+    was always zero — the multidtype tests live under a separate label.
     """
     binaries = list_ctest_tests(label)
+    if label == "backend_parity":
+        # Merge in the multidtype binaries (label "multi") — dedupe by name
+        # since the same binary often carries both labels.
+        binaries = list({*binaries, *list_ctest_tests("multi")})
     all_tests: list[str] = []
     for b in binaries:
         path = f"{bin_dir}/{b}"

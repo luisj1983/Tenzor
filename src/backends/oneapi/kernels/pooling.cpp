@@ -1709,7 +1709,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         // Initialize grad_input to zero
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0f, input_size);
+        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
 
         // For each output position, distribute gradient to input positions
         const int64_t total_output_size = N * C * H_out * W_out;
@@ -1763,7 +1763,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0, input_size);
+        queue.fill(grad_in_ptr, 0.0, input_size).wait();
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelFloat64>(sycl::range<1>(total_output_size),
@@ -1816,7 +1816,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer since atomic_ref<sycl::half> is not widely supported
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size);
+        queue.fill(acc_ptr, 0.0f, input_size).wait();
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelFloat16>(sycl::range<1>(total_output_size),
@@ -1876,7 +1876,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer since atomic_ref<uint16_t> is not suitable for BFloat16
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size);
+        queue.fill(acc_ptr, 0.0f, input_size).wait();
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelBFloat16>(sycl::range<1>(total_output_size),
@@ -1994,7 +1994,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         // Initialize grad_input to zero
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0f, input_size);
+        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
 
         // For each output position, find max and route gradient
         const int64_t total_output_size = N * C * H_out * W_out;
@@ -2046,7 +2046,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0, input_size);
+        queue.fill(grad_in_ptr, 0.0, input_size).wait();
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardKernelFloat64>(sycl::range<1>(total_output_size),
@@ -2097,7 +2097,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer for atomic accumulation
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size);
+        queue.fill(acc_ptr, 0.0f, input_size).wait();
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_output_size),
@@ -2227,7 +2227,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.fill(grad_in_ptr, 0.0f, input_size);
+        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
 
         // The forward stores max_idx as a full N*C*H*W flat index (see
         // pooling.cpp:277: `max_idx = ((n*C+c)*H_in+h_in)*W_in+w_in`).
@@ -2253,7 +2253,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.fill(grad_in_ptr, 0.0, input_size);
+        queue.fill(grad_in_ptr, 0.0, input_size).wait();
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat64>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2276,7 +2276,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         Tensor grad_input_float({N, C, H_in, W_in}, DType::Float32, grad_output.device());
         float* grad_in_float_ptr = get_data_ptr<float>(grad_input_float);
 
-        queue.fill(grad_in_float_ptr, 0.0f, input_size);
+        queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2303,7 +2303,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         Tensor grad_input_float({N, C, H_in, W_in}, DType::Float32, grad_output.device());
         float* grad_in_float_ptr = get_data_ptr<float>(grad_input_float);
 
-        queue.fill(grad_in_float_ptr, 0.0f, input_size);
+        queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelBFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2450,71 +2450,92 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
     const int64_t in_size = N * C * L_in;
     const int64_t out_size = N * C * L_out;
 
+    // W.5: explicitly chain fill → scatter via depends_on instead of
+    // relying on the in_order queue contract; safer if a future change
+    // switches to an out-of-order queue.
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size);
-        queue.parallel_for<MaxPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = go[gid];
-            int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(gi[mi]);
-                ar.fetch_add(gv);
-            }
+        auto fill_evt = queue.fill(gi, 0.0f, in_size);
+        queue.submit([&](sycl::handler& h) {
+            h.depends_on(fill_evt);
+            h.parallel_for<MaxPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = go[gid];
+                int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
         });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size);
-        queue.parallel_for<MaxPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            double gv = go[gid];
-            int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(gi[mi]);
-                ar.fetch_add(gv);
-            }
+        auto fill_evt = queue.fill(gi, 0.0, in_size);
+        queue.submit([&](sycl::handler& h) {
+            h.depends_on(fill_evt);
+            h.parallel_for<MaxPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                double gv = go[gid];
+                int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
         });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
-        queue.parallel_for<MaxPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = static_cast<float>(go[gid]);
-            int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(acc[mi]);
-                ar.fetch_add(gv);
-            }
+        auto fill_evt = queue.fill(acc, 0.0f, in_size);
+        auto scatter_evt = queue.submit([&](sycl::handler& h) {
+            h.depends_on(fill_evt);
+            h.parallel_for<MaxPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = static_cast<float>(go[gid]);
+                int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
         });
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
-            gi[i] = sycl::half(acc[i]);
-        });
+        queue.submit([&](sycl::handler& h) {
+            h.depends_on(scatter_evt);
+            h.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
+                gi[i] = sycl::half(acc[i]);
+            });
+        }).wait();
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
-        queue.parallel_for<MaxPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = bf16_to_f32(go[gid]);
-            int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(acc[mi]);
-                ar.fetch_add(gv);
-            }
+        auto fill_evt = queue.fill(acc, 0.0f, in_size);
+        auto scatter_evt = queue.submit([&](sycl::handler& h) {
+            h.depends_on(fill_evt);
+            h.parallel_for<MaxPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = bf16_to_f32(go[gid]);
+                int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
         });
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
-            gi[i] = f32_to_bf16(acc[i]);
-        });
+        queue.submit([&](sycl::handler& h) {
+            h.depends_on(scatter_evt);
+            h.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
+                gi[i] = f32_to_bf16(acc[i]);
+            });
+        }).wait();
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool1d_backward");
@@ -2619,7 +2640,7 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size);
+        queue.fill(gi, 0.0f, in_size).wait();
         queue.parallel_for<AvgPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2641,7 +2662,7 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size);
+        queue.fill(gi, 0.0, in_size).wait();
         queue.parallel_for<AvgPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2664,7 +2685,7 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
+        queue.fill(acc, 0.0f, in_size).wait();
         queue.parallel_for<AvgPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2689,7 +2710,7 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
+        queue.fill(acc, 0.0f, in_size).wait();
         queue.parallel_for<AvgPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2909,7 +2930,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size);
+        queue.fill(gi, 0.0f, in_size).wait();
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2926,7 +2947,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size);
+        queue.fill(gi, 0.0, in_size).wait();
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2944,7 +2965,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
+        queue.fill(acc, 0.0f, in_size).wait();
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2964,7 +2985,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size);
+        queue.fill(acc, 0.0f, in_size).wait();
         queue.parallel_for<AdaptiveAvgPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;

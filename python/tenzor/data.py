@@ -41,6 +41,16 @@ from collections.abc import Iterator, Sized
 from queue import Empty, Full, Queue
 from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
 
+# W.29: re-export MapDataset from the C++ binding so the .pyi declaration
+# matches a real runtime symbol (the binding lives in tenzor_core.data and
+# is the C++ base class of the concrete datasets).  Wrapped in try/except
+# so a build that lacks tenzor_core (rare — e.g. doc-only environment) still
+# imports cleanly.
+try:
+    from .tenzor_core.data import MapDataset  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    MapDataset = None  # type: ignore[assignment]
+
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 
@@ -939,6 +949,23 @@ class _MultiProcessLoader:
     def __iter__(self):
         if not self._workers:
             self._start_workers()
+        else:
+            # W.19: with persistent_workers=True, leftover items from a prior
+            # epoch (early break / exception) can survive in the index / output
+            # queues. Drain both before sending new indices, otherwise the next
+            # epoch reissues those stale batches or sees the previous epoch's
+            # tail as the new epoch's head.
+            for q in self._index_queues:
+                while True:
+                    try:
+                        q.get_nowait()
+                    except Empty:
+                        break
+            while True:
+                try:
+                    self._output_queue.get_nowait()
+                except Empty:
+                    break
 
         is_iterable = isinstance(self._dataset, IterableDataset)
 

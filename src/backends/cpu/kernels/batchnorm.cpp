@@ -514,6 +514,17 @@ using BatchNormPrimitiveCache = OneDNNPrimitiveCache<BatchNormCacheKey, BatchNor
 
 static thread_local BatchNormPrimitiveCache g_batchnorm_cache;
 
+// W.6: register a thread-local clear-callback. Invoked by clear_dnnl_cache().
+namespace {
+void clear_local_batchnorm_cache() { g_batchnorm_cache.clear(); }
+struct BatchNormCacheClearRegistrar {
+    BatchNormCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_batchnorm_cache);
+    }
+};
+static BatchNormCacheClearRegistrar g_batchnorm_cache_clear_registrar;
+}
+
 // oneDNN-accelerated BatchNorm2d Forward with Affine Transform (Float32 only)
 // Provides 2-3x speedup over scalar implementation with primitive caching
 // NOTE: Only used for very large tensors (>10M elements) due to high overhead

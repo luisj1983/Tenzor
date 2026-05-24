@@ -40,6 +40,10 @@ void register_jit(py::module_& m) {
         .value("ReLU", tenzor::jit::OpType::ReLU)
         .value("Sigmoid", tenzor::jit::OpType::Sigmoid)
         .value("Tanh", tenzor::jit::OpType::Tanh)
+        // W.31: surface GELU on the Python enum so trace regression tests can
+        // assert ``OpType.GELU`` directly instead of scanning string dumps.
+        // The C++ enum value has existed since the audit-3 trace expansion.
+        .value("GELU", tenzor::jit::OpType::GELU)
         .value("Softmax", tenzor::jit::OpType::Softmax)
         .value("Conv2d", tenzor::jit::OpType::Conv2d)
         .value("BatchNorm2d", tenzor::jit::OpType::BatchNorm2d)
@@ -77,6 +81,12 @@ void register_jit(py::module_& m) {
         .def(py::init<>())
         .def("num_nodes", &tenzor::jit::Graph::num_nodes)
         .def("num_values", &tenzor::jit::Graph::num_values)
+        // W.31: expose the node list so trace regression tests can scan for
+        // particular OpTypes (e.g. confirming gelu traces as a single GELU
+        // node, not its underlying decomposition into Mul/Add/Tanh).
+        .def("nodes", &tenzor::jit::Graph::nodes,
+             py::return_value_policy::reference_internal,
+             "Topologically sorted list of all nodes in the graph")
         .def("forward", &tenzor::jit::Graph::forward,
              py::arg("inputs"),
              "Execute graph with runtime inputs",
@@ -333,6 +343,14 @@ void register_jit(py::module_& m) {
             // This matches the @tz.jit Python decorator docstring.
             config.strict = !fallback_to_eager;
 
+            // Audit-4 W.15: under config.strict the CompiledFunction ctor
+            // may eagerly run IREE compilation (long-running C++/MLIR work
+            // that never touches Python objects after the trace lambda has
+            // released the GIL itself). Drop the GIL here so other Python
+            // threads can make progress during compilation. The trace
+            // lambda above re-acquires the GIL via py::gil_scoped_acquire
+            // before calling the user-supplied Python @fn.
+            py::gil_scoped_release release;
             return std::make_shared<tenzor::jit::CompiledFunction>(
                 tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
                 std::move(config));
@@ -346,6 +364,11 @@ void register_jit(py::module_& m) {
         "this module to introspect the pipeline.\n"
         "Accepts any number of positional Variable arguments.");
 
+    // Audit-4 W.15: every show_* dump runs tracing + MLIR lowering +
+    // (for show_iree) the iree-compile pipeline. None of those touch
+    // Python objects after the trace lambda's inner py::gil_scoped_acquire
+    // re-enters for user callbacks, so we drop the GIL across the whole
+    // call to let other Python threads make progress.
     jit.def("show_graph",
         [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
            const tenzor::Variable& example) {
@@ -354,6 +377,7 @@ void register_jit(py::module_& m) {
                     "show_graph: passed object is not a tz.jit-compiled "
                     "function (no _tz_compiled attribute)");
             }
+            py::gil_scoped_release release;
             return cf->dump_graph(example);
         },
         py::arg("compiled"), py::arg("example"),
@@ -367,6 +391,7 @@ void register_jit(py::module_& m) {
                     "show_mlir: passed object is not a tz.jit-compiled "
                     "function");
             }
+            py::gil_scoped_release release;
             return cf->dump_mlir(example);
         },
         py::arg("compiled"), py::arg("example"),
@@ -381,6 +406,7 @@ void register_jit(py::module_& m) {
                     "show_stablehlo: passed object is not a tz.jit-compiled "
                     "function");
             }
+            py::gil_scoped_release release;
             return cf->dump_stablehlo(example);
         },
         py::arg("compiled"), py::arg("example"),
@@ -395,6 +421,7 @@ void register_jit(py::module_& m) {
                     "show_iree: passed object is not a tz.jit-compiled "
                     "function");
             }
+            py::gil_scoped_release release;
             return cf->dump_iree(example);
         },
         py::arg("compiled"), py::arg("example"),

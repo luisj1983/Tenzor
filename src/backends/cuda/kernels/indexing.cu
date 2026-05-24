@@ -25,6 +25,7 @@
 #include "tenzor/utils/config.hpp"
 #include <thrust/iterator/counting_iterator.h>
 #include "cuda_common.cuh"
+#include "cuda_nan_helpers.cuh"
 
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"  // broadcast_to (F2)
@@ -633,7 +634,8 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                     do {
                         old_val = *addr;
                         __half* h = reinterpret_cast<__half*>(&old_val);
-                        __half result = __float2half(__half2float(h[lane]) + val);
+                        // W.7: NaN-preserving conversion.
+                        __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[lane]) + val);
                         new_val = old_val;
                         reinterpret_cast<__half*>(&new_val)[lane] = result;
                     } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -650,7 +652,8 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                     do {
                         old_val = *addr;
                         __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-                        __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[lane]) + val);
+                        // W.7: NaN-preserving conversion.
+                        __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[lane]) + val);
                         new_val = old_val;
                         reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
                     } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -1413,7 +1416,8 @@ __global__ void embedding_backward_fp16_kernel_impl(
         do {
             old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
             __half* h = reinterpret_cast<__half*>(&old_val);
-            __half result = __float2half(__half2float(h[(token_idx * embedding_dim + j) & 1]) + val);
+            // W.7: NaN-preserving conversion.
+            __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[(token_idx * embedding_dim + j) & 1]) + val);
             new_val = old_val;
             reinterpret_cast<__half*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
         } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -1449,7 +1453,8 @@ __global__ void embedding_backward_bf16_kernel_impl(
         do {
             old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
             __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-            __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[(token_idx * embedding_dim + j) & 1]) + val);
+            // W.7: NaN-preserving conversion.
+            __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[(token_idx * embedding_dim + j) & 1]) + val);
             new_val = old_val;
             reinterpret_cast<__nv_bfloat16*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
         } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -2007,7 +2012,8 @@ __global__ void put_kernel_impl<__half>(
                 do {
                     old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     __half* h = reinterpret_cast<__half*>(&old_val);
-                    __half result = __float2half(__half2float(h[target_idx & 1]) + val);
+                    // W.7: NaN-preserving conversion.
+                    __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[target_idx & 1]) + val);
                     new_val = old_val;
                     reinterpret_cast<__half*>(&new_val)[target_idx & 1] = result;
                 } while (atomicCAS(addr, old_val, new_val) != old_val);
@@ -2045,7 +2051,8 @@ __global__ void put_kernel_impl<__nv_bfloat16>(
                 do {
                     old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-                    __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[target_idx & 1]) + val);
+                    // W.7: NaN-preserving conversion.
+                    __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[target_idx & 1]) + val);
                     new_val = old_val;
                     reinterpret_cast<__nv_bfloat16*>(&new_val)[target_idx & 1] = result;
                 } while (atomicCAS(addr, old_val, new_val) != old_val);

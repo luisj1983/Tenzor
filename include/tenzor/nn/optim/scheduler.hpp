@@ -886,15 +886,38 @@ class LambdaLR : public LRScheduler {
 public:
     using LrLambda = std::function<double(int)>;
 
-    LambdaLR(Optimizer& optimizer, LrLambda lr_lambda);
+    /**
+     * @brief Construct LambdaLR.
+     *
+     * Audit-4 W.12: an optional @p name tag identifies the lambda the
+     * scheduler was built with. state_dict() serialises this name and
+     * load_state_dict() refuses (by default) to load a checkpoint whose
+     * saved name differs from the destination's — preventing a silent
+     * wrong-LR trajectory when the user rebuilds the scheduler with a
+     * different lambda. Pass @p name="" (default) to opt out of the
+     * guard; pass @p force=true to load_state_dict() to bypass it.
+     */
+    LambdaLR(Optimizer& optimizer, LrLambda lr_lambda, std::string name = {});
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
 
+    /** @brief Identifier of the lambda this scheduler was built with. */
+    auto name() const -> const std::string& { return name_; }
+
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
         const std::unordered_map<std::string, Tensor>& state) -> void override;
+    /**
+     * @brief Audit-4 W.12: load_state_dict with explicit force flag.
+     *
+     * When @p force is true the saved lambda-name guard is skipped — use
+     * only when the caller has verified out-of-band that the rebuilt
+     * lambda is identical to the one that produced the checkpoint.
+     */
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state, bool force) -> void;
 
 private:
     Optimizer& optimizer_;
@@ -902,6 +925,7 @@ private:
     double base_lr_;
     double last_lr_;
     int epoch_{0};
+    std::string name_;
 };
 
 /**
@@ -1041,20 +1065,34 @@ class MultiplicativeLR : public LRScheduler {
 public:
     using LambdaFunc = std::function<double(int)>;
 
-    MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda);
+    /**
+     * @brief Construct MultiplicativeLR.
+     *
+     * Audit-4 W.12: optional @p name tag — see LambdaLR for the full
+     * round-trip contract. Pass @p force=true to load_state_dict() to
+     * bypass the name guard.
+     */
+    MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda,
+                     std::string name = {});
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
+    /** @brief Identifier of the lambda this scheduler was built with. */
+    auto name() const -> const std::string& { return name_; }
+
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
         const std::unordered_map<std::string, Tensor>& state) -> void override;
+    auto load_state_dict(
+        const std::unordered_map<std::string, Tensor>& state, bool force) -> void;
 
 private:
     Optimizer& optimizer_;
     LambdaFunc lr_lambda_;
     double last_lr_;
     int epoch_{0};
+    std::string name_;
 };
 
 /**
@@ -1089,6 +1127,17 @@ private:
  *
  * Applies all schedulers simultaneously. Each scheduler's step() is called
  * in sequence every epoch.
+ *
+ * @par State serialisation (audit-4 W.10)
+ *
+ * ChainedScheduler holds no counters of its own — there is no `epoch_` or
+ * `step_count_` member. Each wrapped child scheduler maintains its own
+ * counter and is restored independently by ChainedScheduler::state_dict()
+ * via per-child prefixed entries (`"childN_.<key>"`). This delegation
+ * contract is intentional and covered by the
+ * `ChainedScheduler_StateDict_RoundTrip` test in
+ * `tests/core/test_new_features.cpp` — do not add a parent counter without
+ * also revisiting that test, since the children would then double-step.
  */
 class ChainedScheduler : public LRScheduler {
 public:

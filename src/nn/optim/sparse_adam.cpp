@@ -5,6 +5,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include <cmath>
+#include <cstring>
 
 namespace tenzor::optim {
 
@@ -86,45 +87,116 @@ auto SparseAdam::step_impl() -> void {
 
         // Fast path: producer supplied an explicit sparse gradient. Use its
         // COO indices directly instead of scanning the dense buffer to find
-        // nonzero rows. Falls through to the dense-rows path on shape
-        // mismatch (e.g. sparse_dim != 1).
+        // nonzero rows.
+        //
+        // Audit-4 W.13: previously gated on sparse_dim() == 1 only — 2D+
+        // sparse grads (EmbeddingBag with multi-axis indices) fell through
+        // to the dense-rows scan path, defeating the producer's nnz hint.
+        // We now linearise the (sparse_dim, nnz) index matrix into a flat
+        // row index over the leading sparse_dim axes of the param/state
+        // buffers, then reshape exp_avg_/exp_avg_sq_/param so the existing
+        // 1-D-style scatter logic applies uniformly.
         if (param.has_sparse_grad()) {
             const auto& sg_opt = param.sparse_grad();
             if (sg_opt.has_value()) {
                 const auto& sg = sg_opt.value();
-                if (sg.sparse_dim() == 1 && sg.nnz() > 0) {
-                    auto row_indices = sg.indices().reshape({sg.nnz()});
-                    Tensor grad_rows = needs_upcast ? sg.values().to(state_dt) : sg.values();
+                if (sg.nnz() > 0) {
+                    const int64_t sparse_dim = sg.sparse_dim();
+                    const auto& sg_shape = sg.shape();
+                    if (static_cast<int64_t>(sg_shape.size()) >= sparse_dim) {
+                        // Strides over the leading sparse_dim axes of the
+                        // dense layout. For sparse_dim==1 this just yields
+                        // {1} and the path reduces to the original 1-D
+                        // fast path.
+                        int64_t total_rows = 1;
+                        std::vector<int64_t> sparse_strides(sparse_dim, 1);
+                        for (int64_t d = sparse_dim - 1; d >= 0; --d) {
+                            sparse_strides[d] = total_rows;
+                            total_rows *= sg_shape[d];
+                        }
 
-                    auto m_rows = index_select(exp_avg_[i], 0, row_indices);
-                    auto v_rows = index_select(exp_avg_sq_[i], 0, row_indices);
+                        const Tensor& idx_mat = sg.indices();  // (sparse_dim, nnz)
+                        Tensor flat_row_idx;
+                        if (sparse_dim == 1) {
+                            flat_row_idx = idx_mat.reshape({sg.nnz()});
+                        } else {
+                            // Build flat = sum_d idx_mat[d] * stride[d].
+                            // Compute on idx_mat's device/dtype (Int64).
+                            Tensor stride_t({sparse_dim, 1}, DType::Int64,
+                                            idx_mat.device());
+                            std::memcpy(stride_t.data<int64_t>(),
+                                        sparse_strides.data(),
+                                        sparse_dim * sizeof(int64_t));
+                            // idx_mat * stride_t broadcasts to (sparse_dim, nnz);
+                            // sum along dim 0 collapses to (nnz,).
+                            Tensor weighted = idx_mat * stride_t;
+                            flat_row_idx = sum(weighted, /*dim=*/0, /*keepdim=*/false);
+                        }
 
-                    m_rows = m_rows * scalar(hp.beta1) + grad_rows * scalar(1.0 - hp.beta1);
-                    v_rows = v_rows * scalar(hp.beta2) +
-                             grad_rows * grad_rows * scalar(1.0 - hp.beta2);
+                        // Collapse leading sparse_dim axes of the state /
+                        // param buffers into a single row axis so the
+                        // existing scatter logic applies.
+                        auto flatten_leading = [&](const Tensor& t) -> Tensor {
+                            auto sh = t.shape();
+                            std::vector<int64_t> new_shape;
+                            new_shape.push_back(total_rows);
+                            for (int64_t d = sparse_dim;
+                                 d < static_cast<int64_t>(sh.size()); ++d) {
+                                new_shape.push_back(sh[d]);
+                            }
+                            return t.reshape(new_shape);
+                        };
+                        auto unflatten_leading = [&](const Tensor& t) -> Tensor {
+                            return t.reshape(
+                                std::vector<int64_t>(sg_shape.begin(),
+                                                     sg_shape.end()));
+                        };
 
-                    std::vector<int64_t> idx_shape = {row_indices.shape()[0]};
-                    for (int64_t d = 1; d < m_rows.ndim(); ++d) idx_shape.push_back(1);
-                    auto idx_expanded = row_indices.reshape(idx_shape);
-                    auto shape_span = m_rows.shape();
-                    std::vector<int64_t> expand_shape(shape_span.begin(), shape_span.end());
-                    auto idx_broadcast = idx_expanded.expand(expand_shape);
+                        Tensor m_flat   = flatten_leading(exp_avg_[i]);
+                        Tensor v_flat   = flatten_leading(exp_avg_sq_[i]);
+                        Tensor p_flat   = flatten_leading(param.tensor());
+                        Tensor sg_values = sg.values();  // shape: (nnz, *dense_dims)
 
-                    exp_avg_[i] = scatter(exp_avg_[i], 0, idx_broadcast, m_rows);
-                    exp_avg_sq_[i] = scatter(exp_avg_sq_[i], 0, idx_broadcast, v_rows);
+                        // Reshape sg.values to (nnz, *trailing) where trailing
+                        // dims match m_flat[1..]. For COO with no dense_dim
+                        // the values are already (nnz,).
+                        Tensor grad_rows = needs_upcast ? sg_values.to(state_dt)
+                                                        : sg_values;
 
-                    auto denom = sqrt(v_rows) * scalar(1.0 / std::sqrt(bias_correction2))
-                                + scalar(hp.eps);
-                    auto update = div(m_rows, denom) * scalar(step_size);
+                        auto m_rows = index_select(m_flat, 0, flat_row_idx);
+                        auto v_rows = index_select(v_flat, 0, flat_row_idx);
 
-                    Tensor param_rows = needs_upcast
-                        ? index_select(param.tensor(), 0, row_indices).to(state_dt)
-                        : index_select(param.tensor(), 0, row_indices);
-                    param_rows = param_rows - update;
-                    Tensor param_rows_out = needs_upcast ? param_rows.to(param_dt) : param_rows;
-                    param.tensor() = scatter(param.tensor(), 0, idx_broadcast, param_rows_out);
+                        m_rows = m_rows * scalar(hp.beta1) +
+                                 grad_rows * scalar(1.0 - hp.beta1);
+                        v_rows = v_rows * scalar(hp.beta2) +
+                                 grad_rows * grad_rows * scalar(1.0 - hp.beta2);
 
-                    continue;
+                        std::vector<int64_t> idx_shape = {flat_row_idx.shape()[0]};
+                        for (int64_t d = 1; d < m_rows.ndim(); ++d) idx_shape.push_back(1);
+                        auto idx_expanded = flat_row_idx.reshape(idx_shape);
+                        auto shape_span = m_rows.shape();
+                        std::vector<int64_t> expand_shape(shape_span.begin(), shape_span.end());
+                        auto idx_broadcast = idx_expanded.expand(expand_shape);
+
+                        m_flat = scatter(m_flat, 0, idx_broadcast, m_rows);
+                        v_flat = scatter(v_flat, 0, idx_broadcast, v_rows);
+                        exp_avg_[i]    = unflatten_leading(m_flat);
+                        exp_avg_sq_[i] = unflatten_leading(v_flat);
+
+                        auto denom = sqrt(v_rows) * scalar(1.0 / std::sqrt(bias_correction2))
+                                    + scalar(hp.eps);
+                        auto update = div(m_rows, denom) * scalar(step_size);
+
+                        Tensor param_rows = needs_upcast
+                            ? index_select(p_flat, 0, flat_row_idx).to(state_dt)
+                            : index_select(p_flat, 0, flat_row_idx);
+                        param_rows = param_rows - update;
+                        Tensor param_rows_out = needs_upcast ? param_rows.to(param_dt) : param_rows;
+                        p_flat = scatter(p_flat, 0, idx_broadcast, param_rows_out);
+                        param.tensor() = unflatten_leading(p_flat);
+
+                        continue;
+                    }
                 }
             }
         }
@@ -267,10 +339,27 @@ auto SparseAdam::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
+    // Audit-4 W.14: num_params guard mirrors Adam::state_dict so a restore
+    // against a mismatched model count fails loudly before any per-parameter
+    // buffer is overwritten.
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     return state;
 }
 
 auto SparseAdam::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Audit-4 W.14: param-count guard up front.
+    if (state.count("num_params")) {
+        const int64_t expected = state.at("num_params").data<int64_t>()[0];
+        if (expected != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "SparseAdam::load_state_dict: parameter count mismatch - saved " +
+                std::to_string(expected) + " but have " +
+                std::to_string(parameters_.size()));
+        }
+    }
+
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];
     }

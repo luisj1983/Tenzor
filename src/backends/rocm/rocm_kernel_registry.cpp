@@ -1068,6 +1068,12 @@ namespace rocm {
                                         float scale, bool causal, hipStream_t stream) -> std::vector<Tensor>;
     auto nested_to_padded_hip(const Tensor& values, const Tensor& offsets, int64_t max_len, float padding_value, hipStream_t stream) -> Tensor;
     auto nested_from_padded_hip(const Tensor& padded, const Tensor& offsets, hipStream_t stream) -> Tensor;
+
+    // CTC loss
+    auto ctc_loss_forward_kernel(const Tensor& log_probs, const Tensor& targets,
+                                 const Tensor& input_lengths, const Tensor& target_lengths,
+                                 int64_t blank, bool zero_infinity, hipStream_t stream)
+        -> std::vector<Tensor>;
 } // namespace rocm
 
 /**
@@ -5263,6 +5269,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor B = inputs.size() > 2 ? inputs[2] : Tensor();
             auto [evals, evecs] = linalg::lobpcg(inputs[0], inputs[1], k, B, max_iter, tol);
             return {evals, evecs};
+        });
+
+    // =========================================================================
+    // CTC Loss — log-domain forward-backward DP
+    // =========================================================================
+    table.register_kernel(OpId::CTCLossForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t blank = attrs.get_int(AttrKey::Blank, 0);
+            bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
+            return rocm::ctc_loss_forward_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3],
+                blank, zero_infinity, get_hip_stream(attrs));
         });
 
     // =========================================================================
