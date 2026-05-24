@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -307,13 +308,14 @@ TEST_P(RNNTestFixture, GradientFlow) {
     // Check that output requires grad
     EXPECT_TRUE(output.requires_grad()) << "Failed on " << device.to_string();
 
-    // Sum for scalar output
-    auto loss = Variable(sum(output.tensor(), std::nullopt, false), true);
+    // Sum for scalar output — use the autograd-aware overload so the grad_fn
+    // chain back to `input` is preserved. The previous raw-tensor wrap via
+    // `Variable(sum(output.tensor(), ...), true)` was the exact severed-graph
+    // bug pattern documented in feedback_raw_tensor_op_bug.md.
+    auto loss = tenzor::sum(output, std::nullopt, false);
 
-    // Backward should not throw
-    EXPECT_NO_THROW({
-        loss.backward();
-    }) << "Failed on " << device.to_string();
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(RNNTestFixture, TrainingMode) {

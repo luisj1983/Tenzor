@@ -11,6 +11,8 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 
+#include "../grad_flow_helpers.hpp"
+
 using namespace tenzor;
 using namespace tenzor::models;
 
@@ -422,10 +424,24 @@ TEST_F(ElectraTest, GradientFlowSequenceClassification) {
     // Simple loss: sum of all outputs
     auto loss = sum(logits);
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
+    // Backward pass — assert at least one model parameter actually receives
+    // a non-zero gradient (severed grad_fn would leave every param at zero).
+    loss.backward();
+    bool any_param_grad_flows = false;
+    double max_abs_grad = 0.0;
+    for (const auto& p : model.parameters()) {
+        if (!p || !p->requires_grad() || !p->grad().has_value()) continue;
+        auto g_cpu = p->grad().value().cpu().to(DType::Float64);
+        auto g_max = tenzor::max(tenzor::abs(g_cpu)).item<double>();
+        if (g_max > 0.0) {
+            any_param_grad_flows = true;
+            if (g_max > max_abs_grad) max_abs_grad = g_max;
+        }
+    }
+    EXPECT_TRUE(any_param_grad_flows)
+        << "Electra sequence-classification backward produced zero grads "
+           "for every parameter — likely severed grad_fn in the model forward "
+           "(max-abs across all params was " << max_abs_grad << ")";
 }
 
 TEST_F(ElectraTest, GradientFlowPreTraining) {
@@ -460,10 +476,24 @@ TEST_F(ElectraTest, GradientFlowPreTraining) {
         original_tokens
     );
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
+    // Backward pass — assert at least one model parameter actually receives
+    // a non-zero gradient (severed grad_fn would leave every param at zero).
+    loss.backward();
+    bool any_param_grad_flows = false;
+    double max_abs_grad = 0.0;
+    for (const auto& p : model.parameters()) {
+        if (!p || !p->requires_grad() || !p->grad().has_value()) continue;
+        auto g_cpu = p->grad().value().cpu().to(DType::Float64);
+        auto g_max = tenzor::max(tenzor::abs(g_cpu)).item<double>();
+        if (g_max > 0.0) {
+            any_param_grad_flows = true;
+            if (g_max > max_abs_grad) max_abs_grad = g_max;
+        }
+    }
+    EXPECT_TRUE(any_param_grad_flows)
+        << "Electra pretraining backward produced zero grads for every "
+           "parameter — likely severed grad_fn in the model forward "
+           "(max-abs across all params was " << max_abs_grad << ")";
 }
 
 // ============================================================================

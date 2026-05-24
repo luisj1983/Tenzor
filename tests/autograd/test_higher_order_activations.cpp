@@ -274,8 +274,8 @@ TEST_F(HigherOrderActivationsTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::leaky_relu(x, 0.1);
     auto loss = tenzor::sum(y);
-    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    EXPECT_TRUE(x.grad().has_value());
+    loss.backward(std::nullopt, false, true);
+    EXPECT_GRAD_FLOWS(x);
 }
 
 } // namespace

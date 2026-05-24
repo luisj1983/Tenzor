@@ -172,6 +172,44 @@ protected:
                 << " on " << device().to_string();
     }
 
+    // audit-4 U.16: helper that builds {CPU/Float32 reference output,
+    // parameterized-backend input} for the small-config ViT TEST_Ps.
+    //
+    // Pattern: the model is freshly constructed in CPU/Float32 state. We:
+    //   1. create a CPU/Float32 input (seeded once),
+    //   2. run the model on CPU/F32 to capture a deterministic reference,
+    //   3. convert_model() to the parameterized backend/dtype,
+    //   4. produce the device/dtype counterpart of the same input.
+    //
+    // Returns (cpu_ref_output, device_input). Caller runs the device forward
+    // on `device_input` and asserts `expectMatchesCpu(actual, cpu_ref_output,
+    // vitAtol())`. This replaces the loose `expectOutputSane` ceiling for
+    // small-config models where a CPU reference is cheap.
+    template <typename ModelT, typename ForwardFn>
+    std::pair<Tensor, Variable> captureCpuReferenceAndConvert(
+            ModelT& model,
+            const std::vector<int64_t>& input_shape,
+            ForwardFn&& forward_fn,
+            bool input_requires_grad = true) {
+        // Step 1: CPU/Float32 input.
+        auto cpu_input_t = tenzor::randn(input_shape, DType::Float32, Device::cpu());
+        Variable cpu_input(cpu_input_t, input_requires_grad);
+
+        // Step 2: CPU reference output — model is fresh CPU/Float32 here.
+        Tensor cpu_ref = forward_fn(model, cpu_input).tensor()
+                              .to(DType::Float32).contiguous();
+
+        // Step 3: migrate model to the parameterized backend/dtype.
+        convert_model(model);
+
+        // Step 4: same input, moved to (device_, dtype_).
+        auto dev_t = cpu_input_t.to(device_);
+        if (dtype_ != DType::Float32) dev_t = dev_t.to(dtype_);
+        Variable device_input(dev_t, input_requires_grad);
+
+        return {std::move(cpu_ref), std::move(device_input)};
+    }
+
     // Audit-T.1: tolerance picked per dtype for the device-vs-CPU
     // PatchEmbedding diff after the Float32 round-trip.
     float vitAtol() const {
@@ -351,14 +389,18 @@ TEST_P(ViTMultiDtypeTest, ViTBaseConfig) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16ForwardShape) {
     auto model = ViT_Base_Patch16(1000, false, 224);
-    convert_model(model);
+    // audit-4 U.16: small-config TEST_P — diff against CPU/Float32 reference
+    // instead of the loose `expectOutputSane` ceiling. The helper runs the
+    // CPU forward BEFORE `convert_model` migrates the weights.
+    auto [cpu_ref, input] = captureCpuReferenceAndConvert(
+        model, {2, 3, 224, 224},
+        [](auto& m, const Variable& x) { return m->forward(x); });
 
-    auto input = createInput({2, 3, 224, 224});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
-    expectOutputSane(output.tensor());  // audit-T.1
+    expectMatchesCpu(output.tensor(), cpu_ref, vitAtol());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16GradientFlow) {
@@ -393,26 +435,30 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16ParameterCount) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16BatchSizeOne) {
     auto model = ViT_Base_Patch16(10, false, 224);
-    convert_model(model);
+    // audit-4 U.16: small-config TEST_P — diff against CPU/Float32 reference.
+    auto [cpu_ref, input] = captureCpuReferenceAndConvert(
+        model, {1, 3, 224, 224},
+        [](auto& m, const Variable& x) { return m->forward(x); });
 
-    auto input = createInput({1, 3, 224, 224});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {1, 10});
     expectDType(output.tensor());
-    expectOutputSane(output.tensor());  // audit-T.1
+    expectMatchesCpu(output.tensor(), cpu_ref, vitAtol());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16CustomClasses) {
     auto model = ViT_Base_Patch16(100, false, 224);
-    convert_model(model);
+    // audit-4 U.16: small-config TEST_P — diff against CPU/Float32 reference.
+    auto [cpu_ref, input] = captureCpuReferenceAndConvert(
+        model, {2, 3, 224, 224},
+        [](auto& m, const Variable& x) { return m->forward(x); });
 
-    auto input = createInput({2, 3, 224, 224});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {2, 100});
     expectDType(output.tensor());
-    expectOutputSane(output.tensor());  // audit-T.1
+    expectMatchesCpu(output.tensor(), cpu_ref, vitAtol());
 }
 
 // ============================================================================
@@ -429,14 +475,16 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch32Config) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch32ForwardShape) {
     auto model = ViT_Base_Patch32(1000, false, 224);
-    convert_model(model);
+    // audit-4 U.16: small-config TEST_P — diff against CPU/Float32 reference.
+    auto [cpu_ref, input] = captureCpuReferenceAndConvert(
+        model, {2, 3, 224, 224},
+        [](auto& m, const Variable& x) { return m->forward(x); });
 
-    auto input = createInput({2, 3, 224, 224});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
-    expectOutputSane(output.tensor());  // audit-T.1
+    expectMatchesCpu(output.tensor(), cpu_ref, vitAtol());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch32GradientFlow) {
@@ -483,6 +531,10 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch16ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    // reason: ViT-Large-Patch16 forward is ~307M params; running a CPU/Float32
+    // reference (2 * 1000 ≈ 2e3 output floats but 307M weights to multiply
+    // against) doubles peak host RAM at no value-level signal we don't already
+    // get from the parameterized CPU/Float32 run of this same TEST_P.
     expectOutputSane(output.tensor());  // audit-T.1
 }
 
@@ -529,6 +581,9 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch32ForwardShape) {
 
     expectShape(output.tensor(), {2, 1000});
     expectDType(output.tensor());
+    // reason: ViT-Large-Patch32 ~307M params; capturing a CPU/F32 reference
+    // doubles host memory and the parameterized CPU/F32 run already covers
+    // the value-level signal.
     expectOutputSane(output.tensor());  // audit-T.1
 }
 
@@ -561,6 +616,9 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    // reason: ViT-Huge-Patch14 forward is ~632M params; a CPU/F32 reference
+    // forward would push host RAM into multi-GB territory for no extra
+    // signal beyond the parameterized CPU/F32 run.
     expectOutputSane(output.tensor());  // audit-T.1
 }
 
@@ -630,6 +688,9 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    // reason: ViT-Huge-Patch16 forward is ~632M params; CPU reference would
+    // be multi-GB host RAM with no extra signal over the parameterized
+    // CPU/F32 run.
     expectOutputSane(output.tensor());  // audit-T.1
 }
 
@@ -640,14 +701,16 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize384) {
     // Test with 384x384 input (commonly used for fine-tuning)
     auto model = ViT_Base_Patch16(1000, false, 384);
-    convert_model(model);
+    // audit-4 U.16: small-config TEST_P — diff against CPU/Float32 reference.
+    auto [cpu_ref, input] = captureCpuReferenceAndConvert(
+        model, {1, 3, 384, 384},
+        [](auto& m, const Variable& x) { return m->forward(x); });
 
-    auto input = createInput({1, 3, 384, 384});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
-    expectOutputSane(output.tensor());  // audit-T.1
+    expectMatchesCpu(output.tensor(), cpu_ref, vitAtol());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
@@ -662,6 +725,9 @@ TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
+    // reason: 512x512 input may shrink to 384x384 on memory-constrained
+    // backends so the input shape diverges between CPU and device runs —
+    // can't compare against a static CPU reference.
     expectOutputSane(output.tensor());  // audit-T.1
 
     // Verify number of patches based on image size

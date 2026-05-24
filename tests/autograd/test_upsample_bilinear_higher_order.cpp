@@ -16,6 +16,8 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/nn/layers/segmentation.hpp>
 
+#include "../grad_flow_helpers.hpp"
+
 using namespace tenzor;
 
 class D3Test : public ::testing::Test {
@@ -66,9 +68,11 @@ TEST_F(D3Test, UpsampleBilinearBackward_PreservesGraph) {
     EXPECT_TRUE(g.requires_grad());
     EXPECT_NE(g.grad_fn(), nullptr);
 
-    // Higher-order: compute grad-norm and back-prop; should not throw.
+    // Higher-order: compute grad-norm and back-prop; verify the second-order
+    // gradient actually flows through to the original Variable.
     auto gnorm = tenzor::sum(g * g);
-    EXPECT_NO_THROW(gnorm.backward());
+    gnorm.backward();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_F(D3Test, BackwardDispatchesToInterpolateBackward_NotCpuRoundTrip) {

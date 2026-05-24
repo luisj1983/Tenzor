@@ -381,9 +381,9 @@ TEST(AdvancedLossTest, KLDivLoss_BackwardGradient) {
     auto criterion = KLDivLoss("mean");
     auto loss = criterion(input, target);
 
-    // Check that we can compute gradients
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    // Check that gradients actually flow back to the input.
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST(AdvancedLossTest, FocalLoss_BackwardGradient) {
@@ -393,8 +393,8 @@ TEST(AdvancedLossTest, FocalLoss_BackwardGradient) {
     auto criterion = FocalLoss(1.0, 2.0, "mean");
     auto loss = criterion(input, target);
 
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST(AdvancedLossTest, DiceLoss_BackwardGradient) {
@@ -404,8 +404,8 @@ TEST(AdvancedLossTest, DiceLoss_BackwardGradient) {
     auto criterion = DiceLoss(1.0, "mean");
     auto loss = criterion(input, target);
 
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST(AdvancedLossTest, HuberLoss_BackwardGradient) {
@@ -415,8 +415,8 @@ TEST(AdvancedLossTest, HuberLoss_BackwardGradient) {
     auto criterion = HuberLoss(1.0, "mean");
     auto loss = criterion(input, target);
 
-    EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(input.grad().has_value());
+    loss.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 //==============================================================================
