@@ -1199,6 +1199,17 @@ auto view_as_real(const Variable& input) -> Variable;
 auto view_as_complex(const Variable& input) -> Variable;
 
 /**
+ * @brief Complex conjugate. For real tensors this is the identity.
+ *
+ * Variable-level wrapper around tenzor::conj routed through ConjBackward
+ * so the chain stays intact. Required by the complex Wirtinger paths in
+ * MulBackward / DivBackward / MatMulBackward (audit-5 X.5 / Y.9) — the
+ * raw `Variable(conj(saved_b.tensor()), false)` rewrap severed grad_fn
+ * on saved_variables_ Variables.
+ */
+auto conj(const Variable& input) -> Variable;
+
+/**
  * @brief Sample input at non-integer grid locations with gradient tracking.
  *
  * Variable wrapper around tenzor::grid_sample. Backward via GridSampleBackward

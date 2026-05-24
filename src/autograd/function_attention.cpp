@@ -107,7 +107,7 @@ auto composed_attention_backward(const Tensor& dO,
                                  double scale,
                                  bool causal,
                                  double dropout_p = 0.0,
-                                 uint32_t rng_seed = 0u) -> std::vector<Tensor> {
+                                 uint64_t rng_seed = 0ull) -> std::vector<Tensor> {
     // V.8: double scale end-to-end; audit-3 R.6 had widened only the
     // Variable form. dropout_p is also widened to keep parity with the
     // Variable path; the only downstream effect is the threshold used
@@ -175,13 +175,13 @@ auto composed_attention_backward(const Tensor& dO,
     // philox_dropout_mask. The mask op already returns scale=1/(1-p) for
     // kept positions and 0 for dropped, which is exactly the
     // multiplicative correction we need on P (inverted dropout).
-    if (dropout_p > 0.0f && rng_seed != 0u) {
+    if (dropout_p > 0.0f && rng_seed != 0ull) {
         auto P_shape = P.shape();
         std::vector<int64_t> mask_shape(P_shape.begin(), P_shape.end());
         Tensor mask_cpu = philox_dropout_mask(
             mask_shape,
             static_cast<double>(dropout_p),
-            static_cast<uint64_t>(rng_seed),
+            rng_seed,
             /*offset=*/0,
             DType::Float32);
         Tensor mask_dev = mask_cpu.to(P.device()).to(P.dtype());
@@ -243,14 +243,19 @@ auto try_fused_or_compose_backward(const Tensor& dO,
     // FusedAttentionBackward) already hold `double scale_` and were
     // narrowing through the float parameter at every call.
     // Read seed (if any) for the composed-fallback dropout replay.
-    uint32_t seed_for_replay = 0u;
+    // Audit-5 X.6: previously narrowed Int64 → uint32, discarding the upper
+    // 32 bits of the saved Philox seed. When the forward used the full 64
+    // bits (manual_seed past 2^32) the replay produced a different mask
+    // than the forward → corrupted dQ/dK/dV. philox_dropout_mask accepts
+    // uint64_t natively; thread the full width through.
+    uint64_t seed_for_replay = 0ull;
     if (philox_seed.is_valid() && philox_seed.numel() > 0) {
         // Move to CPU to read scalar; tiny single-int copy.
         Tensor seed_cpu = philox_seed.cpu();
         if (seed_cpu.dtype() == DType::Int64) {
-            seed_for_replay = static_cast<uint32_t>(seed_cpu.data<int64_t>()[0]);
+            seed_for_replay = static_cast<uint64_t>(seed_cpu.data<int64_t>()[0]);
         } else if (seed_cpu.dtype() == DType::Int32) {
-            seed_for_replay = static_cast<uint32_t>(seed_cpu.data<int32_t>()[0]);
+            seed_for_replay = static_cast<uint64_t>(static_cast<uint32_t>(seed_cpu.data<int32_t>()[0]));
         }
     }
 

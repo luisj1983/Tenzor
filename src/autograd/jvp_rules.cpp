@@ -315,7 +315,7 @@ auto jvp_erfc(const DualTensor& x) -> DualTensor {
 }
 
 auto jvp_clamp(const DualTensor& x, double min_val, double max_val) -> DualTensor {
-    auto primal = tenzor::clamp(x.primal(), static_cast<float>(min_val), static_cast<float>(max_val));
+    auto primal = tenzor::clamp(x.primal(), min_val, max_val);
     // Gradient passes through where min < x < max, zero at boundaries
     auto above_min = tenzor::gt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), min_val));
     auto below_max = tenzor::lt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), max_val));
@@ -1703,7 +1703,7 @@ auto jvp_adaptive_avgpool_3d(const DualTensor& x,
 auto jvp_sdpa_forward(const DualTensor& Q,
                       const DualTensor& K,
                       const DualTensor& V,
-                      float scale,
+                      double scale,
                       bool causal) -> DualTensor {
     const Tensor& Qp = Q.primal();   const Tensor& Qt = Q.tangent();
     const Tensor& Kp = K.primal();   const Tensor& Kt = K.tangent();
@@ -3738,7 +3738,7 @@ JvpResult jvp_adapter_flash_attention(std::span<const Tensor> primals,
             "discontinuous unless the Bernoulli mask is saved and replayed; "
             "set dropout_p=0 to use forward-mode AD.");
     }
-    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    double scale = attrs.get_float(AttrKey::Scale, 1.0);
     bool causal = attrs.get_bool(AttrKey::Causal, false);
     auto Q = make_dual(primals[0], tangents[0]);
     auto K = make_dual(primals[1], tangents[1]);
@@ -3754,7 +3754,7 @@ JvpResult jvp_adapter_fused_attention(std::span<const Tensor> primals,
         throw std::runtime_error(
             "jvp_adapter_fused_attention: expected 3 inputs (Q, K, V)");
     }
-    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    double scale = attrs.get_float(AttrKey::Scale, 1.0);
     bool causal = attrs.get_bool(AttrKey::Causal, false);
     auto Q = make_dual(primals[0], tangents[0]);
     auto K = make_dual(primals[1], tangents[1]);
@@ -3783,7 +3783,7 @@ JvpResult jvp_adapter_flex_attention(std::span<const Tensor> primals,
         throw std::runtime_error(
             "jvp_adapter_flex_attention: expected 3 inputs (Q, K, V)");
     }
-    float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+    double scale = attrs.get_float(AttrKey::Scale, 1.0);
     // FlexAttention is non-causal by default; causal is encoded via score-mod
     // or block_mask, both of which we've already refused above.
     auto Q = make_dual(primals[0], tangents[0]);

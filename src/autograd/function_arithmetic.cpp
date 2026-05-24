@@ -151,9 +151,12 @@ auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     Variable grad_a_unreduced, grad_b_unreduced;
     if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
-        // Wirtinger: use conj at tensor level (non-differentiable operation)
-        auto conj_b = Variable(conj(saved_b.tensor()), false);
-        auto conj_a = Variable(conj(saved_a.tensor()), false);
+        // Wirtinger: route conj through the Variable-level overload so the
+        // grad_fn carried on saved_a / saved_b (when has_saved_variables())
+        // survives. Raw `Variable(conj(saved_b.tensor()), false)` severed
+        // the chain — audit-5 X.5 / Y.9.
+        auto conj_b = tenzor::conj(saved_b);
+        auto conj_a = tenzor::conj(saved_a);
         grad_a_unreduced = grad_outputs[0] * conj_b;
         grad_b_unreduced = grad_outputs[0] * conj_a;
     } else {
@@ -232,9 +235,14 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     Variable grad_a_unreduced, grad_b_unreduced;
     if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
-        // Wirtinger: use conj at tensor level
-        auto conj_b = Variable(conj(safe_b_tensor), false);
-        auto conj_a = Variable(conj(saved_a.tensor()), false);
+        // Wirtinger: route conj through the Variable-level overload so the
+        // grad_fn carried on saved_a (and the zero-safe `safe_b`) survives.
+        // Raw `Variable(conj(t), false)` severed the chain — audit-5 X.5.
+        // `safe_b` itself is the zero-guarded denominator and is intentionally
+        // non-differentiable at b=0; keeping it grad-free matches the original
+        // semantics while still letting conj(saved_a) carry its chain.
+        auto conj_b = tenzor::conj(safe_b);
+        auto conj_a = tenzor::conj(saved_a);
         grad_a_unreduced = grad_outputs[0] / conj_b;
         grad_b_unreduced = tenzor::neg((conj_a * grad_outputs[0]) / (conj_b * conj_b));
     } else {
@@ -303,9 +311,15 @@ auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs)
 
     Variable grad_a, grad_b;
     if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
-        // Wirtinger: conj(transpose(B)) and conj(transpose(A))
-        auto b_ct = Variable(conj(transpose(saved_b.tensor(), b_ndim - 2, b_ndim - 1)), false);
-        auto a_ct = Variable(conj(transpose(saved_a.tensor(), a_ndim - 2, a_ndim - 1)), false);
+        // Wirtinger: route transpose and conj through the Variable-level
+        // overloads so the grad_fn carried on saved_a / saved_b survives
+        // (audit-5 X.5 / Y.9). Raw `Variable(conj(transpose(t)), false)`
+        // severed the chain — second-order grads through complex matmul
+        // were zero on the saved-input branch.
+        auto b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
+        auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
+        auto b_ct = tenzor::conj(b_t);
+        auto a_ct = tenzor::conj(a_t);
         grad_a = tenzor::matmul(grad_out, b_ct);
         grad_b = tenzor::matmul(a_ct, grad_out);
     } else {
@@ -420,9 +434,14 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     bool is_gpu = (grad_out.tensor().device().type != Device::Type::CPU);
     bool needs_upcast = is_gpu && (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
 
-    Variable go = needs_upcast ? Variable(grad_out.tensor().to(DType::Float32), false) : grad_out;
-    Variable sx = needs_upcast ? Variable(saved_x.tensor().to(DType::Float32), false) : saved_x;
-    Variable sw = needs_upcast ? Variable(saved_w.tensor().to(DType::Float32), false) : saved_w;
+    // Route the upcast through the autograd-aware `variable_cast` so the
+    // input grad_fn chains survive into the F32 compute path (mirrors the
+    // post-compute narrow-back below and the audit-3 Q.2 fix). Raw
+    // `Variable(t.to(F32), false)` severed the chain — second-order grads
+    // through mixed-precision Linear lost contributions.
+    Variable go = needs_upcast ? tenzor::nn::variable_cast(grad_out, DType::Float32) : grad_out;
+    Variable sx = needs_upcast ? tenzor::nn::variable_cast(saved_x, DType::Float32) : saved_x;
+    Variable sw = needs_upcast ? tenzor::nn::variable_cast(saved_w, DType::Float32) : saved_w;
 
     auto grad_x = tenzor::matmul(go, sw);
     auto grad_out_t = tenzor::transpose(go, 0, 1);

@@ -2952,6 +2952,23 @@ auto view_as_complex(const Variable& input) -> Variable {
     return output;
 }
 
+// Variable-level conj routed through ConjBackward so the Wirtinger paths in
+// MulBackward / DivBackward / MatMulBackward (audit-5 X.5) preserve the
+// grad_fn carried on saved_variables_. ConjBackward::backward is `conj(grad)`
+// — linear and stateless, so the wrapper mirrors view_as_real.
+auto conj(const Variable& input) -> Variable {
+    auto out_t = ::tenzor::conj(input.tensor());
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(out_t, false);
+    }
+    auto grad_fn = std::make_shared<ConjBackward>();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(out_t, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 // ============================================================================
 // Vision Operations — Variable-level wrappers for grid_sample / affine_grid.
 // The *Backward classes already exist (see include/tenzor/autograd/function.hpp

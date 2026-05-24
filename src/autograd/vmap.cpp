@@ -217,12 +217,15 @@ void init_builtin_batching_rules() {
             // Already batch-first: matmul naturally handles leading batch dims
             return func(batched_input);
         }
-        // Move batch_dim to front, apply, move back
+        // Move batch_dim to front, apply, move back. Use the Variable-level
+        // autograd::transpose on the trailing transpose so the output keeps
+        // result.grad_fn() — the raw `Variable(perm_out, requires_grad)`
+        // rewrap severed the chain, killing higher-order grads under vmap
+        // (audit-5 X.2).
         auto perm_in = tenzor::transpose(batched_input.tensor(), 0, batch_dim);
         Variable permuted(perm_in, batched_input.requires_grad());
         auto result = func(permuted);
-        auto perm_out = tenzor::transpose(result.tensor(), 0, batch_dim);
-        return Variable(perm_out, result.requires_grad());
+        return tenzor::transpose(result, 0, batch_dim);
     });
 
     // ====================================================================
@@ -243,12 +246,15 @@ void init_builtin_batching_rules() {
         if (batch_dim == 0) {
             return func(batched_input);
         }
-        // Move batch to front, apply, move back
+        // Move batch to front, apply, move back. The trailing transpose must
+        // use the Variable-level autograd::transpose so the output keeps
+        // result.grad_fn() across ~25 shape ops (Conv1/2/3d, BN, LN, GN, IN,
+        // attention variants, pool variants, RNN/LSTM/GRU cells, padding
+        // variants). Raw rewrap severed the chain (audit-5 X.2).
         auto perm_in = tenzor::transpose(batched_input.tensor(), 0, batch_dim);
         Variable permuted(perm_in, batched_input.requires_grad());
         auto result = func(permuted);
-        auto perm_out = tenzor::transpose(result.tensor(), 0, batch_dim);
-        return Variable(perm_out, result.requires_grad());
+        return tenzor::transpose(result, 0, batch_dim);
     };
 
     register_batching_rule("ReshapeBackward", shape_passthrough);
