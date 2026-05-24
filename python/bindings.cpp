@@ -3076,7 +3076,15 @@ void bind_compression(py::module& m) {
             throw std::invalid_argument(
                 "jvp: mode must be 'walker' or 'dual', got '" + mode + "'");
         }
-        auto [output, tangent_out] = tenzor::jvp(func, input, tangent, jvp_mode);
+        // R.22: outer GIL release; inner cpp_fn reacquires for the Python callback.
+        tenzor::Variable output;
+        tenzor::Tensor tangent_out;
+        {
+            py::gil_scoped_release release;
+            auto pair = tenzor::jvp(func, input, tangent, jvp_mode);
+            output = std::move(pair.first);
+            tangent_out = std::move(pair.second);
+        }
         return py::make_tuple(output, tangent_out);
     }, py::arg("func"), py::arg("input"), py::arg("tangent"),
     py::arg("mode") = std::string("walker"),
@@ -3092,7 +3100,13 @@ void bind_compression(py::module& m) {
             py::object result = py_func(x);
             return result.cast<tenzor::Variable>();
         };
-        return tenzor::jacobian(func, input);
+        // R.22: outer GIL release; inner cpp_fn reacquires for the Python callback.
+        tenzor::Tensor J;
+        {
+            py::gil_scoped_release release;
+            J = tenzor::jacobian(func, input);
+        }
+        return J;
     }, py::arg("func"), py::arg("input"),
     "Compute full Jacobian matrix of func at input.\n"
     "Returns tensor of shape (output_size, input_size).");

@@ -2420,6 +2420,14 @@ void register_nn(py::module_& m) {
            "Functional 1D convolution",
            py::call_guard<py::gil_scoped_release>());
 
+    // Audit-4 U.13: expose the free-function PReLU so the Python wrapper
+    // (python/tenzor/functional.py:prelu) can drop the throwaway nn.PReLU
+    // layer that silently severed autograd from the caller's weight.
+    nn.def("functional_prelu", &tenzor::nn::functional::prelu,
+           py::arg("input"), py::arg("weight"),
+           "Functional Parametric ReLU with autograd-aware weight",
+           py::call_guard<py::gil_scoped_release>());
+
     nn.def("functional_conv3d", &tenzor::nn::functional::conv3d,
            py::arg("input"), py::arg("weight"),
            py::arg("bias") = std::nullopt,

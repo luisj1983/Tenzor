@@ -4138,6 +4138,255 @@ Returns:
             if (v.tensor().ndim() == 0) throw py::type_error("len() of a 0-d Variable");
             return v.tensor().shape()[0];
         })
+        // Audit-4 U.11: ``var[i]`` previously raised TypeError because
+        // only Tensor had ``__getitem__``. R.30 added Variable awareness
+        // inside the Tensor path but the Variable side stayed bare.
+        // This binding mirrors the Tensor path's index parsing but routes
+        // every operation through the autograd-aware overloads in
+        // ``include/tenzor/autograd/ops.hpp`` (slice, squeeze, index,
+        // masked_select), so ``y = var[i]`` keeps a grad_fn back to ``var``.
+        .def("__getitem__", [](const tenzor::Variable& self, py::object key) -> tenzor::Variable {
+            // Phase A (GIL held): parse Python key into typed C++ state.
+            enum class IndexKind { Int, Slice, Tuple, TensorMask, FancyIndex };
+            IndexKind kind;
+            int64_t int_idx = 0;
+            int64_t slice_start = 0, slice_stop = 0, slice_step = 1;
+
+            struct TupleEntry {
+                bool is_int;
+                int64_t int_val;
+                int64_t start, stop, step;
+            };
+            std::vector<TupleEntry> tuple_entries;
+            tenzor::Tensor mask_tensor;
+            std::vector<std::optional<tenzor::Tensor>> fancy_indices;
+
+            auto list_to_index_tensor = [&](py::list lst) -> tenzor::Tensor {
+                std::vector<int64_t> vals;
+                vals.reserve(lst.size());
+                for (auto& item : lst) vals.push_back(py::cast<int64_t>(item));
+                auto t = tenzor::from_data(vals.data(),
+                                           {static_cast<int64_t>(vals.size())},
+                                           tenzor::Device::cpu());
+                if (self.tensor().device() != tenzor::Device::cpu()) {
+                    t = t.to(self.tensor().device());
+                }
+                return t;
+            };
+
+            auto is_fancy_element = [](py::object obj) -> bool {
+                if (py::isinstance<py::list>(obj)) return true;
+                if (py::isinstance<tenzor::Tensor>(obj)) {
+                    auto t = obj.cast<tenzor::Tensor>();
+                    return t.dtype() == tenzor::DType::Int32 ||
+                           t.dtype() == tenzor::DType::Int64;
+                }
+                if (py::isinstance<tenzor::Variable>(obj)) {
+                    auto v = obj.cast<tenzor::Variable>();
+                    auto dt = v.tensor().dtype();
+                    return dt == tenzor::DType::Int32 || dt == tenzor::DType::Int64;
+                }
+                return false;
+            };
+
+            if (py::isinstance<py::int_>(key)) {
+                kind = IndexKind::Int;
+                int_idx = py::cast<int64_t>(key);
+            } else if (py::isinstance<py::slice>(key)) {
+                kind = IndexKind::Slice;
+                py::slice slice_obj = py::cast<py::slice>(key);
+                py::ssize_t start, stop, step, length;
+                auto shape = self.tensor().shape();
+                if (shape.empty()) throw std::runtime_error("Cannot slice scalar Variable");
+                if (!slice_obj.compute(shape[0], &start, &stop, &step, &length)) {
+                    throw std::runtime_error(
+                        "Invalid slice for dimension 0 with size " + std::to_string(shape[0]));
+                }
+                slice_start = start; slice_stop = stop; slice_step = step;
+            } else if (py::isinstance<py::list>(key)) {
+                kind = IndexKind::FancyIndex;
+                fancy_indices.push_back(list_to_index_tensor(py::cast<py::list>(key)));
+            } else if (py::isinstance<py::tuple>(key)) {
+                py::tuple indices = py::cast<py::tuple>(key);
+                bool has_fancy = false;
+                for (size_t i = 0; i < indices.size(); ++i) {
+                    if (is_fancy_element(indices[i])) { has_fancy = true; break; }
+                }
+                if (has_fancy) {
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.reserve(indices.size());
+                    for (size_t i = 0; i < indices.size(); ++i) {
+                        if (py::isinstance<py::list>(indices[i])) {
+                            fancy_indices.push_back(list_to_index_tensor(py::cast<py::list>(indices[i])));
+                        } else if (py::isinstance<tenzor::Tensor>(indices[i])) {
+                            auto t = indices[i].cast<tenzor::Tensor>();
+                            if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                                fancy_indices.push_back(t);
+                            } else {
+                                throw std::runtime_error(
+                                    "Tensor index must be integer dtype (Int32/Int64)");
+                            }
+                        } else if (py::isinstance<tenzor::Variable>(indices[i])) {
+                            auto v = indices[i].cast<tenzor::Variable>();
+                            auto t = v.tensor();
+                            if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                                fancy_indices.push_back(t);
+                            } else {
+                                throw std::runtime_error(
+                                    "Variable index must wrap an integer dtype (Int32/Int64)");
+                            }
+                        } else if (py::isinstance<py::slice>(indices[i])) {
+                            fancy_indices.push_back(std::nullopt);
+                        } else if (py::isinstance<py::int_>(indices[i])) {
+                            int64_t val = py::cast<int64_t>(indices[i]);
+                            auto t = tenzor::from_data(&val, {}, tenzor::Device::cpu());
+                            if (self.tensor().device() != tenzor::Device::cpu()) {
+                                t = t.to(self.tensor().device());
+                            }
+                            fancy_indices.push_back(t);
+                        } else {
+                            throw std::runtime_error("Unsupported index type in tuple");
+                        }
+                    }
+                } else {
+                    kind = IndexKind::Tuple;
+                    tuple_entries.reserve(indices.size());
+                    for (size_t i = 0; i < indices.size(); ++i) {
+                        TupleEntry entry{};
+                        if (py::isinstance<py::int_>(indices[i])) {
+                            entry.is_int = true;
+                            entry.int_val = py::cast<int64_t>(indices[i]);
+                        } else if (py::isinstance<py::slice>(indices[i])) {
+                            entry.is_int = false;
+                            py::slice slice_obj = py::cast<py::slice>(indices[i]);
+                            auto s_start = slice_obj.attr("start");
+                            auto s_stop  = slice_obj.attr("stop");
+                            auto s_step  = slice_obj.attr("step");
+                            entry.start = s_start.is_none() ? std::numeric_limits<int64_t>::min() : py::cast<int64_t>(s_start);
+                            entry.stop  = s_stop.is_none()  ? std::numeric_limits<int64_t>::max() : py::cast<int64_t>(s_stop);
+                            entry.step  = s_step.is_none()  ? 1 : py::cast<int64_t>(s_step);
+                        } else {
+                            throw std::runtime_error("Unsupported index type in tuple");
+                        }
+                        tuple_entries.push_back(entry);
+                    }
+                }
+            } else if (py::isinstance<tenzor::Tensor>(key)) {
+                auto t = key.cast<tenzor::Tensor>();
+                if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.push_back(t);
+                } else {
+                    kind = IndexKind::TensorMask;
+                    mask_tensor = t;
+                }
+            } else if (py::isinstance<tenzor::Variable>(key)) {
+                auto v = key.cast<tenzor::Variable>();
+                auto t = v.tensor();
+                if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.push_back(t);
+                } else {
+                    kind = IndexKind::TensorMask;
+                    mask_tensor = t;
+                }
+            } else {
+                throw std::runtime_error("Unsupported index type: expected int, slice, list, Tensor, or Variable");
+            }
+
+            // Phase B (GIL released): perform autograd-aware ops.
+            py::gil_scoped_release release;
+            switch (kind) {
+                case IndexKind::Int: {
+                    auto shape = self.tensor().shape();
+                    if (shape.empty()) throw std::runtime_error("Cannot index scalar Variable");
+                    int64_t idx = int_idx;
+                    if (idx < 0) idx += shape[0];
+                    if (idx < 0 || idx >= shape[0]) {
+                        throw std::out_of_range(
+                            "Index " + std::to_string(int_idx) +
+                            " out of range for dimension 0 with size " + std::to_string(shape[0]));
+                    }
+                    auto sliced = ::tenzor::slice(self, /*dim=*/0, idx, idx + 1, /*step=*/1);
+                    auto sliced_shape = sliced.tensor().shape();
+                    if (!sliced_shape.empty() && sliced_shape[0] == 1) {
+                        return ::tenzor::squeeze(sliced, 0);
+                    }
+                    return sliced;
+                }
+                case IndexKind::Slice: {
+                    return ::tenzor::slice(self, /*dim=*/0, slice_start, slice_stop, slice_step);
+                }
+                case IndexKind::Tuple: {
+                    tenzor::Variable result = self;
+                    int squeeze_count = 0;
+                    for (size_t i = 0; i < tuple_entries.size(); ++i) {
+                        auto& entry = tuple_entries[i];
+                        if (entry.is_int) {
+                            int64_t idx = entry.int_val;
+                            auto shape = result.tensor().shape();
+                            size_t dim = i - squeeze_count;
+                            if (dim >= shape.size()) throw std::out_of_range("Too many indices");
+                            if (idx < 0) idx += shape[dim];
+                            if (idx < 0 || idx >= shape[dim]) {
+                                throw std::out_of_range(
+                                    "Index " + std::to_string(entry.int_val) +
+                                    " out of range for dimension " + std::to_string(dim) +
+                                    " with size " + std::to_string(shape[dim]));
+                            }
+                            result = ::tenzor::slice(result, static_cast<int64_t>(dim), idx, idx + 1, 1);
+                            auto new_shape = result.tensor().shape();
+                            if (dim < new_shape.size() && new_shape[dim] == 1) {
+                                result = ::tenzor::squeeze(result, static_cast<int64_t>(dim));
+                                squeeze_count++;
+                            }
+                        } else {
+                            auto shape = result.tensor().shape();
+                            size_t dim = i - squeeze_count;
+                            if (dim >= shape.size()) throw std::out_of_range("Too many indices");
+                            int64_t dim_size = shape[dim];
+                            int64_t start = entry.start, stop = entry.stop, step = entry.step;
+                            if (start == std::numeric_limits<int64_t>::min()) start = (step > 0) ? 0 : dim_size - 1;
+                            else if (start < 0) start += dim_size;
+                            if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
+                            else if (stop < 0) stop += dim_size;
+                            start = std::clamp(start, int64_t(0), dim_size);
+                            stop  = std::clamp(stop,  int64_t(0), dim_size);
+                            result = ::tenzor::slice(result, static_cast<int64_t>(dim), start, stop, step);
+                        }
+                    }
+                    return result;
+                }
+                case IndexKind::TensorMask: {
+                    if (mask_tensor.dtype() == tenzor::DType::Bool) {
+                        return ::tenzor::masked_select(self, mask_tensor);
+                    }
+                    throw std::runtime_error("Unsupported index type: expected bool Tensor");
+                }
+                case IndexKind::FancyIndex: {
+                    return ::tenzor::index(self, fancy_indices);
+                }
+            }
+            throw std::runtime_error("Unreachable");  // silence compiler warning
+        }, py::arg("key"), "Get variable slice or element with autograd")
+        // __setitem__ mirrors Tensor.__setitem__ by mutating the underlying
+        // Tensor in place. Note: this writes through ``self.tensor()`` and
+        // therefore does NOT create a backward node for the assignment --
+        // it is the same contract Tensor has had since R.18, and matches
+        // PyTorch's behaviour for the in-place index_put_ pattern.
+        .def("__setitem__", [](tenzor::Variable& self, py::object key, py::object value) {
+            // Delegate to Tensor.__setitem__ semantics by reusing the
+            // underlying tensor reference. Unwrap a Variable value to its
+            // tensor first so the broadcast path sees a Tensor as expected.
+            py::object inner_value = value;
+            if (py::isinstance<tenzor::Variable>(value)) {
+                inner_value = py::cast(value.cast<tenzor::Variable>().tensor());
+            }
+            auto& dst = self.tensor();
+            py::object py_dst = py::cast(&dst, py::return_value_policy::reference);
+            py_dst.attr("__setitem__")(key, inner_value);
+        }, py::arg("key"), py::arg("value"),
+           "Assign to variable slice/element (in-place; not differentiable through the write)")
         .def_property_readonly("strides", [](const tenzor::Variable& v) {
             auto s = v.tensor().strides();
             py::tuple result(s.size());

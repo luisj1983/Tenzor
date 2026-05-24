@@ -639,48 +639,83 @@ auto jvp_square(const DualTensor& x) -> DualTensor {
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
-// ---- Reductions: Max/Min (using one-hot mask) ------------------------------
+// ---- Reductions: Max/Min (one-hot at argmax/argmin, tie-safe) -------------
 //
-// Both forward and reverse mode use the same one-hot indicator at the
-// argmax/argmin position. For ties, the gradient is split (the JVP rule
-// uses (x == max(x)) as a mask which gives 1.0 on each tied location;
-// this matches numpy/PyTorch sum-of-derivatives behaviour rather than
-// the strict-tie convention).
+// Audit-4 U.1 / U.2: a previous implementation built `mask = eq(x, max(x))`
+// and summed `dx * mask` along `dim`. For ties (e.g. `[3, 3, 1]`) the mask
+// has multiple ones along the reduced axis, so the JVP returned
+// `dx[0] + dx[1]` instead of a single representative — disagreeing with
+// MaxBackward, which picks a unique winner via argmax. The fix here mirrors
+// MaxBackward: pick the unique argmax/argmin index, one-hot it back to the
+// input shape, and gather the tangent at that position.
+
+namespace {
+
+// Build a one-hot mask along `dim` selecting the argmax / argmin position
+// for every reduction group, matching x.primal()'s shape. For the global
+// reduction case (dim == nullopt) we flatten, take a scalar argmax/argmin,
+// one-hot to numel and reshape back. The result is cast to the tangent
+// dtype so element-wise mul matches downstream.
+auto argreduce_one_hot_mask(const Tensor& x, std::optional<int64_t> dim,
+                            bool use_argmin, DType out_dtype) -> Tensor {
+    auto input_shape_vec = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    if (dim.has_value()) {
+        int64_t d = *dim;
+        int64_t ndim = static_cast<int64_t>(x.ndim());
+        if (d < 0) d += ndim;
+        int64_t num_classes = x.shape()[d];
+        auto idx = use_argmin
+            ? tenzor::argmin(x, /*dim=*/d, /*keepdim=*/false)
+            : tenzor::argmax(x, /*dim=*/d, /*keepdim=*/false);
+        // one_hot appends a class axis at the trailing position; we need the
+        // mask along the reduced axis `d`. After one_hot the mask has shape
+        // (...without_d..., num_classes); move that last axis back to `d`.
+        auto mask_int = tenzor::one_hot(idx, num_classes);
+        // Reorder dims: insert the last axis into position `d`.
+        std::vector<int64_t> perm;
+        perm.reserve(static_cast<size_t>(ndim));
+        int64_t mask_ndim = static_cast<int64_t>(mask_int.ndim());
+        // mask_int dims are [0, 1, ..., mask_ndim-2, mask_ndim-1=class_axis]
+        // We want to place class_axis at position d among the original axes.
+        for (int64_t i = 0; i < ndim; ++i) {
+            if (i == d) {
+                perm.push_back(mask_ndim - 1);
+            } else if (i < d) {
+                perm.push_back(i);
+            } else {
+                perm.push_back(i - 1);
+            }
+        }
+        auto mask_reordered = tenzor::permute(mask_int, perm);
+        return mask_reordered.to(out_dtype);
+    }
+    // Global reduction: flatten, argreduce, one-hot, reshape.
+    auto x_flat = tenzor::flatten(x, 0, -1);
+    int64_t numel = x.numel();
+    auto idx_scalar = use_argmin
+        ? tenzor::argmin(x_flat, /*dim=*/0, /*keepdim=*/false)
+        : tenzor::argmax(x_flat, /*dim=*/0, /*keepdim=*/false);
+    auto mask_flat = tenzor::one_hot(idx_scalar, numel);
+    auto mask = tenzor::reshape(mask_flat, input_shape_vec);
+    return mask.to(out_dtype);
+}
+
+} // anonymous namespace
 
 auto jvp_max_red(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
     auto primal = tenzor::max(x.primal(), dim, keepdim);
-    // Broadcast primal back to x.primal()'s shape via keepdim form
-    Tensor primal_kd;
-    if (dim.has_value() && !keepdim) {
-        primal_kd = tenzor::max(x.primal(), dim, /*keepdim=*/true);
-    } else if (!dim.has_value()) {
-        // global reduction - primal_kd has same shape as primal (scalar);
-        // broadcasting eq() against full tensor still works.
-        primal_kd = primal;
-    } else {
-        primal_kd = primal;
-    }
-    auto mask = tenzor::eq(x.primal(), primal_kd);
-    // Convert bool mask to floating dtype matching tangent
-    auto mask_f = mask.to(x.tangent().dtype());
-    auto masked_tan = tenzor::mul(x.tangent(), mask_f);
+    auto mask = argreduce_one_hot_mask(x.primal(), dim, /*use_argmin=*/false,
+                                       x.tangent().dtype());
+    auto masked_tan = tenzor::mul(x.tangent(), mask);
     auto tangent = tenzor::sum(masked_tan, dim, keepdim);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
 auto jvp_min_red(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
     auto primal = tenzor::min(x.primal(), dim, keepdim);
-    Tensor primal_kd;
-    if (dim.has_value() && !keepdim) {
-        primal_kd = tenzor::min(x.primal(), dim, /*keepdim=*/true);
-    } else if (!dim.has_value()) {
-        primal_kd = primal;
-    } else {
-        primal_kd = primal;
-    }
-    auto mask = tenzor::eq(x.primal(), primal_kd);
-    auto mask_f = mask.to(x.tangent().dtype());
-    auto masked_tan = tenzor::mul(x.tangent(), mask_f);
+    auto mask = argreduce_one_hot_mask(x.primal(), dim, /*use_argmin=*/true,
+                                       x.tangent().dtype());
+    auto masked_tan = tenzor::mul(x.tangent(), mask);
     auto tangent = tenzor::sum(masked_tan, dim, keepdim);
     return DualTensor(std::move(primal), std::move(tangent));
 }
@@ -2913,11 +2948,53 @@ JvpResult jvp_adapter_rfft(std::span<const Tensor> primals,
 JvpResult jvp_adapter_irfft(std::span<const Tensor> primals,
                             std::span<const Tensor> tangents,
                             const OpAttributes& attrs) {
-    return fft_jvp_impl("jvp_adapter_irfft", primals, tangents, attrs,
-        [](const Tensor& t, std::optional<int64_t> n, int64_t dim,
-           const std::string& norm) {
-            return tenzor::fft::irfft(t, n, dim, norm);
-        });
+    // Audit-4 U.3: IRFFT is a *real-valued projection* — its complex
+    // Hermitian input X carries the constraint Im(X[0]) = 0 (and
+    // Im(X[n/2]) = 0 when n is even). A naive `irfft(dx)` silently throws
+    // away whatever non-Hermitian components dx has, but the true JVP must
+    // first project dx onto the valid tangent subspace and then transport
+    // through irfft. Mirroring the IRFFTBackward.backward saved-`n`
+    // technique (function_fft.cpp:339-343), we symmetrise dx via
+    //   sym_dx = rfft(irfft(dx, n), n_orig)
+    // where n_orig is the freq-bin count of the forward irfft's input
+    // (recoverable from primals[0].shape[dim]). irfft(sym_dx, n) is the
+    // tangent in the time domain. Using `n_orig` for the inner rfft is
+    // the same R.7 fix that IRFFTBackward applies for non-default n.
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_irfft: expected 1 input");
+    }
+    const Tensor& x = primals[0];
+    Tensor dx = tangents[0];
+    if (dx.numel() == 0 && x.numel() != 0) {
+        auto shape_vec = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+        dx = tenzor::zeros(shape_vec, x.dtype(), x.device());
+    }
+    std::optional<int64_t> n;
+    if (attrs.has(AttrKey::N)) n = attrs.get_int(AttrKey::N);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+
+    Tensor primal_out = tenzor::fft::irfft(x, n, dim, norm);
+
+    // n_orig: frequency-bin count of the input X (= shape along `dim`).
+    int64_t actual_dim = dim < 0 ? dim + static_cast<int64_t>(x.ndim()) : dim;
+    int64_t n_orig = x.shape()[actual_dim];
+
+    // time_n: the time-domain length used by irfft (= n if supplied, else
+    // the default 2*(n_orig-1)). This is what rfft must reproduce so that
+    // sym_dx has the same shape as dx.
+    int64_t time_n = n.value_or(2 * (n_orig - 1));
+    std::optional<int64_t> time_n_opt(time_n);
+
+    // Project dx onto the Hermitian subspace: round-trip through time domain
+    // then back to freq domain using the saved n_orig (R.7-style). The pair
+    // (irfft, rfft) is the identity on validly-Hermitian inputs and zeroes
+    // the imaginary parts of bins 0 and n/2 otherwise.
+    Tensor time_dx = tenzor::fft::irfft(dx, time_n_opt, dim, norm);
+    Tensor sym_dx  = tenzor::fft::rfft(time_dx, time_n_opt, dim, norm);
+    Tensor tangent_out = tenzor::fft::irfft(sym_dx, n, dim, norm);
+
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
 }
 
 // ---- Audit A.4 (extension): Multi-output JVP rules -----------------------

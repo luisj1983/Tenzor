@@ -2013,15 +2013,13 @@ def prelu(input: Variable, weight: Variable) -> Variable:
     """Parametric ReLU: ``max(0, x) + a * min(0, x)`` with learnable ``a``.
 
     Uses the supplied ``weight`` tensor as the per-channel slope.
+
+    Audit-4 U.13: routes through the C++ ``functional_prelu`` free
+    function so gradients flow back into the caller's ``input`` and
+    ``weight`` Variables instead of a throwaway ``nn.PReLU`` layer's
+    internal Parameter.
     """
-    # PReLU expects the slope tensor to be a Parameter; bind into a fresh
-    # nn.PReLU instance and overwrite its weight before invoking forward.
-    num_parameters = int(weight.tensor().numel())
-    layer = _nn.PReLU(num_parameters=num_parameters)
-    # Replace the layer's weight with the caller-supplied one so gradient
-    # flow lands on the caller's Variable rather than the throwaway layer.
-    layer.weight.tensor().copy_(weight.tensor())
-    return layer(input)
+    return _nn.functional_prelu(input, weight)
 
 
 def conv1d(input: Variable, weight: Variable, bias=None,

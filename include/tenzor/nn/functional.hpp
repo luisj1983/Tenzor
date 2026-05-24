@@ -104,6 +104,23 @@ inline auto log_sigmoid(const Variable& input) -> Variable {
     return nn::log_sigmoid(input);
 }
 
+/**
+ * @brief Functional PReLU: ``max(0, x) + weight * min(0, x)``.
+ *
+ * Audit-4 U.13: the Python wrapper used to bind through a throwaway
+ * ``nn::PReLU`` module and copy the user's weight into the layer's
+ * internal Parameter, which severed autograd back to the caller's
+ * ``weight`` Variable.  This free function mirrors the canonical
+ * ``functional_conv1d`` pattern -- both inputs are honoured as
+ * Variables and the result's grad_fn chain feeds back into them.
+ *
+ * @param input Input Variable, shape ``[..., C, ...]`` (PReLU broadcasts
+ *              ``weight`` along all non-channel dims).
+ * @param weight Per-channel slope Variable; numel must be 1 (shared
+ *               slope) or equal to the input's channel dimension.
+ */
+auto prelu(const Variable& input, const Variable& weight) -> Variable;
+
 // ============================================================================
 // Linear Algebra
 // ============================================================================

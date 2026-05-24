@@ -1,5 +1,6 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
+#include "tenzor/ops/math.hpp"
 #include <algorithm>
 #include <unordered_set>
 
@@ -302,27 +303,57 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
     load_state_dict(state, true);
 }
 
+// Audit-4 U.10: load_state_dict preserves the live parameter/buffer storage
+// and adapts the checkpoint payload to the module's current dtype/device.
+//
+// Behaviour:
+//   * Shapes still must match exactly -- silent reshape would mask user bugs.
+//   * If the checkpoint dtype differs from the live parameter dtype, the
+//     loaded tensor is cast to the module's dtype (supports the canonical
+//     mixed-precision flow: load an F32 checkpoint into an F16 inference
+//     model, or load a BF16 checkpoint back into an F32 reference model).
+//   * If the checkpoint device differs (e.g. CPU checkpoint into a CUDA
+//     module, the standard distributed/restore pattern), the loaded tensor
+//     is transferred to the module's current device.
+//   * Data is written via ``dst.zero_(); add_(dst, src)`` so the live
+//     Tensor's underlying ``Storage`` handle is preserved (the R.18
+//     invariant FSDP2/saved-for-backward depend on).  Direct
+//     ``dst = src.clone()`` would swap the TensorImpl pointer and orphan
+//     any aliasing view, including FSDP2 shard views and any activation
+//     that captured the pre-load Tensor in save_for_backward.
 auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state, bool strict) -> void {
     // Track which state keys are consumed to detect unexpected keys
     std::unordered_set<std::string> consumed_keys;
+
+    // Local helper: adapt loaded tensor to live tensor's dtype + device and
+    // copy in-place so the live Storage handle is preserved.
+    auto copy_into_live = [](Tensor& dst, const Tensor& src, const std::string& name,
+                             const char* kind) {
+        if (dst.shape().size() != src.shape().size() ||
+            !std::equal(dst.shape().begin(), dst.shape().end(), src.shape().begin())) {
+            throw std::runtime_error(std::string("Shape mismatch for ") + kind + " '" + name + "'");
+        }
+        Tensor adapted = src;
+        if (adapted.dtype() != dst.dtype()) {
+            adapted = adapted.to(dst.dtype());
+        }
+        if (adapted.device() != dst.device()) {
+            adapted = adapted.to(dst.device());
+        }
+        // R.18-preserving write: zero, then in-place add. This keeps the
+        // TensorImpl/Storage handle of ``dst`` intact so aliasing views
+        // (FSDP2 shard slices, saved-for-backward captures) see the new
+        // bytes instead of dangling at the pre-load buffer.
+        dst.zero_();
+        add_(dst, adapted);
+    };
 
     // Load own parameters
     for (auto& [name, param] : parameters_) {
         auto it = state.find(name);
         if (it != state.end()) {
             consumed_keys.insert(name);
-            // Verify shapes match
-            const auto& loaded_tensor = it->second;
-            if (param->tensor().shape().size() != loaded_tensor.shape().size() ||
-                !std::equal(param->tensor().shape().begin(), param->tensor().shape().end(),
-                           loaded_tensor.shape().begin())) {
-                throw std::runtime_error("Shape mismatch for parameter '" + name + "'");
-            }
-            if (param->tensor().dtype() != loaded_tensor.dtype()) {
-                throw std::runtime_error("DType mismatch for parameter '" + name + "'");
-            }
-            // Copy data
-            param->tensor() = loaded_tensor.clone();
+            copy_into_live(param->tensor(), it->second, name, "parameter");
         }
     }
 
@@ -331,16 +362,7 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         auto it = state.find(name);
         if (it != state.end()) {
             consumed_keys.insert(name);
-            const auto& loaded_tensor = it->second;
-            if (buffer->tensor().shape().size() != loaded_tensor.shape().size() ||
-                !std::equal(buffer->tensor().shape().begin(), buffer->tensor().shape().end(),
-                           loaded_tensor.shape().begin())) {
-                throw std::runtime_error("Shape mismatch for buffer '" + name + "'");
-            }
-            if (buffer->tensor().dtype() != loaded_tensor.dtype()) {
-                throw std::runtime_error("DType mismatch for buffer '" + name + "'");
-            }
-            buffer->tensor() = loaded_tensor.clone();
+            copy_into_live(buffer->tensor(), it->second, name, "buffer");
         }
     }
 

@@ -10,6 +10,7 @@
 #include "tenzor/nn/layers/normalization.hpp"  // for internal::make_layer_norm_backward
 #include "tenzor/nn/layers/embedding.hpp"      // for internal::make_embedding_backward
 #include "tenzor/nn/layers/pooling.hpp"        // J7: delegate pool functional to Module
+#include "tenzor/nn/activations/activations.hpp" // U.13: nn::relu for prelu composition
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -204,6 +205,46 @@ auto conv1d(const Variable& input, const Variable& weight,
                          /*dilation=*/{int64_t{1}, dilation},
                          groups);
     return ::tenzor::squeeze(out_4d, 2);
+}
+
+// Audit-4 U.13: free-function PReLU built as a pure Variable-level
+// composition (the same identity the ``nn::PReLU`` module evaluates), so
+// grad flows back to the caller's ``input`` and ``weight`` Variables rather
+// than to a throwaway layer's internal Parameter.
+//
+//   prelu(x, w) = relu(x) + w * (x - relu(x))
+//                = max(0, x) + w * min(0, x)
+//
+// ``weight`` is broadcast across input.  When ``weight.numel() == 1`` it
+// applies as a scalar slope; when ``weight.numel() == C`` it is reshaped to
+// ``[1, C, 1, ..., 1]`` to align with input's channel dim before the
+// elementwise multiply, matching PyTorch / nn::PReLU semantics.
+auto prelu(const Variable& input, const Variable& weight) -> Variable {
+    const int64_t w_numel = weight.tensor().numel();
+    Variable broadcast_weight = weight;
+    if (w_numel != 1) {
+        const auto& in_shape = input.shape();
+        if (in_shape.size() < 2) {
+            throw std::invalid_argument(
+                "F::prelu per-channel weight requires input with at least 2 dims "
+                "(got " + std::to_string(in_shape.size()) + "D); use a 1-element "
+                "weight for scalar slope on lower-rank inputs.");
+        }
+        const int64_t c = in_shape[1];
+        if (w_numel != c) {
+            throw std::invalid_argument(
+                "F::prelu weight numel (" + std::to_string(w_numel) +
+                ") must equal 1 or input channel dim (" + std::to_string(c) + ")");
+        }
+        // Reshape weight to [1, C, 1, ..., 1] so the broadcast lines up
+        // with input's channel axis under standard NCHW / NCL / NC layouts.
+        std::vector<int64_t> w_shape(in_shape.size(), int64_t{1});
+        w_shape[1] = c;
+        broadcast_weight = ::tenzor::reshape(weight, w_shape);
+    }
+    auto relu_x = ::tenzor::nn::relu(input);
+    auto neg_part = input - relu_x;       // min(0, x), autograd-safe via Variable op
+    return relu_x + broadcast_weight * neg_part;
 }
 
 auto conv3d(const Variable& input, const Variable& weight,

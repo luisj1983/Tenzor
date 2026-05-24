@@ -191,7 +191,13 @@ void register_optim(py::module_& m) {
              py::arg("state"), "Load optimizer state dictionary");
 
     // Additional optimizers
-    py::class_<tenzor::optim::RMSprop>(optim, "RMSprop")
+    // Audit-4 U.14: thread the Optimizer base + shared_ptr through the
+    // pybind11 class template so isinstance(rmsprop, Optimizer) returns
+    // True and the base class' param_groups / add_param_group / clip
+    // config methods are visible on the Python instance (matches the
+    // optim.pyi declaration ``class RMSprop(Optimizer)``).
+    py::class_<tenzor::optim::RMSprop, tenzor::optim::Optimizer,
+               std::shared_ptr<tenzor::optim::RMSprop>>(optim, "RMSprop")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
              py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
@@ -205,7 +211,10 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::RMSprop::state_dict)
         .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict);
 
-    py::class_<tenzor::optim::Adagrad>(optim, "Adagrad")
+    // Audit-4 U.14: Adagrad inherits from Optimizer in the .pyi stub; thread
+    // the base + shared_ptr through pybind11 so that contract is honoured.
+    py::class_<tenzor::optim::Adagrad, tenzor::optim::Optimizer,
+               std::shared_ptr<tenzor::optim::Adagrad>>(optim, "Adagrad")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 0.01, py::arg("lr_decay") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("initial_accumulator_value") = 0.0,
@@ -217,7 +226,9 @@ void register_optim(py::module_& m) {
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adagrad::zero_grad);
 
-    py::class_<tenzor::optim::Adadelta>(optim, "Adadelta")
+    // Audit-4 U.14: Adadelta — same parent + shared_ptr fix as RMSprop / Adagrad.
+    py::class_<tenzor::optim::Adadelta, tenzor::optim::Optimizer,
+               std::shared_ptr<tenzor::optim::Adadelta>>(optim, "Adadelta")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 1.0, py::arg("rho") = 0.9,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
