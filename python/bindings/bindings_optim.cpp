@@ -117,8 +117,8 @@ void register_optim(py::module_& m) {
             }
             // Q.15: release the GIL so other Python threads (DataLoader
             // workers, DDP comm hooks) make progress while the step runs.
-            py::gil_scoped_release release;
-            self.step();
+            // X.8: scope the release so it ends before `py::none()` is built.
+            { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
@@ -143,8 +143,9 @@ void register_optim(py::module_& m) {
         .def("step", [](tenzor::optim::ASGD& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
             // Q.15: release GIL for the closure-less hot path.
-            py::gil_scoped_release release;
-            self.step(); return py::none();
+            // X.8: scope so release ends before py::none() is built.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
         .def("zero_grad", &tenzor::optim::ASGD::zero_grad,
@@ -167,8 +168,12 @@ void register_optim(py::module_& m) {
              py::arg("amsgrad") = false)
         .def("step", [](tenzor::optim::Adam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adam::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -190,8 +195,12 @@ void register_optim(py::module_& m) {
              py::arg("amsgrad") = false)
         .def("step", [](tenzor::optim::AdamW& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::AdamW::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -219,8 +228,12 @@ void register_optim(py::module_& m) {
              py::arg("momentum") = 0.0, py::arg("centered") = false)
         .def("step", [](tenzor::optim::RMSprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::RMSprop::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -238,8 +251,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-10)
         .def("step", [](tenzor::optim::Adagrad& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adagrad::zero_grad,
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -252,8 +269,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
         .def("step", [](tenzor::optim::Adadelta& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adadelta::zero_grad,
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -266,8 +287,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
         .def("step", [](tenzor::optim::RAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::RAdam::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -286,8 +311,12 @@ void register_optim(py::module_& m) {
              py::arg("momentum_decay") = 4e-3)
         .def("step", [](tenzor::optim::NAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::NAdam::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -305,8 +334,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
         .def("step", [](tenzor::optim::Adamax& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adamax::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -324,8 +357,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01)
         .def("step", [](tenzor::optim::LAMB& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::LAMB::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -343,8 +380,12 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-8)
         .def("step", [](tenzor::optim::SparseAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -362,8 +403,12 @@ void register_optim(py::module_& m) {
              py::arg("step_min") = 1e-6, py::arg("step_max") = 50.0)
         .def("step", [](tenzor::optim::Rprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
             if (closure) return py::cast(self.step(*closure));
-            py::gil_scoped_release release;  // Q.15
-            self.step(); return py::none();
+            // X.8: scope the GIL release so `release` is destroyed (re-acquires
+            // GIL) BEFORE `py::none()` is constructed in the return statement.
+            // Constructing a py::object while the GIL is released triggers a
+            // pybind11 inc_ref() assertion failure on CPython 3.14+.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
         .def("zero_grad", &tenzor::optim::Rprop::zero_grad,

@@ -11,6 +11,12 @@ on:
       - 'tests/**'
       - 'scripts/count_skips.py'
       - 'scripts/audit_op_coverage.py'
+      # X.11: tooling-audit job — run when any of the linted sources or the
+      # tools themselves change. The tooling tools themselves are pure-Python
+      # so this also catches drift in tools/audit_tolerances_baseline.txt and
+      # tools/lint_test_contract_baseline.txt.
+      - 'tools/**'
+      - 'python/tenzor/**'
   push:
     branches: [main]
 
@@ -40,3 +46,41 @@ jobs:
         with:
           name: op-coverage
           path: op-coverage.json
+
+  tooling-audit:
+    # X.11: wire the audit-4 / audit-5 tooling tools into CI as a required
+    # check. Each tool exits non-zero on regression so a single new untagged
+    # marker / pyi drift / unjustified tolerance / sparse-parity miss /
+    # multi-dtype gap / param-group breakage / TensorBoard wire-format
+    # mismatch / test-contract violation surfaces on the PR diff instead of
+    # the audit a release later. All eight run pure-Python and need neither
+    # a build nor a GPU.
+    name: Tooling audit (audit-4/audit-5 P0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: scan_audit_markers.py — orphaned audit markers
+        run: python3 tools/scan_audit_markers.py
+      - name: check_pyi_drift.py — .py / .pyi parity
+        run: python3 tools/check_pyi_drift.py
+      - name: check_multidtype_coverage.py — multi-dtype gaps
+        run: python3 tools/check_multidtype_coverage.py
+      - name: audit_tolerances.py --strict — unjustified loose tolerances
+        run: |
+          python3 tools/audit_tolerances.py --strict \
+            --baseline tools/audit_tolerances_baseline.txt
+      - name: check_param_group_serialization.py — optim round-trip
+        # SKIPs gracefully on source-only checkout (exit 0). When the
+        # compiled extension is present the lint exercises every Optimizer
+        # subclass; see X.8 for the SKIP-vs-FATAL classification.
+        run: python3 tools/check_param_group_serialization.py
+      - name: check_tensorboard_wire_format.py — TB protobuf parity
+        run: python3 tools/check_tensorboard_wire_format.py
+      - name: parity_coverage_matrix.py — backend parity matrix
+        run: python3 tools/parity_coverage_matrix.py
+      - name: lint_test_contract.py — test-contract regressions
+        run: python3 tools/lint_test_contract.py

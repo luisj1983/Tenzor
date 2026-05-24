@@ -134,18 +134,8 @@ class LazyLinear(Module):
 
     def forward(self, input: Tensor) -> Tensor: ...
 
-class Bilinear(Module):
-    """Bilinear layer."""
-
-    def __init__(
-        self,
-        in1_features: int,
-        in2_features: int,
-        out_features: int,
-        bias: bool = True
-    ) -> None: ...
-
-    def forward(self, input1: Tensor, input2: Tensor) -> Tensor: ...
+# X.9: Bilinear is declared in .pyi but not bound from C++. Removed pending
+# either a C++ binding (bindings_nn.cpp) or pure-Python implementation in nn.py.
 
 # Convolutional layers
 class Conv1d(Module):
@@ -904,14 +894,14 @@ class LogSoftmax(Module):
     def __init__(self, dim: Optional[int] = None) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
 
-class HardSwish(Module):
-    """Hard Swish activation function."""
+class Hardswish(Module):
+    """Hard Swish activation function. (Hardswish to match torch naming.)"""
 
     def __init__(self) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
 
-class HardSigmoid(Module):
-    """Hard Sigmoid activation function."""
+class Hardsigmoid(Module):
+    """Hard Sigmoid activation function. (Hardsigmoid to match torch naming.)"""
 
     def __init__(self) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
@@ -1087,6 +1077,44 @@ def clip_grad_value_(parameters: List[Variable], clip_value: float) -> None: ...
 
 # Audit E.10: init_weights / count_parameters were declared here but never
 # existed at runtime.  Removed.
+
+# X.9: utility classes / helpers defined in python/tenzor/nn.py — declared
+# here so the stub matches the runtime surface area.
+class RemovableHandle:
+    """Handle returned by Module.register_*_hook — call .remove() to unhook."""
+
+    id: int
+
+    def remove(self) -> None: ...
+
+
+class PackedSequence:
+    """Container for variable-length sequences used by RNN/LSTM/GRU."""
+
+    data: Tensor
+    batch_sizes: Tensor
+    sorted_indices: Optional[Tensor]
+    unsorted_indices: Optional[Tensor]
+
+
+def pack_padded_sequence(
+    input: Tensor,
+    lengths: Any,
+    batch_first: bool = False,
+    enforce_sorted: bool = True,
+) -> PackedSequence: ...
+
+
+def pad_packed_sequence(
+    sequence: PackedSequence,
+    batch_first: bool = False,
+    padding_value: float = 0.0,
+    total_length: Optional[int] = None,
+) -> Tuple[Tensor, Tensor]: ...
+
+
+def pack_sequence(sequences: List[Tensor], enforce_sorted: bool = True) -> PackedSequence: ...
+
 
 # Sub-module declaration
 from tenzor import functional as functional

@@ -75,7 +75,15 @@ def check_module(py_path: Path) -> tuple[bool, list[str]]:
     if not pyi_path.exists():
         # Nothing to diff against — not drift.
         return False, []
-    mod_name = f"tenzor.{py_path.stem}"
+    # X.9: most stems map directly to `tenzor.<stem>`, but
+    # `python/tenzor/functional.py` is actually the implementation of
+    # `tenzor.nn.functional` (loaded via spec_from_file_location in
+    # __init__.py). Use the explicit mapping for that one case so we diff
+    # against the right runtime module instead of failing import.
+    _STEM_TO_MODULE = {
+        "functional": "tenzor.nn.functional",
+    }
+    mod_name = _STEM_TO_MODULE.get(py_path.stem, f"tenzor.{py_path.stem}")
     messages: list[str] = []
     try:
         module = importlib.import_module(mod_name)

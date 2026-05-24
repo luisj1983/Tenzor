@@ -258,6 +258,18 @@ _overrides_spec.loader.exec_module(_overrides_module)
 _sys.modules['tenzor.overrides'] = _overrides_module
 overrides = _overrides_module
 
+# X.8: `tenzor.optim` was bound as an attribute via `from .tenzor_core import *`
+# above (it is a pybind11 submodule), but was never registered in sys.modules.
+# That meant `import tenzor.optim as optim` failed with ModuleNotFoundError
+# even though `tz.optim.Adam` worked fine.  Register it so the standard import
+# form works (matches the pattern used for nn, data, autograd, linalg, etc.).
+try:
+    from .tenzor_core import optim as _cpp_optim  # type: ignore[import]
+    _sys.modules['tenzor.optim'] = _cpp_optim
+    optim = _cpp_optim
+except (ImportError, AttributeError):
+    pass
+
 # Apply the @implements wrapper to the curated set of common ops.
 # Only wrap names that exist on this module (the C++ binding surface
 # can vary between builds, so be tolerant).

@@ -553,6 +553,26 @@ class Sequential(_CppSequential):
         return '\n'.join(lines) if len(self) > 0 else "Sequential()"
 
 
+# X.9: `Loss` is referenced as the base class of every loss in nn.pyi but had
+# no runtime counterpart, so it appeared as an EXTRA-in-stub drift. Provide a
+# thin Python alias of Module so isinstance(MSELoss(...), Loss) works and so
+# .pyi declarations like `class MSELoss(Loss)` resolve at static-check time.
+class Loss(Module):
+    """Base class marker for loss-function modules.
+
+    All concrete loss classes (``MSELoss``, ``CrossEntropyLoss``, ...) are
+    bound from C++ and inherit from the C++ ``Module``; this Python-side
+    alias exists purely so type stubs and isinstance() checks against
+    ``tz.nn.Loss`` resolve to a real class.
+    """
+
+    reduction: str
+
+    def __init__(self, reduction: str = "mean") -> None:
+        super().__init__()
+        self.reduction = reduction
+
+
 class _ParameterMeta(type):
     """Metaclass that enables isinstance(var, Parameter) checks.
 
@@ -799,3 +819,57 @@ except (ImportError, AttributeError):
     # quantization submodule was not built into this tenzor_core — that is
     # legal (CMake option), so leave tenzor.nn.quantization unbound.
     pass
+
+
+# X.9: Declare __all__ so check_pyi_drift sees the full re-export surface of
+# tenzor.nn. The C++ layer classes come in via `from .tenzor_core import *`
+# inside this module's namespace, but inspect.getmodule() returns
+# `tenzor.tenzor_core.nn` for them — that filter would otherwise hide them
+# from the drift checker and produce a long EXTRA-in-pyi list.
+__all__ = [
+    # Pure-Python additions in this module
+    "Module",
+    "Sequential",
+    "Parameter",
+    "RemovableHandle",
+    "PackedSequence",
+    "Loss",
+    "pack_padded_sequence",
+    "pad_packed_sequence",
+    "pack_sequence",
+    # Linear / activations / normalizations / etc. — bound from C++ and
+    # re-exported via the wildcard import in this module
+    "Linear", "LazyLinear",
+    "ReLU", "LeakyReLU", "ELU", "SELU", "GELU", "SiLU", "Sigmoid", "Tanh",
+    "Softmax", "LogSoftmax", "Mish", "Hardsigmoid", "Hardswish", "GLU", "PReLU",
+    "Dropout", "Dropout2d",
+    "Embedding", "EmbeddingBag",
+    "LayerNorm", "GroupNorm", "RMSNorm",
+    "BatchNorm1d", "BatchNorm2d",
+    "InstanceNorm1d", "InstanceNorm2d", "InstanceNorm3d",
+    "Conv1d", "Conv2d", "Conv3d",
+    "ConvTranspose1d", "ConvTranspose2d", "ConvTranspose3d",
+    "MaxPool1d", "MaxPool2d", "MaxPool3d",
+    "AvgPool1d", "AvgPool2d", "AvgPool3d",
+    "AdaptiveAvgPool1d", "AdaptiveAvgPool2d", "AdaptiveAvgPool3d",
+    "AdaptiveMaxPool1d", "AdaptiveMaxPool2d", "AdaptiveMaxPool3d",
+    "ConstantPad1d", "ConstantPad2d", "ConstantPad3d",
+    "ReflectionPad1d", "ReflectionPad2d",
+    "ReplicationPad1d", "ReplicationPad2d", "ReplicationPad3d",
+    "CircularPad1d", "CircularPad2d", "CircularPad3d",
+    "ZeroPad2d",
+    "Upsample",
+    "RNN", "RNNCell", "LSTM", "LSTMCell", "GRU", "GRUCell",
+    "MultiheadAttention",
+    "TransformerEncoderLayer", "TransformerDecoderLayer",
+    "ModuleList", "ModuleDict", "ParameterList", "ParameterDict",
+    # Losses
+    "MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss",
+    "CrossEntropyLoss", "NLLLoss", "BCELoss", "BCEWithLogitsLoss",
+    "KLDivLoss",
+    # Functional aliases
+    "relu", "leaky_relu", "elu", "selu", "gelu", "sigmoid", "tanh",
+    "softmax", "log_softmax",
+    # Grad clipping
+    "clip_grad_norm_", "clip_grad_value_",
+]

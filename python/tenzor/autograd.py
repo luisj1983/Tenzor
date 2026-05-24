@@ -102,6 +102,27 @@ grad = _autograd_cpp.grad
 gradcheck = _autograd_cpp.gradcheck
 gradgradcheck = _autograd_cpp.gradgradcheck
 
+# X.9: no_grad / enable_grad live on the tenzor root (registered as context
+# manager classes via `from .tenzor_core import *` in the package __init__).
+# autograd.pyi declares them at the autograd submodule level — mirror that
+# at runtime so `tenzor.autograd.no_grad` works and check_pyi_drift passes.
+no_grad = _core.no_grad
+enable_grad = _core.enable_grad
+
+# X.9: declare an explicit __all__ so check_pyi_drift.py picks up the
+# re-exports above (its inspect.getmodule() filter would otherwise drop
+# pybind11-defined symbols whose `__module__` points at tenzor_core).
+__all__ = [
+    "Function",
+    "FunctionCtx",
+    "backward",
+    "grad",
+    "gradcheck",
+    "gradgradcheck",
+    "no_grad",
+    "enable_grad",
+]
+
 
 def backward(tensors, grad_tensors=None, retain_graph: bool = False,
              create_graph: bool = False):

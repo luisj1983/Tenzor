@@ -40,7 +40,6 @@ tests/autograd/test_gradcheck_comprehensive.cpp:705
 tests/autograd/test_gradcheck_comprehensive.cpp:89
 tests/autograd/test_gradcheck_comprehensive.cpp:95
 tests/autograd/test_gradcheck_direct.cpp:101
-tests/autograd/test_gradcheck_direct.cpp:142
 tests/autograd/test_gradcheck_direct.cpp:143
 tests/autograd/test_gradcheck_direct.cpp:144
 tests/autograd/test_gradcheck_extended.cpp:274
@@ -171,8 +170,6 @@ tests/nn/optim/test_schedulers_multidtype.cpp:68
 tests/nn/optim/test_schedulers_multidtype.cpp:91
 tests/nn/optim/test_zero_profiling.cpp:412
 tests/nn/optim/test_zero_profiling.cpp:525
-tests/nn/optim/test_zero_stage2_integration.cpp:717
-tests/nn/optim/test_zero_stage3_integration.cpp:720
 tests/nn/test_clip_grad_multidtype.cpp:69
 tests/nn/test_distributions_multidtype.cpp:63
 tests/nn/test_knowledge_distillation.cpp:74
@@ -189,8 +186,6 @@ tests/ops/test_special_math_multidtype.cpp:208
 tests/ops/test_special_math_multidtype.cpp:209
 tests/ops/test_special_math_multidtype.cpp:218
 tests/ops/test_special_math_multidtype.cpp:219
-tests/test_creation_ops.cpp:132
-tests/test_creation_ops.cpp:136
 tests/test_creation_ops.cpp:151
 tests/test_creation_ops_multidtype.cpp:217
 tests/test_creation_ops_multidtype.cpp:219
@@ -241,8 +236,6 @@ tests/unit/test_linalg_extended_multidtype.cpp:96
 tests/unit/test_linalg_extended_multidtype.cpp:97
 tests/unit/test_linalg_lstsq_pinv_matexp.cpp:163
 tests/unit/test_linalg_lstsq_pinv_matexp.cpp:166
-tests/unit/test_linalg_lstsq_pinv_matexp_multidtype.cpp:100
-tests/unit/test_linalg_lstsq_pinv_matexp_multidtype.cpp:103
 tests/unit/test_losses_advanced.cpp:202
 tests/unit/test_losses_advanced.cpp:274
 tests/unit/test_losses_advanced.cpp:472
@@ -316,21 +309,3 @@ tests/unit/test_special_math_multidtype.cpp:75
 tests/utils/test_config.cpp:162
 tests/utils/test_config.cpp:252
 tests/utils/test_config.cpp:74
-# T.10 — audit-3 sites with `// reason:` justifications added inline.
-tests/autograd/test_func.cpp:100
-tests/autograd/test_func.cpp:101
-tests/autograd/test_func.cpp:102
-tests/autograd/test_func.cpp:103
-tests/autograd/test_gradcheck.cpp:237
-tests/autograd/test_gradcheck.cpp:238
-tests/test_dtype_conversion.cpp:232
-tests/test_dtype_conversion.cpp:234
-tests/test_dtype_conversion.cpp:249
-tests/test_dtype_conversion.cpp:251
-tests/test_dtype_conversion.cpp:290
-tests/test_dtype_conversion.cpp:292
-tests/test_statistics_multidtype.cpp:79
-tests/test_statistics_multidtype.cpp:80
-tests/test_statistics_multidtype.cpp:81
-tests/test_statistics_multidtype.cpp:82
-tests/test_statistics_multidtype.cpp:94

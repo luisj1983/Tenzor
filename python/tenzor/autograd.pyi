@@ -24,6 +24,20 @@ def grad(
     """Compute and return gradients of outputs with respect to inputs."""
     ...
 
+class FunctionCtx:
+    """Context object passed to Function.forward / Function.backward.
+
+    Holds the ``saved_tensors`` saved via ``ctx.save_for_backward(...)``
+    during forward; ``backward`` reads them back out.
+    """
+
+    saved_tensors: Tuple[Variable, ...]
+
+    def save_for_backward(self, *tensors: Variable) -> None:
+        """Save tensors for retrieval in backward."""
+        ...
+
+
 class Function:
     """Base class for custom autograd functions."""
 

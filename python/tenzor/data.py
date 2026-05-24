@@ -1302,6 +1302,10 @@ __all__ = [
     "TensorDataset",
     "Subset",
     "ConcatDataset",
+    # X.9: MapDataset is re-exported from the C++ binding at the top of this
+    # module; declare it here so check_pyi_drift sees the runtime symbol that
+    # matches the .pyi stub.
+    "MapDataset",
     "Sampler",
     "SequentialSampler",
     "RandomSampler",

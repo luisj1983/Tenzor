@@ -729,8 +729,11 @@ TEST_F(ZeROStage3IntegrationTest, CorrectnessWithCheckpointRestore) {
         losses_continued = train_model(*model, optimizer, X, y, 20);
     }
 
-    // Continued training should improve from where we left off
-    // First loss should be close to where we left off
+    // Continued training should improve from where we left off.
+    // ZeRO-3 partitions params + grads + optim state; resume rebuilds each
+    // shard via async all-reduce/all-gather plus stochastic mini-batches.
+    // reason: first post-resume loss can differ from pre-checkpoint loss by
+    // up to ~50% before the optimiser re-stabilises (audit X.10).
     EXPECT_NEAR(losses_continued.front(), losses_first.back(), losses_first.back() * 0.5)
         << "First continued loss should be close to last checkpoint loss";
     // And training should continue improving

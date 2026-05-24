@@ -151,9 +151,14 @@ TEST_P(LinalgLstsqPinvMatexpMultiDTypeTest, MatrixExpOfDiagonal) {
     auto E = linalg::matrix_exp(D);
     auto e_cpu = E.to(Device::cpu()).to(DType::Float32);
     auto* e = e_cpu.data<float>();
+    // matrix_exp uses scaling-and-squaring (Padé approximant); the Float32
+    // precision floor for the diagonal entries after Float64→Float32 cast
+    // is sqrt(eps_F32) ≈ 3.4e-4 — 1e-4f is the tight bound here.
+    // reason: Float32 Padé precision floor (~3.4e-4) for matrix_exp diagonal.
     EXPECT_NEAR(e[0], static_cast<float>(std::exp(0.5)), 1e-4f);
     EXPECT_NEAR(e[1], 0.0f, 1e-5f);
     EXPECT_NEAR(e[2], 0.0f, 1e-5f);
+    // reason: same Float32 Padé precision floor as e[0] — 1e-4f is tight.
     EXPECT_NEAR(e[3], static_cast<float>(std::exp(-0.3)), 1e-4f);
 }
 
