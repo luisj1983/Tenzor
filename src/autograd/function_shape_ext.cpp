@@ -173,6 +173,12 @@ auto GatherBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     auto shape_ptr = shape_tensor.data<int64_t>();
     auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
 
+    // V.11: normalise negative dim against the saved input rank up front.
+    // `gather` accepts negative dims, but `saved_attributes()` and the
+    // downstream `scatter_add` expect a non-negative axis. Mirror Q.1
+    // (SliceBackward) / IndexSelectBackward / NarrowBackward.
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+
     // scatter_add zeros with grad at index positions
     auto grad_input = zeros(input_shape, grad.dtype(), grad.device());
     grad_input = scatter_add(grad_input, dim, index, grad);
@@ -188,6 +194,9 @@ auto GatherBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     const auto& shape_tensor = saved_tensors_[2];
     auto shape_ptr = shape_tensor.data<int64_t>();
     auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    // V.11: normalise (see backward() above).
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
 
     // Use Variable-level scatter_add to preserve gradient graph
     auto zeros_tensor = zeros(input_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
@@ -211,6 +220,13 @@ auto ScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
 
+    // V.11: normalise negative dim against the rank of the input (== grad
+    // shape, since scatter is shape-preserving). The downstream scatter
+    // and gather accept negative dims, but `saved_attributes()` emits the
+    // raw saved value; vmap's dim_shifted_passthrough would then normalise
+    // against the wrong rank for a batched scatter.
+    if (dim < 0) dim += static_cast<int64_t>(grad.shape().size());
+
     // grad_input: zero out the scattered positions
     auto index_shape_vec = std::vector<int64_t>(index.shape().begin(), index.shape().end());
     auto zeros_src = zeros(index_shape_vec, grad.dtype(), grad.device());
@@ -230,6 +246,9 @@ auto ScatterBackward::backward_with_variables(std::vector<Variable> grad_outputs
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
+
+    // V.11: normalise (see backward() above).
+    if (dim < 0) dim += static_cast<int64_t>(grad_var.tensor().shape().size());
 
     auto index_shape_vec = std::vector<int64_t>(index.shape().begin(), index.shape().end());
     auto zeros_src_t = zeros(index_shape_vec, grad_var.tensor().dtype(), grad_var.tensor().device());
@@ -255,6 +274,10 @@ auto ScatterAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
 
+    // V.11: normalise negative dim against grad rank so saved_attributes()
+    // re-emits a non-negative axis for vmap's dim_shifted_passthrough.
+    if (dim < 0) dim += static_cast<int64_t>(grad.shape().size());
+
     // grad_input: identity (scatter_add adds to input, so gradient flows through directly)
     auto grad_input = grad.clone();
 
@@ -269,6 +292,9 @@ auto ScatterAddBackward::backward_with_variables(std::vector<Variable> grad_outp
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
+
+    // V.11: normalise (see backward() above).
+    if (dim < 0) dim += static_cast<int64_t>(grad_var.tensor().shape().size());
 
     // grad_input is identity: gradient flows through unchanged
     // Use mul by 1.0 to create a tracked variable in the graph
@@ -631,7 +657,14 @@ auto UnsqueezeBackward::saved_attributes() const -> OpAttributes {
 
 auto GatherBackward::saved_attributes() const -> OpAttributes {
     OpAttributes attrs;
-    if (!saved_tensors_.empty()) {
+    if (saved_tensors_.size() >= 3) {
+        int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+        // V.11: normalise via the saved input shape (slot [2]) so vmap's
+        // dim_shifted_passthrough sees a non-negative axis.
+        int64_t rank = saved_tensors_[2].numel();
+        if (dim < 0) dim += rank;
+        attrs.set(AttrKey::Dim, dim);
+    } else if (!saved_tensors_.empty()) {
         attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
     }
     return attrs;
@@ -639,7 +672,14 @@ auto GatherBackward::saved_attributes() const -> OpAttributes {
 
 auto ScatterBackward::saved_attributes() const -> OpAttributes {
     OpAttributes attrs;
-    if (!saved_tensors_.empty()) {
+    if (saved_tensors_.size() >= 2) {
+        int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+        // V.11: normalise via the saved index rank (== input rank for
+        // scatter; scatter is shape-preserving on the input).
+        int64_t rank = static_cast<int64_t>(saved_tensors_[1].shape().size());
+        if (dim < 0) dim += rank;
+        attrs.set(AttrKey::Dim, dim);
+    } else if (!saved_tensors_.empty()) {
         attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
     }
     return attrs;
@@ -647,7 +687,29 @@ auto ScatterBackward::saved_attributes() const -> OpAttributes {
 
 auto IndexSelectBackward::saved_attributes() const -> OpAttributes {
     OpAttributes attrs;
-    if (!saved_tensors_.empty()) {
+    if (saved_tensors_.size() >= 3) {
+        int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+        // V.11 / mirrors GatherBackward: normalise via saved input shape.
+        int64_t rank = saved_tensors_[2].numel();
+        if (dim < 0) dim += rank;
+        attrs.set(AttrKey::Dim, dim);
+    } else if (!saved_tensors_.empty()) {
+        attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+    }
+    return attrs;
+}
+
+auto ScatterAddBackward::saved_attributes() const -> OpAttributes {
+    OpAttributes attrs;
+    // V.11: emit a normalised non-negative dim. ScatterAddBackward saves
+    // only [dim, index] — read rank off the index, which shares rank with
+    // input/grad in scatter_add.
+    if (saved_tensors_.size() >= 2) {
+        int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+        int64_t rank = static_cast<int64_t>(saved_tensors_[1].shape().size());
+        if (dim < 0) dim += rank;
+        attrs.set(AttrKey::Dim, dim);
+    } else if (!saved_tensors_.empty()) {
         attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
     }
     return attrs;

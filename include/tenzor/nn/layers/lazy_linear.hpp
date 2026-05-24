@@ -156,11 +156,42 @@ public:
      */
     auto out_features() const -> int64_t { return out_features_; }
 
+    /**
+     * @brief Capture a requested dtype to honour at materialisation time.
+     *
+     * V.29: pre-materialisation `model.to(BFloat16)` was silently dropped
+     * because there were no parameters/buffers yet for Module::to to walk.
+     * LazyLinear now intercepts the call and stashes the request; on the
+     * first forward pass, materialize() allocates weight/bias at this
+     * dtype instead of the hardcoded Float32 default.  Post-materialisation,
+     * we delegate to Module::to so the live parameters are converted in
+     * place (and the request is updated for future inspection).
+     */
+    auto to(DType dtype) -> void override;
+    auto to(Device device) -> void override;
+
 private:
     int64_t out_features_;                      ///< Output feature dimension
     bool has_bias_;                             ///< Whether this layer has bias
     bool materialized_{false};                 ///< Whether parameters have been created
     int64_t in_features_{0};                   ///< Input feature dimension (set on first forward)
+    /**
+     * @brief V.29: dtype requested via `to(DType)` before materialisation.
+     *
+     * `std::nullopt` until the user calls `model.to(some_dtype)`; after
+     * that, materialize() honours this dtype instead of the Float32 default.
+     */
+    std::optional<DType> requested_dtype_{};
+    /**
+     * @brief V.29: device requested via `to(Device)` before materialisation.
+     *
+     * The materialise path already takes the device from the first input
+     * tensor (which is the right behaviour when no `to(Device)` was called),
+     * so this field exists only to keep the requested-state visible for
+     * debugging / introspection.  We do not need to consult it in
+     * materialize() because the first-input device dominates.
+     */
+    std::optional<Device> requested_device_{};
 
     /**
      * @brief Materialize weight and bias parameters.

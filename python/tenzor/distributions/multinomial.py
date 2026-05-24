@@ -1,8 +1,8 @@
 """Multinomial distribution."""
 import math
 import numpy as np
-from scipy.special import gammaln
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Multinomial(Distribution):
@@ -85,6 +85,7 @@ class Multinomial(Distribution):
         return out.reshape(out_shape)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         eps = 1e-7
         p = np.clip(self.probs, eps, 1.0)
@@ -113,6 +114,7 @@ class Multinomial(Distribution):
 
         Returns ``ndarray`` with shape equal to the batch shape.
         """
+        gammaln = _require_scipy_special().gammaln
         n = float(self.total_count)
         p = np.clip(self.probs, 1e-300, 1.0)
 

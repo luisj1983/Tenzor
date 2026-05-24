@@ -1,8 +1,8 @@
 """LogNormal distribution."""
 import math
 import numpy as np
-from scipy import special as scipy_special
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class LogNormal(Distribution):
@@ -45,6 +45,7 @@ class LogNormal(Distribution):
                 - np.log(self.scale) - np.log(value))
 
     def cdf(self, value):
+        scipy_special = _require_scipy_special()
         value = _to_numpy(value)
         return 0.5 * (1.0 + scipy_special.erf(
             (np.log(value) - self.loc) / (self.scale * math.sqrt(2.0))
@@ -60,7 +61,7 @@ class LogNormal(Distribution):
         Q(q) = exp(loc + scale * Phi^{-1}(q))   where Phi^{-1} is the
         inverse standard normal CDF (scipy.special.ndtri).
         """
-        from scipy.special import ndtri
+        ndtri = _require_scipy_special().ndtri
         q = np.asarray(q, dtype=np.float64)
         # Clip away the 0/1 endpoints so ndtri does not return ±inf.
         eps = 1e-12

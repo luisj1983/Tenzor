@@ -218,9 +218,22 @@ def check_optimizer(tz, name, cls) -> bool:
 
 def main() -> int:
     sys.path.insert(0, str(REPO_ROOT / "python"))
+    # V.40: explicitly classify import failures and ensure a non-zero exit on
+    # every FATAL branch.  Earlier history had this returning 0 on the scipy
+    # ModuleNotFoundError path (importing tenzor.distributions eagerly pulled
+    # in scipy.special); without a non-zero exit, the lint passed silently on
+    # systems missing scipy while the actual check never ran.
     try:
         import tenzor as tz  # type: ignore
         import tenzor.optim as optim  # type: ignore
+    except ModuleNotFoundError as exc:  # pylint: disable=broad-except
+        print(
+            f"FATAL: missing dependency while importing tenzor.optim: {exc!r}\n"
+            "       install the missing module or fix the eager import path "
+            "(see V.39 for the distributions/scipy lazy-load pattern)."
+        )
+        traceback.print_exc()
+        return 2
     except Exception as exc:  # pylint: disable=broad-except
         print(f"FATAL: cannot import tenzor.optim: {exc!r}")
         traceback.print_exc()
@@ -255,4 +268,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # V.40: belt-and-braces — any exception escaping main() must produce a
+    # non-zero exit so CI never silently passes a FATAL.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:  # pylint: disable=broad-except
+        traceback.print_exc()
+        sys.exit(1)

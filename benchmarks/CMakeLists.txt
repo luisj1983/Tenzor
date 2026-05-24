@@ -271,10 +271,15 @@ if(_tenzor_bench_deps)
     # still works when only some test executables exist.
     set(_run_disabled_perf_cmds "")
     if(TARGET test_simd_ops)
+        # V.41: AddPerformance no longer carries the DISABLED_ prefix — it is
+        # now a regression-guard ceiling test that runs as part of the normal
+        # suite.  Keep the umbrella entry pointing at it (no
+        # --gtest_also_run_disabled_tests needed) for parity with the other
+        # benchmark-style tests below.
         list(APPEND _run_disabled_perf_cmds
             COMMAND $<TARGET_FILE:test_simd_ops>
                     --gtest_also_run_disabled_tests
-                    --gtest_filter=*DISABLED_AddPerformance*:*DISABLED_BaselineRegressionCheck*)
+                    --gtest_filter=*AddPerformance*:*DISABLED_BaselineRegressionCheck*)
     endif()
     if(TARGET test_performance_regression)
         list(APPEND _run_disabled_perf_cmds

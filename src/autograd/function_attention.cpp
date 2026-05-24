@@ -104,10 +104,15 @@ auto composed_attention_backward(const Tensor& dO,
                                  const Tensor& Q,
                                  const Tensor& K,
                                  const Tensor& V,
-                                 float scale,
+                                 double scale,
                                  bool causal,
-                                 float dropout_p = 0.0f,
+                                 double dropout_p = 0.0,
                                  uint32_t rng_seed = 0u) -> std::vector<Tensor> {
+    // V.8: double scale end-to-end; audit-3 R.6 had widened only the
+    // Variable form. dropout_p is also widened to keep parity with the
+    // Variable path; the only downstream effect is the threshold used
+    // when constructing the dropout mask (precision-irrelevant for the
+    // mask itself but consistent with the rest of the signature).
     // Q, K, V, dO all have shape [B, H, S, D] or [B*H, S, D]. We work on
     // 3D for bmm convenience by collapsing leading dims if 4D. shape() returns
     // a span; convert to vector for the reshape API.
@@ -229,11 +234,14 @@ auto try_fused_or_compose_backward(const Tensor& dO,
                                    const Tensor& V,
                                    const Tensor& O,
                                    const Tensor& L,
-                                   float scale,
+                                   double scale,
                                    bool causal,
-                                   float dropout_p,
+                                   double dropout_p,
                                    const Tensor& philox_seed,
                                    const Tensor& philox_offset) -> std::vector<Tensor> {
+    // V.8: double scale/dropout_p; the callers (FlashAttentionBackward,
+    // FusedAttentionBackward) already hold `double scale_` and were
+    // narrowing through the float parameter at every call.
     // Read seed (if any) for the composed-fallback dropout replay.
     uint32_t seed_for_replay = 0u;
     if (philox_seed.is_valid() && philox_seed.numel() > 0) {
@@ -278,9 +286,10 @@ auto try_flex_backward_or_throw(const Tensor& dO,
                                 const Tensor& V,
                                 const Tensor& O,
                                 const Tensor& L,
-                                float scale,
+                                double scale,
                                 int64_t score_mod_id,
                                 const Tensor& block_mask) -> std::vector<Tensor> {
+    // V.8: double scale; the FlexAttentionBackward holds `double scale_`.
     std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O};
     if (L.is_valid() && L.shape().size() > 0) bwd_inputs.push_back(L);
     if (block_mask.is_valid() && block_mask.shape().size() > 0) bwd_inputs.push_back(block_mask);
@@ -399,8 +408,11 @@ auto composed_attention_backward_variable(const Variable& dO,
                                           const Variable& Q,
                                           const Variable& K,
                                           const Variable& V,
-                                          float scale,
+                                          double scale,
                                           bool causal) -> std::vector<Variable> {
+    // V.8: double scale (the Variable form was the Tensor form's twin;
+    // both now take `double` end-to-end, matching the `double scale_`
+    // member on FlashAttentionBackward/FusedAttentionBackward/FlexAttentionBackward).
     auto Q_shape_span = Q.tensor().shape();
     std::vector<int64_t> orig_shape(Q_shape_span.begin(), Q_shape_span.end());
     std::vector<int64_t> K_shape(K.tensor().shape().begin(), K.tensor().shape().end());

@@ -1,8 +1,8 @@
 """Weibull distribution."""
 import math
 import numpy as np
-from scipy.special import gamma as gamma_fn
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Weibull(Distribution):
@@ -23,10 +23,12 @@ class Weibull(Distribution):
     @property
     def mean(self):
         # E[X] = lambda * Gamma(1 + 1/k)
+        gamma_fn = _require_scipy_special().gamma
         return self.scale * gamma_fn(1.0 + 1.0 / self.concentration)
 
     @property
     def variance(self):
+        gamma_fn = _require_scipy_special().gamma
         k = self.concentration
         lam = self.scale
         g1 = gamma_fn(1.0 + 1.0 / k)

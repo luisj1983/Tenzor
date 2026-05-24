@@ -7272,8 +7272,9 @@ auto conj_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     // For real dtypes, conjugate is identity
     // Clone via a simple copy
     Tensor result(shape, input.dtype(), input.device());
-    cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
-                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream);
+    // audit V.17.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream));
     return result;
 }
 
@@ -7314,8 +7315,9 @@ auto real_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
     // For real dtypes, real() is identity
     Tensor result(shape, input.dtype(), input.device());
-    cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
-                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream);
+    // audit V.17.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream));
     return result;
 }
 

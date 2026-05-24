@@ -1,5 +1,5 @@
 # Baseline of known unjustified loose tolerances flagged by
-# scripts/audit_tolerances.py. Each line is `<path>:<line>`
+# tools/audit_tolerances.py. Each line is `<path>:<line>`
 # (path relative to repo root). Pre-existing entries are ignored
 # under --strict; new violations FAIL the audit. Drive this list
 # to zero over time by justifying or tightening each tolerance.

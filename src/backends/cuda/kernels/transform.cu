@@ -895,12 +895,14 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStre
             out_shape[0] = actual_size;
 
             Tensor chunk(out_shape, input.dtype(), input.device());
-            cudaMemcpyAsync(
+            // audit V.20: per-iteration cudaMemcpyAsync errors were dropped;
+            // surface them via TENZOR_CUDA_CHECK so a mid-loop failure aborts.
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(
                 chunk.data_ptr(),
                 static_cast<const char*>(input.data_ptr()) + start * chunk_stride,
                 actual_size * chunk_stride,
                 cudaMemcpyDeviceToDevice,
-                stream);
+                stream));
             results.push_back(std::move(chunk));
         }
         return results;

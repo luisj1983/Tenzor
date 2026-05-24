@@ -402,6 +402,13 @@ __global__ void split_kernel_impl(
 
 auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, hipStream_t stream) -> std::vector<Tensor> {
     auto input_shape = input.shape();
+    // audit V.14: normalise negative dim (PyTorch convention) and range-check
+    // before indexing into input_shape.
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("chunk: dim out of range");
+    }
     int64_t dim_size = input_shape[dim];
 
     // Calculate chunk size

@@ -201,12 +201,13 @@ auto lstm_forward_cuda(
         auto [h_out, c_out] = lstm_cell_forward_kernel(gates, c_prev, batch, hidden, stream);
 
         // Copy h_out to output[t] (async D2D on same stream, no sync needed)
-        cudaMemcpyAsync(
+        // audit V.17: surface cudaMemcpyAsync errors.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(
             static_cast<char*>(output.data_ptr()) + t * hidden_step_bytes,
             h_out.data_ptr(),
             hidden_step_bytes,
             cudaMemcpyDeviceToDevice,
-            stream);
+            stream));
 
         h_prev = h_out;
         c_prev = c_out;
@@ -339,18 +340,19 @@ auto gru_forward_cuda(
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
 
-        cudaMemcpyAsync(
+        // audit V.17.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(
             static_cast<char*>(output.data_ptr()) + t * hidden_step_bytes,
             h_out.data_ptr(),
             hidden_step_bytes,
             cudaMemcpyDeviceToDevice,
-            stream);
+            stream));
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     // Final hidden state lives in h_buf[seq_len & 1] after the last iteration
     // wrote into the (t+1)&1 buffer.
-    cudaStreamSynchronize(stream);
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     return {output, h_buf[seq_len & 1]};
 }
 
@@ -404,14 +406,15 @@ auto lstm_multi_layer_forward_cuda(
         layer_input = result[0];  // output becomes input for next layer
 
         // Copy final h, c to h_n[l], c_n[l]
-        cudaMemcpyAsync(
+        // audit V.17.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(
             static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
             result[1].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(
+            cudaMemcpyDeviceToDevice, stream));
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(
             static_cast<char*>(c_n.data_ptr()) + l * layer_bytes,
             result[2].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyDeviceToDevice, stream));
     }
 
     return {layer_input, h_n, c_n};
@@ -451,10 +454,11 @@ auto gru_multi_layer_forward_cuda(
 
         layer_input = result[0];
 
-        cudaMemcpyAsync(
+        // audit V.17.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(
             static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
             result[1].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyDeviceToDevice, stream));
     }
 
     return {layer_input, h_n};
@@ -601,17 +605,18 @@ auto bilstm_forward_cuda(
     Tensor c_n({2, batch, hidden}, input.dtype(), input.device());
     size_t state_bytes = batch * hidden * dtype_size(input.dtype());
 
-    cudaMemcpyAsync(h_n.data_ptr(), fwd_result[1].data_ptr(),
-                    state_bytes, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpyAsync(static_cast<char*>(h_n.data_ptr()) + state_bytes,
+    // audit V.17.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(h_n.data_ptr(), fwd_result[1].data_ptr(),
+                    state_bytes, cudaMemcpyDeviceToDevice, stream));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(h_n.data_ptr()) + state_bytes,
                     bwd_result[1].data_ptr(),
-                    state_bytes, cudaMemcpyDeviceToDevice, stream);
+                    state_bytes, cudaMemcpyDeviceToDevice, stream));
 
-    cudaMemcpyAsync(c_n.data_ptr(), fwd_result[2].data_ptr(),
-                    state_bytes, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpyAsync(static_cast<char*>(c_n.data_ptr()) + state_bytes,
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(c_n.data_ptr(), fwd_result[2].data_ptr(),
+                    state_bytes, cudaMemcpyDeviceToDevice, stream));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(c_n.data_ptr()) + state_bytes,
                     bwd_result[2].data_ptr(),
-                    state_bytes, cudaMemcpyDeviceToDevice, stream);
+                    state_bytes, cudaMemcpyDeviceToDevice, stream));
 
     return {output, h_n, c_n};
 }

@@ -1,7 +1,7 @@
 """Beta distribution."""
 import numpy as np
-from scipy.special import betaln, digamma
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Beta(Distribution):
@@ -42,6 +42,8 @@ class Beta(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, value):
+        scipy_special = _require_scipy_special()
+        betaln = scipy_special.betaln
         value = _to_numpy(value)
         a = self.concentration1
         b = self.concentration0
@@ -51,11 +53,14 @@ class Beta(Distribution):
                 - betaln(a, b))
 
     def cdf(self, value):
-        from scipy.special import betainc
+        scipy_special = _require_scipy_special()
         value = _to_numpy(value)
-        return betainc(self.concentration1, self.concentration0, value)
+        return scipy_special.betainc(self.concentration1, self.concentration0, value)
 
     def entropy(self):
+        scipy_special = _require_scipy_special()
+        betaln = scipy_special.betaln
+        digamma = scipy_special.digamma
         a = self.concentration1
         b = self.concentration0
         # H = log B(a, b) - (a-1)*psi(a) - (b-1)*psi(b) + (a+b-2)*psi(a+b)
@@ -70,9 +75,9 @@ class Beta(Distribution):
         Inverts the regularised incomplete beta function via
         scipy.special.betaincinv.
         """
-        from scipy.special import betaincinv
+        scipy_special = _require_scipy_special()
         q = np.asarray(q, dtype=np.float64)
-        return betaincinv(self.concentration1, self.concentration0, q)
+        return scipy_special.betaincinv(self.concentration1, self.concentration0, q)
 
     def support(self):
         return "(0, 1)"

@@ -2464,20 +2464,47 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // Unfold / Fold Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        return cpu::unfold_kernel(inputs[0], kernel_size, stride, padding, dilation);
+        // audit V.12: mirror CUDA contract — read per-axis attrs and reject
+        // asymmetric kernel/stride/padding/dilation. The CPU unfold_kernel is
+        // scalar-only; silently using a single axis would diverge from the
+        // dispatcher's per-axis intent.
+        const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
+            padding[0] != padding[1] || dilation[0] != dilation[1]) {
+            throw std::invalid_argument(
+                "Unfold (CPU): backend kernel only supports symmetric kernel/stride/padding/dilation; "
+                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
+                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
+        }
+        return cpu::unfold_kernel(inputs[0],
+            kernel_size[0], stride[0], padding[0], dilation[0]);
     });
 
     table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // audit V.12: same per-axis throw contract as Unfold above.
         auto output_size = attrs.get_int_list(AttrKey::OutputSize);
-        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        return cpu::fold_kernel(inputs[0], output_size, kernel_size, stride, padding, dilation);
+        const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
+            AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
+            padding[0] != padding[1] || dilation[0] != dilation[1]) {
+            throw std::invalid_argument(
+                "Fold (CPU): backend kernel only supports symmetric kernel/stride/padding/dilation; "
+                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
+                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
+        }
+        return cpu::fold_kernel(inputs[0], output_size,
+            kernel_size[0], stride[0], padding[0], dilation[0]);
     });
 
     // =========================================================================

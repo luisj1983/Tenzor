@@ -14,6 +14,40 @@ def _to_numpy(x):
     return np.float64(x)
 
 
+# V.39: scipy is an *optional* runtime dependency — only a handful of
+# distributions (Normal, Beta, Gamma, ...) need its `special` functions.
+# Without lazy gating, `import tenzor.distributions` (which `nn.pyi` drift
+# tooling triggers via `runpy.run_module`) raises ModuleNotFoundError on
+# tree-walks for systems without scipy, surfacing ~80 spurious "EXTRA"
+# entries in `tools/check_pyi_drift.py`.
+#
+# Use `_require_scipy_special()` from a function body whenever scipy.special
+# is actually called.  This keeps the public `tenzor.distributions` import
+# graph scipy-free, while still giving a clear error at use time.
+def _require_scipy_special():
+    """Return scipy.special, raising a clear error if scipy is not installed."""
+    try:
+        from scipy import special as scipy_special  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "scipy is required for this distribution's analytic CDF / quantile / "
+            "log-prob.  Install with `pip install scipy`."
+        ) from exc
+    return scipy_special
+
+
+def _require_scipy_stats():
+    """Return scipy.stats, raising a clear error if scipy is not installed."""
+    try:
+        from scipy import stats as scipy_stats  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "scipy is required for this distribution's sampling / quantile.  "
+            "Install with `pip install scipy`."
+        ) from exc
+    return scipy_stats
+
+
 class Distribution:
     """Base class for all probability distributions.
 

@@ -2,8 +2,8 @@
 import math
 
 import numpy as np
-from scipy.special import gammaln, digamma
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Chi2(Distribution):
@@ -37,6 +37,7 @@ class Chi2(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         k = self.df
         # Chi2(df) = Gamma(df/2, 1/2):
@@ -47,6 +48,9 @@ class Chi2(Distribution):
                 - gammaln(k / 2.0))
 
     def entropy(self):
+        scipy_special = _require_scipy_special()
+        gammaln = scipy_special.gammaln
+        digamma = scipy_special.digamma
         k = self.df
         # H = k/2 + log(2) + lgamma(k/2) + (1 - k/2)*digamma(k/2)
         return (k / 2.0 + math.log(2.0) + gammaln(k / 2.0)
@@ -57,7 +61,7 @@ class Chi2(Distribution):
 
         P(X <= x) = P(k/2, x/2) (regularised lower incomplete gamma).
         """
-        from scipy.special import gammainc
+        gammainc = _require_scipy_special().gammainc
         value = np.asarray(value, dtype=np.float64)
         k = self.df
         return np.where(value <= 0.0,
@@ -66,7 +70,7 @@ class Chi2(Distribution):
 
     def icdf(self, q):
         """Inverse CDF of Chi2 (audit item E.5)."""
-        from scipy.special import gammaincinv
+        gammaincinv = _require_scipy_special().gammaincinv
         q = np.asarray(q, dtype=np.float64)
         k = self.df
         return 2.0 * gammaincinv(k / 2.0, q)

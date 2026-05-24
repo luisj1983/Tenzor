@@ -406,6 +406,42 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable;
  */
 auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step = 1) -> Variable;
 
+/**
+ * @brief Split a Variable into a fixed number of (nearly) equal chunks along
+ *        a dimension with gradient tracking.
+ *
+ * Returns up to `chunks` Variables. The split is performed as repeated
+ * `autograd::slice` calls, so the result naturally carries grad_fn chains
+ * (SliceBackward per output) and supports `create_graph` end-to-end.
+ *
+ * V.10: previously callers had to chunk the raw `Tensor` via
+ * `tenzor::chunk(var.tensor(), …)`, which severed the autograd graph; this
+ * Variable-level overload restores the chain.
+ *
+ * @param input Input variable to split
+ * @param chunks Number of chunks (positive integer)
+ * @param dim Dimension along which to split (negative dims allowed)
+ * @return Vector of Variables; the last entry may be shorter when
+ *         `chunks` does not divide the dimension evenly. May contain
+ *         fewer than `chunks` entries if the dim is smaller than chunks.
+ */
+auto chunk(const Variable& input, int64_t chunks, int64_t dim = 0) -> std::vector<Variable>;
+
+/**
+ * @brief Split a Variable along a dimension into fixed-size pieces with
+ *        gradient tracking.
+ *
+ * Implemented as repeated `autograd::slice`; see `chunk` for the rationale.
+ *
+ * @param input Input variable to split
+ * @param split_size Size of each output chunk along `dim`
+ *        (the final chunk may be shorter if `split_size` doesn't divide
+ *        the dimension evenly)
+ * @param dim Dimension along which to split (negative dims allowed)
+ * @return Vector of Variables that concatenate back to `input`.
+ */
+auto split(const Variable& input, int64_t split_size, int64_t dim = 0) -> std::vector<Variable>;
+
 // ============================================================================
 // Matrix Operations
 // ============================================================================

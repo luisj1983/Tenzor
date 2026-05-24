@@ -508,34 +508,42 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
     }
 
     // ========== RNG State (v2+, audit K.2) ==========
-    uint32_t num_rng_tensors = static_cast<uint32_t>(checkpoint.rng_state.size());
-    file.write(reinterpret_cast<const char*>(&num_rng_tensors), sizeof(num_rng_tensors));
+    // V.23: the read side gates this section on `version >= 2`; the write
+    // side must mirror the same gate or a v1 round-trip mis-aligns by the
+    // RNG section's byte width (num_rng_tensors + per-tensor headers).
+    // This affects downgrade workflows where a caller deliberately sets
+    // `checkpoint.version` below CHECKPOINT_VERSION to produce a file an
+    // older Tenzor build can ingest.
+    if (checkpoint.version >= 2) {
+        uint32_t num_rng_tensors = static_cast<uint32_t>(checkpoint.rng_state.size());
+        file.write(reinterpret_cast<const char*>(&num_rng_tensors), sizeof(num_rng_tensors));
 
-    for (const auto& [name, tensor] : checkpoint.rng_state) {
-        // Write state name (device key like "cpu:0", "cuda:0").
-        uint32_t name_len = static_cast<uint32_t>(name.size());
-        file.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
-        file.write(name.data(), name_len);
+        for (const auto& [name, tensor] : checkpoint.rng_state) {
+            // Write state name (device key like "cpu:0", "cuda:0").
+            uint32_t name_len = static_cast<uint32_t>(name.size());
+            file.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+            file.write(name.data(), name_len);
 
-        // Write tensor shape (always 1-D, but encode generically for future
-        // device-specific RNG formats).
-        auto shape = tensor.shape();
-        uint32_t ndim = static_cast<uint32_t>(shape.size());
-        file.write(reinterpret_cast<const char*>(&ndim), sizeof(ndim));
-        file.write(reinterpret_cast<const char*>(shape.data()),
-                   ndim * sizeof(int64_t));
+            // Write tensor shape (always 1-D, but encode generically for future
+            // device-specific RNG formats).
+            auto shape = tensor.shape();
+            uint32_t ndim = static_cast<uint32_t>(shape.size());
+            file.write(reinterpret_cast<const char*>(&ndim), sizeof(ndim));
+            file.write(reinterpret_cast<const char*>(shape.data()),
+                       ndim * sizeof(int64_t));
 
-        // Write tensor dtype (always Int64 for current packing).
-        uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
-        file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
+            // Write tensor dtype (always Int64 for current packing).
+            uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
+            file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
 
-        // RNG snapshots are always CPU-resident already, but mirror the
-        // pattern for forward-compat if a backend's generator state goes
-        // through device-side packing in the future.
-        Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
-        size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
-        const void* data_ptr = host_tensor.data_ptr();
-        file.write(reinterpret_cast<const char*>(data_ptr), data_size);
+            // RNG snapshots are always CPU-resident already, but mirror the
+            // pattern for forward-compat if a backend's generator state goes
+            // through device-side packing in the future.
+            Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
+            size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
+            const void* data_ptr = host_tensor.data_ptr();
+            file.write(reinterpret_cast<const char*>(data_ptr), data_size);
+        }
     }
 
     // ========== Metadata ==========

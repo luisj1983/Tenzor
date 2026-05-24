@@ -43,6 +43,7 @@
 #include <hip/hip_runtime.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"  // for any future dispatch needs
+#include "../rocm_error.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
@@ -60,10 +61,14 @@ namespace rocm {
 // here as an inline so the linker is happy if it's not externally visible.
 namespace {
 
-inline Tensor create_hip_zeros_f64(const std::vector<int64_t>& shape, DType dtype, Device device) {
+// audit V.16: zero buffer on the caller-supplied stream and check the result.
+// Previously this submitted to the default stream and silently dropped the
+// hipMemsetAsync return code; on stream errors that produced garbage output.
+inline Tensor create_hip_zeros_f64(const std::vector<int64_t>& shape, DType dtype,
+                                   Device device, hipStream_t stream) {
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
-    hipMemsetAsync(t.data_ptr(), 0, bytes, nullptr);
+    HIP_CHECK(hipMemsetAsync(t.data_ptr(), 0, bytes, stream));
     return t;
 }
 
@@ -527,7 +532,8 @@ auto fused_attention_hip_f64(
     const Tensor& K,
     const Tensor& V,
     double scale,
-    bool causal
+    bool causal,
+    hipStream_t stream
 ) -> std::pair<Tensor, Tensor> {
     if (Q.dtype() != DType::Float64 || K.dtype() != DType::Float64 || V.dtype() != DType::Float64) {
         throw std::runtime_error("fused_attention_hip_f64: requires Float64 inputs");
@@ -537,8 +543,8 @@ auto fused_attention_hip_f64(
     int64_t head_dim    = Q.shape()[2];
     int64_t seq_len_k   = K.shape()[1];
 
-    Tensor output = create_hip_zeros_f64({batch_heads, seq_len_q, head_dim}, DType::Float64, Q.device());
-    Tensor lse    = create_hip_zeros_f64({batch_heads, seq_len_q},           DType::Float32, Q.device());
+    Tensor output = create_hip_zeros_f64({batch_heads, seq_len_q, head_dim}, DType::Float64, Q.device(), stream);
+    Tensor lse    = create_hip_zeros_f64({batch_heads, seq_len_q},           DType::Float32, Q.device(), stream);
 
     constexpr int BLOCK_SIZE = 256;
     constexpr int Bc = 32;
@@ -562,43 +568,43 @@ auto fused_attention_hip_f64(
         case 16:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<16, BLOCK_SIZE>),
-                grid, threads, compute_smem(16), 0,
+                grid, threads, compute_smem(16), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 32:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<32, BLOCK_SIZE>),
-                grid, threads, compute_smem(32), 0,
+                grid, threads, compute_smem(32), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 48:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<48, BLOCK_SIZE>),
-                grid, threads, compute_smem(48), 0,
+                grid, threads, compute_smem(48), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 64:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<64, BLOCK_SIZE>),
-                grid, threads, compute_smem(64), 0,
+                grid, threads, compute_smem(64), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 80:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<80, BLOCK_SIZE>),
-                grid, threads, compute_smem(80), 0,
+                grid, threads, compute_smem(80), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 96:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<96, BLOCK_SIZE>),
-                grid, threads, compute_smem(96), 0,
+                grid, threads, compute_smem(96), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         case 128:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_f64_hip<128, BLOCK_SIZE>),
-                grid, threads, compute_smem(128), 0,
+                grid, threads, compute_smem(128), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, sq, sk, scale, causal);
             break;
         default:
@@ -624,7 +630,8 @@ auto flash_attention_backward_hip_f64(
     const Tensor& V,
     const Tensor& O,
     double scale,
-    bool causal
+    bool causal,
+    hipStream_t stream
 ) -> std::vector<Tensor> {
     if (Q.dtype() != DType::Float64) {
         throw std::runtime_error("flash_attention_backward_hip_f64: requires Float64 inputs");
@@ -633,9 +640,9 @@ auto flash_attention_backward_hip_f64(
     int64_t seq_len     = Q.shape()[1];
     int64_t head_dim    = Q.shape()[2];
 
-    Tensor dQ = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device());
-    Tensor dK = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device());
-    Tensor dV = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device());
+    Tensor dQ = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device(), stream);
+    Tensor dK = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), stream);
+    Tensor dV = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), stream);
 
     constexpr int Br = 32;
     constexpr int Bc = 32;
@@ -663,49 +670,49 @@ auto flash_attention_backward_hip_f64(
         case 16:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<16, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(16), 0,
+                grid, threads, compute_smem(16), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 32:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<32, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(32), 0,
+                grid, threads, compute_smem(32), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 48:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<48, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(48), 0,
+                grid, threads, compute_smem(48), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 64:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<64, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(64), 0,
+                grid, threads, compute_smem(64), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 80:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<80, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(80), 0,
+                grid, threads, compute_smem(80), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 96:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<96, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(96), 0,
+                grid, threads, compute_smem(96), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;
         case 128:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<128, Br, Bc, BLOCK_SIZE>),
-                grid, threads, compute_smem(128), 0,
+                grid, threads, compute_smem(128), stream,
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
                 sl, scale, causal);
             break;

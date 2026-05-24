@@ -53,49 +53,61 @@ void register_quantization(py::module_& m) {
         .def_readonly("axis", &QuantizationParams::axis);
 
     py::class_<QuantizedTensor>(quant, "QuantizedTensor")
+        // V.37: dequantize touches the whole buffer; release GIL.
         .def("dequantize", &QuantizedTensor::dequantize,
-             "Dequantize tensor back to floating point")
+             "Dequantize tensor back to floating point",
+             py::call_guard<py::gil_scoped_release>())
         .def("data", &QuantizedTensor::data, "Get quantized integer data")
         .def("params", &QuantizedTensor::params, "Get quantization parameters")
         .def("shape", &QuantizedTensor::shape)
         .def("device", &QuantizedTensor::device);
 
+    // V.37: every quant op below walks the input tensor; release GIL.
     quant.def("compute_quantization_params", &compute_quantization_params,
         py::arg("min"), py::arg("max"), py::arg("dtype"), py::arg("scheme"),
-        "Compute quantization parameters from min/max values");
+        "Compute quantization parameters from min/max values",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("quantize_tensor", &quantize_tensor,
         py::arg("input"), py::arg("params"),
-        "Quantize tensor using specified parameters");
+        "Quantize tensor using specified parameters",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("quantize_per_tensor_symmetric", &quantize_per_tensor_symmetric,
         py::arg("input"), py::arg("dtype") = QuantDType::INT8,
-        "Symmetric per-tensor quantization (zero-point = 0)");
+        "Symmetric per-tensor quantization (zero-point = 0)",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("quantize_per_tensor_asymmetric", &quantize_per_tensor_asymmetric,
         py::arg("input"), py::arg("dtype") = QuantDType::INT8,
-        "Asymmetric per-tensor quantization (learnable zero-point)");
+        "Asymmetric per-tensor quantization (learnable zero-point)",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("quantize_per_channel_symmetric", &quantize_per_channel_symmetric,
         py::arg("input"), py::arg("axis"), py::arg("dtype") = QuantDType::INT8,
-        "Symmetric per-channel quantization");
+        "Symmetric per-channel quantization",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("quantize_per_channel_asymmetric", &quantize_per_channel_asymmetric,
         py::arg("input"), py::arg("axis"), py::arg("dtype") = QuantDType::INT8,
-        "Asymmetric per-channel quantization");
+        "Asymmetric per-channel quantization",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("dequantize_tensor", &dequantize_tensor,
         py::arg("quantized"),
-        "Dequantize tensor back to floating point");
+        "Dequantize tensor back to floating point",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("compute_quantization_error", &compute_quantization_error,
         py::arg("original"), py::arg("quantized"),
-        "Compute quantization error (MSE) between original and quantized tensors");
+        "Compute quantization error (MSE) between original and quantized tensors",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("calibrate_quantization_params", &calibrate_quantization_params,
         py::arg("activations"), py::arg("scheme"),
         py::arg("dtype") = QuantDType::INT8, py::arg("axis") = -1,
-        "Calibrate quantization parameters from activation statistics");
+        "Calibrate quantization parameters from activation statistics",
+        py::call_guard<py::gil_scoped_release>());
 
     py::class_<Observer, std::shared_ptr<Observer>>(quant, "Observer")
         .def("observe", &Observer::observe, "Observe tensor statistics")
@@ -164,7 +176,8 @@ void register_quantization(py::module_& m) {
              py::arg("weight_qparams"), py::arg("bias_scale") = 1.0f,
              "INT8 quantized linear layer")
         .def("forward_quantized", &QuantizedLinear::forward_quantized,
-             py::arg("input"), "Forward pass with quantized input")
+             py::arg("input"), "Forward pass with quantized input",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_weight", &QuantizedLinear::set_weight, py::arg("weights"))
         .def("set_bias", &QuantizedLinear::set_bias, py::arg("bias"))
         .def_static("from_float", &QuantizedLinear::from_float,
@@ -181,7 +194,8 @@ void register_quantization(py::module_& m) {
              py::arg("bias_scale") = 1.0f,
              "INT8 quantized 2D convolution layer")
         .def("forward_quantized", &QuantizedConv2d::forward_quantized,
-             py::arg("input"), "Forward pass with quantized input")
+             py::arg("input"), "Forward pass with quantized input",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_weight", &QuantizedConv2d::set_weight, py::arg("weights"))
         .def("set_bias", &QuantizedConv2d::set_bias, py::arg("bias"))
         .def_static("from_float", &QuantizedConv2d::from_float,
@@ -198,7 +212,8 @@ void register_quantization(py::module_& m) {
              py::arg("bias_scale") = 1.0f,
              "INT8 quantized 1D convolution layer")
         .def("forward_quantized", &QuantizedConv1d::forward_quantized,
-             py::arg("input"), "Forward pass with quantized input")
+             py::arg("input"), "Forward pass with quantized input",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_weight", &QuantizedConv1d::set_weight, py::arg("weights"))
         .def("set_bias", &QuantizedConv1d::set_bias, py::arg("bias"))
         .def_static("from_float", &QuantizedConv1d::from_float,
@@ -216,7 +231,8 @@ void register_quantization(py::module_& m) {
              py::arg("bias_scale") = 1.0f,
              "INT8 quantized transposed 2D convolution layer")
         .def("forward_quantized", &QuantizedConvTranspose2d::forward_quantized,
-             py::arg("input"), "Forward pass with quantized input")
+             py::arg("input"), "Forward pass with quantized input",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_weight", &QuantizedConvTranspose2d::set_weight, py::arg("weights"))
         .def("set_bias", &QuantizedConvTranspose2d::set_bias, py::arg("bias"))
         .def_static("from_float", &QuantizedConvTranspose2d::from_float,
@@ -229,7 +245,8 @@ void register_quantization(py::module_& m) {
              py::arg("num_features"), py::arg("scale"), py::arg("bias"),
              "Quantized batch normalization with folded parameters")
         .def("forward_quantized", &QuantizedBatchNorm2d::forward_quantized,
-             py::arg("input"), "Forward pass with quantized input")
+             py::arg("input"), "Forward pass with quantized input",
+             py::call_guard<py::gil_scoped_release>())
         .def_static("from_float", &QuantizedBatchNorm2d::from_float,
              py::arg("fp_bn"), py::arg("qconfig"),
              "Create quantized batchnorm from floating-point layer");
@@ -241,7 +258,8 @@ void register_quantization(py::module_& m) {
              py::arg("weight_qparams"), py::arg("padding_idx") = -1,
              "INT8 quantized embedding table")
         .def("forward_quantized", &QuantizedEmbedding::forward_quantized,
-             py::arg("indices"), "Look up and dequantize embeddings")
+             py::arg("indices"), "Look up and dequantize embeddings",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_weight", &QuantizedEmbedding::set_weight, py::arg("weights"))
         .def_property_readonly("num_embeddings", &QuantizedEmbedding::num_embeddings)
         .def_property_readonly("embedding_dim", &QuantizedEmbedding::embedding_dim)
@@ -259,7 +277,8 @@ void register_quantization(py::module_& m) {
              "INT8 quantized LSTM cell")
         .def("forward_cell", &QuantizedLSTMCell::forward_cell,
              py::arg("input"), py::arg("hx"), py::arg("cx"),
-             "Single-step LSTM cell forward with explicit states")
+             "Single-step LSTM cell forward with explicit states",
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("input_size", &QuantizedLSTMCell::input_size)
         .def_property_readonly("hidden_size", &QuantizedLSTMCell::hidden_size)
         .def_static("from_float", &QuantizedLSTMCell::from_float,
@@ -278,7 +297,8 @@ void register_quantization(py::module_& m) {
              "INT8 quantized LSTM")
         .def("forward_with_state", &QuantizedLSTM::forward_with_state,
              py::arg("input"), py::arg("h0"), py::arg("c0"),
-             "Forward with explicit initial states")
+             "Forward with explicit initial states",
+             py::call_guard<py::gil_scoped_release>())
         .def_static("from_float", &QuantizedLSTM::from_float,
              py::arg("fp_lstm"), py::arg("qconfig"),
              "Create quantized LSTM from floating-point layer");
@@ -294,7 +314,8 @@ void register_quantization(py::module_& m) {
              "INT8 quantized GRU")
         .def("forward_with_state", &QuantizedGRU::forward_with_state,
              py::arg("input"), py::arg("h0"),
-             "Forward with explicit initial hidden state")
+             "Forward with explicit initial hidden state",
+             py::call_guard<py::gil_scoped_release>())
         .def_static("from_float", &QuantizedGRU::from_float,
              py::arg("fp_gru"), py::arg("qconfig"),
              "Create quantized GRU from floating-point layer");
@@ -318,14 +339,18 @@ void register_quantization(py::module_& m) {
              py::arg("model"),
              "Convert QAT model to quantized inference model");
 
+    // V.37: fake_quantize_with_grad runs a per-element kernel; fold_bn walks
+    // the whole module tree fusing BN into preceding conv.  Both heavy.
     quant.def("fake_quantize_with_grad", &fake_quantize_with_grad,
         py::arg("input"), py::arg("scale"), py::arg("zero_point"),
         py::arg("quant_min"), py::arg("quant_max"),
-        "Apply fake quantization with autograd support (STE backward)");
+        "Apply fake quantization with autograd support (STE backward)",
+        py::call_guard<py::gil_scoped_release>());
 
     quant.def("fold_bn", &fold_bn,
         py::arg("model"),
-        "Fold BatchNorm2d into preceding Conv2d layers");
+        "Fold BatchNorm2d into preceding Conv2d layers",
+        py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

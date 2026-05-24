@@ -557,6 +557,15 @@ public:
     auto retain_grad() -> void;
 
     /**
+     * @brief Explicit setter for retain_grad flag (allows restoring prior state).
+     *
+     * Unlike retain_grad() which only flips the flag on, this can clear it.
+     * Used by `tenzor.autograd.grad()` (V.32) to restore caller-supplied
+     * Variables to their pre-call state after a scratch backward.
+     */
+    auto set_retain_grad(bool value) -> void;
+
+    /**
      * @brief Check if variable retains gradient.
      *
      * @return true if gradients should be retained (even for non-leaf variables)

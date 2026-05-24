@@ -218,6 +218,26 @@ private:
     /** @brief Sharded DTensor for each parameter, keyed by parameter name */
     std::vector<std::pair<std::string, DTensor>> sharded_params_;
 
+    /**
+     * @brief Persistent in-place destinations for unshard / reshard, keyed by
+     *        parameter name (V.22).
+     *
+     * After the first unshard→reshard cycle, the live parameter Tensor is
+     * shard-sized; the next unshard produces a full-sized tensor whose layout
+     * no longer matches the current dst, which previously fell through to
+     * `dst = full` (a TensorImpl swap R.18 was added to prevent).  Holding a
+     * full-sized slot and a shard-sized slot lets the in-place copy path
+     * (zero_/add_) run on every cycle: unshard pulls into unsharded_dst_,
+     * reshard pulls into sharded_dst_, and the live parameter's TensorImpl
+     * is whichever slot matches the requested layout.
+     *
+     * Slots are populated lazily on first use (so we don't pay for storage
+     * until shard_parameters() actually runs); each maps a parameter name
+     * to a heap-allocated Tensor whose identity is preserved across cycles.
+     */
+    std::unordered_map<std::string, Tensor> unsharded_dst_;
+    std::unordered_map<std::string, Tensor> sharded_dst_;
+
     /** @brief Whether parameters are currently in full (unsharded) state */
     bool params_unsharded_ = false;
 

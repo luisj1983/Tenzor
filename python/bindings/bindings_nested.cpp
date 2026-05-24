@@ -72,11 +72,17 @@ void register_nested(py::module_& m) {
              "Maximum length along the ragged dimension")
 
         // Conversion
+        // V.37: NestedTensor methods that touch real compute (padding fill,
+        // device copy, dtype cast) drop the GIL.  to_padded_tensor in
+        // particular allocates a B x max(L) x D buffer and runs a scatter
+        // kernel — easily seconds of wall time on large batches.
         .def("to_padded_tensor", &NestedTensor::to_padded_tensor,
              py::arg("padding_value") = 0.0,
-             "Convert to padded dense tensor")
+             "Convert to padded dense tensor",
+             py::call_guard<py::gil_scoped_release>())
         .def("unbind", &NestedTensor::unbind,
-             "Unbind into individual tensors")
+             "Unbind into individual tensors",
+             py::call_guard<py::gil_scoped_release>())
         .def("select", &NestedTensor::select,
              py::arg("index"),
              "Select a single element from the batch")
@@ -86,14 +92,18 @@ void register_nested(py::module_& m) {
             [](const NestedTensor& self, Device device) {
                 return self.to(device);
             },
-            py::arg("device"), "Transfer to device")
+            py::arg("device"), "Transfer to device",
+            py::call_guard<py::gil_scoped_release>())
         .def("to_dtype",
             [](const NestedTensor& self, DType dtype) {
                 return self.to(dtype);
             },
-            py::arg("dtype"), "Convert to dtype")
-        .def("contiguous", &NestedTensor::contiguous)
-        .def("clone", &NestedTensor::clone)
+            py::arg("dtype"), "Convert to dtype",
+            py::call_guard<py::gil_scoped_release>())
+        .def("contiguous", &NestedTensor::contiguous,
+             py::call_guard<py::gil_scoped_release>())
+        .def("clone", &NestedTensor::clone,
+             py::call_guard<py::gil_scoped_release>())
 
         // Gradient
         .def_property_readonly("requires_grad", &NestedTensor::requires_grad)
@@ -157,53 +167,54 @@ void register_nested(py::module_& m) {
     // =========================================================================
     // Module-level operations
     // =========================================================================
-    nested_mod.def("add", &nested_add, py::arg("a"), py::arg("b"));
-    nested_mod.def("sub", &nested_sub, py::arg("a"), py::arg("b"));
-    nested_mod.def("mul", &nested_mul, py::arg("a"), py::arg("b"));
-    nested_mod.def("div", &nested_div, py::arg("a"), py::arg("b"));
-    nested_mod.def("neg", &nested_neg, py::arg("a"));
-    nested_mod.def("relu", &nested_relu, py::arg("a"));
-    nested_mod.def("gelu", &nested_gelu, py::arg("a"));
-    nested_mod.def("sigmoid", &nested_sigmoid, py::arg("a"));
-    nested_mod.def("tanh", &nested_tanh, py::arg("a"));
-    nested_mod.def("abs", &nested_abs, py::arg("a"));
+    // V.37: every module-level nested op runs a real kernel; release the GIL.
+    nested_mod.def("add", &nested_add, py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("sub", &nested_sub, py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("mul", &nested_mul, py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("div", &nested_div, py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("neg", &nested_neg, py::arg("a"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("relu", &nested_relu, py::arg("a"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("gelu", &nested_gelu, py::arg("a"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("sigmoid", &nested_sigmoid, py::arg("a"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("tanh", &nested_tanh, py::arg("a"), py::call_guard<py::gil_scoped_release>());
+    nested_mod.def("abs", &nested_abs, py::arg("a"), py::call_guard<py::gil_scoped_release>());
     nested_mod.def("add_scalar", &nested_add_scalar,
-                   py::arg("a"), py::arg("scalar"));
+                   py::arg("a"), py::arg("scalar"), py::call_guard<py::gil_scoped_release>());
     nested_mod.def("mul_scalar", &nested_mul_scalar,
-                   py::arg("a"), py::arg("scalar"));
+                   py::arg("a"), py::arg("scalar"), py::call_guard<py::gil_scoped_release>());
 
     nested_mod.def("softmax", &nested_softmax,
-                   py::arg("input"), py::arg("dim"));
+                   py::arg("input"), py::arg("dim"), py::call_guard<py::gil_scoped_release>());
     nested_mod.def("log_softmax", &nested_log_softmax,
-                   py::arg("input"), py::arg("dim"));
+                   py::arg("input"), py::arg("dim"), py::call_guard<py::gil_scoped_release>());
     nested_mod.def("layer_norm", &nested_layer_norm,
                    py::arg("input"), py::arg("weight"), py::arg("bias"),
-                   py::arg("eps") = 1e-5);
+                   py::arg("eps") = 1e-5, py::call_guard<py::gil_scoped_release>());
     nested_mod.def("sum", &nested_sum,
                    py::arg("input"), py::arg("dim"),
-                   py::arg("keepdim") = false);
+                   py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
     nested_mod.def("mean", &nested_mean,
                    py::arg("input"), py::arg("dim"),
-                   py::arg("keepdim") = false);
+                   py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
 
     nested_mod.def("linear", [](const NestedTensor& input, const Tensor& weight,
                                 std::optional<Tensor> bias) {
         return nested_linear(input, weight,
                              bias.has_value() ? &bias.value() : nullptr);
-    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none());
+    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(), py::call_guard<py::gil_scoped_release>());
 
     nested_mod.def("matmul", &nested_matmul,
-                   py::arg("a"), py::arg("b"));
+                   py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
     nested_mod.def("attention", &nested_attention,
                    py::arg("query"), py::arg("key"), py::arg("value"),
-                   py::arg("scale") = -1.0, py::arg("causal") = false);
+                   py::arg("scale") = -1.0, py::arg("causal") = false, py::call_guard<py::gil_scoped_release>());
 
     nested_mod.def("cat", [](std::vector<NestedTensor> tensors, int64_t dim) {
         return nested_cat(tensors, dim);
-    }, py::arg("tensors"), py::arg("dim") = 0);
+    }, py::arg("tensors"), py::arg("dim") = 0, py::call_guard<py::gil_scoped_release>());
 
     nested_mod.def("dropout", &nested_dropout,
-                   py::arg("input"), py::arg("p"), py::arg("training"));
+                   py::arg("input"), py::arg("p"), py::arg("training"), py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

@@ -138,7 +138,8 @@ public:
      */
     auto execute_multi(std::vector<Variable*> roots,
                       std::vector<Tensor> gradients,
-                      bool retain_graph = false) -> void;
+                      bool retain_graph = false,
+                      bool create_graph = false) -> void;
 
     /**
      * @brief Clear gradient accumulation buffers.

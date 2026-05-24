@@ -1,7 +1,7 @@
 """Dirichlet distribution."""
 import numpy as np
-from scipy.special import gammaln, digamma
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Dirichlet(Distribution):
@@ -48,6 +48,7 @@ class Dirichlet(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         a = self.concentration
         # log p(x) = lgamma(sum_a) - sum(lgamma(a_i)) + sum((a_i-1)*log(x_i))
@@ -55,6 +56,9 @@ class Dirichlet(Distribution):
         return log_norm + ((a - 1.0) * np.log(value)).sum(axis=-1)
 
     def entropy(self):
+        scipy_special = _require_scipy_special()
+        gammaln = scipy_special.gammaln
+        digamma = scipy_special.digamma
         a = self.concentration
         k = a.shape[-1]
         a0 = a.sum(axis=-1)

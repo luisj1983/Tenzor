@@ -150,8 +150,12 @@ class Module(_CppModule):
         # Handle Variable assignment (potential parameter)
         if isinstance(value, _core.Variable):
             with object.__getattribute__(self, '_cache_lock'):
+                # V.31: honour explicit Parameter tag — `nn.Parameter(t, requires_grad=False)`
+                # is a *frozen-but-tracked* parameter (e.g. for fine-tuning checkpoints).
+                # Without this flag-check, requires_grad=False silently demotes it to a buffer.
+                is_parameter = getattr(value, '_is_parameter', False)
                 # requires_grad is a property (bool), not a method.
-                if value.requires_grad:
+                if is_parameter or value.requires_grad:
                     object.__setattr__(self, '_param_cache', None)
                     self.register_parameter(name, value)
                 else:

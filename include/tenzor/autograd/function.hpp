@@ -595,7 +595,8 @@ protected:
     mutable std::vector<uint64_t> saved_versions_;                  ///< Tensor versions at save time (for in-place detection)
     mutable std::vector<uint64_t> saved_view_base_versions_;       ///< View base versions at save time (0 if not a view)
     mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
-    mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
+    mutable Device offloaded_device_{Device::cpu()};                ///< Original device of the first offloaded tensor (legacy; reload uses offloaded_devices_)
+    mutable std::vector<Device> offloaded_devices_;                 ///< V.5: per-tensor original device; reload sends each tensor back to its own source device
     mutable std::atomic<bool> tensors_offloaded_{false};            ///< Whether saved tensors are on CPU due to offloading
     mutable std::mutex offload_mutex_;                              ///< Guards offload/reload of saved tensors
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
@@ -1250,7 +1251,19 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "RollBackward"; }
     auto op_id() const -> OpId override { return OpId::Roll; }
+    // V.9: expose Dim + Shift so vmap's dim_shifted_passthrough can
+    // re-dispatch OpId::Roll on the batched tensor with the shifted
+    // axis. Without this override, the passthrough_rule applied roll to
+    // the batched tensor with the unbatched-rank `dim` — silently rolling
+    // along the batch axis for batch_dim != 0.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim_);
+        attrs.set(AttrKey::Shift, shifts_);
+        return attrs;
+    }
 private:
     int64_t shifts_;
     int64_t dim_;
@@ -1974,6 +1987,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::ScatterAdd; }
+    // V.11: emit normalised non-negative dim for vmap consumers.
+    auto saved_attributes() const -> OpAttributes override;
 };
 
 class IndexSelectBackward : public Function {
@@ -2022,6 +2037,21 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "NarrowBackward"; }
+    // V.9: expose the saved `dim` so vmap can route NarrowBackward through
+    // a per-slice loop fallback (no forward OpId::Narrow exists for the
+    // generic dim_shifted_passthrough re-dispatch). The vmap rule reads
+    // the dim out of saved_attributes() to decide how to invoke the
+    // captured user function; without this override the dim was lost and
+    // the passthrough_rule applied narrow to the batched tensor along
+    // the unbatched dim — silently wrong for batch_dim != 0.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (!saved_tensors_.empty()) {
+            attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+        }
+        return attrs;
+    }
 };
 
 class FlipBackward : public Function {
@@ -2175,6 +2205,16 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "DiagBackward"; }
     auto op_id() const -> OpId override { return OpId::Diag; }
+    // V.9: expose Diagonal so vmap can route OpId::Diag (which has no
+    // axis-shift semantics; diag flattens the last two axes regardless
+    // of batch_dim) via a per-slice loop. Diag has no `dim` argument, so
+    // dim_shifted_passthrough is not used — the saved_attributes only
+    // serve to keep the OpId / attrs pair consistent with the forward.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Diagonal, diagonal_);
+        return attrs;
+    }
 private:
     int64_t input_ndim_;
     int64_t diagonal_;
@@ -2214,6 +2254,15 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TriuBackward"; }
     auto op_id() const -> OpId override { return OpId::Triu; }
+    // V.9: expose Diagonal so vmap can re-dispatch OpId::Triu on the
+    // batched tensor. Triu operates on the last two dims (no axis shift
+    // is needed for batch_dim < ndim-2), so a plain re-dispatch with the
+    // same diagonal value gives the correct per-slice result.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Diagonal, diagonal_);
+        return attrs;
+    }
 private:
     int64_t diagonal_;
 };
@@ -2233,6 +2282,12 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TrilBackward"; }
     auto op_id() const -> OpId override { return OpId::Tril; }
+    // V.9: expose Diagonal (see TriuBackward for rationale).
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Diagonal, diagonal_);
+        return attrs;
+    }
 private:
     int64_t diagonal_;
 };

@@ -830,6 +830,68 @@ auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64
     return output;
 }
 
+// V.10: Variable-level chunk/split as decomposition over autograd::slice.
+//
+// The raw `tenzor::chunk` / `tenzor::split_with_sizes` operate on `Tensor`
+// and sever the autograd graph when called from user code (a frequent
+// pattern in MoE / transformer projections that split QKV after a linear).
+// By implementing chunk/split as repeated calls into `autograd::slice`,
+// each output Variable gets its own SliceBackward, scatters its incoming
+// gradient back to the right window of the input, and naturally supports
+// `create_graph` (SliceBackward already does). The JVP path lifts for
+// free because SliceBackward has a registered JVP rule — no separate
+// chunk/split JVP rule is needed (the jvp_rules.cpp stubs at OpId::Chunk /
+// OpId::Split remain registered for any caller that hits the raw OpId
+// dispatch directly, but the Variable-level entry now decomposes upstream).
+auto chunk(const Variable& input, int64_t chunks, int64_t dim) -> std::vector<Variable> {
+    if (chunks <= 0) {
+        throw std::invalid_argument("autograd::chunk: number of chunks must be positive");
+    }
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("autograd::chunk: dim out of range");
+    }
+    const int64_t dim_size = input.shape()[dim];
+    // Mirror tenzor::chunk's ceiling-division partition semantics so the
+    // Variable form is shape-identical to the raw form.
+    const int64_t chunk_size = (dim_size + chunks - 1) / chunks;
+
+    std::vector<Variable> result;
+    result.reserve(static_cast<size_t>(chunks));
+    for (int64_t i = 0; i < chunks; ++i) {
+        int64_t start = i * chunk_size;
+        if (start >= dim_size) {
+            break;  // Fewer than `chunks` outputs when dim_size < chunks.
+        }
+        int64_t end = std::min(start + chunk_size, dim_size);
+        result.push_back(slice(input, dim, start, end, /*step=*/1));
+    }
+    return result;
+}
+
+auto split(const Variable& input, int64_t split_size, int64_t dim) -> std::vector<Variable> {
+    if (split_size <= 0) {
+        throw std::invalid_argument("autograd::split: split_size must be positive");
+    }
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("autograd::split: dim out of range");
+    }
+    const int64_t dim_size = input.shape()[dim];
+
+    std::vector<Variable> result;
+    if (dim_size == 0) {
+        return result;
+    }
+    for (int64_t start = 0; start < dim_size; start += split_size) {
+        int64_t end = std::min(start + split_size, dim_size);
+        result.push_back(slice(input, dim, start, end, /*step=*/1));
+    }
+    return result;
+}
+
 auto bmm(const Variable& a, const Variable& b) -> Variable {
     if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
         // No gradient needed, just compute

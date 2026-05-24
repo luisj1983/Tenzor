@@ -1,5 +1,6 @@
 #include "tenzor/autograd/vmap.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/indexing.hpp"
@@ -456,19 +457,60 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Additional indexing ops
     // ====================================================================
-    register_batching_rule("NarrowBackward", passthrough_rule);
+    // V.9: Narrow/Roll/Diag/Triu/Tril Backwards carry a per-axis attribute
+    // (dim, shift, diagonal) saved in their constructor. The old
+    // `passthrough_rule` ignored these, so `vmap` over `batch_dim != 0`
+    // applied the op along the unbatched-rank axis — silently wrong (it
+    // would re-narrow/re-roll along the batch axis).
+    //
+    // Roll has a true `dim` attribute that shifts past the batch axis;
+    // dim_shifted_passthrough(AttrKey::Dim) does the read-shift-redispatch
+    // for it (the saved Shift attribute carries through unchanged).
+    //
+    // Narrow has no forward OpId at the dispatch layer (it decomposes to
+    // slice on the autograd side); fall back to the loop-and-stack form
+    // (V.1 fix made that path graph-preserving), which is correct at the
+    // cost of B per-slice dispatches.
+    //
+    // Diag / Triu / Tril operate on the last two axes; for batch_dim
+    // below ndim-2 (the common vmap-over-batch case) a plain
+    // re-dispatch with the unchanged Diagonal attribute on the batched
+    // tensor gives correct per-slice results. For batch_dim >= ndim-2
+    // the loop fallback is the safe path.
+    auto narrow_rule = [](
+        const std::function<Variable(const Variable&)>& func,
+        const Variable& batched_input,
+        int64_t batch_dim) -> Variable {
+        return vmap_loop_and_stack(func, batched_input, batch_dim);
+    };
+    register_batching_rule("NarrowBackward", narrow_rule);
     register_batching_rule("IndexBackward", passthrough_rule);
     register_batching_rule("MaskedFillBackward", passthrough_rule);
     register_batching_rule("MaskedSelectBackward", passthrough_rule);
-    register_batching_rule("RollBackward", passthrough_rule);
+    auto roll_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
+    register_batching_rule("RollBackward", roll_dim_rule);
+    register_batching_rule(OpId::Roll, roll_dim_rule);
 
     // ====================================================================
     // Diag/Trace/Triangular ops
     // ====================================================================
-    register_batching_rule("DiagBackward", passthrough_rule);
-    register_batching_rule("TraceBackward", passthrough_rule);
-    register_batching_rule("TriuBackward", passthrough_rule);
-    register_batching_rule("TrilBackward", passthrough_rule);
+    // Diag/Triu/Tril operate on the trailing two axes; for batch_dim
+    // outside those axes, loop-and-stack is the conservative choice
+    // (correct for arbitrary batch_dim, no axis-shift bookkeeping).
+    auto last2_dim_loop_rule = [](
+        const std::function<Variable(const Variable&)>& func,
+        const Variable& batched_input,
+        int64_t batch_dim) -> Variable {
+        return vmap_loop_and_stack(func, batched_input, batch_dim);
+    };
+    register_batching_rule("DiagBackward", last2_dim_loop_rule);
+    register_batching_rule("TraceBackward", last2_dim_loop_rule);
+    register_batching_rule("TriuBackward", last2_dim_loop_rule);
+    register_batching_rule("TrilBackward", last2_dim_loop_rule);
+    register_batching_rule(OpId::Diag, last2_dim_loop_rule);
+    register_batching_rule(OpId::Triu, last2_dim_loop_rule);
+    register_batching_rule(OpId::Tril, last2_dim_loop_rule);
+    register_batching_rule(OpId::Trace, last2_dim_loop_rule);
 
     // ====================================================================
     // Sparse ops
@@ -490,6 +532,14 @@ void init_builtin_batching_rules() {
 // run, avoiding the double-probe of the previous design).
 
 // Loop-and-stack fallback implementation
+//
+// V.1: build the result via Variable-level cat over unsqueezed per-slice
+// outputs. The previous implementation captured `output.tensor()` and
+// stacked raw tensors, so the returned Variable had no `grad_fn` — under
+// `vmap` inside `create_graph=true` this silently discarded second-order
+// info. Using `autograd::unsqueeze` + `autograd::cat` keeps the graph
+// intact: backward through the cat scatters gradients back to each
+// per-slice Variable, whose grad_fn chains back into the user's `func`.
 static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& func,
                                 const Variable& batched_input,
                                 int64_t batch_dim) -> Variable {
@@ -497,18 +547,20 @@ static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& 
     auto shape = input_tensor.shape();
     int64_t batch_size = shape[batch_dim];
 
-    std::vector<Tensor> results;
-    results.reserve(batch_size);
+    std::vector<Variable> per_slice_outputs;
+    per_slice_outputs.reserve(batch_size);
 
     for (int64_t i = 0; i < batch_size; ++i) {
         auto slice = tenzor::select(input_tensor, batch_dim, i);
         Variable slice_var(slice, batched_input.requires_grad());
         auto output = func(slice_var);
-        results.push_back(output.tensor());
+        // Add a unit-size batch axis at the requested position so a single
+        // `cat` along that axis reconstructs the batched layout that the
+        // raw `tenzor::stack` would have produced.
+        per_slice_outputs.push_back(tenzor::unsqueeze(output, batch_dim));
     }
 
-    auto stacked = tenzor::stack(std::span<const Tensor>(results), batch_dim);
-    return Variable(stacked, batched_input.requires_grad());
+    return tenzor::cat(per_slice_outputs, batch_dim);
 }
 
 auto vmap(std::function<Variable(const Variable&)> func,

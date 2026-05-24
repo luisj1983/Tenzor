@@ -1416,8 +1416,10 @@ auto LinalgVectorNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
     auto safe_abs = where(eq(abs_x, zeros_like(abs_x)), eps, abs_x);
     auto safe_norm = where(eq(norm_expanded, zeros_like(norm_expanded)), eps, norm_expanded);
 
-    auto pow_x = tenzor::pow(safe_abs, static_cast<float>(ord_ - 1.0));
-    auto pow_norm = tenzor::pow(safe_norm, static_cast<float>(ord_ - 1.0));
+    // V.7: ord_ is `double`; tenzor::pow(Tensor, double) exists (audit-3 R.1),
+    // so drop the float narrowing that was rounding ord-1.0 through float.
+    auto pow_x = tenzor::pow(safe_abs, ord_ - 1.0);
+    auto pow_norm = tenzor::pow(safe_norm, ord_ - 1.0);
     auto deriv = mul(tenzor::sign(input), div(pow_x, pow_norm));
     return {mul(grad_expanded, deriv)};
 }

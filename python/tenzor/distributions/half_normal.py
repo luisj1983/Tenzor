@@ -1,8 +1,8 @@
 """HalfNormal distribution."""
 import math
 import numpy as np
-from scipy import special as scipy_special
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class HalfNormal(Distribution):
@@ -45,6 +45,7 @@ class HalfNormal(Distribution):
         return np.where(in_support, lp, -np.inf)
 
     def cdf(self, value):
+        scipy_special = _require_scipy_special()
         value = _to_numpy(value)
         return np.where(
             value >= 0,
@@ -53,6 +54,7 @@ class HalfNormal(Distribution):
         )
 
     def icdf(self, p):
+        scipy_special = _require_scipy_special()
         p = _to_numpy(p)
         return self.scale * math.sqrt(2.0) * scipy_special.erfinv(p)
 

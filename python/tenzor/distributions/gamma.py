@@ -1,7 +1,7 @@
 """Gamma distribution."""
 import numpy as np
-from scipy.special import gammaln, digamma
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Gamma(Distribution):
@@ -38,6 +38,7 @@ class Gamma(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         a = self.concentration
         b = self.rate
@@ -46,6 +47,9 @@ class Gamma(Distribution):
                 - b * value)
 
     def entropy(self):
+        scipy_special = _require_scipy_special()
+        gammaln = scipy_special.gammaln
+        digamma = scipy_special.digamma
         a = self.concentration
         b = self.rate
         # H = a - log(b) + lgamma(a) + (1-a)*digamma(a)
@@ -56,7 +60,7 @@ class Gamma(Distribution):
 
         P(X <= x) = P(a, b * x)  (regularised lower incomplete gamma).
         """
-        from scipy.special import gammainc
+        gammainc = _require_scipy_special().gammainc
         value = np.asarray(value, dtype=np.float64)
         a = self.concentration
         b = self.rate
@@ -70,7 +74,7 @@ class Gamma(Distribution):
         Uses scipy.special.gammaincinv to invert the regularised lower
         incomplete gamma.
         """
-        from scipy.special import gammaincinv
+        gammaincinv = _require_scipy_special().gammaincinv
         q = np.asarray(q, dtype=np.float64)
         a = self.concentration
         b = self.rate

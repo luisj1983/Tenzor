@@ -162,6 +162,26 @@ void register_core(py::module_& m) {
         return cuda_backend ? cuda_backend->device_count() : 0;
     }, "Get number of available CUDA devices");
 
+    // V.33: Used by DataLoader to detect whether fork() is unsafe.
+    // Returns true if a CUDA driver context exists (or could plausibly exist)
+    // in this process — at which point fork() would corrupt the child's
+    // CUDA state and silently produce garbage tensors / hangs.
+    //
+    // Implementation: we treat "CUDA backend present and at least one device
+    // visible" as initialized.  Tenzor lazily initializes the backend on first
+    // use, but by the time the user instantiates a DataLoader they have almost
+    // always already touched CUDA (allocated a tensor, created the model on
+    // GPU, etc.), and any false positive here merely costs us a `spawn` start
+    // instead of `fork` — never wrong correctness-wise.
+    m.def("cuda_is_initialized", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* cuda_backend = loader.get_backend("cuda");
+        if (cuda_backend == nullptr || !cuda_backend->is_available()) {
+            return false;
+        }
+        return cuda_backend->device_count() > 0;
+    }, "Check if CUDA has (or may have) an active driver context — fork() guard for DataLoader");
+
     // CUDA Graph capture and replay
     py::class_<tenzor::CUDAGraph>(m, "CUDAGraph",
         "Captures a sequence of CUDA operations into a graph for fast replay.\n"
@@ -1934,10 +1954,17 @@ Returns:
             int64_t int_idx = 0;
             int64_t slice_start = 0, slice_stop = 0, slice_step = 1;
 
+            // V.35: extend tuple-entry kinds with NewAxis (`None`), Ellipsis,
+            // and BoolMask (bool-dtype Tensor).  Without these the tuple-path
+            // raised "Unsupported index type in tuple" for stock NumPy idioms
+            // like `x[None, ...]`, `x[..., 0]`, `x[bool_mask]`.
+            enum class TupleKind { Int, Slice, NewAxis, Ellipsis, BoolMask };
             struct TupleEntry {
-                bool is_int;
-                int64_t int_val;
-                int64_t start, stop, step;
+                TupleKind kind = TupleKind::Slice;
+                bool is_int = false;          // legacy bool — kept so existing branches keep compiling
+                int64_t int_val = 0;
+                int64_t start = 0, stop = 0, step = 1;
+                tenzor::Tensor mask;          // bool-mask tensor when kind == BoolMask
             };
             std::vector<TupleEntry> tuple_entries;
             tenzor::Tensor mask_tensor;
@@ -1966,6 +1993,11 @@ Returns:
             // but is a distinct pybind11 type — without this branch
             // ``x[some_variable_idx]`` fell through to the slice path and
             // silently produced wrong results.
+            // V.35: `is_fancy_element` returns true for list / integer Tensor /
+            // integer Variable — these *trigger* the fancy-index path.
+            // None / Ellipsis / bool-Tensor are handled by the tuple path
+            // below (NewAxis / Ellipsis / BoolMask kinds) and explicitly do
+            // NOT trigger fancy here.
             auto is_fancy_element = [](py::object obj) -> bool {
                 if (py::isinstance<py::list>(obj)) return true;
                 if (py::isinstance<tenzor::Tensor>(obj)) {
@@ -2058,14 +2090,17 @@ Returns:
                 } else {
                     kind = IndexKind::Tuple;
                     // Pre-parse all tuple entries: need current shape to resolve slices
-                    // We parse slices lazily during Phase B since shape changes with each op
+                    // We parse slices lazily during Phase B since shape changes with each op.
+                    // V.35: also accept None (newaxis), Ellipsis, and bool-Tensor.
                     tuple_entries.reserve(indices.size());
                     for (size_t i = 0; i < indices.size(); ++i) {
                         TupleEntry entry{};
                         if (py::isinstance<py::int_>(indices[i])) {
+                            entry.kind = TupleKind::Int;
                             entry.is_int = true;
                             entry.int_val = py::cast<int64_t>(indices[i]);
                         } else if (py::isinstance<py::slice>(indices[i])) {
+                            entry.kind = TupleKind::Slice;
                             entry.is_int = false;
                             // Extract raw start/stop/step from Python slice object.
                             // None values get sentinel min/max — resolved against dim size in Phase B.
@@ -2076,12 +2111,53 @@ Returns:
                             entry.start = s_start.is_none() ? std::numeric_limits<int64_t>::min() : py::cast<int64_t>(s_start);
                             entry.stop = s_stop.is_none() ? std::numeric_limits<int64_t>::max() : py::cast<int64_t>(s_stop);
                             entry.step = s_step.is_none() ? 1 : py::cast<int64_t>(s_step);
+                        } else if (indices[i].is_none()) {
+                            // V.35: `None` (newaxis) inserts a length-1 dim at the current position.
+                            entry.kind = TupleKind::NewAxis;
+                            entry.is_int = false;
+                        } else if (py::isinstance<py::ellipsis>(indices[i])) {
+                            // V.35: `...` expands to enough full-dim slices to fill remaining dims.
+                            entry.kind = TupleKind::Ellipsis;
+                            entry.is_int = false;
+                        } else if (py::isinstance<tenzor::Tensor>(indices[i])) {
+                            auto t = indices[i].cast<tenzor::Tensor>();
+                            if (t.dtype() == tenzor::DType::Bool) {
+                                // V.35: 1-D bool-mask along the current dim — routed via masked_select.
+                                entry.kind = TupleKind::BoolMask;
+                                entry.is_int = false;
+                                entry.mask = t;
+                            } else {
+                                throw std::runtime_error("Unsupported index type in tuple");
+                            }
+                        } else if (py::isinstance<tenzor::Variable>(indices[i])) {
+                            auto v = indices[i].cast<tenzor::Variable>();
+                            auto t = v.tensor();
+                            if (t.dtype() == tenzor::DType::Bool) {
+                                entry.kind = TupleKind::BoolMask;
+                                entry.is_int = false;
+                                entry.mask = t;
+                            } else {
+                                throw std::runtime_error("Unsupported index type in tuple");
+                            }
                         } else {
                             throw std::runtime_error("Unsupported index type in tuple");
                         }
                         tuple_entries.push_back(entry);
                     }
                 }
+            } else if (key.is_none()) {
+                // V.35: bare `x[None]` -> unsqueeze at dim 0.  Routed through tuple
+                // path with a single NewAxis entry.
+                kind = IndexKind::Tuple;
+                TupleEntry e{};
+                e.kind = TupleKind::NewAxis;
+                tuple_entries.push_back(e);
+            } else if (py::isinstance<py::ellipsis>(key)) {
+                // V.35: bare `x[...]` -> identity; tuple path with one Ellipsis entry.
+                kind = IndexKind::Tuple;
+                TupleEntry e{};
+                e.kind = TupleKind::Ellipsis;
+                tuple_entries.push_back(e);
             } else if (py::isinstance<tenzor::Tensor>(key)) {
                 auto t = key.cast<tenzor::Tensor>();
                 if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
@@ -2134,41 +2210,100 @@ Returns:
                     return self.slice(0, slice_start, slice_stop, slice_step);
                 }
                 case IndexKind::Tuple: {
+                    // V.35: track the *current* output dim cursor explicitly.
+                    // Int entries consume + squeeze a dim (cursor stays put).
+                    // Slice entries consume a dim (cursor advances).
+                    // NewAxis inserts a dim at the cursor and advances.
+                    // Ellipsis expands to (rank_remaining - explicit_remaining)
+                    //   full-dim slices, advancing the cursor.
+                    // BoolMask routes through masked_select on the cursor dim.
                     tenzor::Tensor result = self;
-                    int squeeze_count = 0;
+
+                    // Count how many entries actually consume an input dim
+                    // (Int, Slice, Ellipsis, BoolMask).  NewAxis does not.
+                    int consuming = 0;
+                    int ellipsis_count = 0;
+                    for (auto& e : tuple_entries) {
+                        if (e.kind == TupleKind::NewAxis) continue;
+                        if (e.kind == TupleKind::Ellipsis) { ellipsis_count++; continue; }
+                        consuming++;
+                    }
+                    if (ellipsis_count > 1) {
+                        throw std::runtime_error("Only one Ellipsis allowed per index");
+                    }
+
+                    size_t dim_cursor = 0;
                     for (size_t i = 0; i < tuple_entries.size(); ++i) {
                         auto& entry = tuple_entries[i];
-                        if (entry.is_int) {
+                        if (entry.kind == TupleKind::NewAxis) {
+                            result = result.unsqueeze(static_cast<int64_t>(dim_cursor));
+                            dim_cursor++;
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::Ellipsis) {
+                            auto shape = result.shape();
+                            int64_t fill = static_cast<int64_t>(shape.size()) -
+                                           static_cast<int64_t>(dim_cursor) -
+                                           static_cast<int64_t>(consuming);
+                            if (fill < 0) fill = 0;
+                            dim_cursor += static_cast<size_t>(fill);
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::BoolMask) {
+                            // Apply bool-mask via masked_select on the cursor dim.
+                            // For now we only support 1-D mask matching the full
+                            // remaining shape (PyTorch semantics for `x[mask]`).
+                            // A per-dim 1-D mask uses `index_select` over nonzero.
+                            auto shape = result.shape();
+                            if (dim_cursor >= shape.size()) {
+                                throw std::out_of_range("Bool mask: too many indices");
+                            }
+                            if (entry.mask.shape().size() != 1) {
+                                throw std::runtime_error(
+                                    "Bool tuple-mask must be 1-D; multi-D masks not yet supported in tuple path");
+                            }
+                            if (entry.mask.shape()[0] != shape[dim_cursor]) {
+                                throw std::runtime_error(
+                                    "Bool mask length does not match tensor dim at this position");
+                            }
+                            // Equivalent to torch: gather indices where mask is true on this dim.
+                            auto nz = tenzor::nonzero(entry.mask).squeeze(1);
+                            result = tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
+                            dim_cursor++;
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::Int) {
                             int64_t idx = entry.int_val;
                             auto shape = result.shape();
-                            size_t dim = i - squeeze_count;
-                            if (dim >= shape.size()) {
+                            if (dim_cursor >= shape.size()) {
                                 throw std::out_of_range("Too many indices");
                             }
-                            if (idx < 0) idx += shape[dim];
-                            result = result.slice(dim, idx, idx + 1);
+                            if (idx < 0) idx += shape[dim_cursor];
+                            result = result.slice(dim_cursor, idx, idx + 1);
                             auto new_shape = result.shape();
-                            if (dim < new_shape.size() && new_shape[dim] == 1) {
-                                result = result.squeeze(dim);
-                                squeeze_count++;
+                            if (dim_cursor < new_shape.size() && new_shape[dim_cursor] == 1) {
+                                result = result.squeeze(dim_cursor);
+                                // dim_cursor stays — squeeze collapsed it.
+                            } else {
+                                dim_cursor++;
                             }
-                        } else {
-                            auto shape = result.shape();
-                            size_t dim = i - squeeze_count;
-                            if (dim >= shape.size()) {
-                                throw std::out_of_range("Too many indices");
-                            }
-                            // Resolve slice start/stop against actual dim size
-                            int64_t dim_size = shape[dim];
-                            int64_t start = entry.start, stop = entry.stop, step = entry.step;
-                            if (start == std::numeric_limits<int64_t>::min()) start = (step > 0) ? 0 : dim_size - 1;
-                            else if (start < 0) start += dim_size;
-                            if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
-                            else if (stop < 0) stop += dim_size;
-                            start = std::clamp(start, int64_t(0), dim_size);
-                            stop = std::clamp(stop, int64_t(0), dim_size);
-                            result = result.slice(dim, start, stop, step);
+                            continue;
                         }
+                        // Slice
+                        auto shape = result.shape();
+                        if (dim_cursor >= shape.size()) {
+                            throw std::out_of_range("Too many indices");
+                        }
+                        int64_t dim_size = shape[dim_cursor];
+                        int64_t start = entry.start, stop = entry.stop, step = entry.step;
+                        if (start == std::numeric_limits<int64_t>::min()) start = (step > 0) ? 0 : dim_size - 1;
+                        else if (start < 0) start += dim_size;
+                        if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
+                        else if (stop < 0) stop += dim_size;
+                        start = std::clamp(start, int64_t(0), dim_size);
+                        stop = std::clamp(stop, int64_t(0), dim_size);
+                        result = result.slice(dim_cursor, start, stop, step);
+                        dim_cursor++;
                     }
                     return result;
                 }
@@ -4567,20 +4702,27 @@ Returns:
             return wrapper;
         }, py::arg("func"));
 
-    // set_grad_enabled as context manager too
+    // set_grad_enabled as context manager too.
+    // V.34: LIFO stack (mirrors R.23 fix for enable_grad/no_grad/autocast).
+    // A single scalar prev_state_ corrupts under nested re-entry on the
+    // same instance: `g = set_grad_enabled(False); with g: with g: ...`.
     struct PySetGradEnabledContext {
         bool mode_;
-        bool prev_state_ = false;
+        std::vector<bool> prev_state_stack_;
 
         PySetGradEnabledContext(bool mode) : mode_(mode) {}
 
         void enter() {
-            prev_state_ = tenzor::is_grad_enabled();
+            prev_state_stack_.push_back(tenzor::is_grad_enabled());
             tenzor::set_grad_enabled(mode_);
         }
 
         void exit() {
-            tenzor::set_grad_enabled(prev_state_);
+            if (!prev_state_stack_.empty()) {
+                bool prev = prev_state_stack_.back();
+                prev_state_stack_.pop_back();
+                tenzor::set_grad_enabled(prev);
+            }
         }
     };
 
@@ -4589,15 +4731,25 @@ Returns:
     // ========================================================================
     // Inference mode (stronger than no_grad — also skips version counters)
     // ========================================================================
+    // V.34: LIFO stack of InferenceModeGuards.  A single unique_ptr corrupts
+    // under nested re-entry on the same instance — `g = inference_mode(); with
+    // g: with g: ...` — because the inner enter() overwrites guard_ and the
+    // first exit() destroys both, leaving outer scope in the wrong state.
+    //
+    // Use shared_ptr so pybind11's caster machinery (which instantiates copy
+    // ctors for return-value-policy::copy default) compiles cleanly; the
+    // shared_ptr's reference-counting still gives LIFO destruction at pop_back.
     struct PyInferenceModeContext {
-        std::unique_ptr<tenzor::InferenceModeGuard> guard_;
+        std::vector<std::shared_ptr<tenzor::InferenceModeGuard>> guards_;
 
         void enter() {
-            guard_ = std::make_unique<tenzor::InferenceModeGuard>();
+            guards_.push_back(std::make_shared<tenzor::InferenceModeGuard>());
         }
 
         void exit() {
-            guard_.reset();
+            if (!guards_.empty()) {
+                guards_.pop_back();
+            }
         }
     };
 

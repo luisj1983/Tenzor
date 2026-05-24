@@ -1,7 +1,7 @@
 """NegativeBinomial distribution."""
 import numpy as np
-from scipy.special import gammaln, betainc
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class NegativeBinomial(Distribution):
@@ -50,6 +50,7 @@ class NegativeBinomial(Distribution):
         return np.random.negative_binomial(r, success_prob, size=shape or None).astype(np.float64)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         r = self.total_count
         eps = 1e-7
@@ -78,6 +79,7 @@ class NegativeBinomial(Distribution):
         if rng is None:
             rng = np.random.default_rng()
 
+        gammaln = _require_scipy_special().gammaln
         eps = 1e-7
         r = self.total_count
         p = np.clip(self.probs, eps, 1.0 - eps)
@@ -107,6 +109,7 @@ class NegativeBinomial(Distribution):
         where I_x(a,b) is the regularised incomplete beta. For k < 0 the
         CDF is 0.
         """
+        betainc = _require_scipy_special().betainc
         value = _to_numpy(value)
         eps = 1e-7
         p = np.clip(self.probs, eps, 1.0 - eps)

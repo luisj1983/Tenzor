@@ -6683,8 +6683,10 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     // Find max value on GPU
     Tensor max_tensor({1}, DType::Int64, device);
     int64_t neg_one = -1;
-    hipMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
-                   hipMemcpyHostToDevice, stream);
+    // audit V.15: wrap HIP API calls in HIP_CHECK; previously errors here
+    // (OOM, stream invalidation, device lost) were silently swallowed.
+    HIP_CHECK(hipMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
+                   hipMemcpyHostToDevice, stream));
 
     if (n > 0) {
         dim3 grid, block;
@@ -6695,9 +6697,9 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     }
 
     int64_t max_val = -1;
-    hipMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
-                   hipMemcpyDeviceToHost, stream);
-    hipStreamSynchronize(stream);
+    HIP_CHECK(hipMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
+                   hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     int64_t output_size = std::max(max_val + 1, minlength);
 
@@ -6705,8 +6707,8 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
 
     if (has_weights) {
         Tensor output({output_size}, DType::Float64, device);
-        hipMemsetAsync(output.data<double>(), 0,
-                       static_cast<size_t>(output_size) * sizeof(double), stream);
+        HIP_CHECK(hipMemsetAsync(output.data<double>(), 0,
+                       static_cast<size_t>(output_size) * sizeof(double), stream));
 
         if (n > 0) {
             dim3 grid, block;

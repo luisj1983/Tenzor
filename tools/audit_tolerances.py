@@ -138,7 +138,7 @@ def main() -> int:
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(
             "# Baseline of known unjustified loose tolerances flagged by\n"
-            "# scripts/audit_tolerances.py. Each line is `<path>:<line>`\n"
+            "# tools/audit_tolerances.py. Each line is `<path>:<line>`\n"
             "# (path relative to repo root). Pre-existing entries are ignored\n"
             "# under --strict; new violations FAIL the audit. Drive this list\n"
             "# to zero over time by justifying or tightening each tolerance.\n"

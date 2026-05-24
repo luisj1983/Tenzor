@@ -1,8 +1,13 @@
 """Binomial distribution."""
 import math
 import numpy as np
-from scipy.special import gammaln
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import (
+    Distribution,
+    _to_numpy,
+    _require_scipy_special,
+    _require_scipy_stats,
+)
 
 
 class Binomial(Distribution):
@@ -34,6 +39,7 @@ class Binomial(Distribution):
                                   size=shape or None).astype(np.float64)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         eps = 1e-7
         p = np.clip(self.probs, eps, 1.0 - eps)
@@ -47,6 +53,7 @@ class Binomial(Distribution):
         # wrong for small n (audit item A.9.c).  We compute the PMF in
         # log-space for numerical stability, exponentiate, renormalise, then
         # sum.  Vectorised over arbitrary batched `probs`.
+        gammaln = _require_scipy_special().gammaln
         p = np.asarray(self.probs, dtype=np.float64)
         n_int = int(self.total_count)
         ks = np.arange(0, n_int + 1, dtype=np.float64)            # (n+1,)
@@ -79,7 +86,7 @@ class Binomial(Distribution):
         P(X <= k) = I_{1-p}(n-k, k+1)   (regularised incomplete beta)
         For k < 0 the CDF is 0; for k >= n it is 1.
         """
-        from scipy.special import betainc
+        betainc = _require_scipy_special().betainc
         value = np.asarray(value, dtype=np.float64)
         k = np.floor(value)
         n = float(self.total_count)
@@ -99,7 +106,7 @@ class Binomial(Distribution):
 
         No closed form — invert via scipy.stats.binom.ppf.
         """
-        from scipy.stats import binom as _binom
+        _binom = _require_scipy_stats().binom
         q = np.asarray(q, dtype=np.float64)
         return _binom.ppf(q, self.total_count, self.probs).astype(np.float64)
 

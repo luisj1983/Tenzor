@@ -236,30 +236,47 @@ auto FSDP2::unshard_params() -> void {
         // Find and update the corresponding module parameter
         for (auto& [pname, param] : named_params) {
             if (pname == name && param) {
-                // R.18: preserve param's TensorImpl/Storage when possible so
-                // any saved-for-backward activation that captured the
-                // pre-unshard Tensor (or the unsharded Tensor across a
-                // forward/backward cycle) sees the updated bytes rather
-                // than a stale frozen view. When the unshard/reshard cycle
-                // changes the parameter's shape (the multi-process case),
-                // storage must be replaced -- saved activations would be
-                // size-mismatched anyway, and FSDP2's invariant is that
-                // unshard/reshard happen at activation boundaries.
-                auto& dst = param->tensor();
-                std::vector<int64_t> dst_shape(dst.is_valid() ? std::vector<int64_t>(dst.shape().begin(), dst.shape().end())
-                                                   : std::vector<int64_t>{});
-                std::vector<int64_t> full_shape(full.shape().begin(), full.shape().end());
-                bool same_layout = dst.is_valid() &&
-                                   dst.dtype() == full.dtype() &&
-                                   dst.device() == full.device() &&
-                                   dst.numel() == full.numel() &&
-                                   dst_shape == full_shape;
-                if (same_layout) {
-                    dst.zero_();
-                    add_(dst, full);
+                // R.18 / V.22: preserve param's TensorImpl/Storage so any
+                // saved-for-backward activation that captured the parameter
+                // sees the updated bytes rather than a stale frozen view.
+                //
+                // V.22: we now keep two persistent destinations per
+                // parameter — an "unsharded" full-sized slot and a "sharded"
+                // local-sized slot.  Each cycle reuses whichever slot
+                // matches the requested layout, so the in-place copy path
+                // runs every cycle (previously only on the first one,
+                // because round 1's dst was shard-sized after reshard and
+                // round 2's unshard would fall through to a TensorImpl
+                // swap).
+                std::vector<int64_t> full_shape(full.shape().begin(),
+                                                full.shape().end());
+
+                auto slot_it = unsharded_dst_.find(name);
+                bool slot_valid = (slot_it != unsharded_dst_.end()) &&
+                                  slot_it->second.is_valid() &&
+                                  slot_it->second.dtype() == full.dtype() &&
+                                  slot_it->second.device() == full.device() &&
+                                  slot_it->second.numel() == full.numel() &&
+                                  std::vector<int64_t>(slot_it->second.shape().begin(),
+                                                       slot_it->second.shape().end()) == full_shape;
+
+                if (!slot_valid) {
+                    // First unshard for this parameter (or layout/dtype change
+                    // due to mixed-precision reconfiguration).  Take ownership
+                    // of the freshly-allgathered tensor; subsequent cycles
+                    // will copy into this slot in-place.
+                    unsharded_dst_[name] = full;
                 } else {
-                    dst = full;
+                    Tensor& slot = slot_it->second;
+                    slot.zero_();
+                    add_(slot, full);
                 }
+
+                // Point the live parameter at the unsharded slot.  The slot's
+                // TensorImpl is stable across cycles, so activations that
+                // captured the unsharded layout remain valid through the
+                // next forward/backward.
+                param->tensor() = unsharded_dst_[name];
                 break;
             }
         }
@@ -279,24 +296,31 @@ auto FSDP2::reshard_params() -> void {
         // Write the local shard back to the module parameter
         for (auto& [pname, param] : named_params) {
             if (pname == name && param) {
-                // R.18: same rationale as unshard_params -- prefer in-place
-                // copy to keep TensorImpl identity stable across the cycle.
+                // R.18 / V.22: mirror unshard_params -- write into a
+                // persistent sharded-sized slot so the in-place copy path
+                // is reachable on every cycle, not just the first one.
                 auto local = dt.local_tensor();
-                auto& dst = param->tensor();
-                std::vector<int64_t> dst_shape(dst.is_valid() ? std::vector<int64_t>(dst.shape().begin(), dst.shape().end())
-                                                   : std::vector<int64_t>{});
-                std::vector<int64_t> local_shape(local.shape().begin(), local.shape().end());
-                bool same_layout = dst.is_valid() &&
-                                   dst.dtype() == local.dtype() &&
-                                   dst.device() == local.device() &&
-                                   dst.numel() == local.numel() &&
-                                   dst_shape == local_shape;
-                if (same_layout) {
-                    dst.zero_();
-                    add_(dst, local);
+                std::vector<int64_t> local_shape(local.shape().begin(),
+                                                 local.shape().end());
+
+                auto slot_it = sharded_dst_.find(name);
+                bool slot_valid = (slot_it != sharded_dst_.end()) &&
+                                  slot_it->second.is_valid() &&
+                                  slot_it->second.dtype() == local.dtype() &&
+                                  slot_it->second.device() == local.device() &&
+                                  slot_it->second.numel() == local.numel() &&
+                                  std::vector<int64_t>(slot_it->second.shape().begin(),
+                                                       slot_it->second.shape().end()) == local_shape;
+
+                if (!slot_valid) {
+                    sharded_dst_[name] = local;
                 } else {
-                    dst = local;
+                    Tensor& slot = slot_it->second;
+                    slot.zero_();
+                    add_(slot, local);
                 }
+
+                param->tensor() = sharded_dst_[name];
                 break;
             }
         }

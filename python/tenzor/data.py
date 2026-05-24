@@ -877,7 +877,26 @@ class _MultiProcessLoader:
         self._output_queue: Optional[mp.Queue] = None
 
     def _start_workers(self):
-        ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+        # V.33: fork() corrupts the CUDA driver context in the child
+        # (silent garbage tensors, hangs).  When a non-CPU backend is live,
+        # fall back to spawn (or forkserver where available — spawn is the
+        # safest default).  We probe tenzor_core for an explicit query;
+        # absent that, any CUDA-available system also forces spawn.
+        ctx_name = "fork" if hasattr(os, "fork") else "spawn"
+        if hasattr(os, "fork"):
+            try:
+                from . import tenzor_core as _core  # type: ignore[attr-defined]
+                cuda_active = bool(
+                    getattr(_core, "cuda_is_initialized", lambda: False)()
+                    or getattr(_core, "cuda_is_available", lambda: False)()
+                )
+                if cuda_active:
+                    # forkserver inherits parent's CUDA state on first spawn,
+                    # so spawn is the unambiguous safe choice.
+                    ctx_name = "spawn"
+            except ImportError:
+                pass
+        ctx = mp.get_context(ctx_name)
         self._output_queue = ctx.Queue(maxsize=self._prefetch_factor * self._num_workers)
         self._index_queues = [ctx.Queue(maxsize=self._prefetch_factor) for _ in range(self._num_workers)]
         self._workers = []

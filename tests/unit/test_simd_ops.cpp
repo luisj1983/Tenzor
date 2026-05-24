@@ -229,9 +229,11 @@ TEST_F(SIMDOpsTest, GeLUCorrectness) {
 // Performance Tests
 // ============================================================================
 
-// Disabled: Performance is highly environment-dependent (CPU architecture, system load, cache effects)
-// SIMD can be slower than scalar for simple operations due to overhead
-TEST_F(SIMDOpsTest, DISABLED_AddPerformance) {
+// V.41: converted from DISABLED_ to a regression-guard ceiling test so we
+// catch a 10x slowdown rather than silently rotting under DISABLED.
+// Performance is environment-dependent so we only assert an upper bound on
+// total duration; the speedup comparison was always too brittle to gate on.
+TEST_F(SIMDOpsTest, AddPerformance) {
     const size_t size = 1000000;
     const int iterations = 100;
 
@@ -262,10 +264,12 @@ TEST_F(SIMDOpsTest, DISABLED_AddPerformance) {
     std::cout << "  Scalar: " << scalar_time << " s\n";
     std::cout << "  Speedup: " << speedup << "x\n";
 
-    // Relaxed threshold: Performance can vary run-to-run due to CPU scheduling
-    // Accept up to 10% slowdown for simple operations where SIMD overhead can dominate
-    // on different CPU architectures (especially with smaller data sizes)
-    EXPECT_GT(speedup, 0.90);
+    // reason: regression-guard ceiling; tighten when baseline is established.
+    // 1M-element SIMD add x 100 iterations should comfortably finish under 10s
+    // even on the slowest CI hardware; any larger value indicates a serious
+    // regression in the SIMD or scalar add path.
+    const double duration_ms = (simd_time + scalar_time) * 1000.0;
+    EXPECT_LT(duration_ms, 10000);
 }
 
 TEST_F(SIMDOpsTest, MulPerformance) {

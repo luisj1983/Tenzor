@@ -113,9 +113,20 @@ auto LazyLinear::materialize(int64_t in_features, Device device) -> void {
 
     in_features_ = in_features;
 
+    // V.29: honour any pre-materialisation `to(DType)` call.  We initialise
+    // weight/bias at Float32 (so Xavier / uniform_ — which currently expect a
+    // floating-point storage they can index as `float*` — work correctly),
+    // then cast down to the requested dtype.  This keeps the initialisation
+    // distribution identical to the default Float32 path while ensuring the
+    // live parameter ends up at the dtype the caller requested.
+    const DType target_dtype = requested_dtype_.value_or(DType::Float32);
+
     // Create weight tensor and initialize with Xavier uniform
     auto weight_tensor = zeros({out_features_, in_features_}, DType::Float32, device);
     init::xavier_uniform_(weight_tensor);
+    if (target_dtype != DType::Float32) {
+        weight_tensor = weight_tensor.to(target_dtype);
+    }
     Variable weight(std::move(weight_tensor), true);
     register_parameter("weight", std::move(weight));
 
@@ -126,11 +137,35 @@ auto LazyLinear::materialize(int64_t in_features, Device device) -> void {
         // bound = 1 / sqrt(in_features) (same as PyTorch Linear default)
         float bound = 1.0f / std::sqrt(static_cast<float>(in_features_));
         init::uniform_(bias_tensor, -bound, bound);
+        if (target_dtype != DType::Float32) {
+            bias_tensor = bias_tensor.to(target_dtype);
+        }
         Variable bias_var(std::move(bias_tensor), true);
         register_parameter("bias", std::move(bias_var));
     }
 
     materialized_ = true;
+}
+
+auto LazyLinear::to(DType dtype) -> void {
+    // V.29: stash the request so a pre-materialisation `to(DType)` survives
+    // until materialize() runs.  Once materialised, parameters are live and
+    // Module::to(DType) walks them in-place — the requested_dtype_ keeps
+    // tracking so a subsequent re-init / clone still sees the latest dtype.
+    requested_dtype_ = dtype;
+    Module::to(dtype);
+}
+
+auto LazyLinear::to(Device device) -> void {
+    // V.29: capture the requested device for introspection.  We do not
+    // consult requested_device_ inside materialize() because the standard
+    // recipe is "construct on CPU, call to(device) before training, then
+    // forward an input that's also on `device`" — in that flow the
+    // first-input device matches requested_device_ and the materialise path
+    // would already create the parameters on the right device.  If a future
+    // recipe wants device-without-input we can revisit.
+    requested_device_ = device;
+    Module::to(device);
 }
 
 auto LazyLinear::forward_impl(const Variable& input) -> Variable {

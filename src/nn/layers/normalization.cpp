@@ -663,6 +663,16 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
             grad_bias.contiguous().to(original_dtype)};
 }
 
+// V.24: slot-3 contract for LayerNormBackward's saved buffers.
+//
+// LayerNormBackward saves {x, mean, rstd, gamma?} where the trailing gamma
+// slot is *only* populated when elementwise_affine_ is true.  Today the
+// forward always saves a placeholder ones-tensor at slot 3 so the size is
+// always 4, but that placeholder costs a tensor allocation per forward and
+// will be removed in a future optimisation.  Reading saved[3] / sv[3]
+// unconditionally would then be an out-of-bounds access.  All consumers
+// must gate slot-3 reads on `elementwise_affine_` (also true of the
+// JVP walker hook above, which already checks `num_saved_tensors() < 4`).
 auto LayerNormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     auto& grad_out = grad_outputs[0];
 
@@ -672,13 +682,19 @@ auto LayerNormBackward::backward_with_variables(std::vector<Variable> grad_outpu
         input_var = sv[0];
         mean_var = sv[1];
         rstd_var = sv[2];
-        weight_var = sv[3];
+        // V.24: gate slot-3 read on elementwise_affine_ — the slot is only
+        // contractually populated when affine is true.
+        if (elementwise_affine_) {
+            weight_var = sv[3];
+        }
     } else {
         auto saved = saved_tensors();
         input_var = Variable(saved[0], false);
         mean_var = Variable(saved[1], false);
         rstd_var = Variable(saved[2], false);
-        weight_var = Variable(saved[3], false);
+        if (elementwise_affine_) {
+            weight_var = Variable(saved[3], false);
+        }
     }
 
     int64_t norm_size = normalized_size_;

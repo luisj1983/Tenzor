@@ -761,11 +761,15 @@ namespace rocm {
         const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
 
     // Audit A.11 — native Float64 FlashAttention (flash_attention_f64.hip.cpp).
+    // audit V.16: stream is now plumbed so workspace zeroing and kernel launches
+    // share the dispatcher's stream and HIP errors are surfaced via HIP_CHECK.
     auto fused_attention_hip_f64(const Tensor& Q, const Tensor& K, const Tensor& V,
-                                 double scale, bool causal) -> std::pair<Tensor, Tensor>;
+                                 double scale, bool causal,
+                                 hipStream_t stream) -> std::pair<Tensor, Tensor>;
     auto flash_attention_backward_hip_f64(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
-        const Tensor& O, double scale, bool causal) -> std::vector<Tensor>;
+        const Tensor& O, double scale, bool causal,
+        hipStream_t stream) -> std::vector<Tensor>;
 
     // Fused RMSNorm
     auto fused_rms_norm_hip(const Tensor& input, const Tensor& weight,
@@ -2012,7 +2016,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             }
             if (f64_native_supported) {
                 auto pair = rocm::fused_attention_hip_f64(
-                    Qi, Ki, Vi, static_cast<double>(scale), causal);
+                    Qi, Ki, Vi, static_cast<double>(scale), causal,
+                    get_hip_stream(attrs));
                 output = pair.first;
                 lse    = pair.second;
             } else {
@@ -2135,7 +2140,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     dO3 = tenzor::reshape(dO.contiguous(), std::vector<int64_t>{b * h, sq, dv});
                 }
                 auto grads = rocm::flash_attention_backward_hip_f64(
-                    dO3, Q3, K3, V3, O3, static_cast<double>(scale), causal);
+                    dO3, Q3, K3, V3, O3, static_cast<double>(scale), causal,
+                    get_hip_stream(attrs));
                 if (is_4d_f64) {
                     grads[0] = tenzor::reshape(grads[0], q_shape_4d);
                     grads[1] = tenzor::reshape(grads[1], k_shape_4d);

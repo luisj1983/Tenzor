@@ -26,7 +26,13 @@ AveragedModel::AveragedModel(const std::vector<std::shared_ptr<Variable>>& param
     averaged_params_.reserve(params.size());
     for (const auto& param_ptr : params) {
         if (param_ptr) {
-            // S.13 / R.16: promote F16/BF16 to Float32 master copy.
+            // S.13 / R.16: promote F16/BF16 to Float32 master copy.  The
+            // averaged_params_ slot is allocated up front (matching the
+            // current param shape/dtype-policy) but treated as uninitialised
+            // storage until the first update_parameters() call installs the
+            // first sample.  We seed with a clone to keep numel() consistent;
+            // V.26 keeps n_averaged_ at 0 so update_parameters' first-call
+            // branch overwrites this seed rather than averaging into it.
             const DType state_dt = swa_state_dtype(param_ptr->tensor().dtype());
             if (state_dt != param_ptr->tensor().dtype()) {
                 averaged_params_.push_back(param_ptr->tensor().to(state_dt));
@@ -37,7 +43,11 @@ AveragedModel::AveragedModel(const std::vector<std::shared_ptr<Variable>>& param
             averaged_params_.emplace_back();
         }
     }
-    n_averaged_ = 1;
+    // V.26: PyTorch starts at 0 and update_parameters installs the first
+    // sample as a plain copy.  Audit-3 set this to 1 to count the ctor's
+    // clone as the first sample, which made every subsequent average
+    // off-by-one (and broke cross-framework checkpoint round-trips).
+    n_averaged_ = 0;
 }
 
 auto AveragedModel::update_parameters(const std::vector<std::shared_ptr<Variable>>& params) -> void {
@@ -48,6 +58,13 @@ auto AveragedModel::update_parameters(const std::vector<std::shared_ptr<Variable
             " but got " + std::to_string(params.size()));
     }
 
+    // V.26: PyTorch semantics — the very first call installs the parameter
+    // as-is (count goes 0 -> 1); every subsequent call does the running mean
+    // update with the previous count.  Old code seeded n_averaged_=1 in the
+    // ctor and folded that into avg arithmetic, biasing every average by one
+    // virtual sample equal to the construction-time parameter snapshot.
+    const bool first_sample = (n_averaged_ == 0);
+
     for (size_t i = 0; i < params.size(); ++i) {
         if (!params[i] || averaged_params_[i].numel() == 0) continue;
 
@@ -56,6 +73,13 @@ auto AveragedModel::update_parameters(const std::vector<std::shared_ptr<Variable
         // averaged_params_'s dtype (Float32 for half-precision params).
         const DType state_dt = averaged_params_[i].dtype();
         Tensor param_hi = (param.dtype() != state_dt) ? param.to(state_dt) : param;
+
+        if (first_sample) {
+            // First call: install the parameter directly (matches PyTorch's
+            // `self.module = copy(model)` on n_averaged == 0 path).
+            averaged_params_[i] = param_hi.clone();
+            continue;
+        }
 
         // avg = (avg * n + param) / (n + 1)
         auto scalar = [&](double value) -> Tensor {
@@ -79,13 +103,20 @@ auto AveragedModel::apply_to(std::vector<std::shared_ptr<Variable>>& params) con
 
     for (size_t i = 0; i < params.size(); ++i) {
         if (!params[i] || averaged_params_[i].numel() == 0) continue;
-        // S.13: cast back to param dtype on assignment when state is upcast.
+        // V.21: write into the live tensor in-place to preserve TensorImpl
+        // identity (mirrors FSDP2 R.18 pattern). Reassigning param->tensor()
+        // would swap the underlying TensorImpl and orphan any view that has
+        // already captured the parameter (e.g. an FSDP flat_param view, or
+        // an optimizer state buffer keyed by raw pointer).
+        // S.13: cast back to param dtype on the source side when state is
+        // held at Float32 master copy for F16/BF16 params.
         const DType param_dt = params[i]->tensor().dtype();
-        if (averaged_params_[i].dtype() != param_dt) {
-            params[i]->tensor() = averaged_params_[i].to(param_dt);
-        } else {
-            params[i]->tensor() = averaged_params_[i].clone();
-        }
+        Tensor src_cast = (averaged_params_[i].dtype() != param_dt)
+                              ? averaged_params_[i].to(param_dt)
+                              : averaged_params_[i];
+        auto& dst = params[i]->tensor();
+        dst.zero_();
+        add_(dst, src_cast);
     }
 }
 

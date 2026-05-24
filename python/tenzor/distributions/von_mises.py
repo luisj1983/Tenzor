@@ -1,9 +1,13 @@
 """VonMises distribution."""
 import math
 import numpy as np
-from scipy.special import i0, i1
-from scipy.stats import vonmises as _scipy_vonmises
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import (
+    Distribution,
+    _to_numpy,
+    _require_scipy_special,
+    _require_scipy_stats,
+)
 
 
 class VonMises(Distribution):
@@ -30,25 +34,28 @@ class VonMises(Distribution):
     @property
     def variance(self):
         # Circular variance = 1 - I1(kappa) / I0(kappa)
+        sp = _require_scipy_special()
         kappa = self.concentration
-        return 1.0 - i1(kappa) / i0(kappa)
+        return 1.0 - sp.i1(kappa) / sp.i0(kappa)
 
     def sample(self, sample_shape=()):
         shape = tuple(sample_shape) + self._batch_shape
         return np.random.vonmises(self.loc, self.concentration, size=shape or None)
 
     def log_prob(self, value):
+        sp = _require_scipy_special()
         value = _to_numpy(value)
         # log p(x) = kappa * cos(x - mu) - log(2*pi*I0(kappa))
         kappa = self.concentration
         return (kappa * np.cos(value - self.loc)
-                - math.log(2 * math.pi) - np.log(i0(kappa)))
+                - math.log(2 * math.pi) - np.log(sp.i0(kappa)))
 
     def entropy(self):
         # H = log(2*pi*I0(kappa)) - kappa * I1(kappa) / I0(kappa)
+        sp = _require_scipy_special()
         kappa = self.concentration
-        i0k = i0(kappa)
-        i1k = i1(kappa)
+        i0k = sp.i0(kappa)
+        i1k = sp.i1(kappa)
         return math.log(2 * math.pi) + np.log(i0k) - kappa * i1k / i0k
 
     def cdf(self, value):
@@ -62,12 +69,14 @@ class VonMises(Distribution):
 
         and returns CDF in [0, 1] over the principal branch (-pi, pi].
         """
+        _scipy_vonmises = _require_scipy_stats().vonmises
         value = _to_numpy(value)
         # scipy parameterises VonMises as kappa with loc=mu; broadcast manually.
         return _scipy_vonmises.cdf(value, self.concentration, loc=self.loc)
 
     def icdf(self, q):
         """Inverse CDF (PPF) of VonMises (audit item E.5)."""
+        _scipy_vonmises = _require_scipy_stats().vonmises
         q = _to_numpy(q)
         return _scipy_vonmises.ppf(q, self.concentration, loc=self.loc)
 

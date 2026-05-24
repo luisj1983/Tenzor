@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/backend/attr_macros.hpp"
 #include <unordered_set>
 
 namespace tenzor {
@@ -2378,10 +2379,29 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     // and computes channels from input_shape[1] / (kernel^2); it does NOT set
     // per-dim AttrKey::Channels / Height / Width. Previously we read those
     // missing keys as 0, producing empty output tensors.
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    //
+    // audit V.13: read per-axis attrs and reject asymmetric kernel/stride/
+    // padding/dilation. The col2im.comp shader push-constants are scalar; a
+    // dispatcher that stores per-axis (H/W) variants would silently see them
+    // dropped because the previous code only read the scalar AttrKey::*.
+    const auto kernel_2d_axes  = ::tenzor::backend::attrs::read_2d(attrs,
+        AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 0);
+    const auto stride_2d_axes  = ::tenzor::backend::attrs::stride_2d(attrs);
+    const auto padding_2d_axes = ::tenzor::backend::attrs::padding_2d(attrs);
+    const auto dilation_2d_axes= ::tenzor::backend::attrs::dilation_2d(attrs);
+    if (kernel_2d_axes[0] != kernel_2d_axes[1] || stride_2d_axes[0] != stride_2d_axes[1] ||
+        padding_2d_axes[0] != padding_2d_axes[1] || dilation_2d_axes[0] != dilation_2d_axes[1]) {
+        throw std::invalid_argument(
+            "col2im (Vulkan): backend kernel only supports symmetric kernel/stride/padding/dilation; "
+            "got kernel=" + std::to_string(kernel_2d_axes[0]) + "x" + std::to_string(kernel_2d_axes[1]) +
+            ", stride=" + std::to_string(stride_2d_axes[0]) + "x" + std::to_string(stride_2d_axes[1]) +
+            ", padding=" + std::to_string(padding_2d_axes[0]) + "x" + std::to_string(padding_2d_axes[1]) +
+            ", dilation=" + std::to_string(dilation_2d_axes[0]) + "x" + std::to_string(dilation_2d_axes[1]));
+    }
+    int64_t kernel_size = kernel_2d_axes[0];
+    int64_t stride = stride_2d_axes[0];
+    int64_t padding = padding_2d_axes[0];
+    int64_t dilation = dilation_2d_axes[0];
 
     int64_t height = 0, width = 0, channels = 0;
     if (attrs.has(AttrKey::OutputSize)) {

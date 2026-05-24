@@ -460,14 +460,24 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     // re-entrant locking (has_grad/set_grad also lock grad_mutex_
                     // when thread_safe_ is true, causing self-deadlock).
                     auto accumulate_unlocked = [&]() {
-                        // Cast gradient to match the variable's dtype (e.g., F16 params
-                        // may receive F32 gradients from ops that upcast for precision)
-                        DType var_dtype = var.tensor().dtype();
-                        if (grad_to_apply.dtype() != var_dtype) {
-                            grad_to_apply = grad_to_apply.to(var_dtype);
-                        }
+                        // V.4: Accumulate in the promoted dtype of (existing,
+                        // incoming) so summing F32 grads into an F16 leaf does
+                        // not downcast each incoming grad to F16 before the
+                        // add. Downcasting per-step truncates ~3 bits of
+                        // mantissa per accumulation; PyTorch keeps the
+                        // gradient at the upstream dtype throughout backward
+                        // and downcasts only on the user-facing .grad() read.
                         if (var.impl_->grad_.has_value()) {
-                            var.impl_->grad_ = var.impl_->grad_.value() + grad_to_apply;
+                            auto existing_grad = var.impl_->grad_.value();
+                            DType target = promote_types(existing_grad.dtype(),
+                                                          grad_to_apply.dtype());
+                            if (existing_grad.dtype() != target) {
+                                existing_grad = existing_grad.to(target);
+                            }
+                            if (grad_to_apply.dtype() != target) {
+                                grad_to_apply = grad_to_apply.to(target);
+                            }
+                            var.impl_->grad_ = existing_grad + grad_to_apply;
                         } else {
                             var.impl_->grad_ = grad_to_apply;
                         }
@@ -591,7 +601,8 @@ auto BackwardEngine::get_accumulated_grads(Function* func) -> const std::vector<
 
 auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                                    std::vector<Tensor> gradients,
-                                   bool retain_graph) -> void {
+                                   bool retain_graph,
+                                   bool create_graph) -> void {
     if (roots.empty()) {
         return;
     }
@@ -605,8 +616,26 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     // Save and clear grad_accumulators_ for re-entrancy safety.
     // Nested backward calls (from checkpointing) must use independent
     // accumulator maps to avoid corrupting the outer call's state.
+    //
+    // V.3: install the restore guard IMMEDIATELY after the std::move, before
+    // we run any seeding code that could throw. Previously the guard was
+    // installed below (after topo sort + accumulate_grad calls), so any
+    // exception from `set_grad` / `accumulate_grad` between the move and
+    // the guard install would leak the saved accumulators forever (the
+    // outer-thread state would be permanently empty).
     auto saved_accumulators = std::move(grad_accumulators_);
     grad_accumulators_.clear();
+    ScopeGuard accum_guard_multi{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+
+    // Set the create_graph flag so backward functions know to use Variable ops.
+    // Use RAII guard to ensure flag is restored even on exception. Same
+    // pattern as the single-root execute() above; V.2 brings the multi-root
+    // path to parity (torch.autograd.backward([roots], create_graph=True)
+    // previously silently degraded to first-order-only).
+    std::optional<CreateGraphGuard> graph_guard;
+    if (create_graph) {
+        graph_guard.emplace();
+    }
 
     // Initialize gradients for each root
     for (size_t i = 0; i < roots.size(); ++i) {
@@ -693,8 +722,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         }
     };
 
-    // RAII guards for exception-safe cleanup
-    ScopeGuard accum_guard_multi{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    // V.3: accum_guard_multi was moved up to immediately after the
+    // std::move (above). Only the graph-cleanup guard is installed here.
     ScopeGuard cleanup_guard_multi{[&]{ clear_gradients(); cleanup_graph(); }};
 
     {
@@ -729,7 +758,54 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 
             function->reload_saved_tensors();
             function->validate_saved_tensors();
-            auto input_grads = function->backward(grad_outputs);
+
+            // V.2: dual-path block matching the single-root execute() —
+            // honours `create_graph` by invoking `backward_with_variables`
+            // and tracking higher-order stub disconnections. Previously
+            // the multi-root path always called the raw-Tensor `backward`,
+            // so torch.autograd.backward([roots], create_graph=True)
+            // silently degraded to first-order-only.
+            std::vector<Tensor> input_grads;
+            std::vector<Variable> var_input_grads;
+            {
+                std::optional<BackwardTimer> _profiler_timer;
+                if (AutogradProfiler::instance().is_enabled()) {
+                    _profiler_timer.emplace(function->name());
+                }
+
+                if (create_graph) {
+                    std::vector<Variable> var_grad_outputs;
+                    var_grad_outputs.reserve(grad_outputs.size());
+                    for (auto& g : grad_outputs) {
+                        var_grad_outputs.emplace_back(g, true);
+                    }
+
+                    var_input_grads = function->backward_with_variables(var_grad_outputs);
+
+                    if (function->is_higher_order_stub()) {
+                        auto mode = get_higher_order_grad_mode();
+                        if (mode == HigherOrderGradMode::Error) {
+                            throw std::runtime_error(
+                                "create_graph=true but '" + function->name() +
+                                "' is a higher-order stub (second derivatives are zero). "
+                                "Use set_higher_order_grad_mode(Warn) to allow this.");
+                        }
+                        detail::increment_higher_order_disconnection_count();
+                        TENZOR_LOG_WARN("[tenzor::autograd] '{}' is a higher-order stub — "
+                                        "second derivatives through it will be zero. "
+                                        "(disconnection #{})",
+                                        function->name(),
+                                        higher_order_disconnection_count());
+                    }
+
+                    input_grads.reserve(var_input_grads.size());
+                    for (auto& vg : var_input_grads) {
+                        input_grads.push_back(vg.tensor());
+                    }
+                } else {
+                    input_grads = function->backward(grad_outputs);
+                }
+            }
 
             // Check for NaN/Inf in computed gradients when anomaly detection is on
             check_for_anomaly(input_grads, function.get());
@@ -775,15 +851,18 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
 
                 if (var.is_leaf() || var.retains_grad()) {
-                    // Access impl_->grad_ directly under the lock to avoid
-                    // re-entrant locking (has_grad/set_grad also lock grad_mutex_
-                    // when thread_safe_ is true, causing self-deadlock).
+                    // V.4: accumulate at the promoted dtype of (existing,
+                    // incoming) — never downcast incoming to a half-precision
+                    // leaf dtype before the add.
                     auto accumulate_unlocked = [&]() {
                         if (var.impl_->grad_.has_value()) {
                             auto existing_grad = var.impl_->grad_.value();
-                            if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                                DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
+                            DType target = promote_types(existing_grad.dtype(),
+                                                         grad_to_apply.dtype());
+                            if (existing_grad.dtype() != target) {
                                 existing_grad = existing_grad.to(target);
+                            }
+                            if (grad_to_apply.dtype() != target) {
                                 grad_to_apply = grad_to_apply.to(target);
                             }
                             var.impl_->grad_ = existing_grad + grad_to_apply;
@@ -798,6 +877,16 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 #endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
+                        // V.2: mirror the single-root path — capture the
+                        // Variable form of the gradient on the leaf when
+                        // create_graph is set so .grad_variable() chains
+                        // back through the forward graph.
+                        if (create_graph && i < var_input_grads.size() &&
+                            !var.impl_->grad_with_graph_impl_) {
+                            var.impl_->grad_with_graph_impl_ =
+                                var_input_grads[i].impl_;
+                            var.impl_->grad_with_graph_cache_storage_.reset();
+                        }
                     } else {
                         var.set_grad(grad_to_apply);
                     }

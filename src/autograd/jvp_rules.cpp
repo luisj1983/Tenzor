@@ -328,14 +328,16 @@ auto jvp_clamp(const DualTensor& x, double min_val, double max_val) -> DualTenso
 // Activation extensions
 // ============================================================================
 
-auto jvp_leaky_relu(const DualTensor& x, float negative_slope) -> DualTensor {
+auto jvp_leaky_relu(const DualTensor& x, double negative_slope) -> DualTensor {
+    // V.6: double end-to-end so Float64 callers don't silently narrow the
+    // scalar parameter through float at the helper boundary.
     // leaky_relu(x) = x if x > 0, else negative_slope * x
     auto p = x.primal();
     auto zero = tenzor::zeros_like(p);
     auto pos_mask = tenzor::gt(p, zero);  // 1 where x > 0
     // derivative: 1 where x > 0, negative_slope elsewhere
     auto one = tenzor::ones_like(p);
-    auto slope = tenzor::mul(tenzor::ones_like(p), static_cast<double>(negative_slope));
+    auto slope = tenzor::mul(tenzor::ones_like(p), negative_slope);
     // deriv = pos_mask * 1 + (1 - pos_mask) * negative_slope
     auto deriv = tenzor::add(tenzor::mul(pos_mask, one),
                              tenzor::mul(tenzor::sub(one, pos_mask), slope));
@@ -344,7 +346,8 @@ auto jvp_leaky_relu(const DualTensor& x, float negative_slope) -> DualTensor {
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
-auto jvp_elu(const DualTensor& x, float alpha) -> DualTensor {
+auto jvp_elu(const DualTensor& x, double alpha) -> DualTensor {
+    // V.6: double end-to-end.
     // elu(x) = x if x > 0, else alpha * (exp(x) - 1)
     // d(elu)/dx = 1 if x > 0, else alpha * exp(x)
     auto p = x.primal();
@@ -352,11 +355,11 @@ auto jvp_elu(const DualTensor& x, float alpha) -> DualTensor {
     auto pos_mask = tenzor::gt(p, zero);
     auto one = tenzor::ones_like(p);
     auto exp_x = tenzor::exp(p);
-    auto neg_deriv = tenzor::mul(exp_x, static_cast<double>(alpha));
+    auto neg_deriv = tenzor::mul(exp_x, alpha);
     auto deriv = tenzor::add(tenzor::mul(pos_mask, one),
                              tenzor::mul(tenzor::sub(one, pos_mask), neg_deriv));
     // primal
-    auto neg_val = tenzor::mul(tenzor::sub(exp_x, one), static_cast<double>(alpha));
+    auto neg_val = tenzor::mul(tenzor::sub(exp_x, one), alpha);
     auto primal = tenzor::add(tenzor::mul(pos_mask, p),
                               tenzor::mul(tenzor::sub(one, pos_mask), neg_val));
     auto tangent = tenzor::mul(x.tangent(), deriv);
@@ -385,10 +388,11 @@ auto jvp_selu(const DualTensor& x) -> DualTensor {
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
-auto jvp_softplus(const DualTensor& x, float beta) -> DualTensor {
+auto jvp_softplus(const DualTensor& x, double beta) -> DualTensor {
+    // V.6: double end-to-end.
     // softplus(x) = (1/beta) * log(1 + exp(beta*x))
     // d(softplus)/dx = sigmoid(beta*x)
-    auto bx = tenzor::mul(x.primal(), static_cast<double>(beta));
+    auto bx = tenzor::mul(x.primal(), beta);
     auto exp_bx = tenzor::exp(bx);
     auto one = tenzor::ones_like(x.primal());
     auto primal = tenzor::mul(tenzor::log(tenzor::add(one, exp_bx)), 1.0 / beta);
@@ -2020,7 +2024,10 @@ JvpResult jvp_adapter_leaky_relu(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_leaky_relu: expected 1 input");
     }
     auto x = make_dual(primals[0], tangents[0]);
-    float slope = static_cast<float>(attrs.get_float(AttrKey::Negative_slope, 0.01));
+    // V.6: keep the scalar at double end-to-end (the underlying `jvp_leaky_relu`
+    // now takes `double`; previously the static_cast<float> narrowed the value
+    // read from the OpAttributes' double-typed slot).
+    double slope = attrs.get_float(AttrKey::Negative_slope, 0.01);
     return dual_to_result(jvp_leaky_relu(x, slope));
 }
 
@@ -2031,7 +2038,8 @@ JvpResult jvp_adapter_elu(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_elu: expected 1 input");
     }
     auto x = make_dual(primals[0], tangents[0]);
-    float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+    // V.6: double end-to-end (see jvp_adapter_leaky_relu for rationale).
+    double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
     return dual_to_result(jvp_elu(x, alpha));
 }
 
@@ -2042,7 +2050,8 @@ JvpResult jvp_adapter_softplus(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_softplus: expected 1 input");
     }
     auto x = make_dual(primals[0], tangents[0]);
-    float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+    // V.6: double end-to-end (see jvp_adapter_leaky_relu for rationale).
+    double beta = attrs.get_float(AttrKey::Beta, 1.0);
     return dual_to_result(jvp_softplus(x, beta));
 }
 

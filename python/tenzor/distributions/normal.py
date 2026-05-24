@@ -1,8 +1,10 @@
 """Normal (Gaussian) distribution."""
 import math
 import numpy as np
-from scipy import special as scipy_special
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy — see `_require_scipy_special` in distribution.py.
+# Importing it eagerly at module top causes ImportError on scipy-free
+# systems, which `tools/check_pyi_drift.py` mis-reports as ~80 stub drifts.
+from .distribution import Distribution, _to_numpy, _require_scipy_special
 
 
 class Normal(Distribution):
@@ -41,10 +43,12 @@ class Normal(Distribution):
         return -0.5 * (math.log(2 * math.pi) + 2 * np.log(self.scale) + z * z)
 
     def cdf(self, value):
+        scipy_special = _require_scipy_special()
         value = _to_numpy(value)
         return 0.5 * (1.0 + scipy_special.erf((value - self.loc) / (self.scale * math.sqrt(2.0))))
 
     def icdf(self, p):
+        scipy_special = _require_scipy_special()
         p = _to_numpy(p)
         return self.loc + self.scale * math.sqrt(2.0) * scipy_special.erfinv(2.0 * p - 1.0)
 

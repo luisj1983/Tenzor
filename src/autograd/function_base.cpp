@@ -132,15 +132,29 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
     // copy is what we actually store. For non-offloaded tensors, the
     // version recorded below is the live one and the existing in-place
     // detection still applies.
+    // V.5: record the source device per tensor so multi-device saves
+    // (rare but legal — e.g. a custom Function that captures activations
+    // from two different GPUs) round-trip correctly. The legacy single
+    // `offloaded_device_` was only set on the first iteration, so any
+    // subsequent tensor from a different device would be reloaded to the
+    // *first* tensor's device, silently relocating it.
+    offloaded_devices_.clear();
+    offloaded_devices_.reserve(tensors.size());
     if (!tensors.empty()) {
         bool any_offloaded = false;
         for (auto& t : tensors) {
             if (should_offload(t)) {
+                Device src = t.device();
+                offloaded_devices_.push_back(src);
                 if (!any_offloaded) {
-                    offloaded_device_ = t.device();
+                    offloaded_device_ = src;  // legacy field — first offload source
                     any_offloaded = true;
                 }
                 t = t.to(Device::cpu());
+            } else {
+                // Not offloaded — record CPU as a no-op sentinel so the
+                // index stays aligned with saved_tensors_.
+                offloaded_devices_.push_back(Device::cpu());
             }
         }
         if (any_offloaded) {
@@ -263,7 +277,14 @@ void Function::reload_saved_tensors_locked() const {
     // after the offload/reload round trip. We record the *current*
     // post-reload version as the new baseline.
     for (size_t i = 0; i < saved_tensors_.size(); ++i) {
-        saved_tensors_[i] = saved_tensors_[i].to(offloaded_device_);
+        // V.5: use per-tensor source device; fall back to the legacy
+        // single device for entries that pre-date the per-tensor tracking
+        // (e.g. a Function that bypassed save_for_backward to populate
+        // saved_tensors_ directly).
+        Device target = (i < offloaded_devices_.size())
+            ? offloaded_devices_[i]
+            : offloaded_device_;
+        saved_tensors_[i] = saved_tensors_[i].to(target);
         if (i < saved_versions_.size()) {
             saved_versions_[i] = saved_tensors_[i].version();
         }

@@ -100,7 +100,12 @@ function(tenzor_discover_tests target)
         # Source-level multi-backend parametrization: every five backends
         # get a label so `ctest -L cuda` etc. find these. Name already
         # contains the backend value so no TEST_PREFIX.
-        set(_backend_labels ${_all_backends})
+        #
+        # V.41: also attach the literal label `multi` so `ctest -L multi`
+        # selects this exact group.  Previously expanding `BACKENDS multi`
+        # to the five backend labels meant `ctest -L multi` returned 0
+        # tests despite TESTING.md documenting the selector.
+        set(_backend_labels ${_all_backends} multi)
     else()
         foreach(_b IN LISTS _backends)
             if(NOT _b IN_LIST _valid_single)
@@ -529,7 +534,7 @@ set_tests_properties(cpu_CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIME
 # by justifying or tightening each entry.
 add_test(NAME ToleranceAudit
     COMMAND ${CMAKE_COMMAND} -E env
-            python3 ${PROJECT_SOURCE_DIR}/scripts/audit_tolerances.py
+            python3 ${PROJECT_SOURCE_DIR}/tools/audit_tolerances.py
                 --root ${PROJECT_SOURCE_DIR}/tests
                 --strict
                 --baseline ${PROJECT_SOURCE_DIR}/tools/audit_tolerances_baseline.txt)

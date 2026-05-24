@@ -75,6 +75,19 @@ void register_autograd(py::module_& m) {
             }
         }
 
+        // V.32: PyTorch's torch.autograd.grad() never touches caller .grad
+        // or .retain_grad. Capture pre-call state so we can restore it after
+        // the scratch backward.
+        std::vector<std::optional<tenzor::Tensor>> saved_grads(inputs.size());
+        std::vector<bool> saved_retains(inputs.size(), false);
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (inputs[i].has_grad()) {
+                saved_grads[i] = inputs[i].grad();
+            }
+            saved_retains[i] = inputs[i].retains_grad();
+        }
+
+        py::tuple result(inputs.size());
         {
             py::gil_scoped_release release;
             for (auto& inp : inputs) {
@@ -88,13 +101,20 @@ void register_autograd(py::module_& m) {
             }
         }
 
-        py::tuple result(inputs.size());
+        // Collect scratch grads into the result tuple, then restore caller state.
         for (size_t i = 0; i < inputs.size(); ++i) {
             if (inputs[i].has_grad()) {
                 result[i] = py::cast(inputs[i].grad());
             } else {
                 result[i] = py::none();
             }
+            // Restore the user's pre-call .grad and retain_grad flag.
+            if (saved_grads[i].has_value()) {
+                inputs[i].set_grad(saved_grads[i].value());
+            } else {
+                inputs[i].zero_grad();
+            }
+            inputs[i].set_retain_grad(saved_retains[i]);
         }
         return result;
     },

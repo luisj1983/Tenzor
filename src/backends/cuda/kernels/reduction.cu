@@ -1032,7 +1032,7 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1067,7 +1067,7 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1093,7 +1093,7 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1217,7 +1217,7 @@ static void launch_full_reduction_max_half(const __half* d_input, __half* d_outp
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1242,7 +1242,7 @@ static void launch_full_reduction_min_half(const __half* d_input, __half* d_outp
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1331,7 +1331,7 @@ static void launch_full_reduction_max_bf16(const __nv_bfloat16* d_input, __nv_bf
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -1356,7 +1356,7 @@ static void launch_full_reduction_min_bf16(const __nv_bfloat16* d_input, __nv_bf
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 
@@ -3480,7 +3480,7 @@ static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n,
     }
 
     if (n == 1) {
-        cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, sizeof(T), cudaMemcpyDeviceToDevice, stream)); // audit V.17
         return;
     }
 

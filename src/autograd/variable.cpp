@@ -193,6 +193,13 @@ auto Variable::retain_grad() -> void {
     impl_->retain_grad_ = true;
 }
 
+auto Variable::set_retain_grad(bool value) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set retain_grad on uninitialized Variable");
+    }
+    impl_->retain_grad_.store(value, std::memory_order_release);
+}
+
 auto Variable::retains_grad() const -> bool {
     return impl_ && impl_->retain_grad_;
 }

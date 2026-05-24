@@ -3205,13 +3205,15 @@ auto flash_attention_backward_cuda(
         const DType seed_dtype = philox_seed.dtype();
         if (seed_dtype == DType::Int64) {
             int64_t seed_host = 0;
-            cudaMemcpy(&seed_host, philox_seed.data_ptr(),
-                       sizeof(int64_t), cudaMemcpyDeviceToHost);
+            // audit V.18: surface cudaMemcpy errors instead of silently dropping them.
+            TENZOR_CUDA_CHECK(cudaMemcpy(&seed_host, philox_seed.data_ptr(),
+                       sizeof(int64_t), cudaMemcpyDeviceToHost));
             rng_seed = static_cast<uint32_t>(seed_host);
         } else if (seed_dtype == DType::Int32) {
             int32_t seed_host = 0;
-            cudaMemcpy(&seed_host, philox_seed.data_ptr(),
-                       sizeof(int32_t), cudaMemcpyDeviceToHost);
+            // audit V.18.
+            TENZOR_CUDA_CHECK(cudaMemcpy(&seed_host, philox_seed.data_ptr(),
+                       sizeof(int32_t), cudaMemcpyDeviceToHost));
             rng_seed = static_cast<uint32_t>(seed_host);
         } else {
             throw std::runtime_error(

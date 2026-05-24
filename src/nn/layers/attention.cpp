@@ -665,6 +665,26 @@ auto MultiheadAttention::forward(const Variable& query,
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
         Tensor padding_mask = reshape(key_padding_mask, mask_shape);
 
+        // V.28: accept either a boolean mask (PyTorch convention: True =
+        // ignore) or a float mask (non-zero = ignore).  The previous code
+        // built `threshold = full(0.5, padding_mask.dtype())`, which truncates
+        // 0.5 to 0 under Bool — making `gt(mask, 0)` true for every cell that
+        // happens to be true, but also for every false cell (since gt(false,
+        // 0) is false but the threshold was equal, not strictly less).  More
+        // critically, downstream `where(neg_inf, zero)` allocates -inf at the
+        // mask's dtype: for a Bool mask, -inf truncates to 1, masking
+        // *everything* additively by 1 instead of -inf.  Normalise to Float32
+        // up front so all derived tensors live at a real floating dtype.
+        const DType mask_dtype = padding_mask.dtype();
+        if (mask_dtype == DType::Bool) {
+            padding_mask = padding_mask.to(DType::Float32);
+        } else if (mask_dtype != DType::Float32 && mask_dtype != DType::Float64 &&
+                   mask_dtype != DType::Float16 && mask_dtype != DType::BFloat16) {
+            // Integer mask (Int8/Int32/Int64): treat as 0/1 indicator, widen
+            // to Float32 so the threshold/neg_inf comparison is well-defined.
+            padding_mask = padding_mask.to(DType::Float32);
+        }
+
         // Create -inf tensor for masked positions using device-agnostic tensor ops
         auto pm_shape = std::vector<int64_t>(padding_mask.shape().begin(), padding_mask.shape().end());
         Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),

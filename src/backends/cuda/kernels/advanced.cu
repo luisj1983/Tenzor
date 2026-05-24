@@ -1596,9 +1596,10 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 
         // Get total (last element of CDF) - copy to host
         float total = 0.0f;
-        cudaMemcpyAsync(&total, cdf_ptr + num_categories - 1, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        // audit V.17: previously dropped the cudaMemcpyAsync return code.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&total, cdf_ptr + num_categories - 1, sizeof(float),
+                        cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
         if (total <= 0.0f) total = 1.0f;
 
         // Sample
@@ -2081,20 +2082,30 @@ auto launch_advanced_index_gather(
     Tensor result(prep.output_shape, src.dtype(), src.device());
     if (prep.total == 0) return result;
 
-    // Pack idx pointers into a small device array
-    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    // Pack idx pointers into a small device array.
+    //
+    // audit V.19: previous code used a pageable std::vector as the
+    // cudaMemcpyAsync source, which (per the CUDA docs) forces the runtime to
+    // stage through a synchronous host-pinned bounce buffer — i.e. the call
+    // blocks the host thread until the copy completes, defeating async. Use a
+    // pinned staging buffer (cudaMallocHost) so the HtoD copy is genuinely
+    // asynchronous on `stream` and surface the return codes via TENZOR_CUDA_CHECK.
+    const size_t ptrs_bytes = num_indices * sizeof(const int64_t*);
+    const int64_t** pinned_host_ptrs = nullptr;
+    TENZOR_CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&pinned_host_ptrs), ptrs_bytes));
     std::vector<Tensor> idx_contig(num_indices);
     for (int i = 0; i < num_indices; ++i) {
+        pinned_host_ptrs[i] = nullptr;
         if (prep.meta.is_indexed[i]) {
             idx_contig[i] = index_tensors[i]->contiguous();
-            host_ptrs[i] = idx_contig[i].data<int64_t>();
+            pinned_host_ptrs[i] = idx_contig[i].data<int64_t>();
         }
     }
-    backend::CachedMemoryGuard ptr_buf_guard(num_indices * sizeof(const int64_t*));
+    backend::CachedMemoryGuard ptr_buf_guard(ptrs_bytes);
     auto* d_idx_ptrs = static_cast<const int64_t**>(ptr_buf_guard.get());
-    cudaMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
-                    num_indices * sizeof(const int64_t*),
-                    cudaMemcpyHostToDevice, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_idx_ptrs, pinned_host_ptrs,
+                    ptrs_bytes,
+                    cudaMemcpyHostToDevice, stream));
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
@@ -2107,6 +2118,11 @@ auto launch_advanced_index_gather(
         prep.meta,
         prep.total);
     TENZOR_CUDA_CHECK(cudaGetLastError());
+    // Synchronise before freeing pinned source — release happens after the
+    // copy has issued, but cudaFreeHost is host-blocking and requires the
+    // buffer not be referenced by any in-flight async copy.
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+    TENZOR_CUDA_CHECK(cudaFreeHost(pinned_host_ptrs));
     return result;
 }
 
@@ -2124,19 +2140,24 @@ auto launch_advanced_index_put(
     Tensor values_contig = values.contiguous();
     if (prep.total == 0) return result_contig;
 
-    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    // audit V.19: pinned staging buffer for truly async HtoD; see the gather
+    // path above for the full rationale.
+    const size_t ptrs_bytes = num_indices * sizeof(const int64_t*);
+    const int64_t** pinned_host_ptrs = nullptr;
+    TENZOR_CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&pinned_host_ptrs), ptrs_bytes));
     std::vector<Tensor> idx_contig(num_indices);
     for (int i = 0; i < num_indices; ++i) {
+        pinned_host_ptrs[i] = nullptr;
         if (prep.meta.is_indexed[i]) {
             idx_contig[i] = index_tensors[i]->contiguous();
-            host_ptrs[i] = idx_contig[i].data<int64_t>();
+            pinned_host_ptrs[i] = idx_contig[i].data<int64_t>();
         }
     }
-    backend::CachedMemoryGuard ptr_buf_guard(num_indices * sizeof(const int64_t*));
+    backend::CachedMemoryGuard ptr_buf_guard(ptrs_bytes);
     auto* d_idx_ptrs = static_cast<const int64_t**>(ptr_buf_guard.get());
-    cudaMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
-                    num_indices * sizeof(const int64_t*),
-                    cudaMemcpyHostToDevice, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_idx_ptrs, pinned_host_ptrs,
+                    ptrs_bytes,
+                    cudaMemcpyHostToDevice, stream));
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
@@ -2149,6 +2170,9 @@ auto launch_advanced_index_put(
         prep.meta,
         prep.total);
     TENZOR_CUDA_CHECK(cudaGetLastError());
+    // audit V.19: synchronize before releasing the pinned staging buffer.
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+    TENZOR_CUDA_CHECK(cudaFreeHost(pinned_host_ptrs));
     return result_contig;
 }
 
@@ -2307,17 +2331,19 @@ auto stft_cuda_kernel(const Tensor& input, int64_t n_fft,
     if (window.is_valid() && window.numel() > 0) {
         Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32)
                                                               : window.contiguous();
-        cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
+        // audit V.17: wrap cudaMemcpyAsync in TENZOR_CUDA_CHECK.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
                         win_f32.data<float>(),
                         win_length * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream);
+                        cudaMemcpyDeviceToDevice, stream));
     } else {
         // Fill with ones at [win_offset, win_offset+win_length)
         std::vector<float> host_ones(win_length, 1.0f);
-        cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
+        // audit V.17: pageable HtoD here is implicitly sync; CHECK the result.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
                         host_ones.data(),
                         win_length * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyHostToDevice, stream));
     }
 
     // Frame+window kernel: produce (batch_size, num_frames, n_fft)
@@ -2448,16 +2474,18 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     if (window.is_valid() && window.numel() > 0) {
         Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32)
                                                               : window.contiguous();
-        cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
+        // audit V.17: wrap cudaMemcpyAsync in TENZOR_CUDA_CHECK.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
                         win_f32.data<float>(),
                         win_length * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream);
+                        cudaMemcpyDeviceToDevice, stream));
     } else {
         std::vector<float> host_ones(win_length, 1.0f);
-        cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
+        // audit V.17.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
                         host_ones.data(),
                         win_length * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyHostToDevice, stream));
     }
 
     // Allocate output and window_sum accumulators (zeroed)
@@ -2689,8 +2717,9 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     TENZOR_CUDA_CHECK(cudaMemsetAsync(max_tensor.data<int64_t>(), 0xFF, sizeof(int64_t), stream)); // set to -1
     // Actually set to -1 properly
     int64_t neg_one = -1;
-    cudaMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
-                    cudaMemcpyHostToDevice, stream);
+    // audit V.17: wrap both cudaMemcpyAsync sites and the stream sync.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
+                    cudaMemcpyHostToDevice, stream));
 
     if (n > 0) {
         int block = 256;
@@ -2702,9 +2731,9 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
 
     // Copy max back to host
     int64_t max_val = -1;
-    cudaMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
+                    cudaMemcpyDeviceToHost, stream));
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     int64_t output_size = std::max(max_val + 1, minlength);
 
@@ -3146,9 +3175,10 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream
     // Sort test_elements on GPU using thrust
     Tensor test_sorted(std::vector<int64_t>(test_cont.shape().begin(), test_cont.shape().end()),
                        test_cont.dtype(), test_cont.device());
-    cudaMemcpyAsync(test_sorted.data_ptr(), test_cont.data_ptr(),
+    // audit V.17.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(test_sorted.data_ptr(), test_cont.data_ptr(),
                     test_cont.numel() * test_cont.element_size(),
-                    cudaMemcpyDeviceToDevice, stream);
+                    cudaMemcpyDeviceToDevice, stream));
 
     int64_t num_test = test_sorted.numel();
     int64_t num_elements = elem_cont.numel();
@@ -3587,9 +3617,10 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
             auto end = begin + n;
             auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
             float h_min, h_max;
-            cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(float), cudaMemcpyDeviceToHost, stream);
-            cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(float), cudaMemcpyDeviceToHost, stream);
-            cudaStreamSynchronize(stream);
+            // audit V.17.
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(float), cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(float), cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
             min_val = h_min;
             max_val = h_max;
         } else if (dtype == DType::Float64) {
@@ -3597,9 +3628,10 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
             auto end = begin + n;
             auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
             double h_min, h_max;
-            cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(double), cudaMemcpyDeviceToHost, stream);
-            cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(double), cudaMemcpyDeviceToHost, stream);
-            cudaStreamSynchronize(stream);
+            // audit V.17.
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(double), cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(double), cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
             min_val = h_min;
             max_val = h_max;
         }
@@ -3733,9 +3765,10 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
 
         // Get total unique count from last element of prefix sum
         int32_t num_unique_h;
-        cudaMemcpyAsync(&num_unique_h, prefix.data<int32_t>() + n - 1,
-                        sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        // audit V.17.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&num_unique_h, prefix.data<int32_t>() + n - 1,
+                        sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
         int64_t num_unique = num_unique_h;
 
         // Step 3: gather unique elements and compute inverse indices

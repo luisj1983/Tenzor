@@ -468,8 +468,14 @@ public:
      * model.to(Device::cuda(0));  // Move to GPU 0
      * @endcode
      */
-    auto to(Device device) -> void;
-    auto to(DType dtype) -> void;
+    // V.29: virtual so LazyLinear (and any other lazily-materialised module)
+    // can intercept `to(DType)` / `to(Device)` calls that arrive before the
+    // first forward pass — without an override, a `model.to(BFloat16)` on a
+    // not-yet-materialised LazyLinear is silently dropped (parameters_ /
+    // buffers_ are empty), then materialise() hardcodes Float32 / the input
+    // device and the requested dtype/device never re-fires.
+    virtual auto to(Device device) -> void;
+    virtual auto to(DType dtype) -> void;
 
     /**
      * @brief Move module to CUDA device.

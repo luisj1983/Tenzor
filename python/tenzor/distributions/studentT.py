@@ -1,9 +1,14 @@
 """Student's t distribution."""
 import math
 import numpy as np
-from scipy.special import gammaln, hyp2f1
-from scipy.stats import t as scipy_t
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is loaded lazily on first use to keep the public
+# `tenzor.distributions` import graph scipy-free (see distribution.py).
+from .distribution import (
+    Distribution,
+    _to_numpy,
+    _require_scipy_special,
+    _require_scipy_stats,
+)
 
 
 class StudentT(Distribution):
@@ -47,6 +52,8 @@ class StudentT(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, value):
+        scipy_special = _require_scipy_special()
+        gammaln = scipy_special.gammaln
         value = _to_numpy(value)
         nu = self.df
         y = (value - self.loc) / self.scale
@@ -57,19 +64,23 @@ class StudentT(Distribution):
         return log_unnorm + log_kernel - np.log(self.scale)
 
     def cdf(self, value):
+        scipy_t = _require_scipy_stats().t
         value = _to_numpy(value)
         y = (value - self.loc) / self.scale
         return scipy_t.cdf(y, df=self.df)
 
     def icdf(self, p):
+        scipy_t = _require_scipy_stats().t
         p = _to_numpy(p)
         return self.loc + self.scale * scipy_t.ppf(p, df=self.df)
 
     def entropy(self):
+        scipy_special = _require_scipy_special()
+        digamma = scipy_special.digamma
+        betaln = scipy_special.betaln
         nu = self.df
         # H = 0.5*(nu+1)*(psi((nu+1)/2) - psi(nu/2))
         #   + log(sqrt(nu) * B(nu/2, 0.5))
-        from scipy.special import digamma, betaln
         h = (0.5 * (nu + 1.0) * (digamma((nu + 1.0) / 2.0) - digamma(nu / 2.0))
              + 0.5 * np.log(nu) + betaln(nu / 2.0, 0.5))
         return h + np.log(self.scale)

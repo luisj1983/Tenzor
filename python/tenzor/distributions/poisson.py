@@ -2,8 +2,13 @@
 import math
 
 import numpy as np
-from scipy.special import gammaln
-from .distribution import Distribution, _to_numpy
+# V.39: scipy is lazy (see distribution.py).
+from .distribution import (
+    Distribution,
+    _to_numpy,
+    _require_scipy_special,
+    _require_scipy_stats,
+)
 
 
 class Poisson(Distribution):
@@ -32,6 +37,7 @@ class Poisson(Distribution):
         return np.random.poisson(self.rate, size=shape or None).astype(np.float64)
 
     def log_prob(self, value):
+        gammaln = _require_scipy_special().gammaln
         value = _to_numpy(value)
         # log P(k; lambda) = k * log(lambda) - lambda - lgamma(k+1)
         eps = 1e-7
@@ -54,6 +60,7 @@ class Poisson(Distribution):
 
         Returns ``ndarray`` with shape equal to the batch shape.
         """
+        gammaln = _require_scipy_special().gammaln
         rate = np.clip(self.rate, 1e-300, None)
         scalar_input = (rate.ndim == 0)
         rate_arr = np.atleast_1d(rate).astype(np.float64)
@@ -98,7 +105,7 @@ class Poisson(Distribution):
         Equivalently 1 - P(floor(k) + 1, lambda).
         For k < 0 the CDF is 0.
         """
-        from scipy.special import gammaincc
+        gammaincc = _require_scipy_special().gammaincc
         value = np.asarray(value, dtype=np.float64)
         k = np.floor(value)
         cdf_val = gammaincc(k + 1.0, self.rate)
@@ -109,7 +116,7 @@ class Poisson(Distribution):
 
         No closed form — invert the CDF via scipy.stats.poisson.ppf.
         """
-        from scipy.stats import poisson as _poisson
+        _poisson = _require_scipy_stats().poisson
         q = np.asarray(q, dtype=np.float64)
         return _poisson.ppf(q, self.rate).astype(np.float64)
 

@@ -255,13 +255,21 @@ void register_distributed(py::module_& m) {
         .def("synchronize_gradients", &tenzor::distributed::DistributedDataParallel::synchronize_gradients,
             "Synchronize gradients across all processes",
             py::call_guard<py::gil_scoped_release>())
+        // V.36: release the GIL across DDP comm/state ops.  sync_comm waits on
+        // outstanding async all-reduce work; auto_sync_gradients and
+        // reset_buckets touch per-parameter bucket state which under large
+        // models is several thousand entries — all blocking, all heavy enough
+        // to starve other Python threads.
         .def("sync_comm", &tenzor::distributed::DistributedDataParallel::sync_comm,
-            "Wait for pending async all-reduce operations")
+            "Wait for pending async all-reduce operations",
+            py::call_guard<py::gil_scoped_release>())
         .def("auto_sync_gradients", &tenzor::distributed::DistributedDataParallel::auto_sync_gradients,
             "Enable or disable automatic gradient synchronization",
-            py::arg("enabled"))
+            py::arg("enabled"),
+            py::call_guard<py::gil_scoped_release>())
         .def("reset_buckets", &tenzor::distributed::DistributedDataParallel::reset_buckets,
-            "Reset bucket ready states for next iteration");
+            "Reset bucket ready states for next iteration",
+            py::call_guard<py::gil_scoped_release>());
 
     // FSDP (Fully Sharded Data Parallel)
     py::enum_<tenzor::distributed::ShardingStrategy>(distributed, "ShardingStrategy")
@@ -286,9 +294,15 @@ void register_distributed(py::module_& m) {
         .def("forward", &tenzor::distributed::FullyShardedDataParallel::forward,
              py::arg("input"),
              py::call_guard<py::gil_scoped_release>())
-        .def("finalize_backward", &tenzor::distributed::FullyShardedDataParallel::finalize_backward)
-        .def("summon_full_params", &tenzor::distributed::FullyShardedDataParallel::summon_full_params)
-        .def("release_full_params", &tenzor::distributed::FullyShardedDataParallel::release_full_params)
+        // V.36: FSDP backward/unshard/reshard each perform full-shard
+        // all-gather or reduce-scatter under the hood — blocking collective
+        // work that must drop the GIL.
+        .def("finalize_backward", &tenzor::distributed::FullyShardedDataParallel::finalize_backward,
+             py::call_guard<py::gil_scoped_release>())
+        .def("summon_full_params", &tenzor::distributed::FullyShardedDataParallel::summon_full_params,
+             py::call_guard<py::gil_scoped_release>())
+        .def("release_full_params", &tenzor::distributed::FullyShardedDataParallel::release_full_params,
+             py::call_guard<py::gil_scoped_release>())
         .def("total_params", &tenzor::distributed::FullyShardedDataParallel::total_params)
         .def("sharded_param_bytes", &tenzor::distributed::FullyShardedDataParallel::sharded_param_bytes);
 
@@ -342,9 +356,14 @@ void register_distributed(py::module_& m) {
     rpc.def("shutdown_rpc", &tenzor::distributed::rpc::shutdown_rpc,
         "Shut down the RPC framework");
 
+    // V.36: rpc_sync blocks the calling Python thread on a network round-trip
+    // (potentially seconds).  The C++ implementation in `rpc.cpp` returns
+    // plain Tensors and does not call back into Python before returning, so
+    // GIL release is safe — no need for the request handler to reacquire.
     rpc.def("rpc_sync", &tenzor::distributed::rpc::rpc_sync,
         py::arg("dst"), py::arg("func_name"), py::arg("args"),
-        "Synchronous RPC call to a remote worker");
+        "Synchronous RPC call to a remote worker",
+        py::call_guard<py::gil_scoped_release>());
 
     rpc.def("rpc_async", [](int32_t dst, const std::string& func_name,
                              const std::vector<tenzor::Tensor>& args) {
