@@ -408,11 +408,18 @@ namespace oneapi {
     auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, sycl::queue& queue) -> std::vector<Tensor>;
     auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, sycl::queue& queue) -> Tensor;
     auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue) -> Tensor;
-    auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
-                        int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor;
+    auto unfold_kernel(const Tensor& input,
+                        int64_t kH, int64_t kW,
+                        int64_t sH, int64_t sW,
+                        int64_t pH, int64_t pW,
+                        int64_t dH, int64_t dW,
+                        sycl::queue& queue) -> Tensor;
     auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
-                      int64_t kernel_size, int64_t stride, int64_t padding,
-                      int64_t dilation, sycl::queue& queue) -> Tensor;
+                      int64_t kH, int64_t kW,
+                      int64_t sH, int64_t sW,
+                      int64_t pH, int64_t pW,
+                      int64_t dH, int64_t dW,
+                      sycl::queue& queue) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& queue) -> Tensor;
     auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim, sycl::queue& queue) -> Tensor;
     auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim, sycl::queue& queue) -> Tensor;
@@ -2917,9 +2924,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             // interop stream) and relu_kernel (raw SYCL kernel). Without this
             // the two race on conv_out's USM memory and the test hangs in-binary.
             // Same fix as FusedConv2dSigmoid below.
-            queue.wait();
+            queue.wait_and_throw();
             Tensor relu_out = oneapi::relu_kernel(conv_out, queue);
-            queue.wait();
+            queue.wait_and_throw();
             return relu_out;
         });
 
@@ -2943,9 +2950,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             // on FusedConv2dSigmoid (verified standalone; ReLU/Tanh paths do
             // not hit this because of different oneDNN primitive caching,
             // but the same fix is defensive and harmless there).
-            queue.wait();
+            queue.wait_and_throw();
             Tensor sig_out = oneapi::sigmoid_kernel(conv_out, queue);
-            queue.wait();
+            queue.wait_and_throw();
             return sig_out;
         });
 
@@ -2960,9 +2967,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
                 groups, queue);
-            queue.wait();
+            queue.wait_and_throw();
             Tensor tanh_out = oneapi::tanh_kernel(conv_out, queue);
-            queue.wait();
+            queue.wait_and_throw();
             return tanh_out;
         });
 
@@ -2977,9 +2984,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
                 groups, queue);
-            queue.wait();
+            queue.wait_and_throw();
             Tensor swish_out = oneapi::swish_kernel(conv_out, queue);
-            queue.wait();
+            queue.wait_and_throw();
             return swish_out;
         });
 
@@ -4035,44 +4042,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Unfold,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Y.12: per-axis Unfold accepts asymmetric kernel/stride/padding/dilation.
             const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
                 AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
             const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
             const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
             const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-            // Phase 2.1: OneAPI unfold kernel is scalar-only; reject asymmetric.
-            if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-                padding[0] != padding[1] || dilation[0] != dilation[1]) {
-                throw std::invalid_argument(
-                    "Unfold (OneAPI): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                    "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                    ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-            }
             return oneapi::unfold_kernel(inputs[0],
-                kernel_size[0], stride[0], padding[0], dilation[0], get_q(inputs));
+                kernel_size[0], kernel_size[1],
+                stride[0], stride[1],
+                padding[0], padding[1],
+                dilation[0], dilation[1],
+                get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::Fold,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Y.12: per-axis Fold accepts asymmetric kernel/stride/padding/dilation.
             auto output_size = attrs.get_int_list(AttrKey::OutputSize);
             const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
                 AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
             const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
             const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
             const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-            if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-                padding[0] != padding[1] || dilation[0] != dilation[1]) {
-                throw std::invalid_argument(
-                    "Fold (OneAPI): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                    "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                    ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-            }
             return oneapi::fold_kernel(inputs[0], output_size,
-                kernel_size[0], stride[0], padding[0], dilation[0], get_q(inputs));
+                kernel_size[0], kernel_size[1],
+                stride[0], stride[1],
+                padding[0], padding[1],
+                dilation[0], dilation[1],
+                get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::Roll,

@@ -842,6 +842,15 @@ auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim, hipStream_t s
 
 auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStream_t stream) -> std::vector<Tensor> {
     auto input_shape = input.shape();
+    // Y.13: normalise negative dim (V.14 fixed chunk_kernel but not split_kernel).
+    if (dim < 0) {
+        dim += static_cast<int64_t>(input_shape.size());
+    }
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::out_of_range(
+            "split_kernel (ROCm): dim " + std::to_string(dim) +
+            " out of range for tensor of rank " + std::to_string(input_shape.size()));
+    }
     int64_t dim_size = input_shape[dim];
 
     std::vector<Tensor> results;
@@ -883,7 +892,8 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStrea
         current_offset += current_size;
     }
 
-    HIP_CHECK(hipStreamSynchronize(stream));
+    // Y.13: dropped trailing hipStreamSynchronize(stream) — caller controls
+    // synchronisation, this defeated async pipelining.
     return results;
 }
 

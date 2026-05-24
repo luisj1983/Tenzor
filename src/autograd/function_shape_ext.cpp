@@ -131,10 +131,17 @@ auto WhereBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     auto zeros_tensor = zeros(shape_vec, grad.dtype(), grad.device());
 
     // grad_x = where(condition, grad, 0)
-    auto grad_x = where(condition, grad, zeros_tensor);
+    auto grad_x_unreduced = where(condition, grad, zeros_tensor);
 
     // grad_y = where(condition, 0, grad) = where(!condition, grad, 0)
-    auto grad_y = where(condition, zeros_tensor, grad);
+    auto grad_y_unreduced = where(condition, zeros_tensor, grad);
+
+    // audit-5 Y.4: reduce back to each input's original shape. `tenzor::where`
+    // materialises the common broadcast shape, so the masked grad is at the
+    // broadcast shape; without this reduction the engine sees the wrong-shape
+    // grad and either errors or accumulates incorrectly into x.grad / y.grad.
+    auto grad_x = reduce_grad_for_broadcasting(grad_x_unreduced, input_shape_x_);
+    auto grad_y = reduce_grad_for_broadcasting(grad_y_unreduced, input_shape_y_);
 
     return {grad_x, grad_y};
 }
@@ -149,8 +156,13 @@ auto WhereBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
     Variable cond_var(condition, false);
     Variable zeros_var(zeros_tensor, false);
 
-    auto grad_x = tenzor::where(cond_var, grad_outputs[0], zeros_var);
-    auto grad_y = tenzor::where(cond_var, zeros_var, grad_outputs[0]);
+    auto grad_x_unreduced = tenzor::where(cond_var, grad_outputs[0], zeros_var);
+    auto grad_y_unreduced = tenzor::where(cond_var, zeros_var, grad_outputs[0]);
+
+    // audit-5 Y.4: same broadcast-reduce on the Variable path (preserves
+    // grad_fn through the sum-reduce so higher-order grads survive).
+    auto grad_x = reduce_grad_var_for_broadcasting(grad_x_unreduced, input_shape_x_);
+    auto grad_y = reduce_grad_var_for_broadcasting(grad_y_unreduced, input_shape_y_);
 
     return {grad_x, grad_y};
 }

@@ -94,12 +94,29 @@ endif()
 option(TENZOR_BUILD_PYTHON "Build Python bindings" ON)
 option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
-# Expand the default multi-dtype parity matrix to include BFloat16. Off by
-# default because it doubles the existing FLOAT_DTYPES (F32/F64/F16) test
-# matrix — the full suite already takes 15+ hours and a 4-dtype default
-# would be disproportionate. Tests that need BF16 unconditionally use
-# ALL_FLOAT_DTYPES regardless of this flag.
-option(TENZOR_TEST_BFLOAT16 "Include BFloat16 in the default multi-dtype parity matrix" OFF)
+# Expand the default multi-dtype parity matrix to include BFloat16. BF16 is
+# the dominant training dtype on modern GPUs (CUDA TF32/H100, ROCm MI300,
+# OneAPI PVC, Vulkan Cooperative Matrix), so the BF16 column of the parity
+# matrix must not be ~5% of the F32 column by default. Audit-5 Y.29.
+#
+# Default policy:
+#   * Release / RelWithDebInfo / MinSizeRel — ON (full parity matrix for CI).
+#   * Debug                                 — OFF (dev iteration speed; the
+#                                                  Debug build is for local
+#                                                  edit-compile-debug loops,
+#                                                  not the CI matrix).
+#
+# Tests that need BF16 unconditionally still use ALL_FLOAT_DTYPES regardless
+# of this flag. See TESTING.md ("BFloat16 parity coverage") for the policy
+# rationale.
+set(_tenzor_bf16_default ON)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_tenzor_bf16_default OFF)
+endif()
+option(TENZOR_TEST_BFLOAT16
+       "Include BFloat16 in the default multi-dtype parity matrix"
+       ${_tenzor_bf16_default})
+unset(_tenzor_bf16_default)
 if(TENZOR_TEST_BFLOAT16)
     add_compile_definitions(TENZOR_TEST_BFLOAT16)
 endif()

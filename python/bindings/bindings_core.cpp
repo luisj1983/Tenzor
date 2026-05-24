@@ -1432,7 +1432,12 @@ Returns:
                  py::gil_scoped_release release;
                  cpu_tensor = tenzor::numpy::prepare_tensor_for_numpy(t);
              }
-             py::object arr = tenzor::numpy::create_numpy_array(cpu_tensor, t.dtype());
+             // Y.25: thread the no-copy intent into create_numpy_array so
+             // the strided-view-exceeds-storage fallback also honours the
+             // NumPy 2.0 strict semantics (raises ValueError instead of
+             // warning + copying).
+             py::object arr = tenzor::numpy::create_numpy_array(
+                 cpu_tensor, t.dtype(), /*want_no_copy=*/want_no_copy);
 
              if (want_force_copy && !dtype_requested) {
                  // Caller demanded a fresh allocation; the zero-copy view
@@ -4359,10 +4364,21 @@ Returns:
             int64_t int_idx = 0;
             int64_t slice_start = 0, slice_stop = 0, slice_step = 1;
 
+            // Y.23: parallel the V.35 TupleKind switch from the Tensor
+            // ``__getitem__`` so ``var[None]``, ``var[..., 0]`` and
+            // ``var[bool_mask_in_tuple]`` work with autograd preserved.
+            // NewAxis → ``tenzor::unsqueeze(Variable)``.
+            // Ellipsis → consumes (rank - explicit_remaining) dims.
+            // BoolMask → ``tenzor::index_select`` (Variable overload) on
+            //            the nonzero indices of a 1-D bool mask, which keeps
+            //            grad_fn through to ``self``.
+            enum class TupleKind { Int, Slice, NewAxis, Ellipsis, BoolMask };
             struct TupleEntry {
-                bool is_int;
-                int64_t int_val;
-                int64_t start, stop, step;
+                TupleKind kind = TupleKind::Slice;
+                bool is_int = false;
+                int64_t int_val = 0;
+                int64_t start = 0, stop = 0, step = 1;
+                tenzor::Tensor mask;
             };
             std::vector<TupleEntry> tuple_entries;
             tenzor::Tensor mask_tensor;
@@ -4461,9 +4477,11 @@ Returns:
                     for (size_t i = 0; i < indices.size(); ++i) {
                         TupleEntry entry{};
                         if (py::isinstance<py::int_>(indices[i])) {
+                            entry.kind = TupleKind::Int;
                             entry.is_int = true;
                             entry.int_val = py::cast<int64_t>(indices[i]);
                         } else if (py::isinstance<py::slice>(indices[i])) {
+                            entry.kind = TupleKind::Slice;
                             entry.is_int = false;
                             py::slice slice_obj = py::cast<py::slice>(indices[i]);
                             auto s_start = slice_obj.attr("start");
@@ -4472,12 +4490,47 @@ Returns:
                             entry.start = s_start.is_none() ? std::numeric_limits<int64_t>::min() : py::cast<int64_t>(s_start);
                             entry.stop  = s_stop.is_none()  ? std::numeric_limits<int64_t>::max() : py::cast<int64_t>(s_stop);
                             entry.step  = s_step.is_none()  ? 1 : py::cast<int64_t>(s_step);
+                        } else if (indices[i].is_none()) {
+                            // Y.23: ``None`` inserts a length-1 dim (newaxis).
+                            entry.kind = TupleKind::NewAxis;
+                        } else if (py::isinstance<py::ellipsis>(indices[i])) {
+                            // Y.23: ``...`` expands to enough full-dim slots.
+                            entry.kind = TupleKind::Ellipsis;
+                        } else if (py::isinstance<tenzor::Tensor>(indices[i])) {
+                            auto t = indices[i].cast<tenzor::Tensor>();
+                            if (t.dtype() == tenzor::DType::Bool) {
+                                entry.kind = TupleKind::BoolMask;
+                                entry.mask = t;
+                            } else {
+                                throw std::runtime_error("Unsupported index type in tuple");
+                            }
+                        } else if (py::isinstance<tenzor::Variable>(indices[i])) {
+                            auto v = indices[i].cast<tenzor::Variable>();
+                            auto t = v.tensor();
+                            if (t.dtype() == tenzor::DType::Bool) {
+                                entry.kind = TupleKind::BoolMask;
+                                entry.mask = t;
+                            } else {
+                                throw std::runtime_error("Unsupported index type in tuple");
+                            }
                         } else {
                             throw std::runtime_error("Unsupported index type in tuple");
                         }
                         tuple_entries.push_back(entry);
                     }
                 }
+            } else if (key.is_none()) {
+                // Y.23: bare ``var[None]`` → unsqueeze at dim 0.
+                kind = IndexKind::Tuple;
+                TupleEntry e{};
+                e.kind = TupleKind::NewAxis;
+                tuple_entries.push_back(e);
+            } else if (py::isinstance<py::ellipsis>(key)) {
+                // Y.23: bare ``var[...]`` → identity.
+                kind = IndexKind::Tuple;
+                TupleEntry e{};
+                e.kind = TupleKind::Ellipsis;
+                tuple_entries.push_back(e);
             } else if (py::isinstance<tenzor::Tensor>(key)) {
                 auto t = key.cast<tenzor::Tensor>();
                 if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
@@ -4525,42 +4578,99 @@ Returns:
                     return ::tenzor::slice(self, /*dim=*/0, slice_start, slice_stop, slice_step);
                 }
                 case IndexKind::Tuple: {
+                    // Y.23: parallel the Tensor tuple-path's cursor-based
+                    // walk, but route every transform through Variable
+                    // overloads so grad_fn back to ``self`` survives.
                     tenzor::Variable result = self;
-                    int squeeze_count = 0;
+
+                    int consuming = 0;
+                    int ellipsis_count = 0;
+                    for (auto& e : tuple_entries) {
+                        if (e.kind == TupleKind::NewAxis) continue;
+                        if (e.kind == TupleKind::Ellipsis) { ellipsis_count++; continue; }
+                        consuming++;
+                    }
+                    if (ellipsis_count > 1) {
+                        throw std::runtime_error("Only one Ellipsis allowed per index");
+                    }
+
+                    size_t dim_cursor = 0;
                     for (size_t i = 0; i < tuple_entries.size(); ++i) {
                         auto& entry = tuple_entries[i];
-                        if (entry.is_int) {
+                        if (entry.kind == TupleKind::NewAxis) {
+                            result = ::tenzor::unsqueeze(result, static_cast<int64_t>(dim_cursor));
+                            dim_cursor++;
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::Ellipsis) {
+                            auto shape = result.tensor().shape();
+                            int64_t fill = static_cast<int64_t>(shape.size()) -
+                                           static_cast<int64_t>(dim_cursor) -
+                                           static_cast<int64_t>(consuming);
+                            if (fill < 0) fill = 0;
+                            dim_cursor += static_cast<size_t>(fill);
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::BoolMask) {
+                            auto shape = result.tensor().shape();
+                            if (dim_cursor >= shape.size()) {
+                                throw std::out_of_range("Bool mask: too many indices");
+                            }
+                            if (entry.mask.shape().size() != 1) {
+                                throw std::runtime_error(
+                                    "Bool tuple-mask must be 1-D; multi-D masks not yet supported in tuple path");
+                            }
+                            if (entry.mask.shape()[0] != shape[dim_cursor]) {
+                                throw std::runtime_error(
+                                    "Bool mask length does not match tensor dim at this position");
+                            }
+                            // Equivalent to torch's per-dim bool select:
+                            // index_select(result, dim, nonzero(mask).squeeze(1)).
+                            // index_select has a Variable overload so grad_fn
+                            // back to ``self`` survives.
+                            auto nz = ::tenzor::nonzero(entry.mask).squeeze(1);
+                            result = ::tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
+                            dim_cursor++;
+                            continue;
+                        }
+                        if (entry.kind == TupleKind::Int) {
                             int64_t idx = entry.int_val;
                             auto shape = result.tensor().shape();
-                            size_t dim = i - squeeze_count;
-                            if (dim >= shape.size()) throw std::out_of_range("Too many indices");
-                            if (idx < 0) idx += shape[dim];
-                            if (idx < 0 || idx >= shape[dim]) {
+                            if (dim_cursor >= shape.size()) {
+                                throw std::out_of_range("Too many indices");
+                            }
+                            if (idx < 0) idx += shape[dim_cursor];
+                            if (idx < 0 || idx >= shape[dim_cursor]) {
                                 throw std::out_of_range(
                                     "Index " + std::to_string(entry.int_val) +
-                                    " out of range for dimension " + std::to_string(dim) +
-                                    " with size " + std::to_string(shape[dim]));
+                                    " out of range for dimension " + std::to_string(dim_cursor) +
+                                    " with size " + std::to_string(shape[dim_cursor]));
                             }
-                            result = ::tenzor::slice(result, static_cast<int64_t>(dim), idx, idx + 1, 1);
+                            result = ::tenzor::slice(result, static_cast<int64_t>(dim_cursor), idx, idx + 1, 1);
                             auto new_shape = result.tensor().shape();
-                            if (dim < new_shape.size() && new_shape[dim] == 1) {
-                                result = ::tenzor::squeeze(result, static_cast<int64_t>(dim));
-                                squeeze_count++;
+                            if (dim_cursor < new_shape.size() && new_shape[dim_cursor] == 1) {
+                                result = ::tenzor::squeeze(result, static_cast<int64_t>(dim_cursor));
+                                // dim_cursor stays — squeeze collapsed it.
+                            } else {
+                                dim_cursor++;
                             }
-                        } else {
-                            auto shape = result.tensor().shape();
-                            size_t dim = i - squeeze_count;
-                            if (dim >= shape.size()) throw std::out_of_range("Too many indices");
-                            int64_t dim_size = shape[dim];
-                            int64_t start = entry.start, stop = entry.stop, step = entry.step;
-                            if (start == std::numeric_limits<int64_t>::min()) start = (step > 0) ? 0 : dim_size - 1;
-                            else if (start < 0) start += dim_size;
-                            if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
-                            else if (stop < 0) stop += dim_size;
-                            start = std::clamp(start, int64_t(0), dim_size);
-                            stop  = std::clamp(stop,  int64_t(0), dim_size);
-                            result = ::tenzor::slice(result, static_cast<int64_t>(dim), start, stop, step);
+                            continue;
                         }
+                        // Slice
+                        auto shape = result.tensor().shape();
+                        if (dim_cursor >= shape.size()) {
+                            throw std::out_of_range("Too many indices");
+                        }
+                        int64_t dim_size = shape[dim_cursor];
+                        int64_t start = entry.start, stop = entry.stop, step = entry.step;
+                        if (start == std::numeric_limits<int64_t>::min()) start = (step > 0) ? 0 : dim_size - 1;
+                        else if (start < 0) start += dim_size;
+                        if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
+                        else if (stop < 0) stop += dim_size;
+                        start = std::clamp(start, int64_t(0), dim_size);
+                        stop  = std::clamp(stop,  int64_t(0), dim_size);
+                        result = ::tenzor::slice(result, static_cast<int64_t>(dim_cursor), start, stop, step);
+                        dim_cursor++;
                     }
                     return result;
                 }

@@ -294,6 +294,14 @@ private:
     bool found_inf_nan_;          ///< Whether overflow detected in last step
     bool has_unscaled_;           ///< Whether gradients have been unscaled
 
+    /// Y.32: side-table holding the F32 unscaled gradient for params whose
+    /// stored grad dtype is F16/BF16. ``unscale_`` populates this with the
+    /// pre-cast-back F32 representation; ``check_inf_nan_`` reads from here
+    /// so overflow detection sees the value that fits in F32, not the
+    /// potentially-saturated half-precision cast-back stored on the
+    /// Variable. Cleared at ``step()`` time after the check.
+    std::unordered_map<Variable*, Tensor> f32_unscaled_grads_;
+
     /**
      * @brief Check if any parameter gradients contain inf or nan
      *

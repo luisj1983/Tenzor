@@ -78,7 +78,7 @@ auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor {
         float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
         out_ptr[i] = (u < in_ptr[i]) ? 1.0f : 0.0f;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -188,7 +188,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                 }
                 out_ptr[sid] = lo;
             });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     if (was_1d) result = result.reshape({num_samples});
@@ -228,7 +228,7 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
         }
         out_ptr[i] = lo;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -250,7 +250,7 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
         float* d_max = sycl::malloc_device<float>(1, queue);
         queue.memcpy(d_min, &in_ptr[0], sizeof(float));  // initialise to first element approx
         queue.memcpy(d_max, &in_ptr[0], sizeof(float));
-        queue.wait();
+        queue.wait_and_throw();
 
         // Use sycl::reduction with min and max operators
         queue.parallel_for<HistogramMinMaxTag>(sycl::range<1>(n),
@@ -296,7 +296,7 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
                 atomic_count(counts_ptr[bin]);
             atomic_count.fetch_add(int64_t{1});
         });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     // Bin edges on-device
@@ -310,7 +310,7 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
                 int64_t i = static_cast<int64_t>(idx_);
                 edge_ptr[i] = local_min2 + static_cast<float>(i) * bin_width;
             });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     return {counts, edges};
@@ -353,7 +353,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
         // Initialize from first sample
         queue.memcpy(d_mins, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
         queue.memcpy(d_maxs, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
-        queue.wait();
+        queue.wait_and_throw();
 
         // Parallel min/max over all samples using atomic_ref (no sycl::reduction needed)
         const int64_t local_D = D;
@@ -375,7 +375,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
             atomic_min.fetch_min(v);
             atomic_max.fetch_max(v);
         });
-        queue.wait();
+        queue.wait_and_throw();
 
         // Copy results back
         std::vector<float> h_mins(static_cast<size_t>(D)), h_maxs(static_cast<size_t>(D));
@@ -433,7 +433,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
     queue.memcpy(d_dim_step, dim_step_vec.data(), static_cast<size_t>(D) * sizeof(float));
     queue.memcpy(d_strides, out_strides_vec.data(), static_cast<size_t>(D) * sizeof(int64_t));
     queue.memcpy(d_bins, bins.data(), static_cast<size_t>(D) * sizeof(int64_t));
-    queue.wait();
+    queue.wait_and_throw();
 
     // Allocate counts
     Tensor counts(out_shape, DType::Int64, device);
@@ -474,7 +474,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
                 atomic_count.fetch_add(int64_t{1});
             }
         });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     // Build edge tensors on-device
@@ -493,7 +493,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
                 int64_t j = static_cast<int64_t>(idx_);
                 edge_ptr[j] = local_min + static_cast<float>(j) * local_step;
             });
-        queue.wait();
+        queue.wait_and_throw();
         edges_vec.push_back(std::move(edge));
     }
 
@@ -515,7 +515,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
                 int64_t j = static_cast<int64_t>(idx_);
                 ddata[j] = static_cast<float>(counts_ptr[j]) * inv_norm;
             });
-        queue.wait();
+        queue.wait_and_throw();
         result = density_out;
     }
 
@@ -671,7 +671,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                 });
         }
     }
-    queue.wait();
+    queue.wait_and_throw();
     return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
@@ -720,7 +720,7 @@ auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor {
 
         out_ptr[i] = k - 1;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -767,7 +767,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue&
 
         out_ptr[i] = mean_ptr[i] + std_ptr[i] * z;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -803,7 +803,7 @@ auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor
         // Inverse CDF: -log(1 - u) / rate
         out_ptr[i] = -sycl::log(1.0f - u) / rate_ptr[i];
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -860,7 +860,7 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         }
         out_ptr[idx] = sum;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -913,7 +913,7 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
             out_ptr[(o * (n_val - 1) + k) * inner_val + i_inner] = cumsum;
         }
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -957,7 +957,7 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
         }
         out_ptr[(o * n_val + n_val - 1) * inner_val + i_inner] = (at(n_val - 1) - at(n_val - 2)) / h;
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -1000,7 +1000,7 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
             out_ptr[i] = sycl::pow(sum, 1.0f / p_f);
         }
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 
@@ -1049,7 +1049,7 @@ auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::pow(sum, 1.0f / p_f);
         }
     });
-    queue.wait();
+    queue.wait_and_throw();
     return result;
 }
 

@@ -48,9 +48,15 @@ auto prepare_tensor_for_numpy(const Tensor& tensor) -> Tensor;
  *
  * @param tensor CPU tensor
  * @param original_dtype Original dtype (for BFloat16 handling)
+ * @param want_no_copy Y.25: when ``true`` and the strided view exceeds storage
+ *        bounds (i.e. the function would otherwise fall back to a contiguous
+ *        copy), throw ``py::value_error`` instead of warning and copying. The
+ *        caller is honouring the NumPy 2.0 ``__array__(copy=False)`` contract.
+ *        Default ``false`` preserves the legacy warn-and-copy behaviour.
  * @return NumPy array (may share memory with CPU tensor)
  */
-auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array;
+auto create_numpy_array(const Tensor& tensor, DType original_dtype,
+                        bool want_no_copy = false) -> py::array;
 
 /**
  * Convert Tensor to NumPy array

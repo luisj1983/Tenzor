@@ -2736,7 +2736,7 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait();
+        queue.wait_and_throw();
 
         auto event = queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];
@@ -2855,7 +2855,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait();
+        queue.wait_and_throw();
 
         auto event = queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];

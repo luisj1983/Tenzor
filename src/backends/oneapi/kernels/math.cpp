@@ -1616,7 +1616,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
         queue.memcpy(d_a_h.get(), a_ptr, m * k * sizeof(sycl::half));
         queue.memcpy(d_b_h.get(), b_ptr, k * n * sizeof(sycl::half));
-        queue.wait();
+        queue.wait_and_throw();
 
         // Upcast FP16 → FP32 on device
         const int64_t a_count = m * k;
@@ -1631,7 +1631,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         queue.parallel_for(sycl::range<1>(b_count), [=](sycl::id<1> i) {
             d_b_raw[i] = static_cast<float>(d_b_h_raw[i]);
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
 
         const float alpha = 1.0f;
         const float beta = 0.0f;
@@ -1662,10 +1662,10 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         queue.parallel_for(sycl::range<1>(c_count), [=](sycl::id<1> i) {
             d_c_h_raw[i] = sycl::half(d_c_raw[i]);
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.memcpy(out_ptr, d_c_h.get(), m * n * sizeof(sycl::half));
-        queue.wait();
+        queue.wait_and_throw();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -2367,7 +2367,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
                           [=](sycl::id<1> i, auto& s) {
             s += a_data[i] * b_data[i];
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
         out_ptr[0] = sum_buf[0];
         sycl::free(sum_buf, queue);
 
@@ -2385,7 +2385,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
                           [=](sycl::id<1> i, auto& s) {
             s += a_data[i] * b_data[i];
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
         out_ptr[0] = sum_buf[0];
         sycl::free(sum_buf, queue);
 
@@ -3847,7 +3847,7 @@ auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float val = in_ptr[i];
             if (sycl::isinf(val) || sycl::isnan(val)) f |= 1;
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
         bool found = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
         sycl::free(flag_buf, queue);
@@ -3861,7 +3861,7 @@ auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double val = in_ptr[i];
             if (sycl::isinf(val) || sycl::isnan(val)) f |= 1;
         }).wait();
-        queue.wait();
+        queue.wait_and_throw();
         bool found = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
         sycl::free(flag_buf, queue);

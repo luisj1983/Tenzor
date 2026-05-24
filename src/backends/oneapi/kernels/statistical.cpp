@@ -230,7 +230,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     out_ptr[idx] = sycl::sqrt(var_sum / static_cast<float>(divisor));
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -261,7 +261,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     out_ptr[idx] = sycl::sqrt(var_sum / static_cast<double>(divisor));
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else {
@@ -453,7 +453,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     out_ptr[idx] = var_sum / static_cast<float>(divisor);
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -484,7 +484,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     out_ptr[idx] = var_sum / static_cast<double>(divisor);
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else {
@@ -605,7 +605,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     if (lid == 0) out_ptr[0] = prod;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         } else {
             // Dimensional reduction on device
             const int64_t ndim = shape.size();
@@ -643,7 +643,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     out_ptr[out_idx] = prod_value;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         }
 
         return output;
@@ -685,7 +685,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     if (lid == 0) out_ptr[0] = prod;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         } else {
             // Dimensional reduction on device
             const int64_t ndim = shape.size();
@@ -720,7 +720,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     out_ptr[out_idx] = prod_value;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         }
 
         return output;
@@ -743,7 +743,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     prod.combine(static_cast<int64_t>(in_ptr[idx]));
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = prod_buf[0];
         } else {
             // Dimensional reduction on device
@@ -780,7 +780,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     out_ptr[out_idx] = prod_value;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         }
 
         return output;
@@ -802,7 +802,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     prod.combine(in_ptr[idx]);
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = prod_buf[0];
         } else {
             // Dimensional reduction on device
@@ -837,7 +837,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     out_ptr[out_idx] = prod_value;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
         }
 
         return output;
@@ -940,7 +940,7 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     }
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -995,7 +995,7 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     }
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else {
@@ -1062,7 +1062,7 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     }
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -1098,7 +1098,7 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                     }
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             return output;
         }
         else {

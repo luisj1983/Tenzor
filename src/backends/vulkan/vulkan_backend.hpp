@@ -124,6 +124,12 @@ public:
     /// affine_grid_backward, col2im, interpolate_bilinear_backward, etc.).
     auto has_atomic_float(int32_t device_id) const -> bool;
 
+    /// Y.10: Whether the device advertises VK_EXT_shader_atomic_int64 with
+    /// SSBO Int64 atomics. Used by host-side capability gates for shaders
+    /// that perform `atomicAdd`/`atomicCompSwap` on uint64_t SSBOs (F64
+    /// pooling and reduction backward paths that pack double into uint64).
+    auto has_atomic_int64(int32_t device_id) const -> bool;
+
 private:
     // Vulkan context management
 
@@ -1069,6 +1075,19 @@ void ensure_fp16_supported(int32_t device_id, const char* op_name);
  * readable diagnostic instead of hitting an opaque SPIR-V validation error.
  */
 void ensure_atomic_float_supported(int32_t device_id, const char* op_name);
+
+/**
+ * @brief Y.10: Throw a typed runtime_error with a uniform message if the
+ *        requested Vulkan device does not advertise VK_EXT_shader_atomic_int64
+ *        (SSBO Int64 atomics).
+ *
+ * Same pattern as ensure_fp64_supported (R.13). Call this at the entry of any
+ * dispatcher whose compute shader uses GL_EXT_shader_atomic_int64 (typically
+ * F64 pooling/scatter/reduction backward paths that pack double into uint64
+ * for atomic CAS updates). Queries devices_[device_id].hasAtomicInt64 via the
+ * public has_atomic_int64() accessor.
+ */
+void ensure_atomic_int64_supported(int32_t device_id, const char* op_name);
 
 } // namespace vulkan
 

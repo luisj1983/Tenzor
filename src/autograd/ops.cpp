@@ -853,12 +853,26 @@ auto chunk(const Variable& input, int64_t chunks, int64_t dim) -> std::vector<Va
         throw std::out_of_range("autograd::chunk: dim out of range");
     }
     const int64_t dim_size = input.shape()[dim];
+
+    std::vector<Variable> result;
+    result.reserve(static_cast<size_t>(chunks));
+
+    // audit-5 Y.5: when dim_size == 0 we still owe the caller `chunks`
+    // zero-sized slices (PyTorch parity).  The general loop below exits at
+    // the first iteration (start=0 >= dim_size=0) and returns an empty
+    // vector — callers doing `auto [a, b, c] = chunk(x, 3)` would then
+    // perform an out-of-range vector access on a zero-length dim.
+    if (dim_size == 0) {
+        for (int64_t i = 0; i < chunks; ++i) {
+            result.push_back(slice(input, dim, /*start=*/0, /*end=*/0, /*step=*/1));
+        }
+        return result;
+    }
+
     // Mirror tenzor::chunk's ceiling-division partition semantics so the
     // Variable form is shape-identical to the raw form.
     const int64_t chunk_size = (dim_size + chunks - 1) / chunks;
 
-    std::vector<Variable> result;
-    result.reserve(static_cast<size_t>(chunks));
     for (int64_t i = 0; i < chunks; ++i) {
         int64_t start = i * chunk_size;
         if (start >= dim_size) {
@@ -1524,6 +1538,13 @@ auto where(const Variable& condition, const Variable& x, const Variable& y) -> V
     // y's gradient entirely). The condition tensor is still kept in
     // saved_tensors_ so the backward can read it.
     grad_fn->save_for_backward({condition.tensor()});
+    // audit-5 Y.4: save the un-broadcasted x/y shapes so the backward can
+    // reduce the masked grad back to each input's original shape (mirroring
+    // BinaryOp backwards). `tenzor::where` materialises the broadcast shape,
+    // so without this the engine would receive grad_x at the broadcast shape
+    // — accumulation fails or silently scatters.
+    grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
+    grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
     grad_fn->set_next_functions({x.grad_fn(), y.grad_fn()});
     grad_fn->set_input_variables({x, y});
     Variable output(result, true);

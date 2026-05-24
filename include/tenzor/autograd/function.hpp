@@ -1948,6 +1948,14 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Where; }
+
+    // Saved at forward() time so the backward can broadcast-reduce the
+    // unreduced grad back to the user's original (un-broadcasted) input shapes
+    // (audit-5 Y.4). `tenzor::where` materialises the common broadcast shape;
+    // the backward needs to sum across the broadcast axes to land at x.shape()
+    // and y.shape() respectively, mirroring the BinaryOp backwards.
+    std::vector<int64_t> input_shape_x_;
+    std::vector<int64_t> input_shape_y_;
 };
 
 class GatherBackward : public Function {

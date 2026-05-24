@@ -393,11 +393,21 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
                 sub_state[sub_key] = tensor;
             }
         }
-        // Submodules are loaded non-strict so per-submodule missing/
-        // unexpected keys propagate to the root's aggregate report via
-        // the parameters_/buffers_ scan above and the consumed_keys
-        // bookkeeping; the root then decides whether to throw.
-        module->load_state_dict(sub_state, /*strict=*/false);
+        // Y.21: propagate the submodule's missing/unexpected keys into the
+        // root's aggregate report, re-prefixed with `name + "."`. Previously
+        // the recursion called the throw-on-mismatch overload with
+        // strict=false, which silently discarded the submodule's report —
+        // so the root's strict-mode throw only ever saw mismatches in its
+        // *own* parameters_/buffers_, not anything inside submodules.
+        std::vector<std::string> sub_missing;
+        std::vector<std::string> sub_unexpected;
+        module->load_state_dict(sub_state, /*strict=*/false, sub_missing, sub_unexpected);
+        for (auto& k : sub_missing) {
+            missing_keys.push_back(prefix + k);
+        }
+        for (auto& k : sub_unexpected) {
+            unexpected_keys.push_back(prefix + k);
+        }
     }
 
     // Collect missing keys (expected but not in state)

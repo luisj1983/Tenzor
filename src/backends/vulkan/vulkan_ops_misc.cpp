@@ -1293,6 +1293,10 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (grad_output.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "ROIAlignBackward");
+        // Y.10: roi_align_backward_f64.comp uses GL_EXT_shader_atomic_float for
+        // CAS-based double atomicAdd via uint64 reinterpret; gate so unsupported
+        // devices fail fast instead of hitting an opaque SPIR-V error.
+        vulkan::ensure_atomic_float_supported(device_id, "ROIAlignBackward");
     }
     // S.4: gate FP16 dispatch on shaderFloat16 device support.
     if (grad_output.dtype() == DType::Float16) {
@@ -5510,6 +5514,11 @@ auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_outpu
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
+    if (is_f64) {
+        // Y.10: fractional_maxpool2d_backward_f64 uses GL_EXT_shader_atomic_int64
+        // for CAS-based Float64 atomicAdd; gate so unsupported devices fail fast.
+        vulkan::ensure_atomic_int64_supported(device_id, "FractionalMaxPool2dBackward");
+    }
     auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool2d_backward_f64" : "fractional_maxpool2d_backward", device_id);
     Tensor grad_input = is_f64
         ? dispatchFull(input_shape, 0.0, DType::Float64)
@@ -5598,6 +5607,11 @@ auto VulkanBackend::dispatchFractionalMaxPool3dBackward(const Tensor& grad_outpu
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
 
     int32_t device_id = go.device().index;
+    if (is_f64) {
+        // Y.10: fractional_maxpool3d_backward_f64 uses GL_EXT_shader_atomic_int64
+        // for CAS-based Float64 atomicAdd; gate so unsupported devices fail fast.
+        vulkan::ensure_atomic_int64_supported(device_id, "FractionalMaxPool3dBackward");
+    }
     auto* pipeline = getPipeline(is_f64 ? "fractional_maxpool3d_backward_f64" : "fractional_maxpool3d_backward", device_id);
     Tensor grad_input = is_f64
         ? dispatchFull(input_shape, 0.0, DType::Float64)

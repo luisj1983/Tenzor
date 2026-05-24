@@ -177,7 +177,7 @@ auto jvp_nan_to_num(const DualTensor& x, double nan, double posinf, double negin
 /// @name Reductions long-tail (Audit A.4 batch 5)
 /// @{
 /// p-norm: tangent = sum(sign(x) * |x|^(p-1) * dx, dim) * norm^(1-p)
-auto jvp_norm(const DualTensor& x, float p, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
+auto jvp_norm(const DualTensor& x, double p, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
 /// argmax/argmin/argsort produce integer indices: tangent is zero (not differentiable).
 auto jvp_argmax(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
 auto jvp_argmin(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor;
@@ -197,7 +197,7 @@ auto jvp_index_copy(const DualTensor& input, int64_t dim, const Tensor& index,
                     const DualTensor& source) -> DualTensor;
 /// index_fill: y[index[i]] = constant; linear in input with the indexed slots zeroed.
 auto jvp_index_fill(const DualTensor& input, int64_t dim, const Tensor& index,
-                    float value) -> DualTensor;
+                    double value) -> DualTensor;
 /// select_scatter: linear in input and src.
 auto jvp_select_scatter(const DualTensor& input, const DualTensor& src,
                         int64_t dim, int64_t index) -> DualTensor;

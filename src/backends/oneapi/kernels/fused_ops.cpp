@@ -699,7 +699,7 @@ auto fused_layer_norm_backward_kernel(
                 });
         });
 
-        queue.wait();
+        queue.wait_and_throw();
     };
 
     if (input.dtype() == DType::Float32) {

@@ -2189,7 +2189,7 @@ auto deformable_conv2d_backward_input_kernel(
         queue.fill(gi_ptr, 0.0f, static_cast<size_t>(N * C_in * H * W));
         queue.fill(go_off_ptr, 0.0f, static_cast<size_t>(offset.numel()));
         if (use_mask) queue.fill(gm_ptr, 0.0f, static_cast<size_t>(mask.numel()));
-        queue.wait();
+        queue.wait_and_throw();
 
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -2287,7 +2287,7 @@ auto deformable_conv2d_backward_input_kernel(
         queue.fill(gi_ptr, 0.0, static_cast<size_t>(N * C_in * H * W));
         queue.fill(go_off_ptr, 0.0, static_cast<size_t>(offset.numel()));
         if (use_mask) queue.fill(gm_ptr, 0.0, static_cast<size_t>(mask.numel()));
-        queue.wait();
+        queue.wait_and_throw();
 
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -2426,7 +2426,7 @@ auto deformable_conv2d_backward_weight_kernel(
     if (input.dtype() == DType::Float32) {
         float* gw_ptr = get_data_ptr<float>(grad_weight);
         queue.fill(gw_ptr, 0.0f, static_cast<size_t>(C_out * channels_per_group * kH * kW));
-        queue.wait();
+        queue.wait_and_throw();
 
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -2484,7 +2484,7 @@ auto deformable_conv2d_backward_weight_kernel(
     } else if (input.dtype() == DType::Float64) {
         double* gw_ptr = get_data_ptr<double>(grad_weight);
         queue.fill(gw_ptr, 0.0, static_cast<size_t>(C_out * channels_per_group * kH * kW));
-        queue.wait();
+        queue.wait_and_throw();
 
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* in_ptr = get_data_ptr<const double>(input);

@@ -1444,7 +1444,7 @@ auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
             }
             out_ptr[i] = lo;
         });
-        queue.wait();
+        queue.wait_and_throw();
     };
 
     switch (sorted_sequence.dtype()) {

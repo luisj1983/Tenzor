@@ -125,7 +125,7 @@ auto stft_kernel(const Tensor& input, int64_t n_fft,
                 }
                 out_ptr[idx] = val * win_ptr[i];
             });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     // OneAPI rfft/fft returns Float32 with a trailing pair dim of 2:
@@ -260,7 +260,7 @@ auto istft_kernel(const Tensor& input, int64_t n_fft,
                 out_atom.fetch_add(val);
                 ws_atom.fetch_add(w2);
             });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     // Normalize
@@ -275,7 +275,7 @@ auto istft_kernel(const Tensor& input, int64_t n_fft,
                 float ws = ws_ptr[idx];
                 if (ws > 1e-11f) out_ptr[idx] /= ws;
             });
-        queue.wait();
+        queue.wait_and_throw();
     }
 
     int64_t pad = center ? (n_fft / 2) : 0;

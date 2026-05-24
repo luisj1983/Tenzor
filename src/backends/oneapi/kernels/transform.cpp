@@ -1350,9 +1350,13 @@ class UnfoldIm2colFloat64;
 class FoldCol2imFloat32;
 class FoldCol2imFloat64;
 
-auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
-                    int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
-    // 2D unfold: input [N, C, H, W] -> output [N, C*kH*kW, L]
+auto unfold_kernel(const Tensor& input,
+                    int64_t kH, int64_t kW,
+                    int64_t sH, int64_t sW,
+                    int64_t pH, int64_t pW,
+                    int64_t dH, int64_t dW,
+                    sycl::queue& queue) -> Tensor {
+    // Y.12: per-axis 2D unfold: input [N, C, H, W] -> output [N, C*kH*kW, L].
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::runtime_error("unfold_kernel: expected 4D input [N, C, H, W]");
@@ -1362,16 +1366,16 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig_dtype = input.dtype();
         Tensor widened = input.to(DType::Float32);
-        Tensor result = unfold_kernel(widened, kernel_size, stride, padding,
-                                      dilation, queue);
+        Tensor result = unfold_kernel(widened, kH, kW, sH, sW, pH, pW, dH, dW,
+                                      queue);
         return result.to(orig_dtype);
     }
 
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
-    int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t H_out = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t W_out = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
     int64_t L = H_out * W_out;
-    int64_t channels_col = C * kernel_size * kernel_size;
+    int64_t channels_col = C * kH * kW;
 
     Tensor output({N, channels_col, L}, input.dtype(), input.device());
 
@@ -1392,17 +1396,17 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
                     int64_t idx = index / W_out;
                     int64_t h_o = idx % H_out;
                     idx /= H_out;
-                    int64_t kw = idx % kernel_size;
-                    idx /= kernel_size;
-                    int64_t kh = idx % kernel_size;
-                    int64_t c = idx / kernel_size;
-                    int64_t h_in = h_o * stride - padding + kh * dilation;
-                    int64_t w_in = w_o * stride - padding + kw * dilation;
+                    int64_t kw = idx % kW;
+                    idx /= kW;
+                    int64_t kh = idx % kH;
+                    int64_t c = idx / kH;
+                    int64_t h_in = h_o * sH - pH + kh * dH;
+                    int64_t w_in = w_o * sW - pW + kw * dW;
                     batch_out[index] = (h_in >= 0 && w_in >= 0 && h_in < H && w_in < W) ?
                         batch_in[(c * H + h_in) * W + w_in] : 0.0f;
                 });
         }
-        queue.wait();
+        queue.wait_and_throw();
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = in_cont.data<double>();
         double* out_ptr = output.data<double>();
@@ -1415,17 +1419,17 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
                     int64_t idx = index / W_out;
                     int64_t h_o = idx % H_out;
                     idx /= H_out;
-                    int64_t kw = idx % kernel_size;
-                    idx /= kernel_size;
-                    int64_t kh = idx % kernel_size;
-                    int64_t c = idx / kernel_size;
-                    int64_t h_in = h_o * stride - padding + kh * dilation;
-                    int64_t w_in = w_o * stride - padding + kw * dilation;
+                    int64_t kw = idx % kW;
+                    idx /= kW;
+                    int64_t kh = idx % kH;
+                    int64_t c = idx / kH;
+                    int64_t h_in = h_o * sH - pH + kh * dH;
+                    int64_t w_in = w_o * sW - pW + kw * dW;
                     batch_out[index] = (h_in >= 0 && w_in >= 0 && h_in < H && w_in < W) ?
                         batch_in[(c * H + h_in) * W + w_in] : 0.0;
                 });
         }
-        queue.wait();
+        queue.wait_and_throw();
     } else {
         throw std::runtime_error("unfold_kernel: unsupported dtype (expected Float32 or Float64)");
     }
@@ -1438,8 +1442,12 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
 // ============================================================================
 
 auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
-                  int64_t kernel_size, int64_t stride, int64_t padding,
-                  int64_t dilation, sycl::queue& queue) -> Tensor {
+                  int64_t kH, int64_t kW,
+                  int64_t sH, int64_t sW,
+                  int64_t pH, int64_t pW,
+                  int64_t dH, int64_t dW,
+                  sycl::queue& queue) -> Tensor {
+    // Y.12: per-axis 2D fold (col2im).
     auto shape = input.shape();
     if (shape.size() != 3) {
         throw std::runtime_error("fold_kernel: expected 3D input [N, C*kH*kW, L]");
@@ -1451,8 +1459,8 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig_dtype = input.dtype();
         Tensor widened = input.to(DType::Float32);
-        Tensor result = fold_kernel(widened, output_size, kernel_size, stride,
-                                    padding, dilation, queue);
+        Tensor result = fold_kernel(widened, output_size,
+                                    kH, kW, sH, sW, pH, pW, dH, dW, queue);
         return result.to(orig_dtype);
     }
 
@@ -1461,19 +1469,19 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     int64_t L = shape[2];
     int64_t H_out = output_size[0];
     int64_t W_out = output_size[1];
-    int64_t C = channels_col / (kernel_size * kernel_size);
+    int64_t C = channels_col / (kH * kW);
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
 
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    int64_t H_col = (H_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t W_col = (W_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t H_col = (H_out + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t W_col = (W_out + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
     int64_t col_size_per_batch = channels_col * L;
     int64_t im_size_per_batch = C * H_out * W_out;
 
     // GPU col2im: each work-item handles one column entry, atomically accumulates into output
-    int64_t col2im_work_size = C * kernel_size * kernel_size * H_col * W_col;
+    int64_t col2im_work_size = C * kH * kW * H_col * W_col;
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = in_cont.data<float>();
@@ -1488,14 +1496,14 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
                     int64_t idx = index / W_col;
                     int64_t h_c = idx % H_col;
                     idx /= H_col;
-                    int64_t kw = idx % kernel_size;
-                    idx /= kernel_size;
-                    int64_t kh = idx % kernel_size;
-                    int64_t c = idx / kernel_size;
-                    int64_t h = h_c * stride - padding + kh * dilation;
-                    int64_t w = w_c * stride - padding + kw * dilation;
+                    int64_t kw = idx % kW;
+                    idx /= kW;
+                    int64_t kh = idx % kH;
+                    int64_t c = idx / kH;
+                    int64_t h = h_c * sH - pH + kh * dH;
+                    int64_t w = w_c * sW - pW + kw * dW;
                     if (h >= 0 && w >= 0 && h < H_out && w < W_out) {
-                        int64_t col_idx = ((c * kernel_size + kh) * kernel_size + kw);
+                        int64_t col_idx = ((c * kH + kh) * kW + kw);
                         int64_t l = h_c * W_col + w_c;
                         int64_t im_idx = (c * H_out + h) * W_out + w;
                         sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
@@ -1504,7 +1512,7 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
                     }
                 });
         }
-        queue.wait();
+        queue.wait_and_throw();
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = in_cont.data<double>();
         double* out_ptr = output.data<double>();
@@ -1518,14 +1526,14 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
                     int64_t idx = index / W_col;
                     int64_t h_c = idx % H_col;
                     idx /= H_col;
-                    int64_t kw = idx % kernel_size;
-                    idx /= kernel_size;
-                    int64_t kh = idx % kernel_size;
-                    int64_t c = idx / kernel_size;
-                    int64_t h = h_c * stride - padding + kh * dilation;
-                    int64_t w = w_c * stride - padding + kw * dilation;
+                    int64_t kw = idx % kW;
+                    idx /= kW;
+                    int64_t kh = idx % kH;
+                    int64_t c = idx / kH;
+                    int64_t h = h_c * sH - pH + kh * dH;
+                    int64_t w = w_c * sW - pW + kw * dW;
                     if (h >= 0 && w >= 0 && h < H_out && w < W_out) {
-                        int64_t col_idx = ((c * kernel_size + kh) * kernel_size + kw);
+                        int64_t col_idx = ((c * kH + kh) * kW + kw);
                         int64_t l = h_c * W_col + w_c;
                         int64_t im_idx = (c * H_out + h) * W_out + w;
                         sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
@@ -1534,7 +1542,7 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
                     }
                 });
         }
-        queue.wait();
+        queue.wait_and_throw();
     } else {
         throw std::runtime_error("fold_kernel: unsupported dtype (expected Float32 or Float64)");
     }
@@ -1851,7 +1859,7 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
             uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
             out[idx] = sycl::bit_cast<float>(f_bits);
         });
-        queue.wait();
+        queue.wait_and_throw();
     } else if (src == DType::Float32 && (dst == DType::FP8_E4M3 || dst == DType::FP8_E5M2)) {
         // Float32 → FP8: device-side bit manipulation
         const float* in = get_data_ptr<const float>(input);
@@ -1900,7 +1908,7 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
                 out[idx] = (h_sign << 7) | (h_exp << 2) | h_mantissa;
             }
         });
-        queue.wait();
+        queue.wait_and_throw();
     } else if (src == DType::Float32 && dst == DType::Complex64) {
         // Real → complex: fill imaginary part with zeros. Complex64
         // storage is interleaved (re, im) float pairs.
@@ -2774,7 +2782,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
         throw std::runtime_error("repeat_interleave_tensor: unsupported dtype");
     }
 
-    queue.wait();
+    queue.wait_and_throw();
     sycl::free(d_prefix, queue);
     return output;
 }

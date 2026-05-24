@@ -87,6 +87,14 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             auto inv_scale = full({1}, inv_scale_f32,
                                   DType::Float32, grad->device());
             Tensor unscaled = grad->to(DType::Float32) * inv_scale;
+            // Y.32: stash the F32 unscaled tensor in a side-table keyed by
+            // the param's raw pointer so ``check_inf_nan_`` can read it
+            // back. Storing the cast-back F16/BF16 on the Variable means
+            // the optimizer's ``step()`` sees the right dtype, but values
+            // that fit in F32 yet round to inf on cast-back must NOT
+            // trigger a spurious overflow event — those should be detected
+            // against the pre-cast F32 representation here.
+            f32_unscaled_grads_[param.get()] = unscaled;
             param->set_grad(unscaled.to(grad_dt));
         } else {
             auto inv_scale = full({1}, inv_scale_f32,
@@ -109,8 +117,19 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
             continue;
         }
 
+        // Y.32: when the original grad dtype was F16/BF16, the cast-back
+        // copy stored on the Variable may have rounded values that fit in
+        // F32 up to inf. Check the F32 side-table entry — the genuine
+        // post-unscale value — instead. A finite F32 unscaled grad should
+        // not trigger backoff just because its half-precision representation
+        // saturated.
+        auto it = f32_unscaled_grads_.find(param.get());
+        const Tensor& probe = (it != f32_unscaled_grads_.end())
+                                  ? it->second
+                                  : *grad;
+
         // Use fused kernel — stays on device, no per-param D2H transfer
-        auto result = has_inf_nan(*grad);
+        auto result = has_inf_nan(probe);
         // Single D2H transfer of 1 bool
         if (result.cpu().data<bool>()[0]) {
             return true;
@@ -132,6 +151,7 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
     if (found_inf_nan_) {
         // Skip optimizer step due to overflow
         has_unscaled_ = false;  // Reset for next iteration
+        f32_unscaled_grads_.clear();  // Y.32: drop the side-table.
         return false;
     }
 
@@ -140,6 +160,7 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
 
     // Reset unscale flag for next iteration
     has_unscaled_ = false;
+    f32_unscaled_grads_.clear();  // Y.32: side-table only lives for one step.
 
     return true;
 }
@@ -192,6 +213,7 @@ auto GradScaler::reset() -> void {
     growth_tracker_ = 0;
     found_inf_nan_ = false;
     has_unscaled_ = false;
+    f32_unscaled_grads_.clear();  // Y.32
 }
 
 auto GradScaler::state_dict() const -> std::unordered_map<std::string, float> {

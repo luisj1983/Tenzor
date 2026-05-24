@@ -971,7 +971,7 @@ def adaptive_max_pool2d(input: Variable, output_size: Union[int, tuple[int, int]
     return _nn.functional_adaptive_max_pool2d(input, output_size)
 
 
-def batch_norm(input: Variable, num_features: int, training: bool = True, momentum: float = 0.1, eps: float = 1e-5) -> Variable:
+def batch_norm(input: Variable, num_features: int, training: bool = True, momentum: float = 0.1, eps: float = 1e-5, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
     """Apply batch normalization over a mini-batch of inputs.
 
     Creates a transient BatchNorm layer with fresh running statistics.
@@ -991,6 +991,12 @@ def batch_norm(input: Variable, num_features: int, training: bool = True, moment
         Value used for running mean/var update.  Default: ``0.1``.
     eps : float, optional
         Added to denominator for numerical stability.  Default: ``1e-5``.
+    weight : Variable, optional
+        Optional affine weight (gamma) Variable of shape ``[C]``. When
+        provided, its gradient flows.  Default: ``None`` (no scaling).
+    bias : Variable, optional
+        Optional affine bias (beta) Variable of shape ``[C]``. When
+        provided, its gradient flows.  Default: ``None`` (no offset).
 
     Returns
     -------
@@ -1000,15 +1006,16 @@ def batch_norm(input: Variable, num_features: int, training: bool = True, moment
     Example
     -------
     >>> y = F.batch_norm(x, num_features=64, training=True)
+    >>> y = F.batch_norm(x, 64, weight=w, bias=b)
     """
-    return _nn.functional_batch_norm(input, num_features, training, momentum, eps)
+    return _nn.functional_batch_norm(input, num_features, training, momentum, eps, weight, bias)
 
 
-def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e-5) -> Variable:
+def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e-5, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
     """Apply layer normalization over the last *D* dimensions.
 
-    Creates a transient LayerNorm layer with learnable affine parameters.
-    For persistent parameters, use ``tz.nn.LayerNorm`` as a module.
+    Creates a transient LayerNorm layer. Pass ``weight`` / ``bias`` to
+    supply affine parameters whose gradients should flow.
 
     Parameters
     ----------
@@ -1018,6 +1025,10 @@ def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e
         Shape of the dimensions to normalize over (trailing dims of *input*).
     eps : float, optional
         Added to denominator for numerical stability.  Default: ``1e-5``.
+    weight : Variable, optional
+        Affine weight broadcast over ``normalized_shape``. Default ``None``.
+    bias : Variable, optional
+        Affine bias broadcast over ``normalized_shape``. Default ``None``.
 
     Returns
     -------
@@ -1027,11 +1038,12 @@ def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e
     Example
     -------
     >>> y = F.layer_norm(x, [hidden_size])
+    >>> y = F.layer_norm(x, [hidden_size], weight=w, bias=b)
     """
-    return _nn.functional_layer_norm(input, normalized_shape, eps)
+    return _nn.functional_layer_norm(input, normalized_shape, eps, weight, bias)
 
 
-def group_norm(input: Variable, num_groups: int, num_channels: int, eps: float = 1e-5) -> Variable:
+def group_norm(input: Variable, num_groups: int, num_channels: int, eps: float = 1e-5, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
     """Apply group normalization.
 
     Parameters
@@ -1045,6 +1057,10 @@ def group_norm(input: Variable, num_groups: int, num_channels: int, eps: float =
         Number of channels *C* in the input.
     eps : float, optional
         Added to denominator for numerical stability.  Default: ``1e-5``.
+    weight : Variable, optional
+        Affine weight Variable of shape ``[C]``. Default ``None``.
+    bias : Variable, optional
+        Affine bias Variable of shape ``[C]``. Default ``None``.
 
     Returns
     -------
@@ -1055,10 +1071,10 @@ def group_norm(input: Variable, num_groups: int, num_channels: int, eps: float =
     -------
     >>> y = F.group_norm(x, num_groups=32, num_channels=256)
     """
-    return _nn.functional_group_norm(input, num_groups, num_channels, eps)
+    return _nn.functional_group_norm(input, num_groups, num_channels, eps, weight, bias)
 
 
-def instance_norm(input: Variable, num_features: int, eps: float = 1e-5, affine: bool = False) -> Variable:
+def instance_norm(input: Variable, num_features: int, eps: float = 1e-5, affine: bool = False, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
     """Apply instance normalization.
 
     Normalizes each sample independently across spatial dimensions.
@@ -1072,7 +1088,12 @@ def instance_norm(input: Variable, num_features: int, eps: float = 1e-5, affine:
     eps : float, optional
         Added to denominator for numerical stability.  Default: ``1e-5``.
     affine : bool, optional
-        If ``True``, apply learnable affine parameters.  Default: ``False``.
+        Legacy parameter retained for backwards compatibility.  Pass
+        ``weight`` / ``bias`` Variables instead for autograd-aware affine.
+    weight : Variable, optional
+        Affine weight Variable of shape ``[C]``. Default ``None``.
+    bias : Variable, optional
+        Affine bias Variable of shape ``[C]``. Default ``None``.
 
     Returns
     -------
@@ -1083,10 +1104,10 @@ def instance_norm(input: Variable, num_features: int, eps: float = 1e-5, affine:
     -------
     >>> y = F.instance_norm(x, num_features=64)
     """
-    return _nn.functional_instance_norm(input, num_features, eps, affine)
+    return _nn.functional_instance_norm(input, num_features, eps, affine, weight, bias)
 
 
-def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6) -> Variable:
+def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
     """Apply Root Mean Square layer normalization.
 
     Parameters
@@ -1097,6 +1118,11 @@ def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6) -> Varia
         Size of the last dimension to normalize over.
     eps : float, optional
         Added to denominator for numerical stability.  Default: ``1e-6``.
+    weight : Variable, optional
+        Affine weight Variable broadcast over the normalized trailing
+        dimensions. Default ``None``.
+    bias : Variable, optional
+        Affine bias Variable. Default ``None``.
 
     Returns
     -------
@@ -1107,7 +1133,7 @@ def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6) -> Varia
     -------
     >>> y = F.rms_norm(x, hidden_size)
     """
-    return _nn.functional_rms_norm(input, normalized_shape, eps)
+    return _nn.functional_rms_norm(input, normalized_shape, eps, weight, bias)
 
 
 def interpolate(input: Variable, size: Sequence[int], mode: str = 'bilinear', align_corners: bool = False) -> Variable:

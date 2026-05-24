@@ -85,12 +85,21 @@ auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tens
 auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
 
 /** @brief Fill self at index positions with a scalar value along dim. */
+auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor;
+/// @deprecated audit-5 Y.3: use the `double` overload above. The `float` form
+/// narrows the user-provided scalar before storing it into `AttrKey::Value`
+/// (a double), losing up to ~1e-7 of precision on Float64 tensors.  Kept for
+/// backward source compatibility with pre-Y.3 callers; new code should pass a
+/// `double`.
 auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float value) -> Tensor;
 
 /** @brief Select elements where mask is true. */
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor;
 
 /** @brief Fill elements with value where mask is true. */
+auto masked_fill(const Tensor& input, const Tensor& mask, double value) -> Tensor;
+/// @deprecated audit-5 Y.3: use the `double` overload above. Same narrowing
+/// concern as `index_fill(float)`.
 auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
 
 /**

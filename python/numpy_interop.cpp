@@ -220,7 +220,8 @@ auto prepare_tensor_for_numpy(const Tensor& tensor) -> Tensor {
 }
 
 // Phase 2: Create NumPy array from CPU tensor (requires GIL)
-auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array {
+auto create_numpy_array(const Tensor& tensor, DType original_dtype,
+                        bool want_no_copy) -> py::array {
     auto shape = tensor.shape();
     auto strides = tensor.strides();
     auto dtype = tensor.dtype();
@@ -248,6 +249,16 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array
         tensor.storage()->size_bytes() / element_size);
 
     if (max_offset >= storage_elements) {
+        // Y.25: NumPy 2.0 ``__array__(copy=False)`` strict contract — when
+        // the caller has demanded zero-copy but our strided view exceeds
+        // storage bounds (which would require a contiguous fallback), raise
+        // ``ValueError`` instead of silently warning-and-copying. W.16
+        // closed this for non-CPU / dtype-cast paths but not this branch.
+        if (want_no_copy) {
+            throw py::value_error(
+                "Unable to avoid copy: tensor stride pattern exceeds "
+                "storage bounds and requires a contiguous copy");
+        }
         PyErr_WarnEx(PyExc_RuntimeWarning,
             "Strided tensor view exceeds storage bounds, "
             "falling back to contiguous copy for NumPy conversion", 1);

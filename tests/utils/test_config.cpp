@@ -7,14 +7,28 @@
 #include <tenzor/utils/config.hpp>
 #include <fstream>
 #include <filesystem>
+#include <string>
+#include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
 
 class ConfigTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Audit-5 Y.33: per-test, per-process temp path. The old shared
+        // "/tmp/tenzor_test_config.ini" raced under parallel `ctest` runs
+        // (different `bin/test_config` invocations clobbered each other's
+        // load_from_file fixtures). Mirrors tests/nn/test_safetensors.cpp.
+        const auto* info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        const std::string test_name = info ? info->name() : "unknown";
+        test_config_file_ = (std::filesystem::temp_directory_path() /
+                             ("tenzor_config_" + std::to_string(::getpid()) +
+                              "_" + test_name + ".ini")).string();
+
         // Reset config to empty state by clearing all known keys
         auto& config = Config::instance();
+        (void)config;
 
         // Clean up test config file if it exists
         if (std::filesystem::exists(test_config_file_)) {
@@ -29,7 +43,7 @@ protected:
         }
     }
 
-    const std::string test_config_file_ = "/tmp/tenzor_test_config.ini";
+    std::string test_config_file_;
 };
 
 // Test 1: Singleton instance
@@ -173,7 +187,12 @@ TEST_F(ConfigTest, LoadFromFile) {
 // Test 9: Load from non-existent file
 TEST_F(ConfigTest, LoadFromNonExistentFile) {
     auto& config = Config::instance();
-    bool success = config.load_from_file("/tmp/non_existent_file_12345.ini");
+    // Audit-5 Y.33: per-pid path so a parallel test run can't have produced
+    // this file on disk between SetUp and the call.
+    const auto bogus = (std::filesystem::temp_directory_path() /
+                        ("tenzor_config_missing_" +
+                         std::to_string(::getpid()) + ".ini")).string();
+    bool success = config.load_from_file(bogus);
     EXPECT_FALSE(success);
 }
 

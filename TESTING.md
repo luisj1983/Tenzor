@@ -65,6 +65,17 @@ Every new layer in `include/tenzor/nn/` must land with:
    `MultiBackendDTypeTest`. The test must run on all 5 backends × Float32,
    Float64, Float16 (+ BFloat16 when the build has
    `TENZOR_TEST_BFLOAT16=ON`).
+
+   **BFloat16 parity coverage (audit-5 Y.29).** `TENZOR_TEST_BFLOAT16`
+   defaults `ON` for Release / RelWithDebInfo / MinSizeRel builds and `OFF`
+   for `Debug` builds. The Debug carve-out is intentional: a Debug
+   configure is the dev edit-compile-loop, not the CI matrix — full
+   per-dtype coverage roughly doubles wall-clock time. CI must always
+   configure with one of the Release variants (or pass
+   `-DTENZOR_TEST_BFLOAT16=ON` explicitly) so the BFloat16 column of the
+   parity matrix is populated. Tests that need BF16 unconditionally
+   (e.g. AMP fixtures) iterate over `ALL_FLOAT_DTYPES`, which always
+   contains BFloat16 regardless of this flag.
 2. **Gradient-flow assertion that actually verifies gradients** — never
    `EXPECT_NO_THROW({ loss.backward(); })` alone. Required minimum:
    - `ASSERT_TRUE(input.has_grad())`

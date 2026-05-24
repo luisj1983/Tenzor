@@ -1077,10 +1077,12 @@ auto jvp_masked_select(const DualTensor& x, const Tensor& mask) -> DualTensor {
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
-auto jvp_masked_fill(const DualTensor& x, const Tensor& mask, float value) -> DualTensor {
+auto jvp_masked_fill(const DualTensor& x, const Tensor& mask, double value) -> DualTensor {
     // masked_fill replaces tangent positions with 0 (constant value has zero derivative).
+    // `value` is `double` so Float64 callers don't lose precision before the public
+    // `tenzor::masked_fill` overload widens it again (audit-5 Y.2 + Y.3).
     auto primal = tenzor::masked_fill(x.primal(), mask, value);
-    auto tangent = tenzor::masked_fill(x.tangent(), mask, 0.0f);
+    auto tangent = tenzor::masked_fill(x.tangent(), mask, 0.0);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -1200,16 +1202,19 @@ auto jvp_nan_to_num(const DualTensor& x, double nan, double posinf, double negin
 
 // ---- Reductions long-tail --------------------------------------------------
 
-auto jvp_norm(const DualTensor& x, float p, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
+auto jvp_norm(const DualTensor& x, double p, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
     // y = (sum |x|^p)^(1/p)
     // dy = (sum sign(x) * |x|^(p-1) * dx) * y^(1-p)
     //    where for p=2 this is (sum x*dx) / y, and for p=1 it is sum sign(x)*dx.
     // We build the keepdim form of the primal so the y^(1-p) broadcast is well-defined,
     // then squeeze if the caller did not request keepdim.
-    auto y_kd = tenzor::norm(x.primal(), p, dim, /*keepdim=*/true);
+    // The public `tenzor::norm` API takes `float p` today; we keep the helper's
+    // contract as `double` (audit-5 Y.1) so users on Float64 don't lose precision
+    // in the `|x|^(p-1)` path which is computed at double width below.
+    auto y_kd = tenzor::norm(x.primal(), static_cast<float>(p), dim, /*keepdim=*/true);
     auto abs_x = tenzor::abs(x.primal());
     auto sgn   = tenzor::sign(x.primal());
-    auto pow_abs = tenzor::pow(abs_x, static_cast<double>(p) - 1.0);
+    auto pow_abs = tenzor::pow(abs_x, p - 1.0);
     // Guard against the p<1 singularity at x=0: |x|^(p-1) is +inf there, and
     // sign(0)=0 makes the product NaN. The contribution at exactly x=0 should
     // be zero (sign is zero, the subgradient is the convex-set [-1,1] which
@@ -1219,7 +1224,7 @@ auto jvp_norm(const DualTensor& x, float p, std::optional<int64_t> dim, bool kee
     auto safe_pow_abs = tenzor::where(zero_mask, zero_like_abs, pow_abs);
     auto weighted = tenzor::mul(tenzor::mul(sgn, safe_pow_abs), x.tangent());
     auto num = tenzor::sum(weighted, dim, /*keepdim=*/true);
-    auto scale = tenzor::pow(y_kd, 1.0 - static_cast<double>(p));
+    auto scale = tenzor::pow(y_kd, 1.0 - p);
     auto tangent_kd = tenzor::mul(num, scale);
 
     Tensor primal = keepdim ? y_kd : tenzor::squeeze(y_kd, dim);
@@ -1286,12 +1291,14 @@ auto jvp_index_copy(const DualTensor& input, int64_t dim, const Tensor& index,
 }
 
 auto jvp_index_fill(const DualTensor& input, int64_t dim, const Tensor& index,
-                    float value) -> DualTensor {
+                    double value) -> DualTensor {
     // y = input; y[index[i]] = value (constant).  Derivative wrt input is the
     // identity on un-indexed positions and zero at indexed positions; we get
     // that by filling the input tangent at the same indices with 0.
+    // `value` is `double` so Float64 callers don't lose precision before the
+    // public `tenzor::index_fill` overload widens it again (audit-5 Y.2 + Y.3).
     auto primal = tenzor::index_fill(input.primal(), dim, index, value);
-    auto tangent = tenzor::index_fill(input.tangent(), dim, index, /*value=*/0.0f);
+    auto tangent = tenzor::index_fill(input.tangent(), dim, index, /*value=*/0.0);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -2368,7 +2375,7 @@ JvpResult jvp_adapter_masked_fill(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_masked_fill: expected 2 inputs (input, mask)");
     }
     auto x = make_dual(primals[0], tangents[0]);
-    float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+    double value = attrs.get_float(AttrKey::Value, 0.0);
     return dual_to_result(jvp_masked_fill(x, primals[1], value));
 }
 
@@ -2731,7 +2738,7 @@ JvpResult jvp_adapter_norm(std::span<const Tensor> primals,
         throw std::runtime_error("jvp_adapter_norm: expected 1 input");
     }
     auto x = make_dual(primals[0], tangents[0]);
-    float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+    double p = attrs.get_float(AttrKey::P, 2.0);
     std::optional<int64_t> dim;
     if (attrs.has(AttrKey::Dim)) {
         int64_t d = attrs.get_int(AttrKey::Dim);
@@ -2833,7 +2840,7 @@ JvpResult jvp_adapter_index_fill(std::span<const Tensor> primals,
     }
     auto input  = make_dual(primals[0], tangents[0]);
     int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-    float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+    double value = attrs.get_float(AttrKey::Value, 0.0);
     return dual_to_result(jvp_index_fill(input, dim, primals[1], value));
 }
 

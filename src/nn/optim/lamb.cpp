@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/lamb.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -6,21 +7,8 @@
 
 namespace tenzor::optim {
 
-// R.16: see adam.cpp for the full rationale.
-namespace {
-inline auto optim_state_dtype(DType param_dtype) -> DType {
-    if (param_dtype == DType::Float16 || param_dtype == DType::BFloat16) {
-        return DType::Float32;
-    }
-    return param_dtype;
-}
-inline auto make_optim_state(const Tensor& param) -> Tensor {
-    DType state_dt = optim_state_dtype(param.dtype());
-    if (state_dt == param.dtype()) return zeros_like(param);
-    std::vector<int64_t> shape(param.shape().begin(), param.shape().end());
-    return zeros(shape, state_dt, param.device());
-}
-} // namespace
+// R.16 master-weights helpers (optim_state_dtype / make_optim_state) are
+// shared across all optimisers via include/tenzor/nn/optim/master_weights.hpp.
 
 LAMB::LAMB(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
            double beta2, double eps, double weight_decay)
@@ -226,11 +214,17 @@ auto LAMB::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
     eps_          = get_f64("eps",          eps_);
     weight_decay_ = get_f64("weight_decay", weight_decay_);
 
+    // V.27 / Y.17: cast to the R.16 master-weights dtype on load. Pre-R.16
+    // checkpoints stored half-precision buffers; restoring them as-is would
+    // silently break the master-weights invariant on the next step.
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string ea_key = "exp_avg_" + std::to_string(i);
         std::string eas_key = "exp_avg_sq_" + std::to_string(i);
-        if (state.count(ea_key)) exp_avg_[i] = state.at(ea_key).clone();
-        if (state.count(eas_key)) exp_avg_sq_[i] = state.at(eas_key).clone();
+        const DType state_dt = (i < parameters_.size() && parameters_[i])
+            ? optim_state_dtype(parameters_[i]->tensor().dtype())
+            : DType::Float32;
+        if (state.count(ea_key)) exp_avg_[i] = state.at(ea_key).to(state_dt);
+        if (state.count(eas_key)) exp_avg_sq_[i] = state.at(eas_key).to(state_dt);
     }
 }
 

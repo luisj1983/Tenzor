@@ -11,9 +11,28 @@
 #include <tenzor/nn/optim/adam.hpp>
 #include <sstream>
 #include <memory>
+#include <string>
+#include <filesystem>
+#include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
 using namespace tenzor::nn;
+
+namespace {
+// Audit-5 Y.33: per-test, per-process temp filepath for ModelCheckpoint
+// templates. The old hardcoded "/tmp/model_epoch_{epoch}.pt" et al. raced
+// when two `bin/test_callbacks` processes ran concurrently and also
+// stomped any developer's existing files at those paths. Mirrors
+// tests/nn/test_safetensors.cpp.
+std::string callback_temp_path(const char* tag) {
+    const auto* info =
+        ::testing::UnitTest::GetInstance()->current_test_info();
+    const std::string test_name = info ? info->name() : "unknown";
+    return (std::filesystem::temp_directory_path() /
+            ("tenzor_callbacks_" + std::to_string(::getpid()) + "_" +
+             test_name + "_" + tag)).string();
+}
+}  // namespace
 
 // Helper class for testing custom callbacks
 class TestCallback : public Callback {
@@ -195,7 +214,7 @@ TEST(CallbackTest, ModelCheckpointCallbackCreation) {
     auto model = std::make_shared<Linear>(10, 5);
 
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/model_epoch_{epoch}.pt",
+        callback_temp_path("epoch_{epoch}.pt"),
         model,
         true,  // save_best_only
         "val_loss"
@@ -209,7 +228,7 @@ TEST(CallbackTest, ModelCheckpointSaveBestOnly) {
     auto model = std::make_shared<Linear>(10, 5);
 
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_best.pt",
+        callback_temp_path("best.pt"),
         model,
         true  // save_best_only
     );
@@ -232,7 +251,7 @@ TEST(CallbackTest, ModelCheckpointFilepathTemplate) {
     auto model = std::make_shared<Linear>(10, 5);
 
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/model_epoch_{epoch:03d}.pt",
+        callback_temp_path("epoch_{epoch:03d}.pt"),
         model,
         false  // save every epoch
     );
@@ -440,7 +459,7 @@ TEST(CallbackTest, CallbackWithModelAndOptimizer) {
 
     // Create callbacks
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model.pt",
+        callback_temp_path("model.pt"),
         model,
         true
     );

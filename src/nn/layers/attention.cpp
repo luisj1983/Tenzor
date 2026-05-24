@@ -633,10 +633,40 @@ auto MultiheadAttention::forward(const Variable& query,
         // Previously a 3D mask was passed through verbatim; the subsequent
         // additive combine with the 4D padding mask then crashed on shape
         // mismatch (the 3D leading dim N*H cannot broadcast to N).
-        auto am_shape = attn_mask.shape();
+        //
+        // Y.19: a Bool attn_mask (PyTorch convention: True = ignore) must be
+        // widened to a float mask with -inf at True positions before the
+        // additive combine. Mirrors V.28's key_padding_mask handling; without
+        // this, the downstream `add(combined_mask, broadcastable_mask)`
+        // computes `float + bool` (treated as 0/1), so masked positions get
+        // an additive `1.0` instead of `-inf`, leaking attention to them.
+        Tensor normalised_mask = attn_mask;
+        const DType am_dtype = normalised_mask.dtype();
+        if (am_dtype == DType::Bool) {
+            auto pm_shape = std::vector<int64_t>(normalised_mask.shape().begin(),
+                                                 normalised_mask.shape().end());
+            Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                         DType::Float32, normalised_mask.device());
+            Tensor zero_tensor = zeros(pm_shape, DType::Float32, normalised_mask.device());
+            normalised_mask = Tensor(where(normalised_mask, neg_inf_tensor, zero_tensor));
+        } else if (am_dtype != DType::Float32 && am_dtype != DType::Float64 &&
+                   am_dtype != DType::Float16 && am_dtype != DType::BFloat16) {
+            // Integer mask: treat as 0/1 indicator, widen to a float -inf/0 mask.
+            auto pm_shape = std::vector<int64_t>(normalised_mask.shape().begin(),
+                                                 normalised_mask.shape().end());
+            Tensor as_float = normalised_mask.to(DType::Float32);
+            Tensor threshold = full(pm_shape, 0.5f, DType::Float32, normalised_mask.device());
+            Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                         DType::Float32, normalised_mask.device());
+            Tensor zero_tensor = zeros(pm_shape, DType::Float32, normalised_mask.device());
+            Tensor mask_gt = Tensor(gt(as_float, threshold));
+            normalised_mask = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
+        }
+
+        auto am_shape = normalised_mask.shape();
         if (am_shape.size() == 2) {
             std::vector<int64_t> new_shape = {1, 1, am_shape[0], am_shape[1]};
-            combined_mask = reshape(attn_mask, new_shape);
+            combined_mask = reshape(normalised_mask, new_shape);
         } else if (am_shape.size() == 3) {
             if (am_shape[0] != batch_size * num_heads_) {
                 throw std::invalid_argument(
@@ -645,9 +675,9 @@ auto MultiheadAttention::forward(const Variable& query,
                     std::to_string(batch_size * num_heads_) + ")");
             }
             std::vector<int64_t> new_shape = {batch_size, num_heads_, am_shape[1], am_shape[2]};
-            combined_mask = reshape(attn_mask, new_shape);
+            combined_mask = reshape(normalised_mask, new_shape);
         } else if (am_shape.size() == 4) {
-            combined_mask = attn_mask;
+            combined_mask = normalised_mask;
         } else {
             throw std::invalid_argument(
                 "MultiheadAttention: attn_mask must be 2D, 3D, or 4D, got " +

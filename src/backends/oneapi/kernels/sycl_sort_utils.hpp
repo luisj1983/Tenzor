@@ -52,7 +52,7 @@ void sycl_bitonic_sort(T* data, int64_t n, sycl::queue& queue) {
                     }
                 }
             });
-            queue.wait();
+            queue.wait_and_throw();
         }
     }
 }
@@ -109,7 +109,7 @@ void sycl_bitonic_sort_by_key(T* data, int64_t* indices, int64_t n, sycl::queue&
                     }
                 }
             });
-            queue.wait();
+            queue.wait_and_throw();
         }
     }
 }

@@ -879,6 +879,13 @@ auto VulkanBackend::has_atomic_float(int32_t device_id) const -> bool {
     return devices_[device_id].hasAtomicFloat;
 }
 
+auto VulkanBackend::has_atomic_int64(int32_t device_id) const -> bool {
+    if (device_id < 0 || static_cast<size_t>(device_id) >= devices_.size()) {
+        return false;
+    }
+    return devices_[device_id].hasAtomicInt64;
+}
+
 auto VulkanBackend::recommended_workgroup_2d(GpuVendor vendor, OpKind op)
     -> std::pair<uint32_t, uint32_t> {
     // Defaults are chosen to match each vendor's subgroup width in the
@@ -1326,6 +1333,26 @@ void ensure_atomic_float_supported(int32_t device_id, const char* op_name) {
         throw std::runtime_error(
             std::string("[Vulkan ") + (op_name ? op_name : "?") +
             "] requires VK_EXT_shader_atomic_float (not supported on this device)");
+    }
+}
+
+// Y.10: Shared VK_EXT_shader_atomic_int64 capability gate for vulkan_ops_*.cpp
+// dispatchers whose compute shaders use GL_EXT_shader_atomic_int64 (typically
+// F64 pooling/scatter/reduction backward paths that pack double into uint64
+// for atomic CAS updates). Mirrors ensure_fp64_supported (R.13). Queries
+// devices_[device_id].hasAtomicInt64 via the public has_atomic_int64() accessor.
+void ensure_atomic_int64_supported(int32_t device_id, const char* op_name) {
+    auto* backend = DispatchTableRegistry::get_backend(Device::Type::Vulkan);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] Vulkan backend is not initialised; cannot query VK_EXT_shader_atomic_int64");
+    }
+    auto* vk = static_cast<VulkanBackend*>(backend);
+    if (!vk->has_atomic_int64(device_id)) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] requires VK_EXT_shader_atomic_int64 (not supported on this device)");
     }
 }
 

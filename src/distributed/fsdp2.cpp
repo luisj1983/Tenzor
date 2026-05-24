@@ -102,6 +102,36 @@ auto FSDP2::shard_parameters() -> void {
         }
     }
 
+    // Y.22: pre-allocate the persistent unsharded destination so cycle 0 of
+    // unshard_params() takes the in-place zero_/add_ path rather than the
+    // first-cycle TensorImpl-swap branch. The swap branch breaks R.18 on
+    // cycle 0: any activation that captured the parameter's TensorImpl
+    // (saved-for-backward, FSDP2 shard view) gets orphaned because the
+    // live parameter now points at the allgathered tensor's impl.
+    //
+    // Allocating as `zeros(full_shape, comm/param dtype, device)` here gives
+    // unshard_params() a slot whose shape/dtype/device match the freshly
+    // allgathered `full` tensor, so `slot_valid` is true on cycle 0 and
+    // the in-place add path runs every cycle, including the first.
+    unsharded_dst_.clear();
+    if (shard_world_size_ > 1) {
+        for (auto& [name, param] : named_params) {
+            if (!param) {
+                continue;
+            }
+            auto& tensor = param->tensor();
+            // The unsharded slot must match the dtype of `dt.full_tensor()`,
+            // which after the optional mixed-precision cast above is
+            // config_.mixed_precision.param_dtype when set, otherwise the
+            // original param dtype.
+            const DType slot_dtype = (config_.mixed_precision.param_dtype != tensor.dtype())
+                ? config_.mixed_precision.param_dtype
+                : tensor.dtype();
+            std::vector<int64_t> full_shape(tensor.shape().begin(), tensor.shape().end());
+            unsharded_dst_[name] = zeros(full_shape, slot_dtype, tensor.device());
+        }
+    }
+
     is_sharded_ = true;
 }
 

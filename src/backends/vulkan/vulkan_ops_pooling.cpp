@@ -590,6 +590,11 @@ auto VulkanBackend::dispatchMaxPool2dBackward([[maybe_unused]] const Tensor& gra
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    if (is_f64) {
+        // Y.10: max_pool2d_backward_f64 uses GL_EXT_shader_atomic_int64 for
+        // CAS-based double atomicAdd; gate so unsupported devices fail fast.
+        vulkan::ensure_atomic_int64_supported(device_id, "MaxPool2dBackward");
+    }
     std::string mp1_shader = is_f64 ? "max_pool2d_backward_f64" : "max_pool2d_backward";
     auto* pipeline = getPipeline(mp1_shader, device_id);
 
@@ -1029,6 +1034,10 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
     bool is_bf16 = (input.dtype() == DType::BFloat16);
+    if (is_f64) {
+        // Y.10: max_pool2d_backward_f64 uses GL_EXT_shader_atomic_int64; gate.
+        vulkan::ensure_atomic_int64_supported(device_id, "MaxPool2dBackward");
+    }
     std::string mp_shader = is_f64 ? "max_pool2d_backward_f64" :
                             (is_f16 ? "max_pool2d_backward_f16" :
                             (is_bf16 ? "max_pool2d_backward_bf16" : "max_pool2d_backward"));
@@ -1305,6 +1314,10 @@ auto VulkanBackend::dispatchMaxPool1dBackward(const Tensor& grad_output, const T
     }
 
     int32_t device_id = grad_output.device().index;
+    if (grad_output.dtype() == DType::Float64) {
+        // Y.10: max_pool1d_backward_f64 uses GL_EXT_shader_atomic_int64; gate.
+        vulkan::ensure_atomic_int64_supported(device_id, "MaxPool1dBackward");
+    }
     Tensor grad_input = dispatchZeros({N, C, L_in}, grad_output.dtype(), grad_output.device());
 
     std::string shader_name = "max_pool1d_backward";
@@ -1595,6 +1608,10 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output,
     if (grad_out_numel == 0) return Tensor(input_shape, grad_output.dtype(), grad_output.device());
 
     int32_t device_id = grad_output.device().index;
+    if (grad_output.dtype() == DType::Float64) {
+        // Y.10: max_pool1d_backward_f64 uses GL_EXT_shader_atomic_int64; gate.
+        vulkan::ensure_atomic_int64_supported(device_id, "AdaptiveMaxPool1dBackward");
+    }
     Tensor grad_input = dispatchZeros(input_shape, grad_output.dtype(), grad_output.device());
 
     std::string shader_name = "max_pool1d_backward";

@@ -542,6 +542,12 @@ auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices_in,
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
 
+    if (is_float64) {
+        // Y.10: put_f64.comp uses GL_EXT_shader_atomic_int64 for CAS-based
+        // Float64 atomicAdd when accumulating; gate so unsupported devices
+        // fail fast instead of hitting an opaque SPIR-V validation error.
+        vulkan::ensure_atomic_int64_supported(device_id, "Put");
+    }
     std::string shader_name = is_float64 ? "put_f64" : "put";
     auto* pipeline = getPipeline(shader_name, device_id);
 

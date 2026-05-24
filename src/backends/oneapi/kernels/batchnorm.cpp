@@ -567,7 +567,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
-        queue.wait();
+        queue.wait_and_throw();
 
         const double scale = 1.0 / static_cast<double>(N * spatial);
         queue.parallel_for<BatchNorm2dBackwardInputKernelFloat64>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
@@ -608,7 +608,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
-        queue.wait();
+        queue.wait_and_throw();
 
         const float scale = 1.0f / static_cast<float>(N * spatial);
         queue.parallel_for<BatchNorm2dBackwardInputKernelFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
@@ -652,7 +652,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
         }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
-        queue.wait();
+        queue.wait_and_throw();
 
         const float scale = 1.0f / static_cast<float>(N * spatial);
         queue.parallel_for<BatchNorm2dBackwardInputKernelBFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
@@ -1488,7 +1488,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         // Pass 2: compute per-group variance and inv_std
         queue.parallel_for<GroupNormVarianceKernelFloat32>(
@@ -1510,7 +1510,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         // Pass 3: normalize + affine
         queue.parallel_for<GroupNormNormalizeKernelFloat32>(
@@ -1558,7 +1558,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_d[n * num_groups + g] = sum / static_cast<double>(group_size);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormVarianceKernelFloat64>(
             sycl::range<2>(N, num_groups),
@@ -1579,7 +1579,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 invstd_d[n * num_groups + g] = 1.0 / sycl::sqrt(var + eps_d);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormNormalizeKernelFloat64>(
             sycl::range<3>(N, C, spatial_size),
@@ -1622,7 +1622,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormVarianceKernelFloat16>(
             sycl::range<2>(N, num_groups),
@@ -1643,7 +1643,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormNormalizeKernelFloat16>(
             sycl::range<3>(N, C, spatial_size),
@@ -1687,7 +1687,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormVarianceKernelBFloat16>(
             sycl::range<2>(N, num_groups),
@@ -1708,7 +1708,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for<GroupNormNormalizeKernelBFloat16>(
             sycl::range<3>(N, C, spatial_size),

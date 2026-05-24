@@ -108,6 +108,107 @@ TEST_P(NNConvParity, Conv1d_Padding) {
 }
 
 // ============================================================================
+// Audit-5 Y.30: Conv1d per-axis stride / dilation parity coverage.
+//
+// F.11 / U.4 wired the Conv1d→Conv2d backend dispatch to translate the
+// scalar 1D Stride/Padding/Dilation into per-axis (StrideH=1, StrideW=stride,
+// PaddingH=0, PaddingW=padding, DilationH=1, DilationW=dilation). Before
+// U.4 those scalars were duplicated to both H and W on CUDA/ROCm/OneAPI/
+// Vulkan, so padding=1 turned the spurious H=1 axis into H_out=3 and
+// dilation>1 could even reject the call because the dilated kernel exceeded
+// H=1. The fix landed without a parity test, so a regression would only
+// surface in downstream ASR / TTS workloads.
+//
+// Conv1d's public ctor is scalar-only (the 1D analogue of Conv2d's
+// pair<int64_t,int64_t>); the "per-axis" angle is that the *backend*
+// dispatcher must forward the scalar as a per-axis attr along the temporal
+// axis only. Pick L=32 with stride=2 / padding=1 / dilation=1 (PyTorch
+// L_out = (32 + 2*1 - 1*(3-1) - 1)/2 + 1 = 16) and L=32 with stride=1 /
+// padding=2 / dilation=2 (L_out = (32 + 2*2 - 2*(3-1) - 1)/1 + 1 = 32) so
+// the expected output length is asymmetric enough that a wrong attr broadcast
+// to H would either reshape the tensor or throw.
+// ============================================================================
+
+TEST_P(NNConvParity, Conv1d_PerAxisStride) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn conv parity");
+
+    // stride=2, padding=1, dilation=1; L_in=32, kernel=3 →
+    // L_out = (32 + 2*1 - 1*(3-1) - 1)/2 + 1 = 16.
+    nn::Conv1d conv(3, 16, 3, 2, 1, 1);
+    auto input = randn({1, 3, 32}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+    ASSERT_EQ(ref_output.shape().size(), 3u);
+    EXPECT_EQ(ref_output.shape()[2], 16);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::Conv1d conv_dev(3, 16, 3, 2, 1, 1);
+            auto params = conv.parameters();
+            auto dev_params = conv_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            conv_dev.to(backends[i]);
+            auto input_dev = input.to(backends[i]);
+            auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("Conv1d_PerAxisStride on ")
+                         + backend_name(backends[i]));
+            ASSERT_EQ(output.shape().size(), 3u);
+            EXPECT_EQ(output.shape()[2], 16);
+            EXPECT_TENSORS_CLOSE(ref_output,
+                                 output.to(Device::cpu()),
+                                 1e-4f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "Conv1d_PerAxisStride failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+TEST_P(NNConvParity, Conv1d_PerAxisDilation) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn conv parity");
+
+    // stride=1, padding=2, dilation=2; L_in=32, kernel=3 →
+    // effective kernel = (3-1)*2 + 1 = 5,
+    // L_out = (32 + 2*2 - 5)/1 + 1 = 32.
+    nn::Conv1d conv(3, 16, 3, 1, 2, 2);
+    auto input = randn({1, 3, 32}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+    ASSERT_EQ(ref_output.shape().size(), 3u);
+    EXPECT_EQ(ref_output.shape()[2], 32);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::Conv1d conv_dev(3, 16, 3, 1, 2, 2);
+            auto params = conv.parameters();
+            auto dev_params = conv_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            conv_dev.to(backends[i]);
+            auto input_dev = input.to(backends[i]);
+            auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("Conv1d_PerAxisDilation on ")
+                         + backend_name(backends[i]));
+            ASSERT_EQ(output.shape().size(), 3u);
+            EXPECT_EQ(output.shape()[2], 32);
+            EXPECT_TENSORS_CLOSE(ref_output,
+                                 output.to(Device::cpu()),
+                                 1e-4f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "Conv1d_PerAxisDilation failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+// ============================================================================
 // Conv3d Tests
 // ============================================================================
 

@@ -168,29 +168,32 @@ TEST_P(NNLossParity, PoissonNLLLoss) {
 }
 
 TEST_P(NNLossParity, CTCLoss) {
+    // Audit-5 Y.31: previously the entire test body was wrapped in
+    // `try { ... } catch (...) { GTEST_SKIP(); }`, which silently swallowed
+    // every backend failure as "not available" even though the W.3 sweep
+    // landed ROCm / OneAPI / MPS CTC kernels. A real dispatch break (missing
+    // kernel, wrong attr, NaN output) was indistinguishable from a clean
+    // skip. Let exceptions propagate as failures so the parity matrix
+    // tooling (and humans reading the ctest output) sees the truth.
 
-    try {
-        // log_probs: (T, N, C) = (50, 4, 20)
-        auto log_probs_raw = randn({50, 4, 20}, DType::Float32, Device::cpu());
-        auto log_probs = nn::log_softmax(Variable(log_probs_raw, false), 2).tensor();
+    // log_probs: (T, N, C) = (50, 4, 20)
+    auto log_probs_raw = randn({50, 4, 20}, DType::Float32, Device::cpu());
+    auto log_probs = nn::log_softmax(Variable(log_probs_raw, false), 2).tensor();
 
-        // targets: (N, S) = (4, 10), class indices 1-19 (0 is blank)
-        auto targets = (rand({4, 10}, DType::Float32, Device::cpu()) * 19.0f + 1.0f).to(DType::Int64);
+    // targets: (N, S) = (4, 10), class indices 1-19 (0 is blank)
+    auto targets = (rand({4, 10}, DType::Float32, Device::cpu()) * 19.0f + 1.0f).to(DType::Int64);
 
-        // input_lengths: all 50
-        auto input_lengths = ones({4}, DType::Int64, Device::cpu()) * 50;
+    // input_lengths: all 50
+    auto input_lengths = ones({4}, DType::Int64, Device::cpu()) * 50;
 
-        // target_lengths: all 10
-        auto target_lengths = ones({4}, DType::Int64, Device::cpu()) * 10;
+    // target_lengths: all 10
+    auto target_lengths = ones({4}, DType::Int64, Device::cpu()) * 10;
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::CTCLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              inputs[1], inputs[2], inputs[3]).tensor();
-        }, std::vector<Tensor>{log_probs, targets, input_lengths, target_lengths}, device, 1e-4f, 1e-5f, "CTCLoss");
-    } catch (...) {
-        GTEST_SKIP() << "CTCLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::CTCLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          inputs[1], inputs[2], inputs[3]).tensor();
+    }, std::vector<Tensor>{log_probs, targets, input_lengths, target_lengths}, device, 1e-4f, 1e-5f, "CTCLoss");
 }
 
 TEST_P(NNLossParity, MultiLabelSoftMarginLoss) {

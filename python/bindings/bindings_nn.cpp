@@ -2316,53 +2316,135 @@ void register_nn(py::module_& m) {
        "Apply 2D adaptive max pooling",
        py::call_guard<py::gil_scoped_release>());
 
-    nn.def("functional_batch_norm", [](const tenzor::Variable& input, int64_t num_features,
-                                        bool training, double momentum, double eps) -> tenzor::Variable {
-        tenzor::nn::BatchNorm2d layer(num_features, eps, momentum, true, true);
+    // Y.24: helper that applies optional affine `weight` / `bias` Variables
+    // *outside* of the transient layer, so their grad_fn flows back to the
+    // user's Variables (the layer's own params are unreachable).
+    //
+    //   - LayerNorm / RMSNorm: weight/bias shape == ``normalized_shape``;
+    //     broadcast natural over leading dims, no reshape needed.
+    //   - BatchNorm / GroupNorm / InstanceNorm: weight/bias shape == [C];
+    //     reshape to [1, C, 1, ..., 1] so they broadcast over [N, C, ...].
+    auto apply_affine_channel_first = [](const tenzor::Variable& y,
+                                         const std::optional<tenzor::Variable>& weight,
+                                         const std::optional<tenzor::Variable>& bias)
+                                         -> tenzor::Variable {
+        if (!weight.has_value() && !bias.has_value()) return y;
+        auto in_shape = y.tensor().shape();
+        // Build broadcast shape [1, C, 1, ..., 1] sized to match y.
+        std::vector<int64_t> bcast(in_shape.size(), int64_t{1});
+        if (in_shape.size() >= 2) bcast[1] = in_shape[1];
+        tenzor::Variable out = y;
+        if (weight.has_value()) {
+            tenzor::Variable w_b = ::tenzor::reshape(*weight, bcast);
+            out = out * w_b;
+        }
+        if (bias.has_value()) {
+            tenzor::Variable b_b = ::tenzor::reshape(*bias, bcast);
+            out = out + b_b;
+        }
+        return out;
+    };
+
+    auto apply_affine_trailing = [](const tenzor::Variable& y,
+                                    const std::optional<tenzor::Variable>& weight,
+                                    const std::optional<tenzor::Variable>& bias)
+                                    -> tenzor::Variable {
+        // weight / bias broadcast natively over the trailing dims they cover
+        // (LayerNorm / RMSNorm shape contract).
+        if (!weight.has_value() && !bias.has_value()) return y;
+        tenzor::Variable out = y;
+        if (weight.has_value()) out = out * (*weight);
+        if (bias.has_value()) out = out + (*bias);
+        return out;
+    };
+
+    nn.def("functional_batch_norm", [apply_affine_channel_first](
+            const tenzor::Variable& input, int64_t num_features,
+            bool training, double momentum, double eps,
+            std::optional<tenzor::Variable> weight,
+            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
+        // Y.24: run the transient layer in non-affine mode so the
+        // normalization-only output flows out, then apply the caller's
+        // affine via autograd-aware Variable ops.
+        tenzor::nn::BatchNorm2d layer(num_features, eps, momentum,
+                                      /*affine=*/false, /*track_running_stats=*/true);
         layer.train(training);
-        return layer.forward_impl(input);
+        auto y = layer.forward_impl(input);
+        return apply_affine_channel_first(y, weight, bias);
     }, py::arg("input"), py::arg("num_features"),
        py::arg("training") = true, py::arg("momentum") = 0.1, py::arg("eps") = 1e-5,
-       "Apply batch normalization (creates fresh running stats)",
+       py::arg("weight") = py::none(), py::arg("bias") = py::none(),
+       "Apply batch normalization. weight/bias are optional Variables "
+       "([C]); when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
-    nn.def("functional_layer_norm", [](const tenzor::Variable& input,
-                                        std::vector<int64_t> normalized_shape,
-                                        double eps) -> tenzor::Variable {
-        tenzor::nn::LayerNorm layer(std::move(normalized_shape), eps, true);
-        return layer.forward_impl(input);
+    nn.def("functional_layer_norm", [apply_affine_trailing](
+            const tenzor::Variable& input,
+            std::vector<int64_t> normalized_shape,
+            double eps,
+            std::optional<tenzor::Variable> weight,
+            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
+        tenzor::nn::LayerNorm layer(std::move(normalized_shape), eps,
+                                    /*elementwise_affine=*/false);
+        auto y = layer.forward_impl(input);
+        return apply_affine_trailing(y, weight, bias);
     }, py::arg("input"), py::arg("normalized_shape"), py::arg("eps") = 1e-5,
-       "Apply layer normalization",
+       py::arg("weight") = py::none(), py::arg("bias") = py::none(),
+       "Apply layer normalization. weight/bias are optional Variables "
+       "(broadcast over normalized_shape); when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
-    nn.def("functional_group_norm", [](const tenzor::Variable& input,
-                                        int64_t num_groups, int64_t num_channels,
-                                        double eps) -> tenzor::Variable {
-        tenzor::nn::GroupNorm layer(num_groups, num_channels, eps, true);
-        return layer.forward_impl(input);
+    nn.def("functional_group_norm", [apply_affine_channel_first](
+            const tenzor::Variable& input,
+            int64_t num_groups, int64_t num_channels,
+            double eps,
+            std::optional<tenzor::Variable> weight,
+            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
+        tenzor::nn::GroupNorm layer(num_groups, num_channels, eps,
+                                    /*affine=*/false);
+        auto y = layer.forward_impl(input);
+        return apply_affine_channel_first(y, weight, bias);
     }, py::arg("input"), py::arg("num_groups"), py::arg("num_channels"),
        py::arg("eps") = 1e-5,
-       "Apply group normalization",
+       py::arg("weight") = py::none(), py::arg("bias") = py::none(),
+       "Apply group normalization. weight/bias are optional Variables "
+       "([C]); when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
-    nn.def("functional_instance_norm",
-          [](const tenzor::Variable& input, int64_t num_features,
-             double eps, bool affine) -> tenzor::Variable {
-        tenzor::nn::InstanceNorm2d layer(num_features, eps, affine);
-        return layer.forward_impl(input);
+    nn.def("functional_instance_norm", [apply_affine_channel_first](
+            const tenzor::Variable& input, int64_t num_features,
+            double eps, bool /*affine_unused*/,
+            std::optional<tenzor::Variable> weight,
+            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
+        // Y.24: ignore the legacy ``affine`` bool — caller controls affine
+        // explicitly by supplying ``weight`` / ``bias``.
+        tenzor::nn::InstanceNorm2d layer(num_features, eps, /*affine=*/false);
+        auto y = layer.forward_impl(input);
+        return apply_affine_channel_first(y, weight, bias);
     }, py::arg("input"), py::arg("num_features"),
        py::arg("eps") = 1e-5, py::arg("affine") = false,
-       "Apply instance normalization",
+       py::arg("weight") = py::none(), py::arg("bias") = py::none(),
+       "Apply instance normalization. weight/bias are optional Variables "
+       "([C]); when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
-    nn.def("functional_rms_norm",
-          [](const tenzor::Variable& input, int64_t normalized_shape,
-             double eps) -> tenzor::Variable {
+    nn.def("functional_rms_norm", [apply_affine_trailing](
+            const tenzor::Variable& input, int64_t normalized_shape,
+            double eps,
+            std::optional<tenzor::Variable> weight,
+            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
+        // Y.24: RMSNorm's own weight is a Parameter on the transient module
+        // and therefore unreachable. Run with the module's ones-weight then
+        // multiply by the caller's weight (and bias if supplied) via
+        // Variable ops so grad_fn flows back to the user's Variables.
         tenzor::nn::RMSNorm layer(normalized_shape, eps);
-        return layer.forward_impl(input);
+        auto y = layer.forward_impl(input);
+        return apply_affine_trailing(y, weight, bias);
     }, py::arg("input"), py::arg("normalized_shape"),
        py::arg("eps") = 1e-6,
-       "Apply RMS normalization",
+       py::arg("weight") = py::none(), py::arg("bias") = py::none(),
+       "Apply RMS normalization. weight (and optional bias) are Variables "
+       "broadcast over normalized_shape; when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_interpolate", [](const tenzor::Variable& input,

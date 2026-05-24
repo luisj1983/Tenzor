@@ -62,11 +62,17 @@ auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
     return dispatch(OpId::MaskedSelect, inputs)[0];
 }
 
-auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
+auto masked_fill(const Tensor& input, const Tensor& mask, double value) -> Tensor {
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Value, static_cast<double>(value));
+    attrs.set(AttrKey::Value, value);
     std::vector<Tensor> inputs = {input, mask};
     return dispatch(OpId::MaskedFill, inputs, attrs)[0];
+}
+
+// Deprecated `float` overload (audit-5 Y.3): forward to the `double` overload
+// so the user-provided scalar travels at double precision into `AttrKey::Value`.
+auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
+    return masked_fill(input, mask, static_cast<double>(value));
 }
 
 auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
@@ -510,12 +516,18 @@ auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Ten
     return dispatch(OpId::IndexCopy, inputs, attrs)[0];
 }
 
-auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float value) -> Tensor {
+auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    attrs.set(AttrKey::Value, static_cast<double>(value));
+    attrs.set(AttrKey::Value, value);
     std::vector<Tensor> inputs = {input.contiguous(), index.contiguous()};
     return dispatch(OpId::IndexFill, inputs, attrs)[0];
+}
+
+// Deprecated `float` overload (audit-5 Y.3): forward to the `double` overload
+// so the user-provided scalar travels at double precision into `AttrKey::Value`.
+auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float value) -> Tensor {
+    return index_fill(input, dim, index, static_cast<double>(value));
 }
 
 auto bincount(const Tensor& input,
@@ -567,6 +579,15 @@ auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& sourc
 }
 
 auto select_scatter(const Tensor& input, const Tensor& src, int64_t dim, int64_t index) -> Tensor {
+    // audit-5 Y.6: normalise negative dim at the dispatcher so backends that
+    // index `shape[dim]` without their own normalisation (CUDA/ROCm/OneAPI
+    // per audit-3 Q.1 / audit-4 V.14) don't underflow.  Mirrors `cat` /
+    // `slice`.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("select_scatter: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Index, index);
@@ -576,6 +597,12 @@ auto select_scatter(const Tensor& input, const Tensor& src, int64_t dim, int64_t
 
 auto slice_scatter(const Tensor& input, const Tensor& src, int64_t dim,
                    int64_t start, int64_t end, int64_t step) -> Tensor {
+    // audit-5 Y.6: same negative-dim normalisation as select_scatter above.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("slice_scatter: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Start, start);

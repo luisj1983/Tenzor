@@ -346,6 +346,15 @@ auto dist(const Tensor& a, const Tensor& b, float p) -> Tensor {
 // =========================================================================
 
 auto cummax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    // audit-5 Y.7: normalise negative dim at the dispatcher so ROCm / OneAPI /
+    // CUDA backends (which use the attribute raw) don't underflow on
+    // `shape[dim]`.  CPU has its own normalisation today, but the parity
+    // requirement is that every backend sees a non-negative dim.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("cummax: dim out of range");
+    }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
@@ -354,6 +363,12 @@ auto cummax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
 }
 
 auto cummin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    // audit-5 Y.7: same negative-dim normalisation as cummax above.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("cummin: dim out of range");
+    }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
@@ -367,6 +382,12 @@ auto isin(const Tensor& elements, const Tensor& test_elements) -> Tensor {
 }
 
 auto kthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor> {
+    // audit-5 Y.7: same negative-dim normalisation as cummax / cummin above.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("kthvalue: dim out of range");
+    }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);

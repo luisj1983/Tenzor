@@ -9,6 +9,8 @@
 #include <tenzor/tenzor.hpp>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
 
@@ -26,6 +28,16 @@ static ::testing::Environment* const tb_env =
 class TensorBoardTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Audit-5 Y.33: per-test, per-process temp dir so parallel re-runs
+        // and CI matrix shards don't race on a shared "/tmp/tenzor_tb_test"
+        // directory. Mirrors tests/nn/test_safetensors.cpp.
+        const auto* info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        const std::string test_name = info ? info->name() : "unknown";
+        test_log_dir_ = (std::filesystem::temp_directory_path() /
+                         ("tenzor_tensorboard_" + std::to_string(::getpid()) +
+                          "_" + test_name)).string();
+
         // Clean up test log directory if it exists
         if (std::filesystem::exists(test_log_dir_)) {
             std::filesystem::remove_all(test_log_dir_);
@@ -39,7 +51,7 @@ protected:
         }
     }
 
-    const std::string test_log_dir_ = "/tmp/tenzor_tb_test";
+    std::string test_log_dir_;
 };
 
 // Test 1: Constructor creates directory

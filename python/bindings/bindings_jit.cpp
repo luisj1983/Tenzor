@@ -151,7 +151,12 @@ void register_jit(py::module_& m) {
     jit.def("trace", py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
             const tenzor::Variable&>(&tenzor::jit::trace),
             py::arg("module"), py::arg("dummy_input"),
-            "Trace a module's forward pass");
+            "Trace a module's forward pass",
+            // Y.26: release the GIL during trace — runs the module's
+            // forward pass through native ops, which can be very long for
+            // realistic models; holding the GIL would block DataLoader /
+            // DDP comm threads behind it.
+            py::call_guard<py::gil_scoped_release>());
 
     jit.def("optimize_graph", &tenzor::jit::optimize_graph,
             py::arg("graph"),
@@ -184,14 +189,21 @@ void register_jit(py::module_& m) {
     py::class_<tenzor::jit::CompiledModule,
                std::shared_ptr<tenzor::jit::CompiledModule>>(jit, "CompiledModule",
         "Callable wrapper around a traced+compiled graph (torch.jit.ScriptModule analog)")
+        // Y.26: ``Graph.forward`` (above) already releases the GIL; mirror
+        // that contract on the user-facing CompiledModule entry points
+        // (forward / __call__ / trace_module) so a Python inference loop
+        // doesn't block DataLoader workers or DDP comm threads on the
+        // duration of a fused-graph execution.
         .def("forward",
              py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
              py::arg("input"),
-             "Execute the compiled graph on a Variable input")
+             "Execute the compiled graph on a Variable input",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__",
              py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
              py::arg("input"),
-             "Callable alias for forward()")
+             "Callable alias for forward()",
+             py::call_guard<py::gil_scoped_release>())
         .def("optimize_for_inference",
              &tenzor::jit::CompiledModule::optimize_for_inference,
              "Apply inference-only optimization passes");
@@ -200,7 +212,8 @@ void register_jit(py::module_& m) {
             py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
                               const tenzor::Variable&>(&tenzor::jit::CompiledModule::trace),
             py::arg("module"), py::arg("example_input"),
-            "Trace a module's forward pass, returning a callable CompiledModule.");
+            "Trace a module's forward pass, returning a callable CompiledModule.",
+            py::call_guard<py::gil_scoped_release>());
 
     // Compile API (torch.compile equivalent)
     jit.def("compile", [](py::function fn, bool fullgraph, std::string mode) {

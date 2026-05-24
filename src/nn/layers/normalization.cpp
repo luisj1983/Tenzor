@@ -1872,6 +1872,16 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         attrs.set(AttrKey::Eps, eps_);
         std::vector<Tensor> inputs_vec = {input_compute, weight_tensor, bias_tensor};
         auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
+        // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
+        // results[2] without checking size would SEGFAULT in this layer (not
+        // the kernel) if a backend regresses to returning {output} only.
+        if (results.size() < 3) {
+            throw std::runtime_error(
+                "GroupNorm: backend kernel returned " +
+                std::to_string(results.size()) +
+                " tensors; the contract requires {output, mean, rstd}. Fix "
+                "the backend kernel registration.");
+        }
 
         Tensor output = results[0];
         Tensor saved_mean = results[1];
@@ -2474,6 +2484,16 @@ auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
     attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
+    // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
+    // results[2] without checking size would SEGFAULT in this layer (not
+    // the kernel) if a backend regresses to returning {output} only.
+    if (results.size() < 3) {
+        throw std::runtime_error(
+            "InstanceNorm2d: backend kernel returned " +
+            std::to_string(results.size()) +
+            " tensors; the contract requires {output, mean, rstd}. Fix "
+            "the backend kernel registration.");
+    }
 
     Tensor output = results[0];
     Tensor saved_mean = results[1];   // [N, C]
@@ -2604,6 +2624,16 @@ auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
     attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input_4d, weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
+    // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
+    // results[2] without checking size would SEGFAULT in this layer (not
+    // the kernel) if a backend regresses to returning {output} only.
+    if (results.size() < 3) {
+        throw std::runtime_error(
+            "InstanceNorm1d: backend kernel returned " +
+            std::to_string(results.size()) +
+            " tensors; the contract requires {output, mean, rstd}. Fix "
+            "the backend kernel registration.");
+    }
 
     // Reshape output back to (N, C, L)
     Tensor output = results[0].reshape({N, C, L});

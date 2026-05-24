@@ -157,7 +157,7 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
                 output_ptr[((n * C + c) * H_out + h) * W_out + w] = val;
             });
     }
-    queue.wait();
+    queue.wait_and_throw();
     return output_f32.to(input.dtype());
 }
 
@@ -341,7 +341,7 @@ auto grid_sample_backward_kernel(const Tensor& grad_output,
         throw std::invalid_argument(
             "grid_sample_backward (OneAPI): unknown mode '" + mode + "'");
     }
-    queue.wait();
+    queue.wait_and_throw();
     return {gi_f32.to(in_dt), gg_f32.to(gr_dt)};
 }
 
@@ -400,7 +400,7 @@ auto affine_grid_backward_kernel(const Tensor& grad_grid,
             add(4, dg_y * y_norm);
             add(5, dg_y);
         });
-    queue.wait();
+    queue.wait_and_throw();
     return gt_f32.to(gr_dt);
 }
 
@@ -443,7 +443,7 @@ auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
             grid_ptr[out_idx] = x_out;
             grid_ptr[out_idx + 1] = y_out;
         });
-    queue.wait();
+    queue.wait_and_throw();
     return grid;
 }
 

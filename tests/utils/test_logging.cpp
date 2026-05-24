@@ -7,12 +7,26 @@
 #include <tenzor/utils/logging.hpp>
 #include <fstream>
 #include <filesystem>
+#include <string>
+#include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
 
 class LoggingTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Audit-5 Y.33: per-test, per-process temp path. Mirrors the
+        // tests/nn/test_safetensors.cpp pattern (audit-3 T.11). The old
+        // shared "/tmp/tenzor_test.log" raced when two `bin/test_logging`
+        // processes ran on the same host (CI matrix, parallel re-runs) and
+        // also stomped any developer's hand-rolled log at that path.
+        const auto* info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        const std::string test_name = info ? info->name() : "unknown";
+        test_log_file_ = (std::filesystem::temp_directory_path() /
+                          ("tenzor_logging_" + std::to_string(::getpid()) +
+                           "_" + test_name + ".log")).string();
+
         // Reset logger to default state
         auto& logger = Logger::instance();
         logger.set_level(LogLevel::Info);
@@ -31,7 +45,7 @@ protected:
         }
     }
 
-    const std::string test_log_file_ = "/tmp/tenzor_test.log";
+    std::string test_log_file_;
 };
 
 // Test 1: Singleton instance

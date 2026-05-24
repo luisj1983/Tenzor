@@ -187,7 +187,7 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
     queue.memset(get_data_ptr<float>(grad_Q), 0, static_cast<size_t>(total_q_len * head_dim) * sizeof(float));
     queue.memset(get_data_ptr<float>(grad_K), 0, static_cast<size_t>(total_kv_len * head_dim) * sizeof(float));
     queue.memset(get_data_ptr<float>(grad_V), 0, static_cast<size_t>(total_kv_len * head_dim) * sizeof(float));
-    queue.wait();
+    queue.wait_and_throw();
 
     const float* do_ptr = get_data_ptr<const float>(do_contig);
     const float* q_ptr = get_data_ptr<const float>(q_contig);

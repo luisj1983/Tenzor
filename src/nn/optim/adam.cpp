@@ -383,6 +383,21 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
         amsgrad_ = state.at("amsgrad").data<int64_t>()[0] != 0;
     }
 
+    // Y.18: if amsgrad flipped false -> true on load, allocate the
+    // max_exp_avg_sq_ buffers now (the constructor only sized them when
+    // amsgrad was true). Without this, the load loop below iterates an
+    // empty vector and silently discards every saved max_exp_avg_sq_i.
+    if (amsgrad_ && max_exp_avg_sq_.empty()) {
+        max_exp_avg_sq_.reserve(parameters_.size());
+        for (auto& param : parameters_) {
+            if (param) {
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
+            }
+        }
+    }
+
     // Validate momentum buffer counts match current parameter count
     size_t saved_count = 0;
     for (const auto& [key, _] : state) {
@@ -704,6 +719,21 @@ auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state
 
     if (state.count("amsgrad")) {
         amsgrad_ = state.at("amsgrad").data<int64_t>()[0] != 0;
+    }
+
+    // Y.18: if amsgrad flipped false -> true on load, allocate the
+    // max_exp_avg_sq_ buffers now (the constructor only sized them when
+    // amsgrad was true). Without this, the load loop below iterates an
+    // empty vector and silently discards every saved max_exp_avg_sq_i.
+    if (amsgrad_ && max_exp_avg_sq_.empty()) {
+        max_exp_avg_sq_.reserve(parameters_.size());
+        for (auto& param : parameters_) {
+            if (param) {
+                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
+            }
+        }
     }
 
     // V.27: cast to the R.16 master-weights dtype on load (see Adam::load_state_dict).

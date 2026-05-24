@@ -10,6 +10,26 @@
 
 #ifdef TENZOR_CUDA_ENABLED
 #include <cuda_runtime.h>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+
+// audit-5 Y.8: local mirror of `tenzor::cuda::TENZOR_CUDA_CHECK` so the
+// StreamManager doesn't silently swallow `cudaSetDevice` / `cudaStreamCreate` /
+// `cudaStreamSynchronize` / `cudaStreamDestroy` failures.  We keep it local
+// rather than pulling in `cuda_common.cuh` because that header drags the
+// kernel-side intrinsics; we only need the runtime error check here.
+#ifndef TENZOR_ASYNC_CUDA_CHECK
+#define TENZOR_ASYNC_CUDA_CHECK(call)                                          \
+    do {                                                                        \
+        cudaError_t _e = (call);                                                \
+        if (_e != cudaSuccess) {                                                \
+            throw std::runtime_error(                                           \
+                std::string("CUDA error in StreamManager (") + #call + "): " + \
+                cudaGetErrorString(_e));                                        \
+        }                                                                       \
+    } while (0)
+#endif
 #endif
 
 namespace tenzor {
@@ -64,13 +84,15 @@ auto StreamManager::get_stream(const Device& device) -> StreamHandle {
 
 #ifdef TENZOR_CUDA_ENABLED
         if (device.type == Device::Type::CUDA) {
-            // Set device
-            cudaSetDevice(device.index);
+            // Set device (audit-5 Y.8 — was unchecked).
+            TENZOR_ASYNC_CUDA_CHECK(cudaSetDevice(device.index));
 
-            // Create CUDA streams
+            // Create CUDA streams.  An unchecked failure would insert an
+            // uninitialised handle into the pool and later corrupt the CUDA
+            // context on the synchronize / destroy path.
             for (size_t i = 0; i < STREAMS_PER_DEVICE; ++i) {
                 cudaStream_t stream;
-                cudaStreamCreate(&stream);
+                TENZOR_ASYNC_CUDA_CHECK(cudaStreamCreate(&stream));
                 device_info.streams.push_back(static_cast<StreamHandle>(stream));
             }
         }
@@ -94,7 +116,9 @@ auto StreamManager::synchronize_stream(StreamHandle stream) -> void {
     }
 
 #ifdef TENZOR_CUDA_ENABLED
-    cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+    // audit-5 Y.8: was unchecked — a failure here (corrupt stream handle,
+    // device lost) needs to surface, not be silently dropped.
+    TENZOR_ASYNC_CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)));
 #endif
 }
 
@@ -113,7 +137,8 @@ auto StreamManager::synchronize_device(const Device& device) -> void {
     if (device.type == Device::Type::CUDA) {
         for (StreamHandle stream : device_info.streams) {
             if (stream) {
-                cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+                // audit-5 Y.8: was unchecked.
+                TENZOR_ASYNC_CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)));
             }
         }
     }
@@ -122,12 +147,28 @@ auto StreamManager::synchronize_device(const Device& device) -> void {
 
 StreamManager::~StreamManager() {
 #ifdef TENZOR_CUDA_ENABLED
+    // Destructor cannot throw, so we log on failure instead of throwing.
+    // audit-5 Y.8: previously all four CUDA calls below were unchecked.  We
+    // can't propagate via exception from a destructor, but a context-lost
+    // condition still warrants an error path — write to stderr so the
+    // failure is visible rather than silent.
     for (auto& [device, device_info] : device_streams_) {
         if (device.type == Device::Type::CUDA) {
-            cudaSetDevice(device.index);
+            cudaError_t set_err = cudaSetDevice(device.index);
+            if (set_err != cudaSuccess) {
+                std::fprintf(stderr,
+                    "StreamManager: cudaSetDevice(%d) failed in destructor: %s\n",
+                    device.index, cudaGetErrorString(set_err));
+                continue;  // can't destroy streams without the right device set
+            }
             for (StreamHandle stream : device_info.streams) {
                 if (stream) {
-                    cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+                    cudaError_t dst_err = cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+                    if (dst_err != cudaSuccess) {
+                        std::fprintf(stderr,
+                            "StreamManager: cudaStreamDestroy failed: %s\n",
+                            cudaGetErrorString(dst_err));
+                    }
                 }
             }
         }

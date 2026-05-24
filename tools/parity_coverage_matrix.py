@@ -153,6 +153,11 @@ def list_ctest_tests(label: str = "backend_parity") -> list[str]:
     except subprocess.CalledProcessError as e:
         print(f"ctest failed: {e}", file=sys.stderr)
         sys.exit(1)
+    except FileNotFoundError:
+        # ctest itself is missing (PATH / not installed).
+        print("ERROR: ctest not found on PATH — run from build/ directory",
+              file=sys.stderr)
+        sys.exit(2)
     data = json.loads(out)
     return [t["name"] for t in data.get("tests", [])]
 
@@ -308,6 +313,20 @@ def main() -> int:
     args = parser.parse_args()
 
     test_names = discover_all_tests(args.label)
+    # Y.28: ctest --show-only=json-v1 exits 0 with an empty test list when the
+    # tool is invoked outside of build/ (no CTestTestfile.cmake to scan). The
+    # legacy behaviour was to emit a silent empty matrix with exit 0 — the
+    # exact same output we'd produce for a perfectly green run. Treat the
+    # empty case as a hard failure so the caller (CI, audit tooling) cannot
+    # confuse "you ran me from the wrong directory" with "coverage is fine".
+    if not test_names:
+        print(
+            "ERROR: ctest enumerated zero tests for label "
+            f"'{args.label}' — run this tool from the build/ directory "
+            "(e.g. `cd build && python3 ../tools/parity_coverage_matrix.py`).",
+            file=sys.stderr,
+        )
+        return 2
     entries = [parse_test_name(name) for name in test_names]
     cov = aggregate(entries)
 

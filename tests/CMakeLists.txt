@@ -22,7 +22,7 @@ set(TENZOR_TEST_TIMEOUT 1500)
 
 # When ON, tests enumerate all devices per backend (e.g. cuda:0, cuda:1)
 # instead of only testing device index 0.
-option(TENZOR_TEST_ALL_DEVICES "Test all devices per backend" off)
+option(TENZOR_TEST_ALL_DEVICES "Test all devices per backend" OFF)
 if(TENZOR_TEST_ALL_DEVICES)
     add_compile_definitions(TENZOR_TEST_ALL_DEVICES)
 endif()
@@ -34,7 +34,7 @@ endif()
 # runtime — without it, every parametrized OneAPI test fails its SetUp with
 # "Backend dispatch table not ready" because no device gets registered.
 option(TENZOR_TEST_ONEAPI_ALLOW_CPU
-       "Allow OneAPI tests to bind to a SYCL CPU device (debug/CI parity runs)" off)
+       "Allow OneAPI tests to bind to a SYCL CPU device (debug/CI parity runs)" OFF)
 
 # Custom function that wraps gtest_discover_tests
 # Supports optional LABELS parameter for CTest label-based filtering
