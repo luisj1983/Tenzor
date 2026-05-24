@@ -51,7 +51,7 @@ void atomicAddBF16(uint element_idx, float grad) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = grad_input[word_idx];
-    for (uint iter = 0u; iter < 1024u; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         uint expected = old_val;
         // Extract current bfloat16 value
         uint cur_bits = (expected >> shift) & 0xFFFFu;
@@ -65,6 +65,9 @@ void atomicAddBF16(uint element_idx, float grad) {
         old_val = atomicCompSwap(grad_input[word_idx], expected, new_word);
         if (old_val == expected) return;
     }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 void main() {

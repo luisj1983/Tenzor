@@ -78,7 +78,7 @@ void writeBF16(uint flat_idx, float value) {
     uint bf16_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
 
     uint old_val = grad_input[word_idx];
-    for (uint iter = 0; iter < 1024; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         uint new_val;
         if (half_idx == 0) {
             new_val = (old_val & 0xFFFF0000u) | bf16_bits;
@@ -89,12 +89,9 @@ void writeBF16(uint flat_idx, float value) {
         if (result == old_val) return;
         old_val = result;
     }
-    // Fallback: direct write after exceeding retry limit
-    if (half_idx == 0) {
-        grad_input[word_idx] = (grad_input[word_idx] & 0xFFFF0000u) | bf16_bits;
-    } else {
-        grad_input[word_idx] = (grad_input[word_idx] & 0x0000FFFFu) | (bf16_bits << 16);
-    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 shared float shared_sum_dy[WORKGROUP_SIZE];

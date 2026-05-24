@@ -41,13 +41,15 @@ void writeF16U(uint element_idx, float val) {
 
     uint old_val = data_u[word_idx];
     uint new_val, expected;
-    for (uint iter = 0; iter < 1024; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         expected = old_val;
         new_val = (expected & ~mask) | (bits << shift);
         old_val = atomicCompSwap(data_u[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    data_u[word_idx] = new_val;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 // Write Float16 to S buffer
@@ -60,13 +62,15 @@ void writeF16S(uint element_idx, float val) {
 
     uint old_val = data_s[word_idx];
     uint new_val, expected;
-    for (uint iter = 0; iter < 1024; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         expected = old_val;
         new_val = (expected & ~mask) | (bits << shift);
         old_val = atomicCompSwap(data_s[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    data_s[word_idx] = new_val;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 // Write Float16 to Vt buffer
@@ -79,13 +83,15 @@ void writeF16Vt(uint element_idx, float val) {
 
     uint old_val = data_vt[word_idx];
     uint new_val, expected;
-    for (uint iter = 0; iter < 1024; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         expected = old_val;
         new_val = (expected & ~mask) | (bits << shift);
         old_val = atomicCompSwap(data_vt[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    data_vt[word_idx] = new_val;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 void main() {

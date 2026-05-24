@@ -42,14 +42,15 @@ void writeF16(uint element_idx, float value) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = grad_input[word_idx];
-    for (uint iter = 0; iter < 1024; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         uint expected = old_val;
         uint new_val = (expected & ~mask) | (bits << shift);
         old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    // Fallback: direct write after exceeding retry limit
-    grad_input[word_idx] = (grad_input[word_idx] & ~mask) | (bits << shift);
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (X.7 / Y.11 / Y.16).
 }
 
 // Helper to pack two float16 values
