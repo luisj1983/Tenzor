@@ -446,7 +446,7 @@ TEST_F(E1Test, Vulkan_Conv2dForward_AsymmetricMatchesCPU_Values) {
 // message). These end-to-end tests verify the public API surface.
 // ----------------------------------------------------------------------------
 
-TEST_F(E1Test, NN_FConv2d_AsymmetricStride_CPU_ProducesShape) {
+TEST_F(E1Test, NN_FConv2d_AsymmetricStride_ProducesShape) {
     auto input  = random_tensor({1, 2, 8, 8}, Device::cpu());
     auto weight = random_tensor({4, 2, 3, 3}, Device::cpu());
     Variable input_v(input, false);
@@ -501,7 +501,7 @@ TEST_F(E1Test, NN_FConv2d_AsymmetricStride_ROCm_ProducesShape) {
     EXPECT_EQ(shape[3], 6);
 }
 
-TEST_F(E1Test, NN_Conv2d_Module_AsymmetricStride_CPU_Works) {
+TEST_F(E1Test, NN_Conv2d_Module_AsymmetricStride_Works) {
     // Module-level: nn::Conv2d with rectangular stride. Previously threw.
     nn::Conv2d conv(/*in_channels=*/2, /*out_channels=*/4,
                      /*kernel_size=*/std::pair<int64_t, int64_t>{3, 3},
@@ -517,7 +517,7 @@ TEST_F(E1Test, NN_Conv2d_Module_AsymmetricStride_CPU_Works) {
     EXPECT_EQ(shape[3], 6);
 }
 
-TEST_F(E1Test, NN_Conv2d_Module_AsymmetricDilation_CPU_Works) {
+TEST_F(E1Test, NN_Conv2d_Module_AsymmetricDilation_Works) {
     nn::Conv2d conv(/*in_channels=*/2, /*out_channels=*/4,
                      /*kernel_size=*/std::pair<int64_t, int64_t>{3, 3},
                      /*stride=*/std::pair<int64_t, int64_t>{1, 1},

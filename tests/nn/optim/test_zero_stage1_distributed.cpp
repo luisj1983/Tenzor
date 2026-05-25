@@ -28,6 +28,9 @@
 #include <vector>
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
+#include <string>
+#include <unistd.h>  // getpid — CC.17 per-test, per-process temp path
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -319,8 +322,12 @@ TEST_F(ZeROGlooTest, CheckpointCompatibilityAcrossRanks) {
         }
     }
 
-    // Save checkpoint (each rank saves its partition)
-    std::string checkpoint_path = "/tmp/zero_test_rank_" + std::to_string(rank_);
+    // Save checkpoint (each rank saves its partition).  CC.17: include PID
+    // and test name so parallel ctest invocations don't race.
+    std::string checkpoint_path = (std::filesystem::temp_directory_path() /
+        ("tenzor_zero_test_rank_" + std::to_string(rank_) + "_" +
+         std::to_string(::getpid()) + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()))).string();
     EXPECT_NO_THROW(optimizer.save_checkpoint(checkpoint_path));
 
     barrier();

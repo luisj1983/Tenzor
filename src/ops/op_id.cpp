@@ -190,6 +190,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Conv2dBackwardBias)] = "conv2d_backward_bias";
     names[static_cast<size_t>(OpId::ConvTranspose2dForward)] = "conv_transpose2d_forward";
     names[static_cast<size_t>(OpId::DepthwiseConv2d)] = "depthwise_conv2d";
+    names[static_cast<size_t>(OpId::DepthwiseConv1d)] = "depthwise_conv1d";
+    names[static_cast<size_t>(OpId::DepthwiseConv3d)] = "depthwise_conv3d";
     names[static_cast<size_t>(OpId::DeformableConv2dForward)] = "deformable_conv2d_forward";
     names[static_cast<size_t>(OpId::DeformableConv2dBackwardInput)] = "deformable_conv2d_backward_input";
     names[static_cast<size_t>(OpId::DeformableConv2dBackwardWeight)] = "deformable_conv2d_backward_weight";
@@ -604,7 +606,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 468;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695) + 1 (CTCLossForward at 696) + 2 (Hardswish, Hardsigmoid) + 2 (GridSampleBackward, AffineGridBackward — audit Q.4)
+inline constexpr size_t EXPECTED_NAMED_OPS = 470;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695) + 1 (CTCLossForward at 696) + 2 (Hardswish, Hardsigmoid) + 2 (GridSampleBackward, AffineGridBackward — audit Q.4) + 2 (DepthwiseConv1d, DepthwiseConv3d — audit CC.5)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

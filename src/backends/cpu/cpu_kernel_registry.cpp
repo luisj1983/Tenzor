@@ -1885,6 +1885,30 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], bias, sh, sw, ph, pw, dh, dw)};
     });
 
+    // CC.5: 1D / 3D depthwise dispatch surface. The actual fast-path kernel
+    // implementations are a follow-up; today the NN layer's `Conv{1,3}d`
+    // shortcut only dispatches these OpIds when a real kernel is registered
+    // (via `is_op_supported`) and otherwise falls through to standard
+    // Conv{1,3}d. Registering an explicit throw-not-implemented handler
+    // guarantees that any direct `dispatch(OpId::DepthwiseConv1d, ...)` call
+    // — bypassing the NN-layer guard — fails loudly with a clear routing
+    // hint, rather than landing on a missing-kernel error or silently
+    // miscomputing.
+    table.register_kernel(OpId::DepthwiseConv1d,
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                "DepthwiseConv1d (CPU): not yet implemented; route through "
+                "generic Conv1dForward (Conv1d::forward_impl falls back "
+                "automatically when this OpId is unregistered).");
+        });
+    table.register_kernel(OpId::DepthwiseConv3d,
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                "DepthwiseConv3d (CPU): not yet implemented; route through "
+                "generic Conv3dForward (Conv3d::forward_impl falls back "
+                "automatically when this OpId is unregistered).");
+        });
+
     // DeformableConv2d (DCNv2)
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: {input, offset, weight, bias, mask}

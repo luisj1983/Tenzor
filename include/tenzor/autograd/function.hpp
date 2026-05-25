@@ -4870,9 +4870,18 @@ private:
  */
 class RepeatInterleaveBackward : public Function {
 public:
+    // CC.2: `was_flattened_` distinguishes the nullopt-dim path (forward
+    // flattens N-D input to 1D before repeating) from the explicit-dim path
+    // (forward preserves rank). Saving only `dim_` is ambiguous when the
+    // original input happened to be 1D: the backward needs to know whether
+    // the output gradient still has the original rank or has been collapsed
+    // to a single axis. Setting this flag in the wrapper based on
+    // `dim == nullopt` is the only signal we have at backward time.
     RepeatInterleaveBackward(int64_t repeats, std::optional<int64_t> dim,
-                             std::vector<int64_t> input_shape)
-        : repeats_(repeats), dim_(dim), input_shape_(std::move(input_shape)) {}
+                             std::vector<int64_t> input_shape,
+                             bool was_flattened)
+        : repeats_(repeats), dim_(dim), input_shape_(std::move(input_shape)),
+          was_flattened_(was_flattened) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "RepeatInterleaveBackward"; }
@@ -4881,6 +4890,7 @@ private:
     int64_t repeats_;
     std::optional<int64_t> dim_;
     std::vector<int64_t> input_shape_;
+    bool was_flattened_;
 };
 
 /**

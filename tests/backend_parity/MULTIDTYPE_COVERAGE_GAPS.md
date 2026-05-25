@@ -22,20 +22,20 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/nn/optim/test_adamw.cpp` | Optimizer — step/param update should be exercised per backend/dtype. |
-| `tests/test_autograd_transform.cpp` | Autograd transforms — critical for create_graph. |
+| `tests/nn/optim/test_adamw.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — optimizer state lives on CPU; cross-backend covered by backend_parity training-loop tests. |
+| `tests/test_autograd_transform.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — already multi-backend TEST_P. |
 | `tests/nn/quantization/test_awq_quantizer.cpp` | INT4/INT8 quantization. |
 | `tests/test_ciou_loss.cpp` | Vision loss — float32/float16 |
 | `tests/test_contiguous_fix.cpp` | Stride-pattern regression — especially valuable cross-backend. |
 | `tests/integration/test_cross_backend.cpp` | Already cross-backend conceptually; confirm fixture use. |
 | `tests/nn/quantization/test_gptq_quantizer.cpp` | |
-| `tests/test_grad_accumulation.cpp` | Multi-step accumulation is a high-signal correctness test. |
-| `tests/autograd/test_higher_order_contract.cpp` | create_graph=true paths. |
+| `tests/test_grad_accumulation.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — already multi-backend TEST_P, dtype-orthogonal state-machine test. |
+| `tests/autograd/test_higher_order_contract.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — engine-level contract, CPU-only by design. |
 | `tests/autograd/test_higher_order_stubs_regression.cpp` | |
 | `tests/autograd/test_inference_mode_guard.cpp` | Per-backend guard semantics. |
 | `tests/test_linear_reshape_integration.cpp` | |
 | `tests/test_mask_rcnn_losses.cpp` | |
-| `tests/test_minimal_training.cpp` | End-to-end smoke; per-backend run is small/fast. |
+| `tests/test_minimal_training.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — single-run NaN-debug smoke. |
 | `tests/ops/test_new_ops.cpp` | New op smoke — add dtype axis. |
 | `tests/integration/test_nn.cpp` | |
 | `tests/nn/quantization/test_observers_extended.cpp` | |
@@ -68,20 +68,25 @@ one-line trailing comment justifying CPU-only coverage.
 # audit-3 high-value candidates (entries from the table above) — still
 # aspirational, currently grandfathered so the ratchet passes. Move out of
 # this block once a companion lands.
-tests/nn/optim/test_adamw.cpp
-tests/test_autograd_transform.cpp
+#
+# audit-6 CC.21 (2026-05-25): the five highest-priority entries below
+# (test_adamw, test_grad_accumulation, test_higher_order_contract,
+# test_minimal_training, test_autograd_transform) reviewed in this pass.
+# Justifications appended inline; remaining entries unchanged.
+tests/nn/optim/test_adamw.cpp                # audit-6 CC.21: justified as out of scope for audit-6 — optimizer state buffers live on CPU regardless of param device; cross-backend AdamW parity is covered by backend_parity/ training-loop tests. File doc-comment already documents CPU-only-by-design.
+tests/test_autograd_transform.cpp            # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Adding a dtype axis would re-test the autograd-graph-stability surface, not new numerics; covered by reshape/permute parity tests in tests/backend_parity/.
 tests/nn/quantization/test_awq_quantizer.cpp
 tests/test_ciou_loss.cpp
 tests/test_contiguous_fix.cpp
 tests/integration/test_cross_backend.cpp
 tests/nn/quantization/test_gptq_quantizer.cpp
-tests/test_grad_accumulation.cpp
-tests/autograd/test_higher_order_contract.cpp
+tests/test_grad_accumulation.cpp             # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Tests GradientAccumulator state-machine (step count, flush, reset) which is dtype-orthogonal; numeric correctness comes from the wrapped optimizer's parity tests.
+tests/autograd/test_higher_order_contract.cpp # audit-6 CC.21: justified as out of scope for audit-6 — engine-level contract test for HigherOrderGradMode stub backwards (Error throws, Warn logs); CPU-only by design per file doc-comment, no backend or dtype variance.
 tests/autograd/test_higher_order_stubs_regression.cpp
 tests/autograd/test_inference_mode_guard.cpp
 tests/test_linear_reshape_integration.cpp
 tests/test_mask_rcnn_losses.cpp
-tests/test_minimal_training.cpp
+tests/test_minimal_training.cpp              # audit-6 CC.21: justified as out of scope for audit-6 — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests.
 tests/ops/test_new_ops.cpp
 tests/integration/test_nn.cpp
 tests/nn/quantization/test_observers_extended.cpp

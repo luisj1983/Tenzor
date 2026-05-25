@@ -20,6 +20,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
 #include <cmath>
 #include <algorithm>
 
@@ -133,7 +134,7 @@ TEST_F(OneAPIBackendTest, BackendRegistration) {
 
 TEST_F(OneAPIBackendTest, DeviceAvailability) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     // Verify device properties
@@ -149,7 +150,7 @@ TEST_F(OneAPIBackendTest, DeviceAvailability) {
 
 TEST_F(OneAPIBackendTest, BasicMemoryAllocation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -170,7 +171,7 @@ TEST_F(OneAPIBackendTest, BasicMemoryAllocation) {
 
 TEST_F(OneAPIBackendTest, LargeMemoryAllocation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -185,7 +186,7 @@ TEST_F(OneAPIBackendTest, LargeMemoryAllocation) {
 
 TEST_F(OneAPIBackendTest, MemoryDeallocation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -203,7 +204,7 @@ TEST_F(OneAPIBackendTest, MemoryDeallocation) {
 
 TEST_F(OneAPIBackendTest, HostToDeviceCopy) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -219,7 +220,7 @@ TEST_F(OneAPIBackendTest, HostToDeviceCopy) {
 
 TEST_F(OneAPIBackendTest, DeviceToHostCopy) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -241,7 +242,7 @@ TEST_F(OneAPIBackendTest, DeviceToHostCopy) {
 
 TEST_F(OneAPIBackendTest, DeviceToDeviceCopy) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -256,7 +257,7 @@ TEST_F(OneAPIBackendTest, DeviceToDeviceCopy) {
 
 TEST_F(OneAPIBackendTest, RoundTripCopy) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -278,7 +279,7 @@ TEST_F(OneAPIBackendTest, RoundTripCopy) {
 
 TEST_F(OneAPIBackendTest, AddOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -300,7 +301,7 @@ TEST_F(OneAPIBackendTest, AddOperation) {
 
 TEST_F(OneAPIBackendTest, SubOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -320,7 +321,7 @@ TEST_F(OneAPIBackendTest, SubOperation) {
 
 TEST_F(OneAPIBackendTest, MulOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -340,7 +341,7 @@ TEST_F(OneAPIBackendTest, MulOperation) {
 
 TEST_F(OneAPIBackendTest, DivOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -364,7 +365,7 @@ TEST_F(OneAPIBackendTest, DivOperation) {
 
 TEST_F(OneAPIBackendTest, MatMulBasic) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -389,7 +390,7 @@ TEST_F(OneAPIBackendTest, MatMulBasic) {
 
 TEST_F(OneAPIBackendTest, MatMulSquareMatrices) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -411,7 +412,7 @@ TEST_F(OneAPIBackendTest, MatMulSquareMatrices) {
 
 TEST_F(OneAPIBackendTest, MatMulLargeMatrices) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -436,7 +437,7 @@ TEST_F(OneAPIBackendTest, MatMulLargeMatrices) {
 
 TEST_F(OneAPIBackendTest, SqrtOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -455,7 +456,7 @@ TEST_F(OneAPIBackendTest, SqrtOperation) {
 
 TEST_F(OneAPIBackendTest, NegOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -473,7 +474,7 @@ TEST_F(OneAPIBackendTest, NegOperation) {
 
 TEST_F(OneAPIBackendTest, AbsOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -491,7 +492,7 @@ TEST_F(OneAPIBackendTest, AbsOperation) {
 
 TEST_F(OneAPIBackendTest, ExpOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -509,7 +510,7 @@ TEST_F(OneAPIBackendTest, ExpOperation) {
 
 TEST_F(OneAPIBackendTest, LogOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -527,7 +528,7 @@ TEST_F(OneAPIBackendTest, LogOperation) {
 
 TEST_F(OneAPIBackendTest, PowOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -549,7 +550,7 @@ TEST_F(OneAPIBackendTest, PowOperation) {
 
 TEST_F(OneAPIBackendTest, ReluActivation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -576,7 +577,7 @@ TEST_F(OneAPIBackendTest, ReluActivation) {
 
 TEST_F(OneAPIBackendTest, SigmoidActivation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -596,7 +597,7 @@ TEST_F(OneAPIBackendTest, SigmoidActivation) {
 
 TEST_F(OneAPIBackendTest, TanhActivation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -615,7 +616,7 @@ TEST_F(OneAPIBackendTest, TanhActivation) {
 
 TEST_F(OneAPIBackendTest, LeakyReluActivation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -646,7 +647,7 @@ TEST_F(OneAPIBackendTest, LeakyReluActivation) {
 
 TEST_F(OneAPIBackendTest, SumReduction) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -664,7 +665,7 @@ TEST_F(OneAPIBackendTest, SumReduction) {
 
 TEST_F(OneAPIBackendTest, SumReductionAlongDimension) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -685,7 +686,7 @@ TEST_F(OneAPIBackendTest, SumReductionAlongDimension) {
 
 TEST_F(OneAPIBackendTest, MeanReduction) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -701,7 +702,7 @@ TEST_F(OneAPIBackendTest, MeanReduction) {
 
 TEST_F(OneAPIBackendTest, MaxReduction) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -724,7 +725,7 @@ TEST_F(OneAPIBackendTest, MaxReduction) {
 
 TEST_F(OneAPIBackendTest, MinReduction) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -751,7 +752,7 @@ TEST_F(OneAPIBackendTest, MinReduction) {
 
 TEST_F(OneAPIBackendTest, ReshapeOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -770,7 +771,7 @@ TEST_F(OneAPIBackendTest, ReshapeOperation) {
 
 TEST_F(OneAPIBackendTest, TransposeOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -788,7 +789,7 @@ TEST_F(OneAPIBackendTest, TransposeOperation) {
 
 TEST_F(OneAPIBackendTest, PermuteOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -802,7 +803,7 @@ TEST_F(OneAPIBackendTest, PermuteOperation) {
 
 TEST_F(OneAPIBackendTest, SqueezeOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -816,7 +817,7 @@ TEST_F(OneAPIBackendTest, SqueezeOperation) {
 
 TEST_F(OneAPIBackendTest, UnsqueezeOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -834,7 +835,7 @@ TEST_F(OneAPIBackendTest, UnsqueezeOperation) {
 
 TEST_F(OneAPIBackendTest, ContiguousOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -848,7 +849,7 @@ TEST_F(OneAPIBackendTest, ContiguousOperation) {
 
 TEST_F(OneAPIBackendTest, CloneOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -866,7 +867,7 @@ TEST_F(OneAPIBackendTest, CloneOperation) {
 
 TEST_F(OneAPIBackendTest, ZerosCreation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -885,7 +886,7 @@ TEST_F(OneAPIBackendTest, ZerosCreation) {
 
 TEST_F(OneAPIBackendTest, OnesCreation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -901,7 +902,7 @@ TEST_F(OneAPIBackendTest, OnesCreation) {
 
 TEST_F(OneAPIBackendTest, FullCreation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -917,7 +918,7 @@ TEST_F(OneAPIBackendTest, FullCreation) {
 
 TEST_F(OneAPIBackendTest, FillOperation) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -947,7 +948,7 @@ TEST_F(OneAPIBackendTest, InvalidDeviceIndex) {
 
 TEST_F(OneAPIBackendTest, ShapeMismatchAddition) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -963,7 +964,7 @@ TEST_F(OneAPIBackendTest, ShapeMismatchAddition) {
 
 TEST_F(OneAPIBackendTest, InvalidMatMulDimensions) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -979,7 +980,7 @@ TEST_F(OneAPIBackendTest, InvalidMatMulDimensions) {
 
 TEST_F(OneAPIBackendTest, InvalidReshape) {
     if (!hasOneAPIDevice()) {
-        GTEST_SKIP() << "No OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
     }
 
     auto device = Device::oneapi(0);
@@ -1011,7 +1012,7 @@ TEST_F(OneAPIBackendTest, MultiDeviceSupport) {
     }
 
     if (device_count < 2) {
-        GTEST_SKIP() << "Less than 2 OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "Less than 2 OneAPI devices available");
     }
 
     // Test tensor creation on different devices
@@ -1040,7 +1041,7 @@ TEST_F(OneAPIBackendTest, CrossDeviceCopy) {
     }
 
     if (device_count < 2) {
-        GTEST_SKIP() << "Less than 2 OneAPI devices available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "Less than 2 OneAPI devices available");
     }
 
     auto dev0 = Device::oneapi(0);

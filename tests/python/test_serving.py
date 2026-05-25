@@ -37,11 +37,13 @@ class TestServerConfig:
         cfg.grpc_port = 50051
         cfg.http_port = 8000
         cfg.num_workers = 4
-        cfg.model_repository_path = "/tmp/tz_models"
+        # CC.17: per-process tempdir prefix so parallel pytest runs don't collide.
+        models_path = tempfile.mkdtemp(prefix=f"tz_models_{os.getpid()}_")
+        cfg.model_repository_path = models_path
         assert cfg.grpc_port == 50051
         assert cfg.http_port == 8000
         assert cfg.num_workers == 4
-        assert cfg.model_repository_path == "/tmp/tz_models"
+        assert cfg.model_repository_path == models_path
 
 
 # ---------------------------------------------------------------------------

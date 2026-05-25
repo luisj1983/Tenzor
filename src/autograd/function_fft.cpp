@@ -73,13 +73,22 @@ auto CumProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     auto cum = cumsum(flipped, dim_);
     auto rev_cum = flip(cum, {dim_});
 
-    // Zero-safe: where input == 0, use 0 gradient
+    // CC.3: zero-safe division without dtype-dependent eps.
+    // The previous approach replaced zeros in the denominator with
+    // `dtype_epsilon(input.dtype())`. For F16 that constant is ~9.8e-4 —
+    // large enough to distort the gradient on the masked positions before
+    // we zero them out. (rev_cum / eps explodes to ~1e3 for moderate rev_cum,
+    // which feeds finite-magnitude garbage into intermediate buffers and
+    // overflows when chained.) Replace zeros with ONES in the safe denominator
+    // — the division result on those positions is then a bounded value that
+    // we immediately overwrite with zero via the mask, with no eps-scale
+    // intermediate.
     auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                         input.dtype(), input.device());
-    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto ones_t = ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                       input.dtype(), input.device());
     auto zero_mask = eq(input, zero_t);
-    auto safe_input = where(zero_mask, eps, input);
+    auto safe_input = where(zero_mask, ones_t, input);
     auto result = div(rev_cum, safe_input);
 
     // Zero out positions where input was zero
@@ -97,13 +106,16 @@ auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs
     auto cum = tenzor::cumsum(flipped, dim_);
     auto rev_cum = tenzor::flip(cum, {dim_});
 
-    // Zero-safe division at Tensor level (input is constant)
+    // CC.3: zero-safe division at Tensor level (input is constant).
+    // Use ones (not eps) in the safe denominator — eps is dtype-dependent and
+    // distorts F16 gradients before the mask zeroes them out. See the matching
+    // comment in CumProdBackward::backward.
     auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                         input.dtype(), input.device());
-    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto ones_t = ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                       input.dtype(), input.device());
     auto zero_mask = eq(input, zero_t);
-    auto safe_input = where(zero_mask, eps, input);
+    auto safe_input = where(zero_mask, ones_t, input);
     Variable safe_input_var(safe_input, false);
 
     auto result = rev_cum / safe_input_var;

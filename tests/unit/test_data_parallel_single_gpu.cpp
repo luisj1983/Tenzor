@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
 #include <memory>
 #include <vector>
 #include <cmath>
@@ -179,7 +180,7 @@ private:
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_BasicForward) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(3.0f);
@@ -198,7 +199,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_BasicForward) {
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_CorrectOutputShape) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -228,7 +229,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_CorrectOutputShape) {
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_PreservesValues) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(1.0f);  // Identity scaling
@@ -254,7 +255,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_PreservesValues) {
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_ParameterAccess) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<TrainableModule>(10, 5);
@@ -275,7 +276,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_ParameterAccess) {
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_TrainingModeSync) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -293,7 +294,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_TrainingModeSync) {
 
 TEST_F(DataParallelSingleGPUTest, SingleGPU_MultipleForwardPasses) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<CountingModule>();
@@ -316,7 +317,7 @@ TEST_F(DataParallelSingleGPUTest, SingleGPU_MultipleForwardPasses) {
 
 TEST_F(DataParallelSingleGPUTest, GradientFlow_BasicBackward) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<TrainableModule>(8, 4);
@@ -332,7 +333,7 @@ TEST_F(DataParallelSingleGPUTest, GradientFlow_BasicBackward) {
 
 TEST_F(DataParallelSingleGPUTest, GradientFlow_ParametersUpdateable) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<TrainableModule>(8, 4);
@@ -351,7 +352,7 @@ TEST_F(DataParallelSingleGPUTest, GradientFlow_ParametersUpdateable) {
 
 TEST_F(DataParallelSingleGPUTest, GradientFlow_NonLeafGradients) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(2.0f);
@@ -371,7 +372,7 @@ TEST_F(DataParallelSingleGPUTest, GradientFlow_NonLeafGradients) {
 
 TEST_F(DataParallelSingleGPUTest, MockMultiGPU_DeviceValidation) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -390,7 +391,7 @@ TEST_F(DataParallelSingleGPUTest, MockMultiGPU_DeviceValidation) {
 
 TEST_F(DataParallelSingleGPUTest, MockMultiGPU_EmptyDeviceList) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -404,7 +405,7 @@ TEST_F(DataParallelSingleGPUTest, MockMultiGPU_EmptyDeviceList) {
 
 TEST_F(DataParallelSingleGPUTest, MockMultiGPU_DefaultOutputDevice) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -416,7 +417,7 @@ TEST_F(DataParallelSingleGPUTest, MockMultiGPU_DefaultOutputDevice) {
 
 TEST_F(DataParallelSingleGPUTest, MockMultiGPU_BatchSizeValidation) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -436,7 +437,7 @@ TEST_F(DataParallelSingleGPUTest, MockMultiGPU_BatchSizeValidation) {
 
 TEST_F(DataParallelSingleGPUTest, MockMultiGPU_ReplicaInitialization) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -456,7 +457,7 @@ TEST_F(DataParallelSingleGPUTest, MockMultiGPU_ReplicaInitialization) {
 
 TEST_F(DataParallelSingleGPUTest, Integration_LinearLayer) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     // Create a Linear layer and wrap with DataParallel
@@ -474,7 +475,7 @@ TEST_F(DataParallelSingleGPUTest, Integration_LinearLayer) {
 
 TEST_F(DataParallelSingleGPUTest, Integration_SequentialModel) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     // Build a sequential model
@@ -495,7 +496,7 @@ TEST_F(DataParallelSingleGPUTest, Integration_SequentialModel) {
 
 TEST_F(DataParallelSingleGPUTest, Integration_CompareWithDirectExecution) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(2.5f);
@@ -533,7 +534,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_NullModule) {
 
 TEST_F(DataParallelSingleGPUTest, EdgeCase_EmptyInput) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -553,7 +554,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_EmptyInput) {
 
 TEST_F(DataParallelSingleGPUTest, EdgeCase_1DTensor) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(2.0f);
@@ -574,7 +575,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_1DTensor) {
 
 TEST_F(DataParallelSingleGPUTest, EdgeCase_LargeBatch) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -591,7 +592,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_LargeBatch) {
 
 TEST_F(DataParallelSingleGPUTest, EdgeCase_SmallFeatureDimension) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -607,7 +608,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_SmallFeatureDimension) {
 
 TEST_F(DataParallelSingleGPUTest, EdgeCase_NonZeroBatchDimension) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -629,7 +630,7 @@ TEST_F(DataParallelSingleGPUTest, EdgeCase_NonZeroBatchDimension) {
 
 TEST_F(DataParallelSingleGPUTest, Interface_ModuleAccessor) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -641,7 +642,7 @@ TEST_F(DataParallelSingleGPUTest, Interface_ModuleAccessor) {
 
 TEST_F(DataParallelSingleGPUTest, Interface_DeviceIDsAccessor) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -653,7 +654,7 @@ TEST_F(DataParallelSingleGPUTest, Interface_DeviceIDsAccessor) {
 
 TEST_F(DataParallelSingleGPUTest, Interface_OutputDeviceAccessor) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -664,7 +665,7 @@ TEST_F(DataParallelSingleGPUTest, Interface_OutputDeviceAccessor) {
 
 TEST_F(DataParallelSingleGPUTest, Interface_BatchDimAccessor) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -675,7 +676,7 @@ TEST_F(DataParallelSingleGPUTest, Interface_BatchDimAccessor) {
 
 TEST_F(DataParallelSingleGPUTest, Interface_NamedParameters) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<TrainableModule>(10, 5);
@@ -699,7 +700,7 @@ TEST_F(DataParallelSingleGPUTest, Interface_NamedParameters) {
 
 TEST_F(DataParallelSingleGPUTest, Helper_MakeDataParallel) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -713,7 +714,7 @@ TEST_F(DataParallelSingleGPUTest, Helper_MakeDataParallel) {
 
 TEST_F(DataParallelSingleGPUTest, Helper_MakeDataParallelAutoDetect) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -731,7 +732,7 @@ TEST_F(DataParallelSingleGPUTest, Helper_MakeDataParallelAutoDetect) {
 
 TEST_F(DataParallelSingleGPUTest, Correctness_NumericalStability) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(0.1f);
@@ -758,7 +759,7 @@ TEST_F(DataParallelSingleGPUTest, Correctness_NumericalStability) {
 
 TEST_F(DataParallelSingleGPUTest, Correctness_BatchOrderPreserved) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>(1.0f);
@@ -793,7 +794,7 @@ TEST_F(DataParallelSingleGPUTest, Correctness_BatchOrderPreserved) {
 
 TEST_F(DataParallelSingleGPUTest, ThreadSafety_ConcurrentForward) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -810,7 +811,7 @@ TEST_F(DataParallelSingleGPUTest, ThreadSafety_ConcurrentForward) {
 
 TEST_F(DataParallelSingleGPUTest, ThreadSafety_ReplicaInitializationOnce) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<CountingModule>();
@@ -834,7 +835,7 @@ TEST_F(DataParallelSingleGPUTest, ThreadSafety_ReplicaInitializationOnce) {
 
 TEST_F(DataParallelSingleGPUTest, Stress_ManySmallBatches) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();
@@ -850,7 +851,7 @@ TEST_F(DataParallelSingleGPUTest, Stress_ManySmallBatches) {
 
 TEST_F(DataParallelSingleGPUTest, Stress_VaryingBatchSizes) {
     if (!cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     }
 
     auto module = std::make_shared<ScaleModule>();

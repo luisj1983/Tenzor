@@ -89,7 +89,8 @@ void register_optim(py::module_& m) {
         "Base class for all optimizers")
         .def("zero_grad", &tenzor::optim::Optimizer::zero_grad, "Zero out all parameter gradients",
              py::call_guard<py::gil_scoped_release>())
-        .def("state_dict", &tenzor::optim::Optimizer::state_dict, "Get optimizer state dictionary")
+        .def("state_dict", &tenzor::optim::Optimizer::state_dict, "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::Optimizer::load_state_dict, py::arg("state"),
              "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>())
@@ -129,7 +130,8 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::SGD::get_lr,
              "Get current learning rate")
         .def("state_dict", &tenzor::optim::SGD::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::SGD::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -155,7 +157,8 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::ASGD::get_lr,
              "Get current learning rate")
         .def("state_dict", &tenzor::optim::ASGD::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::ASGD::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -182,7 +185,8 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::Adam::get_lr,
              "Get current learning rate")
         .def("state_dict", &tenzor::optim::Adam::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::Adam::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -209,7 +213,8 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::AdamW::get_lr,
              "Get current learning rate")
         .def("state_dict", &tenzor::optim::AdamW::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::AdamW::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -237,7 +242,8 @@ void register_optim(py::module_& m) {
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::RMSprop::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
-        .def("state_dict", &tenzor::optim::RMSprop::state_dict)
+        .def("state_dict", &tenzor::optim::RMSprop::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict,
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -298,7 +304,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::RAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::RAdam::get_lr)
-        .def("state_dict", &tenzor::optim::RAdam::state_dict)
+        .def("state_dict", &tenzor::optim::RAdam::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::RAdam::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -322,7 +329,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::NAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::NAdam::get_lr)
-        .def("state_dict", &tenzor::optim::NAdam::state_dict)
+        .def("state_dict", &tenzor::optim::NAdam::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::NAdam::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -345,7 +353,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Adamax::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::Adamax::get_lr)
-        .def("state_dict", &tenzor::optim::Adamax::state_dict)
+        .def("state_dict", &tenzor::optim::Adamax::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::Adamax::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -368,7 +377,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LAMB::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LAMB::get_lr)
-        .def("state_dict", &tenzor::optim::LAMB::state_dict)
+        .def("state_dict", &tenzor::optim::LAMB::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::LAMB::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -391,7 +401,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SparseAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
-        .def("state_dict", &tenzor::optim::SparseAdam::state_dict)
+        .def("state_dict", &tenzor::optim::SparseAdam::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::SparseAdam::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -418,7 +429,8 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::Rprop::get_lr,
              "Get current learning rate")
         .def("state_dict", &tenzor::optim::Rprop::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::Rprop::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -454,7 +466,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LBFGS::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LBFGS::get_lr)
-        .def("state_dict", &tenzor::optim::LBFGS::state_dict)
+        .def("state_dict", &tenzor::optim::LBFGS::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::LBFGS::load_state_dict, py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
@@ -499,7 +512,8 @@ void register_optim(py::module_& m) {
         })
         .def("zero_grad", &tenzor::optim::ZeROStage1Optimizer::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20
-        .def("state_dict", &tenzor::optim::ZeROStage1Optimizer::state_dict)
+        .def("state_dict", &tenzor::optim::ZeROStage1Optimizer::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::ZeROStage1Optimizer::load_state_dict,
              py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
@@ -839,7 +853,8 @@ void register_optim(py::module_& m) {
         .def("set_rho", &tenzor::optim::SAM::set_rho,
              py::arg("rho"), "Set perturbation radius")
         .def("state_dict", &tenzor::optim::SAM::state_dict,
-             "Get optimizer state dictionary")
+             "Get optimizer state dictionary",
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::SAM::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>())  // W.20
@@ -894,7 +909,8 @@ void register_optim(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::AdamAtan2::set_lr)
         .def("get_lr", &tenzor::optim::AdamAtan2::get_lr)
-        .def("state_dict", &tenzor::optim::AdamAtan2::state_dict)
+        .def("state_dict", &tenzor::optim::AdamAtan2::state_dict,
+             py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::AdamAtan2::load_state_dict,
              py::call_guard<py::gil_scoped_release>());  // W.20
 }

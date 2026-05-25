@@ -953,8 +953,31 @@ auto TripletMarginLoss::forward(const Variable& anchor, const Variable& positive
                                 const Variable& negative) -> Variable {
     // Compute pairwise distances using p-norm
     // d(a, p) = ||a - p||_p, d(a, n) = ||a - n||_p
-    auto diff_pos = anchor - positive;
-    auto diff_neg = anchor - negative;
+    //
+    // CC.8: the `1e-8f` eps for the L2 sqrt is well below the F16 smallest
+    // normal (~6.1e-5), so on F16/BF16 inputs the additive eps rounds to 0
+    // and sqrt(0) leaves the backward `1/(2*sqrt(...))` term blowing up to
+    // inf wherever anchor==positive or anchor==negative. Widen the diff
+    // tensors to Float32 for the distance computation (mirrors AA.4 FocalLoss
+    // / KLDiv upcast). `variable_cast` wires TypeCastBackward so gradients
+    // flow through the cast, and we downcast d_pos / d_neg back to the
+    // input dtype before the margin/relu/reduction so the loss dtype is
+    // preserved.
+    const DType orig_dtype = anchor.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable anchor_c = needs_upcast
+        ? tenzor::nn::variable_cast(anchor, DType::Float32)
+        : anchor;
+    Variable positive_c = needs_upcast
+        ? tenzor::nn::variable_cast(positive, DType::Float32)
+        : positive;
+    Variable negative_c = needs_upcast
+        ? tenzor::nn::variable_cast(negative, DType::Float32)
+        : negative;
+
+    auto diff_pos = anchor_c - positive_c;
+    auto diff_neg = anchor_c - negative_c;
 
     // For p=2 (L2 norm): sqrt(sum(diff^2, dim=-1))
     // For p=1 (L1 norm): sum(|diff|, dim=-1)
@@ -972,7 +995,7 @@ auto TripletMarginLoss::forward(const Variable& anchor, const Variable& positive
 
     if (swap_) {
         // Distance swap: use min(d(a,n), d(p,n)) for negative distance
-        auto diff_pn = positive - negative;
+        auto diff_pn = positive_c - negative_c;
         Variable d_pn;
         if (p_ == 2.0) {
             d_pn = sqrt(sum(diff_pn * diff_pn, last_dim, false) + eps_var);
@@ -981,6 +1004,13 @@ auto TripletMarginLoss::forward(const Variable& anchor, const Variable& positive
         }
         // d_neg = min(d_neg, d_pn) via: d_neg - relu(d_neg - d_pn)
         d_neg = d_neg - relu(d_neg - d_pn);
+    }
+
+    // Downcast distances back to the input dtype before margin/relu so the
+    // resulting loss has the user-visible input dtype.
+    if (needs_upcast) {
+        d_pos = tenzor::nn::variable_cast(d_pos, orig_dtype);
+        d_neg = tenzor::nn::variable_cast(d_neg, orig_dtype);
     }
 
     auto margin_var = scalar_var(static_cast<float>(margin_), d_pos);

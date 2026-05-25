@@ -133,9 +133,13 @@ add_parity_test(test_quantization_parity test_quantization_parity.cpp)
 
 # Inf-G (deferred → landed): multi-backend INT8 e2e quantization parity.
 # Each backend test gracefully GTEST_SKIPs when the device is unavailable.
+# CC.16: BACKENDS multi so the `cpu_` ctest prefix does not get prepended to
+# tests that exercise CUDA/ROCm/Vulkan/OneAPI — the test names themselves
+# carry the device under test, and tagging "multi" attaches every backend
+# label so `ctest -L cuda` etc. still finds these.
 add_executable(test_quantization_e2e_parity test_quantization_e2e_parity.cpp)
 target_link_libraries(test_quantization_e2e_parity PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_quantization_e2e_parity LABELS "backend_parity;quantization" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_quantization_e2e_parity LABELS "backend_parity;quantization" BACKENDS multi DISCOVERY_TIMEOUT 60)
 
 # Real-int8 quantized-kernel parity (QuantizedLinear across backends)
 add_parity_test(test_quantized_kernel_parity test_quantized_kernel_parity.cpp)

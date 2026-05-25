@@ -13,16 +13,25 @@ namespace {
 
 // Try to get ml_dtypes.bfloat16 numpy dtype. Returns the dtype object on
 // success, or py::none() if ml_dtypes is not installed.
+//
+// CC.12: the cache is positive-only — once we resolve the bfloat16 dtype
+// from a successful import, it never changes for the life of the process,
+// so we cache it. But a failed import is NOT cached: ml_dtypes may have
+// been installed after the first call (e.g. on-demand via subprocess
+// during a JAX/Keras coexistence test), and the previous static `tried`
+// flag would lock us into the "raise ValueError" branch forever even
+// after a successful install. Re-attempt import on every call where we
+// don't already have the dtype.
 auto get_ml_dtypes_bfloat16() -> py::object {
     static py::object cached = py::none();
-    static bool tried = false;
-    if (!tried) {
-        tried = true;
+    if (cached.is_none()) {
         try {
             auto ml_dtypes = py::module_::import("ml_dtypes");
             cached = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
         } catch (const py::error_already_set&) {
-            // ml_dtypes not installed — cached stays as py::none()
+            // ml_dtypes not installed at this call — leave cached as
+            // py::none() so the next call re-attempts the import.
+            // Clear any pending Python error so it doesn't leak.
         }
     }
     return cached;
@@ -34,11 +43,31 @@ auto get_ml_dtypes_bfloat16() -> py::object {
 // silently-lossy roundtrips because `numpy_dtype_to_tenzor` on the way back
 // would map kind='u', itemsize=2 to UInt16 rather than BFloat16, so the
 // dtype was lost without any user-visible error.
+//
+// CC.12: BEFORE raising the Z.19 ValueError we make one more lazy attempt
+// to import ml_dtypes — `get_ml_dtypes_bfloat16()` itself no longer caches
+// a negative result, but we keep the explicit second probe here so the
+// emit path makes the auto-detect intent visible at the use site and so
+// `import_module("ml_dtypes")` can be called from any GIL-held context
+// (mirrors the JAX/Keras coexistence pattern: the dependency may have
+// been imported indirectly between when Tenzor first ran and when the
+// user finally calls .numpy() on a BF16 tensor).
 auto apply_bfloat16_dtype(py::array result, DType dtype) -> py::array {
     if (dtype != DType::BFloat16) {
         return result;
     }
     auto bf16_dtype = get_ml_dtypes_bfloat16();
+    if (bf16_dtype.is_none()) {
+        // Second, explicit attempt: probe ml_dtypes once more so the
+        // emit path itself doesn't depend on the cache's freshness.
+        try {
+            auto ml_dtypes = py::module_::import("ml_dtypes");
+            bf16_dtype = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
+        } catch (const py::error_already_set&) {
+            // Genuinely not installed — fall through to the typed
+            // ValueError below.
+        }
+    }
     if (!bf16_dtype.is_none()) {
         // View the uint16 data as bfloat16 (same binary layout, zero-copy)
         return result.attr("view")(bf16_dtype);

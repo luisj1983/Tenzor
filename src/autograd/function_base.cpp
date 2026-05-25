@@ -343,15 +343,24 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 "to fall through with disconnected gradient graph.");
         case HigherOrderGradMode::Warn: {
             auto count = g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            // CC.7: rate-limit the warning to avoid unbounded log spam when a
+            // training loop hits a non-higher-order op every step (which is
+            // typical — Warn-mode is meant to be a soft signal, not a flood).
+            // The atomic counter itself is untouched so `higher_order_disconnection_count()`
+            // still reports the true total; we only throttle the log emission.
+            // Emit the first occurrence (count == 1) and then every 100th, so
+            // bursts in tight loops collapse to ~1% of their original volume.
             // Audit I.4: unified logger so TENZOR_LOG_LEVEL can silence
-            // these warnings in production.
-            TENZOR_LOG_WARN("[tenzor::autograd] '{}' does not support higher-order "
-                            "gradients{}. The gradient graph is disconnected at "
-                            "this operation — second-order derivatives through "
-                            "it will be zero. (disconnection #{})",
-                            op_name,
-                            is_higher_order_stub() ? " (passthrough stub)" : "",
-                            count);
+            // these warnings entirely in production.
+            if (count == 1 || (count % 100) == 0) {
+                TENZOR_LOG_WARN("[tenzor::autograd] '{}' does not support higher-order "
+                                "gradients{}. The gradient graph is disconnected at "
+                                "this operation — second-order derivatives through "
+                                "it will be zero. (disconnection #{})",
+                                op_name,
+                                is_higher_order_stub() ? " (passthrough stub)" : "",
+                                count);
+            }
             break;
         }
         }

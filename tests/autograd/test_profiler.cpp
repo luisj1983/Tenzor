@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unistd.h>  // getpid — CC.17 per-test, per-process temp path
 
 using namespace tenzor;
 using namespace std::chrono_literals;
@@ -126,7 +127,11 @@ TEST_F(ProfilerTest, ExportChromeTrace) {
     prof.record_trace("traced_op", start, std::chrono::nanoseconds(2'000'000),
                       ProfilePhase::Backward);
 
-    const std::string path = "/tmp/tenzor_test_trace.json";
+    // CC.17: per-process, per-test temp path so parallel ctest runs don't race.
+    const std::string path = (std::filesystem::temp_directory_path() /
+        ("tenzor_test_trace_" + std::to_string(::getpid()) + "_" +
+         ::testing::UnitTest::GetInstance()->current_test_info()->name() +
+         ".json")).string();
 
     // Remove pre-existing file to ensure we test fresh creation.
     std::filesystem::remove(path);

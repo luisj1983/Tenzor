@@ -240,7 +240,16 @@ auto SAM::state_dict() const -> std::unordered_map<std::string, Tensor> {
 
 auto SAM::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
     if (state.count("sam_rho")) {
-        rho_ = state.at("sam_rho").data<double>()[0];
+        // CC.10: state_dict() writes sam_rho as Float64 / CPU, but a checkpoint
+        // round-tripped through multi-rank serialization (or through a backend
+        // that adapts scalar tensors to its own device/dtype on save) can come
+        // back with a different dtype (Float32, Float16) or backend device.
+        // Reading `data<double>()` on a Float32 / GPU tensor would either
+        // mis-interpret bytes or trip a host-pointer assertion. Apply the V.27
+        // adapter pattern: force Float64 + CPU before pulling the scalar host
+        // value out.
+        const Tensor& rho_state = state.at("sam_rho");
+        rho_ = rho_state.to(DType::Float64).to(Device::cpu()).data<double>()[0];
     }
 
     // S.17: strip the SAM-only key before forwarding so base optimisers

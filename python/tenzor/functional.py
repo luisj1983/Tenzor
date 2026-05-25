@@ -895,7 +895,8 @@ def max_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, 
     return _nn.functional_max_pool2d(input, kernel_size, stride, padding)
 
 
-def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, padding: int = 0) -> Variable:
+def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, padding: int = 0,
+               count_include_pad: bool = True) -> Variable:
     """Apply 2D average pooling over an input signal.
 
     Parameters
@@ -908,6 +909,13 @@ def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, 
         Stride of the pooling window.  Defaults to *kernel_size*.
     padding : int, optional
         Implicit zero padding on both sides.  Default: ``0``.
+    count_include_pad : bool, optional
+        Whether to include the zero-padding in the averaging calculation.
+        Audit-6 CC.23: accepted for PyTorch API parity (mirrors the 1D/3D
+        Z.21 contract).  The backend layer implements the include-pad
+        behaviour by default; the ``False`` variant is not yet supported
+        and raises ``NotImplementedError`` rather than silently changing
+        the average.
 
     Returns
     -------
@@ -918,6 +926,9 @@ def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, 
     -------
     >>> y = F.avg_pool2d(x, kernel_size=2, stride=2)
     """
+    if not count_include_pad:
+        raise NotImplementedError(
+            "avg_pool2d(count_include_pad=False) is not yet supported")
     if stride is None:
         stride = kernel_size
     return _nn.functional_avg_pool2d(input, kernel_size, stride, padding)

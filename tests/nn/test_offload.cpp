@@ -13,6 +13,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/offload.hpp>
 #include <chrono>
@@ -125,7 +126,7 @@ protected:
 // ==========================
 
 TEST_F(ParameterOffloadTest, OffloadContext_Constructor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 10);
     model->to(Device::cuda(0));
@@ -137,7 +138,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_Constructor) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadContext_Enable) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 10);
     model->to(Device::cuda(0));
@@ -153,7 +154,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_Enable) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadContext_Disable) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 10);
     model->to(Device::cuda(0));
@@ -169,7 +170,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_Disable) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadContext_GetStats) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 10);
     model->to(Device::cuda(0));
@@ -188,7 +189,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_GetStats) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadContext_RegisterHooks) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 10);
     model->to(Device::cuda(0));
@@ -204,7 +205,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_RegisterHooks) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadContext_Destructor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 10);
     model->to(Device::cuda(0));
@@ -227,7 +228,7 @@ TEST_F(ParameterOffloadTest, OffloadContext_Destructor) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, OffloadParams_SingleLayer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Create simple linear layer
     auto linear = std::make_shared<Linear>(128, 64);
@@ -247,7 +248,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_SingleLayer) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadParams_MultipleLayers) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(256, 512, 128);
     model->to(Device::cuda(0));
@@ -266,7 +267,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_MultipleLayers) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadParams_SelectiveThreshold) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Create model with small and large parameters
     auto model = std::make_unique<Sequential>();
@@ -292,7 +293,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_SelectiveThreshold) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadParams_FirstLayerPinned) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 64);
     model->to(Device::cuda(0));
@@ -313,7 +314,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_FirstLayerPinned) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadParams_LastLayerPinned) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 64);
     model->to(Device::cuda(0));
@@ -334,7 +335,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_LastLayerPinned) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadParams_PreservesData) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 32);
     model->to(Device::cuda(0));
@@ -366,7 +367,7 @@ TEST_F(ParameterOffloadTest, OffloadParams_PreservesData) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, OffloadGradients_AfterBackward) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 10);
     model->to(Device::cuda(0));
@@ -393,7 +394,7 @@ TEST_F(ParameterOffloadTest, OffloadGradients_AfterBackward) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadGradients_MultipleParams) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 64);
     model->to(Device::cuda(0));
@@ -419,7 +420,7 @@ TEST_F(ParameterOffloadTest, OffloadGradients_MultipleParams) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadGradients_PreservesValues) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(32, 64, 10);
     model->to(Device::cuda(0));
@@ -461,7 +462,7 @@ TEST_F(ParameterOffloadTest, OffloadGradients_PreservesValues) {
 }
 
 TEST_F(ParameterOffloadTest, OffloadGradients_PrefetchForOptimizer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 32);
     model->to(Device::cuda(0));
@@ -492,7 +493,7 @@ TEST_F(ParameterOffloadTest, OffloadGradients_PrefetchForOptimizer) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, ComputeContext_RAII_LoadsParams) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto param = randn({1000, 1000}, DType::Float32, Device::cpu());
 
@@ -507,7 +508,7 @@ TEST_F(ParameterOffloadTest, ComputeContext_RAII_LoadsParams) {
 }
 
 TEST_F(ParameterOffloadTest, ComputeContext_RAII_OffloadsOnDestroy) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto param1 = randn({500, 500}, DType::Float32, Device::cpu());
     auto param2 = randn({500, 500}, DType::Float32, Device::cpu());
@@ -530,7 +531,7 @@ TEST_F(ParameterOffloadTest, ComputeContext_RAII_OffloadsOnDestroy) {
 }
 
 TEST_F(ParameterOffloadTest, ComputeContext_MultipleTensors) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     std::vector<Tensor> tensors;
     const int num_tensors = 5;
@@ -560,7 +561,7 @@ TEST_F(ParameterOffloadTest, ComputeContext_MultipleTensors) {
 }
 
 TEST_F(ParameterOffloadTest, ComputeContext_NestedScopes) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto param1 = randn({200, 200}, DType::Float32, Device::cpu());
     auto param2 = randn({200, 200}, DType::Float32, Device::cpu());
@@ -591,7 +592,7 @@ TEST_F(ParameterOffloadTest, ComputeContext_NestedScopes) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, Integration_SimpleForwardPass) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 10);
     model->to(Device::cuda(0));
@@ -610,7 +611,7 @@ TEST_F(ParameterOffloadTest, Integration_SimpleForwardPass) {
 }
 
 TEST_F(ParameterOffloadTest, Integration_ForwardBackwardPass) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 10);
     model->to(Device::cuda(0));
@@ -639,7 +640,7 @@ TEST_F(ParameterOffloadTest, Integration_ForwardBackwardPass) {
 }
 
 TEST_F(ParameterOffloadTest, Integration_FullTrainingLoop) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Create model
     auto model = createTestModule(784, 256, 10);
@@ -688,7 +689,7 @@ TEST_F(ParameterOffloadTest, Integration_FullTrainingLoop) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, Performance_MemorySavings) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Create large model
     auto model = createTestModule(1024, 2048, 512);
@@ -711,7 +712,7 @@ TEST_F(ParameterOffloadTest, Performance_MemorySavings) {
 }
 
 TEST_F(ParameterOffloadTest, Performance_OverheadAcceptable) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(512, 1024, 256);
     model->to(Device::cuda(0));
@@ -752,7 +753,7 @@ TEST_F(ParameterOffloadTest, Performance_OverheadAcceptable) {
 // ==========================
 
 TEST_F(ParameterOffloadTest, EdgeCase_EmptyModel) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = std::make_unique<Sequential>();
 
@@ -766,7 +767,7 @@ TEST_F(ParameterOffloadTest, EdgeCase_EmptyModel) {
 }
 
 TEST_F(ParameterOffloadTest, EdgeCase_AlreadyOnCPU) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 32);
     // Model already on CPU - don't move to CUDA
@@ -781,7 +782,7 @@ TEST_F(ParameterOffloadTest, EdgeCase_AlreadyOnCPU) {
 }
 
 TEST_F(ParameterOffloadTest, EdgeCase_MultipleEnableDisable) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 32);
     model->to(Device::cuda(0));
@@ -814,7 +815,7 @@ TEST_F(ParameterOffloadTest, AsyncOffloadEndsWithCommittedState) {
     //   (a) enable() leaves every param fully-committed on CPU (not stuck mid-transfer);
     //   (b) get_stats() drives drain_all_pending() and reports a consistent snapshot;
     //   (c) cross-device data comparison still matches the pre-offload params bit-for-bit.
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(128, 256, 64);
     model->to(Device::cuda(0));
@@ -860,7 +861,7 @@ TEST_F(ParameterOffloadTest, AsyncOffloadEndsWithCommittedState) {
 // the real quantize-on-offload + dequantize-on-fetch flow.
 
 TEST_F(ParameterOffloadTest, Int8WithScale_OffloadFetch_DataApproximatelyPreserved) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(64, 128, 32);
     model->to(Device::cuda(0));
@@ -911,7 +912,7 @@ TEST_F(ParameterOffloadTest, Int8WithScale_OffloadFetch_DataApproximatelyPreserv
 }
 
 TEST_F(ParameterOffloadTest, Int8WithScale_OffloadFetch_FiniteResults) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto model = createTestModule(32, 64, 16);
     model->to(Device::cuda(0));

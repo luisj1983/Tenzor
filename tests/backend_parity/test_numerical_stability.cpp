@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/nn/loss/losses.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 #include <cmath>
 #include <limits>
@@ -17,260 +18,211 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// audit-6 CC.22: 21 of the previously-helper-fn-pattern tests in this file
+// converted to TEST_P (parameterized across backends) so they appear in the
+// parity coverage matrix's per-backend tally. Renamed to a sibling suite
+// `NumericalStabilityParity` to keep the original `NumericalStability`
+// non-parameterized TESTs (FP16 saturation, gradient-only, complex-helper)
+// running unchanged.
+class NumericalStabilityParity : public BackendTest {};
+
 // ============================================================================
 // Very Small Values (Near Zero)
 // ============================================================================
 
-TEST(NumericalStability, VerySmallValues_Add) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, VerySmallValues_Add) {
+auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] + inputs[1];
-    }, {a, b}, 1e-7f, 1e-9f, "Very Small Add");
+    }, {a, b}, device, 1e-7f, 1e-9f, "Very Small Add");
 }
 
-TEST(NumericalStability, VerySmallValues_Mul) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, VerySmallValues_Mul) {
+auto a = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] * inputs[1];
-    }, {a, b}, 1e-7f, 1e-9f, "Very Small Mul");
+    }, {a, b}, device, 1e-7f, 1e-9f, "Very Small Mul");
 }
 
-TEST(NumericalStability, VerySmallValues_Div) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, VerySmallValues_Div) {
+auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] / inputs[1];
-    }, {a, b}, 1e-6f, 1e-8f, "Very Small Div");
+    }, {a, b}, device, 1e-6f, 1e-8f, "Very Small Div");
 }
 
-TEST(NumericalStability, VerySmallValues_Log) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
+TEST_P(NumericalStabilityParity, VerySmallValues_Log) {
+auto a = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
 
-    auto a = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
-
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return log(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Very Small Log");
+    }, {a}, device, 1e-5f, 1e-7f, "Very Small Log");
 }
 
-TEST(NumericalStability, VerySmallValues_Exp) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
+TEST_P(NumericalStabilityParity, VerySmallValues_Exp) {
+auto a = full({32, 32}, -20.0f, DType::Float32, Device::cpu());
 
-    auto a = full({32, 32}, -20.0f, DType::Float32, Device::cpu());
-
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return exp(inputs[0]);
-    }, {a}, 1e-7f, 1e-9f, "Very Small Exp");
+    }, {a}, device, 1e-7f, 1e-9f, "Very Small Exp");
 }
 
 // ============================================================================
 // Very Large Values (Near Overflow)
 // ============================================================================
 
-TEST(NumericalStability, VeryLargeValues_Add) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, VeryLargeValues_Add) {
+auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] + inputs[1];
-    }, {a, b}, 1e-3f, 1e-5f, "Very Large Add");
+    }, {a, b}, device, 1e-3f, 1e-5f, "Very Large Add");
 }
 
-TEST(NumericalStability, VeryLargeValues_Mul) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e10f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, VeryLargeValues_Mul) {
+auto a = full({32, 32}, 1e10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] * inputs[1];
-    }, {a, b}, 1e-2f, 1e-4f, "Very Large Mul");
+    }, {a, b}, device, 1e-2f, 1e-4f, "Very Large Mul");
 }
 
-TEST(NumericalStability, VeryLargeValues_Exp) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    // Large exp input (but not so large it overflows)
+TEST_P(NumericalStabilityParity, VeryLargeValues_Exp) {
+// Large exp input (but not so large it overflows)
     auto a = full({32, 32}, 10.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return exp(inputs[0]);
-    }, {a}, 1e-2f, 1e-4f, "Very Large Exp");
+    }, {a}, device, 1e-2f, 1e-4f, "Very Large Exp");
 }
 
 // ============================================================================
 // Mixed Magnitudes
 // ============================================================================
 
-TEST(NumericalStability, MixedMagnitudes_Add) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, MixedMagnitudes_Add) {
+auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] + inputs[1];
-    }, {a, b}, 1e-3f, 1e-5f, "Mixed Magnitudes Add");
+    }, {a, b}, device, 1e-3f, 1e-5f, "Mixed Magnitudes Add");
 }
 
-TEST(NumericalStability, MixedMagnitudes_MatMul) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e4f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, MixedMagnitudes_MatMul) {
+auto a = full({32, 32}, 1e4f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-4f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, 1e-2f, 1e-4f, "Mixed Magnitudes MatMul");
+    }, {a, b}, device, 1e-2f, 1e-4f, "Mixed Magnitudes MatMul");
 }
 
 // ============================================================================
 // Denormalized Numbers
 // ============================================================================
 
-TEST(NumericalStability, DenormalizedNumbers) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    // Create denormalized numbers (very close to zero)
+TEST_P(NumericalStabilityParity, DenormalizedNumbers) {
+// Create denormalized numbers (very close to zero)
     float denorm = std::numeric_limits<float>::min() / 2.0f;
     auto a = full({32, 32}, denorm, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] + inputs[0];
-    }, {a}, 1e-7f, 1e-9f, "Denormalized Add");
+    }, {a}, device, 1e-7f, 1e-9f, "Denormalized Add");
 }
 
 // ============================================================================
 // NaN Handling
 // ============================================================================
 
-TEST(NumericalStability, NaN_Propagation) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = randn({32, 32}, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, NaN_Propagation) {
+auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
     // Create NaN by dividing zero by zero
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto zeros = zeros_like(inputs[0]);
         return zeros / zeros;  // Should produce NaN
-    }, {a}, 0.0f, 0.0f, "NaN Creation");
+    }, {a}, device, 0.0f, 0.0f, "NaN Creation");
 }
 
-TEST(NumericalStability, NaN_InOperation) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
+TEST_P(NumericalStabilityParity, NaN_InOperation) {
+auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    auto a = randn({32, 32}, DType::Float32, Device::cpu());
-
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         // sqrt of negative should produce NaN
         return sqrt(inputs[0] * -1.0f);
-    }, {a}, 1e-6f, 1e-8f, "NaN from Operation");
+    }, {a}, device, 1e-6f, 1e-8f, "NaN from Operation");
 }
 
 // ============================================================================
 // Infinity Handling
 // ============================================================================
 
-TEST(NumericalStability, Infinity_Division) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e30f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, Infinity_Division) {
+auto a = full({32, 32}, 1e30f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-30f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] / inputs[1];
-    }, {a, b}, 1e-2f, 1e-4f, "Large Division");
+    }, {a, b}, device, 1e-2f, 1e-4f, "Large Division");
 }
 
-TEST(NumericalStability, Infinity_Exp) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
+TEST_P(NumericalStabilityParity, Infinity_Exp) {
+auto a = full({32, 32}, 100.0f, DType::Float32, Device::cpu());
 
-    auto a = full({32, 32}, 100.0f, DType::Float32, Device::cpu());
-
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return exp(inputs[0]);  // May overflow to infinity
-    }, {a}, 1e-2f, 1e-4f, "Exp Overflow");
+    }, {a}, device, 1e-2f, 1e-4f, "Exp Overflow");
 }
 
 // ============================================================================
 // Precision Loss Tests
 // ============================================================================
 
-TEST(NumericalStability, PrecisionLoss_Accumulation) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
+TEST_P(NumericalStabilityParity, PrecisionLoss_Accumulation) {
+auto a = full({1000, 1000}, 1e-7f, DType::Float32, Device::cpu());
 
-    auto a = full({1000, 1000}, 1e-7f, DType::Float32, Device::cpu());
-
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         // Sum of many small values tests accumulation precision
         return sum(inputs[0]);
-    }, {a}, 1e-3f, 1e-5f, "Precision Loss Accumulation");
+    }, {a}, device, 1e-3f, 1e-5f, "Precision Loss Accumulation");
 }
 
-TEST(NumericalStability, PrecisionLoss_Cancellation) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
+TEST_P(NumericalStabilityParity, PrecisionLoss_Cancellation) {
+auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e8f + 1.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         // Catastrophic cancellation test
         return inputs[1] - inputs[0];
-    }, {a, b}, 1e-2f, 1e-4f, "Precision Loss Cancellation");
+    }, {a, b}, device, 1e-2f, 1e-4f, "Precision Loss Cancellation");
 }
 
 // ============================================================================
 // Special Function Edge Cases
 // ============================================================================
 
-TEST(NumericalStability, Softmax_LargeValues) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    // Large values in softmax should not overflow
+TEST_P(NumericalStabilityParity, Softmax_LargeValues) {
+// Large values in softmax should not overflow
     auto a = full({32, 64}, 100.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto input_var = Variable(inputs[0], false);
         return softmax(input_var, 1).tensor();
-    }, {a}, 1e-6f, 1e-8f, "Softmax Large Values");
+    }, {a}, device, 1e-6f, 1e-8f, "Softmax Large Values");
 }
 
-TEST(NumericalStability, LogSoftmax_StableComputation) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    auto a = randn({32, 64}, DType::Float32, Device::cpu()) * 10.0f;
+TEST_P(NumericalStabilityParity, LogSoftmax_StableComputation) {
+auto a = randn({32, 64}, DType::Float32, Device::cpu()) * 10.0f;
 
     // Inputs scaled to ±30 yield log_softmax outputs spanning ~[-60, 0]; the
     // Float32 ULP at that magnitude is ~7e-6, so the original atol=1e-7 was
@@ -280,10 +232,10 @@ TEST(NumericalStability, LogSoftmax_StableComputation) {
     // no overflow), not a bit-exactness test — use a tolerance that
     // reflects FP32 precision at this output magnitude rather than one
     // tighter than the format itself.
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto input_var = Variable(inputs[0], false);
         return log_softmax(input_var, 1).tensor();
-    }, {a}, 1e-4f, 1e-5f, "LogSoftmax Stability");
+    }, {a}, device, 1e-4f, 1e-5f, "LogSoftmax Stability");
 }
 
 TEST(NumericalStability, BatchNorm_SmallVariance) {
@@ -470,30 +422,24 @@ TEST(NumericalStability, Gradient_VeryLargeValues) {
 // Underflow/Overflow Detection
 // ============================================================================
 
-TEST(NumericalStability, DetectUnderflow) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    // Multiply very small numbers
+TEST_P(NumericalStabilityParity, DetectUnderflow) {
+// Multiply very small numbers
     auto a = full({32, 32}, 1e-20f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-20f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] * inputs[1];
-    }, {a, b}, 1e-7f, 1e-9f, "Detect Underflow");
+    }, {a, b}, device, 1e-7f, 1e-9f, "Detect Underflow");
 }
 
-TEST(NumericalStability, DetectOverflow) {
-    auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
-
-    // Multiply large numbers (but keep within float32 range)
+TEST_P(NumericalStabilityParity, DetectOverflow) {
+// Multiply large numbers (but keep within float32 range)
     auto a = full({32, 32}, 1e15f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] * inputs[1];
-    }, {a, b}, 1e-2f, 1e-4f, "Detect Overflow");
+    }, {a, b}, device, 1e-2f, 1e-4f, "Detect Overflow");
 }
 
 // ============================================================================
@@ -577,6 +523,8 @@ TEST(NumericalStability, FP16Saturation_Add) {
         [&](Device d) { return a.to(d) + b.to(d); },
         "FP16 Saturation Add");
 }
+
+INSTANTIATE_BACKEND_TESTS(NumericalStabilityParity);
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

@@ -341,6 +341,27 @@ void register_nn(py::module_& m) {
         // see them fire. To break a cycle in that case, call
         // `handle.remove()` explicitly (the Python `RemovableHandle` already
         // exposes this — see `python/tenzor/nn.py`).
+        //
+        // CC.13 — GIL invariant for hook callbacks:
+        //   Module::forward_impl / Module::backward_impl run from C++ and
+        //   are bound below with `py::call_guard<py::gil_scoped_release>()`
+        //   (BB.18 made train/eval/zero_grad/state_dict release the GIL, and
+        //   the forward dispatch on Module follows the same pattern). When
+        //   the C++ side then invokes a user-supplied Python hook callable,
+        //   that callable must acquire the GIL before the call into the
+        //   Python interpreter; otherwise pybind11's operator()(py::object)
+        //   would race against any other thread holding the GIL.
+        //
+        //   Every hook lambda below explicitly does
+        //       `py::gil_scoped_acquire acquire;`
+        //   before `_resolve_hook_ref` (which calls into Python via
+        //   weakref) and before invoking `cb(...)`. This is the correct
+        //   pattern even though pybind11 will internally acquire on the
+        //   call itself — we also resolve the weakref, which is a Python
+        //   operation in its own right, so the explicit acquire covers
+        //   both. Do NOT remove the acquire; it is required for the
+        //   GIL-release contract on `forward_impl`/`backward_impl` to
+        //   compose safely with user hooks.
         // ====================================================================
         .def("register_forward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();

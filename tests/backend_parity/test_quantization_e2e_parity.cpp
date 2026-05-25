@@ -99,7 +99,7 @@ auto run_on_device(std::shared_ptr<Module> qmodel, Device target_dev) -> Tensor 
 // E2E: quantize on CPU; verify the same quantized model produces matching
 // output when moved to each available GPU backend.
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2EParity, INT8_CPU_To_CUDA_Match) {
+TEST_F(QuantizationE2EParity, INT8_CudaMatchesCpu) {
     if (!device_available(Device::Type::CUDA)) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -116,7 +116,7 @@ TEST_F(QuantizationE2EParity, INT8_CPU_To_CUDA_Match) {
     }
 }
 
-TEST_F(QuantizationE2EParity, INT8_CPU_To_ROCm_Match) {
+TEST_F(QuantizationE2EParity, INT8_RocmMatchesCpu) {
     if (!device_available(Device::Type::ROCm)) {
         GTEST_SKIP() << "ROCm not available";
     }
@@ -132,7 +132,7 @@ TEST_F(QuantizationE2EParity, INT8_CPU_To_ROCm_Match) {
     }
 }
 
-TEST_F(QuantizationE2EParity, INT8_CPU_To_Vulkan_Match) {
+TEST_F(QuantizationE2EParity, INT8_VulkanMatchesCpu) {
     if (!device_available(Device::Type::Vulkan)) {
         GTEST_SKIP() << "Vulkan not available";
     }
@@ -153,7 +153,7 @@ TEST_F(QuantizationE2EParity, INT8_CPU_To_Vulkan_Match) {
     }
 }
 
-TEST_F(QuantizationE2EParity, INT8_CPU_To_OneAPI_Match) {
+TEST_F(QuantizationE2EParity, INT8_OneapiMatchesCpu) {
     if (!device_available(Device::Type::OneAPI)) {
         GTEST_SKIP() << "OneAPI not available";
     }
@@ -178,7 +178,7 @@ TEST_F(QuantizationE2EParity, INT8_CPU_To_OneAPI_Match) {
 // Self-consistency: same model run twice on CPU must produce identical output.
 // (Guards against non-deterministic quant kernels.)
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2EParity, CPU_Selfconsistency_Identical) {
+TEST_F(QuantizationE2EParity, SelfconsistencyIdentical) {
     auto model = make_qmodel();
     auto qmodel = quantize_static(model, make_calib(3));
     auto out1 = run_on_device(qmodel, Device::cpu());

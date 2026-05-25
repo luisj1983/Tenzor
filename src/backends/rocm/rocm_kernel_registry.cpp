@@ -3959,6 +3959,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             dilation_h, dilation_w, get_hip_stream(attrs));
     });
 
+    // CC.5: 1D / 3D depthwise dispatch surface. See cpu_kernel_registry.cpp
+    // for the full rationale — these handlers exist to make accidental
+    // dispatch (bypassing the NN-layer fallback) fail loudly instead of
+    // silently miscomputing. Real ROCm kernels are a follow-up.
+    table.register_kernel(OpId::DepthwiseConv1d,
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                "DepthwiseConv1d (ROCm): not yet implemented; route through "
+                "generic Conv1dForward (Conv1d::forward_impl falls back "
+                "automatically when this OpId is unregistered).");
+        });
+    table.register_kernel(OpId::DepthwiseConv3d,
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                "DepthwiseConv3d (ROCm): not yet implemented; route through "
+                "generic Conv3dForward (Conv3d::forward_impl falls back "
+                "automatically when this OpId is unregistered).");
+        });
+
     // --- Deformable Convolution v2 (DCNv2) ------------------------------------
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: {input, offset, weight, bias, mask}

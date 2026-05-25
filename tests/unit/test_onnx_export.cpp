@@ -18,6 +18,8 @@
 #include <tenzor/nn/module.hpp>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <unistd.h>  // getpid — CC.17 per-test, per-process temp path
 
 using namespace tenzor;
 using namespace tenzor::onnx;
@@ -38,8 +40,14 @@ static ::testing::Environment* const tenzor_env =
 class ONNXExportTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create temp directory for test files
-        test_dir_ = "/tmp/tenzor_onnx_test";
+        // CC.17: per-process, per-test temp directory so parallel ctest runs
+        // don't collide on the same filename.
+        const auto* info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        const std::string test_name = info ? info->name() : "unknown";
+        test_dir_ = (std::filesystem::temp_directory_path() /
+                     ("tenzor_onnx_test_" + std::to_string(::getpid()) +
+                      "_" + test_name)).string();
         std::filesystem::create_directories(test_dir_);
     }
 

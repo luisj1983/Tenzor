@@ -3396,8 +3396,17 @@ auto RepeatInterleaveBackward::backward(std::vector<Tensor> grad_outputs) -> std
     // to a no-op sum when the repeats axis has length 1.
     int64_t r = repeats_;
 
-    if (dim_.has_value()) {
+    // CC.2: `was_flattened_` is the authoritative signal for which forward
+    // path ran. Previously the backward only looked at `dim_.has_value()`,
+    // which conflated "user passed nullopt → forward flattened input" with
+    // an explicit dim=0 on a 1D input. They produce the same forward output
+    // but require different backward reshapes: the flattened path must
+    // restore the original rank-N shape, the dim-specified path must keep
+    // the existing rank.
+    if (!was_flattened_) {
         // grad_y has shape == input with dim*r at axis `dim`.
+        // `dim_` is guaranteed to have a value on this branch (the wrapper
+        // only sets was_flattened_=true when dim was nullopt).
         int64_t nd = static_cast<int64_t>(input_shape_.size());
         int64_t dim_norm = *dim_ < 0 ? *dim_ + nd : *dim_;
 
@@ -3418,9 +3427,9 @@ auto RepeatInterleaveBackward::backward(std::vector<Tensor> grad_outputs) -> std
         return {summed};
     }
 
-    // dim is nullopt -> forward flattened x to 1D and repeated.
+    // was_flattened_ == true: forward flattened x to 1D and repeated.
     // grad_y is 1D of length (numel(x) * r); reshape to (numel(x), r), sum
-    // along axis 1, then reshape to input_shape_.
+    // along axis 1, then reshape back to the original rank-N input_shape_.
     int64_t numel = 1;
     for (auto d : input_shape_) numel *= d;
     auto reshaped = reshape(grad_y, {numel, r});

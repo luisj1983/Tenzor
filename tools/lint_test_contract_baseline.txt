@@ -2,20 +2,6 @@
 # Each line is `<path>:<line>:` matching the lint script's output.
 # Pre-existing entries are ignored by the lint; new violations FAIL.
 # Drive this list to zero over time.
-#
-# audit-4 W.26: removed entries fixed by adding EXPECT_GRAD_FLOWS to
-# control-path tests: test_inplace_version_detection.cpp (1),
-# test_pooling.cpp (3), test_layernorm_multidtype.cpp (1),
-# test_pipeline_parallel.cpp (1), test_activation_backward_multidtype.cpp (1),
-# test_conv3d_multidtype.cpp (1). 8 entries dropped (~12%).
-# audit-5 Z.25: 4 pooling1d + 4 pooling3d + 3 rnn_cells_dispatch entries
-# migrated to EXPECT_GRAD_FLOWS. 11 entries dropped.
-# audit-5 Z.29: 11 test_losses_advanced_multidtype.cpp entries migrated to
-# EXPECT_GRAD_FLOWS (KLDiv, Focal, Dice, Huber, BCEWithLogits, CTC, Triplet
-# variants, MultiLabelMargin, InfoNCE, NTXent). 11 entries dropped (~32%
-# reduction of post-Z.25 baseline).
-/home/lee/Projects/Tenzor/tests/autograd/test_higher_order_activations.cpp:274:
-/home/lee/Projects/Tenzor/tests/autograd/test_higher_order_activations_multidtype.cpp:274:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:57:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:89:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_stubs_regression.cpp:187:
@@ -30,25 +16,12 @@
 /home/lee/Projects/Tenzor/tests/nn/test_pipeline_parallel_multidtype.cpp:81:
 /home/lee/Projects/Tenzor/tests/ops/test_batchnorm_dispatch_multidtype.cpp:100:
 /home/lee/Projects/Tenzor/tests/ops/test_embedding_bag_multidtype.cpp:101:
-/home/lee/Projects/Tenzor/tests/unit/test_electra.cpp:364:
-/home/lee/Projects/Tenzor/tests/unit/test_electra.cpp:402:
-/home/lee/Projects/Tenzor/tests/unit/test_gru.cpp:290:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:381:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:392:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:403:
-/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced.cpp:414:
-/home/lee/Projects/Tenzor/tests/unit/test_lstm.cpp:327:
-/home/lee/Projects/Tenzor/tests/unit/test_pruning_multidtype.cpp:897:
-/home/lee/Projects/Tenzor/tests/unit/test_rnn.cpp:311:
-/home/lee/Projects/Tenzor/tests/unit/test_roberta.cpp:252:
-/home/lee/Projects/Tenzor/tests/unit/test_roberta.cpp:301:
 /home/lee/Projects/Tenzor/tests/test_vulkan_complete_ops.cpp:479:
 /home/lee/Projects/Tenzor/tests/test_vulkan_complete_ops.cpp:503:
 /home/lee/Projects/Tenzor/tests/unit/test_async_ops.cpp:502:
 /home/lee/Projects/Tenzor/tests/unit/test_electra.cpp:572:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:154:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:242:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:283:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:350:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:389:
-/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp:87:
+/home/lee/Projects/Tenzor/tests/unit/test_gru.cpp:290:
+/home/lee/Projects/Tenzor/tests/unit/test_lstm.cpp:327:
+/home/lee/Projects/Tenzor/tests/unit/test_pruning_multidtype.cpp:897:
+/home/lee/Projects/Tenzor/tests/unit/test_roberta.cpp:252:
+/home/lee/Projects/Tenzor/tests/unit/test_roberta.cpp:301:

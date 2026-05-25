@@ -212,7 +212,7 @@ tests/unit/test_creation_dtype_coverage.cpp:160
 tests/unit/test_creation_dtype_coverage.cpp:243
 tests/unit/test_creation_dtype_coverage.cpp:250
 tests/unit/test_creation_dtype_coverage.cpp:251
-tests/unit/test_data_parallel_single_gpu.cpp:754
+tests/unit/test_data_parallel_single_gpu.cpp:755
 tests/unit/test_distributions_samplers.cpp:132
 tests/unit/test_distributions_samplers.cpp:133
 tests/unit/test_distributions_samplers.cpp:134

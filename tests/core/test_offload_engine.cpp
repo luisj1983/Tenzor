@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
 #include "tenzor/core/offload_engine.hpp"
 #include "tenzor/core/transfer_engine.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -78,7 +79,7 @@ protected:
 // =============================================================================
 
 TEST_F(OffloadEngineTest, ConstructorWithValidConfig) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     ASSERT_NO_THROW({
         OffloadEngine engine(default_config);
@@ -86,7 +87,7 @@ TEST_F(OffloadEngineTest, ConstructorWithValidConfig) {
 }
 
 TEST_F(OffloadEngineTest, ConstructorWithDefaultConfig) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine::Config config;
     ASSERT_NO_THROW({
@@ -95,7 +96,7 @@ TEST_F(OffloadEngineTest, ConstructorWithDefaultConfig) {
 }
 
 TEST_F(OffloadEngineTest, ConstructorInitializesResources) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -111,7 +112,7 @@ TEST_F(OffloadEngineTest, ConstructorInitializesResources) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, SyncOffloadToCPU_BasicTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -123,7 +124,7 @@ TEST_F(OffloadEngineTest, SyncOffloadToCPU_BasicTensor) {
 }
 
 TEST_F(OffloadEngineTest, SyncOffloadToCPU_LargeTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -137,7 +138,7 @@ TEST_F(OffloadEngineTest, SyncOffloadToCPU_LargeTensor) {
 }
 
 TEST_F(OffloadEngineTest, SyncLoadToGPU_BasicTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -149,7 +150,7 @@ TEST_F(OffloadEngineTest, SyncLoadToGPU_BasicTensor) {
 }
 
 TEST_F(OffloadEngineTest, SyncLoadToGPU_LargeTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -162,7 +163,7 @@ TEST_F(OffloadEngineTest, SyncLoadToGPU_LargeTensor) {
 }
 
 TEST_F(OffloadEngineTest, SyncRoundTrip_PreservesData) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -174,7 +175,7 @@ TEST_F(OffloadEngineTest, SyncRoundTrip_PreservesData) {
 }
 
 TEST_F(OffloadEngineTest, SyncOffload_MultipleTypes) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -194,7 +195,7 @@ TEST_F(OffloadEngineTest, SyncOffload_MultipleTypes) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, AsyncOffloadToCPU_BasicTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -209,7 +210,7 @@ TEST_F(OffloadEngineTest, AsyncOffloadToCPU_BasicTensor) {
 }
 
 TEST_F(OffloadEngineTest, AsyncOffloadToCPU_ReturnsHandle) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -220,7 +221,7 @@ TEST_F(OffloadEngineTest, AsyncOffloadToCPU_ReturnsHandle) {
 }
 
 TEST_F(OffloadEngineTest, AsyncOffloadToCPU_CanWait) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -233,7 +234,7 @@ TEST_F(OffloadEngineTest, AsyncOffloadToCPU_CanWait) {
 }
 
 TEST_F(OffloadEngineTest, AsyncLoadToGPU_BasicTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -246,7 +247,7 @@ TEST_F(OffloadEngineTest, AsyncLoadToGPU_BasicTensor) {
 }
 
 TEST_F(OffloadEngineTest, AsyncTransfers_MultipleSimultaneous) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -265,7 +266,7 @@ TEST_F(OffloadEngineTest, AsyncTransfers_MultipleSimultaneous) {
 }
 
 TEST_F(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -286,7 +287,7 @@ TEST_F(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
 }
 
 TEST_F(OffloadEngineTest, AsyncPrefetch_SingleTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -304,7 +305,7 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_SingleTensor) {
 }
 
 TEST_F(OffloadEngineTest, AsyncPrefetch_MultipleTensors) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -324,7 +325,7 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_CommitsToTargetTensor) {
     // Locks in the contract that prefetch_to_gpu + wait_for_prefetch actually moves the
     // tensor to GPU and preserves its data — the legacy code dropped the TransferHandle on
     // the floor so the user's Tensor* never saw the GPU copy.
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -381,7 +382,7 @@ TEST_F(OffloadEngineTest, SharedTransferEngine_DefaultsToOwnEngine) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, PinnedMemoryStats_Accurate) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -391,7 +392,7 @@ TEST_F(OffloadEngineTest, PinnedMemoryStats_Accurate) {
 }
 
 TEST_F(OffloadEngineTest, AutoOffload_Registration) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -408,7 +409,7 @@ TEST_F(OffloadEngineTest, AutoOffload_Registration) {
 }
 
 TEST_F(OffloadEngineTest, AutoOffload_ByPriority) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -423,7 +424,7 @@ TEST_F(OffloadEngineTest, AutoOffload_ByPriority) {
 }
 
 TEST_F(OffloadEngineTest, MemoryPressure_Calculation) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -437,7 +438,7 @@ TEST_F(OffloadEngineTest, MemoryPressure_Calculation) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, Prefetch_StartsTransferEarly) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -452,7 +453,7 @@ TEST_F(OffloadEngineTest, Prefetch_StartsTransferEarly) {
 }
 
 TEST_F(OffloadEngineTest, Prefetch_WithDisabledConfig) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine::Config config = default_config;
     config.enable_prefetch = false;
@@ -473,7 +474,7 @@ TEST_F(OffloadEngineTest, Prefetch_WithDisabledConfig) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, BandwidthMeasurement_Offload) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -493,7 +494,7 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Offload) {
 }
 
 TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -517,7 +518,7 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, OffloadCPUTensor_NoOp) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -530,7 +531,7 @@ TEST_F(OffloadEngineTest, OffloadCPUTensor_NoOp) {
 }
 
 TEST_F(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -546,7 +547,7 @@ TEST_F(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, Synchronize_WaitsForAll) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -571,7 +572,7 @@ TEST_F(OffloadEngineTest, Synchronize_WaitsForAll) {
 // =============================================================================
 
 TEST_F(OffloadEngineTest, Statistics_TrackOperations) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 

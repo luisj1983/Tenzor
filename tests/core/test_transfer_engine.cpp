@@ -14,6 +14,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
 #include <tenzor/core/transfer_engine.hpp>
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
@@ -133,7 +134,7 @@ TEST_F(TransferEngineTest, ConstructorWithDefaultConfig) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, SyncCPUToGPU_BasicTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -145,7 +146,7 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_BasicTransfer) {
 }
 
 TEST_F(TransferEngineTest, SyncCPUToGPU_LargeTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -158,7 +159,7 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_LargeTensor) {
 }
 
 TEST_F(TransferEngineTest, SyncCPUToGPU_MultipleTensors) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -177,7 +178,7 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_MultipleTensors) {
 }
 
 TEST_F(TransferEngineTest, SyncCPUToGPU_EmptyTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -194,7 +195,7 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_EmptyTensor) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, SyncGPUToCPU_BasicTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -206,7 +207,7 @@ TEST_F(TransferEngineTest, SyncGPUToCPU_BasicTransfer) {
 }
 
 TEST_F(TransferEngineTest, SyncGPUToCPU_LargeTensor) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -218,7 +219,7 @@ TEST_F(TransferEngineTest, SyncGPUToCPU_LargeTensor) {
 }
 
 TEST_F(TransferEngineTest, SyncGPUToCPU_RoundTrip) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -235,7 +236,7 @@ TEST_F(TransferEngineTest, SyncGPUToCPU_RoundTrip) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, AsyncCPUToGPU_BasicTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -252,7 +253,7 @@ TEST_F(TransferEngineTest, AsyncCPUToGPU_BasicTransfer) {
 }
 
 TEST_F(TransferEngineTest, AsyncGPUToCPU_BasicTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -266,7 +267,7 @@ TEST_F(TransferEngineTest, AsyncGPUToCPU_BasicTransfer) {
 }
 
 TEST_F(TransferEngineTest, AsyncTransfer_HandleWait) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -280,7 +281,7 @@ TEST_F(TransferEngineTest, AsyncTransfer_HandleWait) {
 }
 
 TEST_F(TransferEngineTest, AsyncTransfer_MultipleHandles) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -304,7 +305,7 @@ TEST_F(TransferEngineTest, AsyncTransfer_MultipleHandles) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -338,7 +339,7 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
 }
 
 TEST_F(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -368,7 +369,7 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, StreamSync_WaitForCompletion) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -382,7 +383,7 @@ TEST_F(TransferEngineTest, StreamSync_WaitForCompletion) {
 }
 
 TEST_F(TransferEngineTest, StreamSync_MultipleTransfers) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -401,7 +402,7 @@ TEST_F(TransferEngineTest, StreamSync_MultipleTransfers) {
 }
 
 TEST_F(TransferEngineTest, StreamSync_IndividualStream) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -419,7 +420,7 @@ TEST_F(TransferEngineTest, StreamSync_IndividualStream) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, Statistics_TrackTransfers) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -434,7 +435,7 @@ TEST_F(TransferEngineTest, Statistics_TrackTransfers) {
 }
 
 TEST_F(TransferEngineTest, Statistics_TrackBytes) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -449,7 +450,7 @@ TEST_F(TransferEngineTest, Statistics_TrackBytes) {
 }
 
 TEST_F(TransferEngineTest, Statistics_GetStatistics) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -466,7 +467,7 @@ TEST_F(TransferEngineTest, Statistics_GetStatistics) {
 }
 
 TEST_F(TransferEngineTest, Statistics_Reset) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -482,7 +483,7 @@ TEST_F(TransferEngineTest, Statistics_Reset) {
 }
 
 TEST_F(TransferEngineTest, Statistics_AverageBandwidth) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -502,7 +503,7 @@ TEST_F(TransferEngineTest, Statistics_AverageBandwidth) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -522,7 +523,7 @@ TEST_F(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
 }
 
 TEST_F(TransferEngineTest, BandwidthMeasurement_GPUToCPU) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -546,7 +547,7 @@ TEST_F(TransferEngineTest, BandwidthMeasurement_GPUToCPU) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, SyncTransfer_Float16) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -559,7 +560,7 @@ TEST_F(TransferEngineTest, SyncTransfer_Float16) {
 }
 
 TEST_F(TransferEngineTest, SyncTransfer_Int32) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -579,7 +580,7 @@ TEST_F(TransferEngineTest, SyncTransfer_Int32) {
 }
 
 TEST_F(TransferEngineTest, SyncTransfer_Int64) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -596,7 +597,7 @@ TEST_F(TransferEngineTest, SyncTransfer_Int64) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Config with pinned memory
     TransferEngine::Config pinned_config = default_config;
@@ -631,7 +632,7 @@ TEST_F(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
 }
 
 TEST_F(TransferEngineTest, PinnedMemory_ReuseBuffer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -669,7 +670,7 @@ TEST_F(TransferEngineTest, Config_InvalidQueueCapacity) {
 }
 
 TEST_F(TransferEngineTest, Config_SingleStream) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine::Config single_stream_config = default_config;
     single_stream_config.num_streams = 1;
@@ -684,7 +685,7 @@ TEST_F(TransferEngineTest, Config_SingleStream) {
 }
 
 TEST_F(TransferEngineTest, Config_ManyStreams) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine::Config many_streams_config = default_config;
     many_streams_config.num_streams = 16;
@@ -708,7 +709,7 @@ TEST_F(TransferEngineTest, Config_ManyStreams) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, EmptyTensorTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -721,7 +722,7 @@ TEST_F(TransferEngineTest, EmptyTensorTransfer) {
 }
 
 TEST_F(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -741,7 +742,7 @@ TEST_F(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
 }
 
 TEST_F(TransferEngineTest, Error_TransferNonCPUTensorToGPU) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -753,7 +754,7 @@ TEST_F(TransferEngineTest, Error_TransferNonCPUTensorToGPU) {
 }
 
 TEST_F(TransferEngineTest, Error_TransferNonGPUTensorToCPU) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -765,7 +766,7 @@ TEST_F(TransferEngineTest, Error_TransferNonGPUTensorToCPU) {
 }
 
 TEST_F(TransferEngineTest, Error_AsyncTransferInvalidDevice) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -781,7 +782,7 @@ TEST_F(TransferEngineTest, Error_AsyncTransferInvalidDevice) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -811,7 +812,7 @@ TEST_F(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
 }
 
 TEST_F(TransferEngineTest, ThreadSafety_SynchronizeWhileTransferring) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -851,7 +852,7 @@ TEST_F(TransferEngineTest, Handle_EmptyHandle) {
 }
 
 TEST_F(TransferEngineTest, Handle_MultipleWaits) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -867,7 +868,7 @@ TEST_F(TransferEngineTest, Handle_MultipleWaits) {
 }
 
 TEST_F(TransferEngineTest, Handle_CheckReadyBeforeCompletion) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -890,7 +891,7 @@ TEST_F(TransferEngineTest, Handle_CheckReadyBeforeCompletion) {
 // =============================================================================
 
 TEST_F(TransferEngineTest, Performance_MinimumBandwidth) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -915,7 +916,7 @@ TEST_F(TransferEngineTest, Performance_MinimumBandwidth) {
 }
 
 TEST_F(TransferEngineTest, Performance_AsyncOverlapping) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 

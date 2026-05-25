@@ -23,6 +23,9 @@
 #include <sstream>
 #include <memory>
 #include <limits>
+#include <filesystem>
+#include <string>
+#include <unistd.h>  // getpid — CC.17 per-test, per-process temp path
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -266,8 +269,13 @@ TEST_P(CallbackMultiDTypeTest, EarlyStoppingReset) {
 // ============================================================================
 
 TEST_P(CallbackMultiDTypeTest, ModelCheckpointCallbackCreation) {
+    // CC.17: per-process, per-test temp path so parallel ctest runs don't race.
+    const std::string ckpt_template = (std::filesystem::temp_directory_path() /
+        ("tenzor_model_epoch_{epoch}_" + std::to_string(::getpid()) + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/model_epoch_{epoch}.pt",
+        ckpt_template,
         model,
         true,  // save_best_only
         "val_loss"
@@ -278,8 +286,13 @@ TEST_P(CallbackMultiDTypeTest, ModelCheckpointCallbackCreation) {
 }
 
 TEST_P(CallbackMultiDTypeTest, ModelCheckpointSaveBestOnly) {
+    const std::string ckpt_path = (std::filesystem::temp_directory_path() /
+        ("tenzor_test_model_best_multidtype_" + std::to_string(::getpid()) + "_" +
+         backend_name() + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_best_multidtype_" + backend_name() + ".pt",
+        ckpt_path,
         model,
         true  // save_best_only
     );
@@ -299,8 +312,14 @@ TEST_P(CallbackMultiDTypeTest, ModelCheckpointSaveBestOnly) {
 }
 
 TEST_P(CallbackMultiDTypeTest, ModelCheckpointFilepathTemplate) {
+    // CC.17: per-process, per-test temp path.
+    const std::string ckpt_template = (std::filesystem::temp_directory_path() /
+        ("tenzor_model_epoch_{epoch:03d}_" + std::to_string(::getpid()) + "_" +
+         backend_name() + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/model_epoch_{epoch:03d}_" + backend_name() + ".pt",
+        ckpt_template,
         model,
         false  // save every epoch
     );
@@ -311,8 +330,13 @@ TEST_P(CallbackMultiDTypeTest, ModelCheckpointFilepathTemplate) {
 }
 
 TEST_P(CallbackMultiDTypeTest, ModelCheckpointMonitorTrainLoss) {
+    const std::string ckpt_path = (std::filesystem::temp_directory_path() /
+        ("tenzor_test_model_trainloss_" + std::to_string(::getpid()) + "_" +
+         backend_name() + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_trainloss_" + backend_name() + ".pt",
+        ckpt_path,
         model,
         true,
         "train_loss"
@@ -549,8 +573,13 @@ TEST_P(CallbackMultiDTypeTest, MultipleCallbacksWithEarlyStopping) {
 
 TEST_P(CallbackMultiDTypeTest, CallbackWithModelAndOptimizer) {
     // Create callbacks
+    const std::string ckpt_path = (std::filesystem::temp_directory_path() /
+        ("tenzor_test_model_integrated_" + std::to_string(::getpid()) + "_" +
+         backend_name() + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_integrated_" + backend_name() + ".pt",
+        ckpt_path,
         model,
         true
     );
@@ -590,8 +619,13 @@ TEST_P(CallbackMultiDTypeTest, CompleteTrainingWorkflow) {
     auto custom_cb = std::make_shared<TestCallbackImpl>();
     auto progress = std::make_shared<ProgressCallback>(2);
     auto early_stop = std::make_shared<EarlyStoppingCallback>(5, 0.001f);
+    const std::string workflow_ckpt = (std::filesystem::temp_directory_path() /
+        ("tenzor_workflow_model_" + std::to_string(::getpid()) + "_" +
+         backend_name() + "_" +
+         std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) +
+         ".pt")).string();
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/workflow_model_" + backend_name() + ".pt",
+        workflow_ckpt,
         model,
         true
     );

@@ -17,6 +17,9 @@
 #include <tenzor/nn/layers/linear.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <cstdio>
+#include <filesystem>
+#include <string>
+#include <unistd.h>  // getpid — CC.17 per-test, per-process temp path
 
 using namespace tenzor;
 
@@ -72,8 +75,11 @@ TEST(ProgramExport, RoundTripPreservesNumerics) {
     EXPECT_FALSE(exported.state_dict().empty())
         << "exported state dict should include fc1/fc2 weights and biases";
 
-    // Save and reload.
-    const std::string path = "/tmp/tenzor_program_export_roundtrip.tzep";
+    // Save and reload.  CC.17: per-process, per-test temp path.
+    const std::string path = (std::filesystem::temp_directory_path() /
+        ("tenzor_program_export_roundtrip_" + std::to_string(::getpid()) + "_" +
+         ::testing::UnitTest::GetInstance()->current_test_info()->name() +
+         ".tzep")).string();
     exported.save(path);
     auto loaded = export_::ExportedProgram::load(path);
     std::remove(path.c_str());
@@ -115,7 +121,11 @@ TEST(ProgramExport, LoadMapLocationCpu) {
     auto x = randn({2, 4}, DType::Float32, Device::cpu());
     auto exported = export_::export_model(*model, {x});
 
-    const std::string path = "/tmp/tenzor_test_program_export_maploc.tzep";
+    // CC.17: per-process, per-test temp path.
+    const std::string path = (std::filesystem::temp_directory_path() /
+        ("tenzor_test_program_export_maploc_" + std::to_string(::getpid()) + "_" +
+         ::testing::UnitTest::GetInstance()->current_test_info()->name() +
+         ".tzep")).string();
     exported.save(path);
     auto loaded = export_::ExportedProgram::load(path, Device::cpu());
     std::remove(path.c_str());

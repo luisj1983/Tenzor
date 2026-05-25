@@ -15,7 +15,10 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/utils/error.hpp"
+#include <algorithm>
 #include <cmath>
+#include <ranges>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -1616,7 +1619,15 @@ auto where(const Variable& condition, const Variable& x, const Variable& y) -> V
     // based gradient accumulation and pushed grad_y into x (and dropped
     // y's gradient entirely). The condition tensor is still kept in
     // saved_tensors_ so the backward can read it.
-    grad_fn->save_for_backward({condition.tensor()});
+    //
+    // CC.4: save condition.contiguous(). The backward dispatches
+    // `tenzor::where` on the saved condition; backend `where` kernels (CUDA
+    // / ROCm / Vulkan / OneAPI) require contiguous bool input and throw
+    // when they encounter a non-contiguous saved view (e.g. condition was
+    // produced by a `transpose`/`permute` and never materialised). Forcing
+    // contiguity at save-time gives the backward a clean buffer with no
+    // hidden stride dependency.
+    grad_fn->save_for_backward({condition.tensor().contiguous()});
     // audit-5 Y.4: save the un-broadcasted x/y shapes so the backward can
     // reduce the masked grad back to each input's original shape (mirroring
     // BinaryOp backwards). `tenzor::where` materialises the broadcast shape,
@@ -3854,7 +3865,24 @@ auto masked_fill(const Variable& input, const Tensor& mask, float value)
 
 // masked_select(x, mask): saves the mask and a CPU Int64 tensor encoding the
 // input shape so backward can scatter grad_y back into a zeros_like(x).
+//
+// CC.1: assert mask.shape() == input.shape() at the autograd wrapper. The
+// scatter-back path in MaskedSelectBackward assumes the saved mask has the
+// same shape as the input so a single zeros_like(input) + scatter-add over
+// the mask positions reconstructs grad_x. If mask broadcasts (smaller rank
+// or unequal extents), the saved mask aliases a view and the scatter would
+// either fault or — worse — silently scatter into the wrong cells. Take the
+// simpler assert path here; relax to broadcast+reduce-after-scatter only
+// when a real use-case justifies the extra forward bookkeeping.
 auto masked_select(const Variable& input, const Tensor& mask) -> Variable {
+    // `shape()` returns a span, so use ranges::equal for the comparison.
+    TENZOR_CHECK_SHAPE(
+        std::ranges::equal(mask.shape(), input.tensor().shape()),
+        "masked_select (autograd): mask shape must equal input shape. "
+        "Broadcasting masks would corrupt the backward scatter-add — see "
+        "MaskedSelectBackward in src/autograd/function_shape_ext.cpp. "
+        "Expand the mask to input.shape() before calling masked_select if "
+        "you need autograd through it.");
     auto result = tenzor::masked_select(input.tensor(), mask);
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(result, false);
@@ -4199,8 +4227,13 @@ auto repeat_interleave(const Variable& input, int64_t repeats,
         return Variable(result, false);
     }
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    // CC.2: `was_flattened` records whether forward took the nullopt-dim
+    // flatten path. Backward needs this to reshape grad_y back to the
+    // original rank-N input shape; without it the backward can't tell a
+    // genuine 1D input from an N-D input that was flattened internally.
+    bool was_flattened = !dim.has_value();
     auto grad_fn = std::make_shared<RepeatInterleaveBackward>(
-        repeats, dim, std::move(input_shape));
+        repeats, dim, std::move(input_shape), was_flattened);
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -4223,8 +4256,9 @@ auto repeat_interleave(const Variable& input, const Tensor& repeats,
     // at use time — by using repeats=-1 we sentinel that the per-element
     // overload was used; the class detects this and throws.
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    bool was_flattened = !dim.has_value();
     auto grad_fn = std::make_shared<RepeatInterleaveBackward>(
-        /*repeats=*/-1, dim, std::move(input_shape));
+        /*repeats=*/-1, dim, std::move(input_shape), was_flattened);
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

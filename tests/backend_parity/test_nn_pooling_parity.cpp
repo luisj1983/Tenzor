@@ -74,6 +74,89 @@ TEST_P(NNPoolingParity, AvgPool3d) {
 }
 
 // ============================================================================
+// Audit-6 CC.20 — Vulkan F16/BF16 MaxPool3d parity
+//
+// BB.7 bumped the Vulkan CAS retry cap to 65536 so the F16/BF16 MaxPool3d
+// path now lands a value for every (N,C,d,h,w) output position. Audit-5
+// Z.28 flagged the pre-existing divergence; this is the regression guard.
+//
+// Tolerances reflect F16/BF16 storage precision: 5e-2 absolute matches the
+// MultiBackendDTypeTest convention for half-precision pooling outputs.
+// ============================================================================
+
+namespace {
+// Forward MaxPool3d on every available backend at the requested dtype and
+// compare against a CPU Float32 reference. Mirrors the
+// Pooling3dMultiDTypeTest pattern but lives in the parity file because the
+// MultiBackendDType fixture's BFloat16 inclusion is gated on
+// TENZOR_TEST_BFLOAT16 (a build-time opt-in) — we want this guard
+// unconditionally.
+template <typename PoolMake>
+void maxpool3d_halfdtype_parity(PoolMake make_pool,
+                                DType dtype,
+                                float atol,
+                                const char* name) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+
+    auto input_f32 = randn({1, 4, 4, 4, 4}, DType::Float32, Device::cpu());
+
+    // CPU Float32 reference.
+    Tensor ref;
+    try {
+        auto pool = make_pool();
+        ref = pool.forward(Variable(input_f32, false)).tensor();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << name << " CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto pool = make_pool();
+            pool.to(backends[i]);
+            auto input_dev = input_f32.to(dtype).to(backends[i]);
+            auto out = pool.forward(Variable(input_dev, false));
+            backends[i].synchronize();
+            // Convert the half-dtype output back to CPU Float32 for the
+            // comparison. F16/BF16 round-trip introduces ~5e-2 absolute
+            // error which is what the half-precision pooling baseline
+            // tolerates.
+            auto out_cpu_f32 = out.tensor().to(Device::cpu()).to(DType::Float32);
+            SCOPED_TRACE(std::string(name) + " on " + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, out_cpu_f32, atol, atol);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << name << " failed on " << backend_name(backends[i])
+                          << ": " << e.what();
+        }
+    }
+}
+}  // namespace
+
+TEST_P(NNPoolingParity, MaxPool3d_F16) {
+    maxpool3d_halfdtype_parity(
+        [] { return nn::MaxPool3d(2, 2); },
+        DType::Float16, 5e-2f, "MaxPool3d_F16");
+}
+
+TEST_P(NNPoolingParity, MaxPool3d_BF16) {
+    maxpool3d_halfdtype_parity(
+        [] { return nn::MaxPool3d(2, 2); },
+        DType::BFloat16, 5e-2f, "MaxPool3d_BF16");
+}
+
+TEST_P(NNPoolingParity, AdaptiveMaxPool3d_F16) {
+    maxpool3d_halfdtype_parity(
+        [] { return nn::AdaptiveMaxPool3d(2, 2, 2); },
+        DType::Float16, 5e-2f, "AdaptiveMaxPool3d_F16");
+}
+
+TEST_P(NNPoolingParity, AdaptiveMaxPool3d_BF16) {
+    maxpool3d_halfdtype_parity(
+        [] { return nn::AdaptiveMaxPool3d(2, 2, 2); },
+        DType::BFloat16, 5e-2f, "AdaptiveMaxPool3d_BF16");
+}
+
+// ============================================================================
 // 1D Adaptive Pooling Tests
 // ============================================================================
 

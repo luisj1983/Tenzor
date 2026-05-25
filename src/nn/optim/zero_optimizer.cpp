@@ -20,6 +20,7 @@
 #include "tenzor/ops/op_id.hpp"
 // Phase E (E2): activation-checkpoint integration -- recompute hook registry.
 #include "tenzor/autograd/checkpoint.hpp"
+#include <cassert>
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
@@ -944,6 +945,13 @@ auto ZeROStage1Optimizer::on_parameters_appended_(size_t /*old_count*/,
     // the original slice.
     if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
         compute_element_partition_layout();
+
+        // CC.9: ElementLevel uses a single-slot master (one fp32 slice per
+        // rank), not a per-param vector, so the params <-> master 1:1
+        // invariant does not apply here. ParamLevel rejects add_param_group
+        // outright (throws below), so there is no per-param resize path on
+        // that branch either. Document the invariant once here for the
+        // reader who comes looking for the post-add_param_group assert.
     } else {
         // ParamLevel partition_parameters() appends into partitions_[r].params
         // without clearing, so re-running it would duplicate existing
@@ -961,6 +969,16 @@ auto ZeROStage1Optimizer::on_parameters_appended_(size_t /*old_count*/,
     }
 }
 
+// CC.9 invariant (Stage 1): when use_master_fp32 is true,
+// `partition.master_params` MUST have the same .size() as
+// `partition.params`. Every step() / update_local_partition_* / load
+// path that indexes both vectors with the same `i` (lines ~1586, 1764,
+// 1881, 1978, 3986-3999) relies on this lockstep invariant. Any code
+// path that resizes `partition.params` (initialize_optimizer_states,
+// add_param_group / on_parameters_appended_, load_state_dict resize
+// loop) must also extend `master_params` by the same count — and
+// vice-versa. A debug-build `assert` at the end of each such path
+// guards the invariant; release builds skip the check.
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
     if (config_.partitioning_mode == PartitioningMode::ElementLevel) {
         auto& partition = local_partition();
@@ -1211,6 +1229,19 @@ auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
             // master signals "param is already fp32, use it directly".
             partition.master_params.push_back(master);
         }
+    }
+
+    // CC.9: index-alignment invariant. Every code path that walks both
+    // `partition.params[i]` and `partition.master_params[i]` (step(),
+    // update_local_partition_*(), load_state_dict() — see lines 1586, 1764,
+    // 1881, 1978, 3986-3999) assumes lockstep indexing. If `master_params`
+    // ever drifts from `params` (e.g. an add_param_group path that forgets
+    // to extend the master vector), those loops silently use the wrong
+    // master for a param. Assert here right after the per-param init loop
+    // closes; cheap, fires in Debug builds, removed under NDEBUG.
+    if (config_.use_master_fp32) {
+        assert(partition.master_params.size() == partition.params.size()
+               && "ZeRO Stage 1 master_params must align 1:1 with params");
     }
 
     if (should_cpu_offload || should_nvme_offload) {
@@ -3998,6 +4029,18 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
                 // Param is fp32: master is wasteful, leave it empty.
                 partition.master_params[i] = Tensor();
             }
+        }
+
+        // CC.9: re-check the Stage 1 master_params <-> params lockstep
+        // invariant after the post-Stage3 partition_model_parameters resize
+        // loop. The loop only mutates existing slots in-place; it does not
+        // change either vector's size. If a prior code path corrupted the
+        // alignment, we want to catch it here in Debug builds before the
+        // optimizer's first step() walks both vectors in lockstep.
+        if (config_.use_master_fp32) {
+            assert(partition.master_params.size() == partition.params.size()
+                   && "ZeRO Stage 1 master_params must align 1:1 with params "
+                      "after Stage 3 partition resize");
         }
     }
 }
